@@ -2378,21 +2378,43 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 task_descriptor: str = descriptor,
                 task_attempt: dict[str, Any] = attempt,
             ) -> None:
+                async def _call(
+                    generation_prompt: str,
+                ) -> tuple[Any, str | None]:
+                    async with phase_scope(DaydreamPhase.PLAN_WRITE):
+                        output, _, aborted_reason = await run_agent(
+                            backend,
+                            ctx.work.repo,
+                            generation_prompt,
+                            phase=DaydreamPhase.PLAN_WRITE,
+                            output_schema=PLAN_AUTHOR_SCHEMA,
+                            read_only=True,
+                            persist_session=False,
+                            wall_budget_s=wall_budget,
+                            tool_call_budget=tool_budget,
+                        )
+                    return output, aborted_reason
+
+                async def _call_once_retried(
+                    generation_prompt: str,
+                ) -> tuple[Any, str | None]:
+                    """Absorb one transport crash; a second one is terminal.
+
+                    The retry replaces only the crashed generation, so a crash
+                    on the repair never restarts generation 0, and the
+                    two-generation authoring-repair budget is unchanged.
+                    """
+                    try:
+                        return await _call(generation_prompt)
+                    except Exception:
+                        return await _call(generation_prompt)
+
                 async def _generate() -> dict[str, Any]:
                     current_prompt = task_prompt
                     for generation_index in range(2):
-                        async with phase_scope(DaydreamPhase.PLAN_WRITE):
-                            output, _, aborted_reason = await run_agent(
-                                backend,
-                                ctx.work.repo,
-                                current_prompt,
-                                phase=DaydreamPhase.PLAN_WRITE,
-                                output_schema=PLAN_AUTHOR_SCHEMA,
-                                read_only=True,
-                                persist_session=False,
-                                wall_budget_s=wall_budget,
-                                tool_call_budget=tool_budget,
-                            )
+                        output, aborted_reason = await _call_once_retried(
+                            current_prompt
+                        )
                         output = _redact_model_value(output)
                         if aborted_reason is not None:
                             abort_code = {

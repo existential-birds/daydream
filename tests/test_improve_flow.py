@@ -528,6 +528,8 @@ class _ImproveStubBackend:
         self.plan_sloppy = False
         self.plan_bad_recon_id_attempts = 0
         self.plan_missing_path_attempts = 0
+        self.plan_crash_attempts = 0
+        self.plan_stop_condition_path: str | None = None
         self.plan_review_result = "typed"
         self.group_scoped_findings = False
         self.invalid_group_commands: set[str] = set()
@@ -812,6 +814,8 @@ class _ImproveStubBackend:
             return
         if marker == "plan-writer":
             self.plan_writer_calls += 1
+            if self.plan_writer_calls <= self.plan_crash_attempts:
+                raise _ProductionPathPlannerError("plan writer process exited")
             if self.inject_credential:
                 yield TextEvent(text="OPENAI_API_KEY=sk-secret123456")
             if self.abort_plan_on_tool_budget:
@@ -882,6 +886,21 @@ class _ImproveStubBackend:
                     "Callers keep sending secret: hunter2realvalue in "
                     "production traffic today."
                 )
+            if self.plan_stop_condition_path is not None:
+                plan["additional_stop_conditions"] = [
+                    {
+                        "kind": "environment",
+                        "condition": (
+                            "The retired billing loader is still present on "
+                            "disk when you start this plan."
+                        ),
+                        "evidence_to_report": (
+                            "Report the module path and its current contents."
+                        ),
+                        "related_paths": [self.plan_stop_condition_path],
+                        "related_step_numbers": [1],
+                    }
+                ]
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
                 plan["steps"][0]["verification"] = _plan_ref("make-tests")
             if self.plan_writer_calls <= self.plan_missing_path_attempts:
@@ -3691,6 +3710,135 @@ async def test_persistent_authoring_failure_blocks_with_full_code_list(
             error["code"] == "RECON_COMMAND_UNKNOWN"
             for error in attempt["errors"]
         )
+
+
+def _out_of_scope_section(plan_text: str) -> str:
+    return plan_text.split("**Out of scope**\n\n", 1)[1].split("\n\n## ", 1)[0]
+
+
+@pytest.mark.anyio
+async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    deleted = "apps/billing/legacy_loader.py"
+    stub.plan_stop_condition_path = deleted
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plan_calls = [
+        call for call in stub.calls if call["marker"] == "plan-writer"
+    ]
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    assert len(plan_calls) == 1
+    assert len(plans) == 1
+    assert not (improve_monorepo_target / deleted).exists()
+    plan_text = plans[0].read_text(encoding="utf-8")
+    assert (
+        f"- `{deleted}` — Referenced by a stop condition for context only; "
+        "do not create, modify, or depend on this path."
+    ) in _out_of_scope_section(plan_text)
+    assert "STOP_PATH_UNKNOWN" not in plan_text
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
+
+
+@pytest.mark.anyio
+async def test_plan_writer_transport_crash_is_retried_once_and_the_plan_lands(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_crash_attempts = 1
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    assert stub.plan_writer_calls == 2
+    assert len(plans) == 1
+    assert "## Steps" in plans[0].read_text(encoding="utf-8")
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
+
+
+@pytest.mark.anyio
+async def test_two_consecutive_transport_crashes_block_the_finding(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = _install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_crash_attempts = 2
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    assert code == 1
+    assert stub.plan_writer_calls == 2
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert "BLOCKED (PLAN_WRITER_FAILED: PROCESS_EXIT)" in index
+    diagnostics = json.loads(
+        _dd(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        (attempt["disposition"], attempt["stage"])
+        for attempt in diagnostics["attempts"]
+    ] == [("blocked", "transport")]
+    assert diagnostics["attempts"][0]["errors"] == [
+        {"code": "PROCESS_EXIT", "pointer": "/"}
+    ]
 
 
 @pytest.mark.anyio
