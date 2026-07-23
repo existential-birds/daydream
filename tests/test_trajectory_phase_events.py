@@ -134,7 +134,6 @@ async def test_emit_command_validation_summary_is_structured_and_redacted(
         accepted=4,
         rejected=29,
         reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
-        diagnostics_artifact=".daydream/improve/command-validation-diagnostics.json",
     )
 
     event = rec._phase_events[0]
@@ -150,9 +149,6 @@ async def test_emit_command_validation_summary_is_structured_and_redacted(
             "RECON_EVIDENCE_MISMATCH": 28,
             "RECON_MALFORMED_COMMAND": 1,
         },
-        "diagnostics_artifact": (
-            ".daydream/improve/command-validation-diagnostics.json"
-        ),
     }
 
 

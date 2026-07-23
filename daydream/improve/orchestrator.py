@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from jsonschema import Draft202012Validator
 
 import daydream.agent as agent
 from daydream import git_ops
@@ -29,7 +28,6 @@ from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
     audit_findings_path,
-    command_validation_diagnostics_path,
     coverage_path,
     plan_write_diagnostics_path,
     recon_path,
@@ -44,7 +42,6 @@ from daydream.improve.assemble import (
 )
 from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
-    valid_repository_file_path,
     validate_recon_commands,
 )
 from daydream.improve.partition import (
@@ -114,7 +111,6 @@ RECON_SCHEMA: dict[str, Any] = {
 _EVIDENCE_LOCATION = re.compile(
     r"^`?(.+?):(\d+)(?::\d+)?(?:`|\b)"
 )
-_SAFE_RECON_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _PLAN_SLUG = re.compile(r"^[a-z0-9-]{1,60}$")
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 
@@ -176,154 +172,6 @@ def _with_artifact_provenance(
         "artifact_provenance": _artifact_provenance(phase=phase),
         **payload,
     }
-
-
-def _safe_evidence_location(command: Any) -> dict[str, Any]:
-    """Extract only schema-bounded source identity from a rejected candidate."""
-    if not isinstance(command, dict):
-        return {"source_path": None, "line_anchor": None}
-    evidence = command.get("evidence")
-    if not isinstance(evidence, dict):
-        return {"source_path": None, "line_anchor": None}
-    source_path = evidence.get("source_path")
-    if not isinstance(source_path, str) or not valid_repository_file_path(
-        source_path
-    ):
-        source_path = None
-    anchor = evidence.get("line_anchor")
-    if not (
-        isinstance(anchor, dict)
-        and isinstance(anchor.get("start_line"), int)
-        and not isinstance(anchor["start_line"], bool)
-        and anchor["start_line"] >= 1
-        and isinstance(anchor.get("end_line"), int)
-        and not isinstance(anchor["end_line"], bool)
-        and anchor["end_line"] >= 1
-    ):
-        anchor = None
-    else:
-        anchor = {
-            "start_line": anchor["start_line"],
-            "end_line": anchor["end_line"],
-        }
-    return {"source_path": source_path, "line_anchor": anchor}
-
-
-def _command_validation_diagnostics(
-    recon: Any,
-    *,
-    valid_commands: list[dict[str, Any]],
-    command_errors: list[str],
-    container_errors: list[str],
-) -> dict[str, Any]:
-    """Build a redacted, candidate-addressable command-validation envelope."""
-    raw_commands = recon.get("commands") if isinstance(recon, dict) else None
-    commands = raw_commands if isinstance(raw_commands, list) else []
-    schema_validator = Draft202012Validator(RECON_COMMAND_SCHEMA)
-    errors_by_index: dict[int, list[dict[str, str]]] = {}
-    stages: dict[int, str] = {}
-    for rendered in command_errors:
-        code, separator, pointer = rendered.partition("@")
-        pointer = pointer if separator else "/commands"
-        match = re.match(r"^/commands/(\d+)(?:/|$)", pointer)
-        index = int(match.group(1)) if match else -1
-        errors_by_index.setdefault(index, []).append(
-            {"code": code, "pointer": pointer}
-        )
-        if 0 <= index < len(commands):
-            stages[index] = (
-                "schema"
-                if next(schema_validator.iter_errors(commands[index]), None)
-                is not None
-                else (
-                    "evidence"
-                    if code.startswith("RECON_EVIDENCE_")
-                    else "semantic"
-                )
-            )
-    candidate_container_errors = [
-        {
-            "code": rendered.partition("@")[0],
-            "pointer": rendered.partition("@")[2] or "/",
-        }
-        for rendered in container_errors
-    ]
-    unaddressed_command_errors = errors_by_index.pop(-1, [])
-    safe_container_errors: list[dict[str, str]] = []
-    for error in [*candidate_container_errors, *unaddressed_command_errors]:
-        if error not in safe_container_errors:
-            safe_container_errors.append(error)
-    rejections: list[dict[str, Any]] = []
-    for index, command in enumerate(commands):
-        errors = errors_by_index.get(index, [])
-        if not errors:
-            continue
-        candidate_id = (
-            command.get("id")
-            if isinstance(command, dict)
-            and isinstance(command.get("id"), str)
-            and _SAFE_RECON_ID.fullmatch(command["id"])
-            else f"candidate-{index}" if index >= 0 else "commands-container"
-        )
-        rejections.append(
-            {
-                "candidate_id": candidate_id,
-                "evidence": _safe_evidence_location(command),
-                "validation_stage": stages.get(index, "semantic"),
-                "errors": errors,
-            }
-        )
-    if unaddressed_command_errors and not commands:
-        rejections.append(
-            {
-                "candidate_id": "commands-container",
-                "evidence": {"source_path": None, "line_anchor": None},
-                "validation_stage": "container",
-                "errors": unaddressed_command_errors,
-            }
-        )
-    counts = {
-        "total_candidates": len(commands),
-        "accepted": len(valid_commands),
-        "rejected": len(commands) - len(valid_commands),
-    }
-    return {
-        "artifact_type": "daydream.command-validation-diagnostics",
-        "artifact_provenance": _artifact_provenance(phase=DaydreamPhase.RECON),
-        "counts": counts,
-        "container_errors": safe_container_errors,
-        "rejections": rejections,
-    }
-
-
-def _recon_container_errors(recon: Any) -> list[str]:
-    """Return stable pointers for schema errors outside candidate records."""
-    if not isinstance(recon, dict):
-        return ["RECON_CONTAINER_INVALID@/"]
-    container = {**recon, "commands": []}
-    missing = [
-        field
-        for field in RECON_SCHEMA["required"]
-        if field not in recon
-    ]
-    rendered = [
-        f"RECON_CONTAINER_INVALID@/{field}"
-        for field in missing
-    ]
-    errors = sorted(
-        Draft202012Validator(RECON_SCHEMA).iter_errors(container),
-        key=lambda error: repr(list(error.absolute_path)),
-    )
-    for error in errors:
-        path = list(error.absolute_path)
-        if error.validator == "required" and not path:
-            continue
-        pointer = "".join(
-            f"/{str(part).replace('~', '~0').replace('/', '~1')}"
-            for part in path
-        ) or "/"
-        rendered.append(f"RECON_CONTAINER_INVALID@{pointer}")
-    return rendered
 
 
 @dataclass(frozen=True)
@@ -510,11 +358,13 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     recon_data: dict[str, Any] = {}
+    total_candidates = 0
     valid_commands: list[dict[str, Any]] = []
     command_errors: list[str] = []
     safe_recon = _redact_model_value(recon)
-    container_errors = _recon_container_errors(safe_recon)
     if isinstance(safe_recon, dict):
+        raw_commands = safe_recon.get("commands")
+        total_candidates = len(raw_commands) if isinstance(raw_commands, list) else 0
         candidate_commands, command_errors = validate_recon_commands(
             safe_recon,
             repo=target,
@@ -538,7 +388,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
                     "code": error.partition("@")[0],
                     "pointer": error.partition("@")[2] or "/",
                 }
-                for error in [*container_errors, *command_errors]
+                for error in command_errors
             ],
         }
     else:
@@ -552,61 +402,28 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
                 {"code": "RECON_CONTAINER_INVALID", "pointer": "/"}
             ],
         }
-    diagnostics = _command_validation_diagnostics(
-        safe_recon,
-        valid_commands=valid_commands,
-        command_errors=command_errors,
-        container_errors=container_errors,
-    )
-    diagnostics_file = command_validation_diagnostics_path(directory)
-    diagnostics_file.write_text(
-        json.dumps(diagnostics, indent=2) + "\n",
-        encoding="utf-8",
-    )
     recon_path(directory).write_text(json.dumps(recon_data, indent=2) + "\n")
-    reasons = Counter(
-        error["code"] for error in diagnostics["container_errors"]
-    )
-    container_error_keys = {
-        (error["code"], error["pointer"])
-        for error in diagnostics["container_errors"]
-    }
-    reasons.update(
-        error["code"]
-        for rejection in diagnostics["rejections"]
-        for error in rejection["errors"]
-        if (error["code"], error["pointer"])
-        not in container_error_keys
-    )
+    reasons = Counter(error.partition("@")[0] for error in command_errors)
     recorder = get_current_recorder()
     if recorder is not None:
         recorder.emit_command_validation_summary(
-            **diagnostics["counts"],
+            total_candidates=total_candidates,
+            accepted=len(valid_commands),
+            rejected=total_candidates - len(valid_commands),
             reasons=dict(reasons),
-            container_errors=diagnostics["container_errors"],
-            diagnostics_artifact=diagnostics_file.relative_to(
-                target
-            ).as_posix(),
         )
     if not recon_data.get("commands"):
         reason_summary = ", ".join(
             f"{code}: {count}"
             for code, count in sorted(reasons.items())
-        ) or "container validation failed"
-        commands_container_rejected = any(
-            error == {
-                "code": "RECON_COMMANDS_INVALID",
-                "pointer": "/commands",
-            }
-            for error in diagnostics["container_errors"]
-        )
+        ) or "the model returned no usable command container"
         candidate_summary = (
-            "The repository command container was rejected before candidates "
-            "could be enumerated. "
-            if commands_container_rejected
+            f"{total_candidates} repository command candidates were found but "
+            "rejected. "
+            if total_candidates
             else (
-                f"{diagnostics['counts']['total_candidates']} repository command "
-                "candidates were found but rejected. "
+                "The repository command container was rejected before "
+                "candidates could be enumerated. "
             )
         )
         print_warning(
@@ -615,7 +432,8 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             + candidate_summary
             + f"Reasons: {reason_summary}. Audit and planning will continue "
             "without executable verification commands. "
-            "See .daydream/improve/command-validation-diagnostics.json.",
+            "Rejection codes are recorded in "
+            ".daydream/improve/recon.json under `command_rejections`.",
         )
 
     ctx.data["all_services"] = all_services

@@ -1039,8 +1039,6 @@ class TrajectoryRecorder:
         accepted: int,
         rejected: int,
         reasons: dict[str, int],
-        diagnostics_artifact: str,
-        container_errors: list[dict[str, str]] | None = None,
     ) -> None:
         """Record a redacted repository-command validation summary."""
         metadata: dict[str, Any] = {
@@ -1050,10 +1048,7 @@ class TrajectoryRecorder:
                 "rejected": rejected,
             },
             "reasons": dict(sorted(reasons.items())),
-            "diagnostics_artifact": diagnostics_artifact,
         }
-        if container_errors:
-            metadata["container_errors"] = container_errors
         self._emit_phase_event(
             DaydreamPhase.RECON,
             "command_validation",

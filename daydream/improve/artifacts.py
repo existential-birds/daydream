@@ -22,11 +22,6 @@ def recon_path(improve_dir_path: Path) -> Path:
     return improve_dir_path / "recon.json"
 
 
-def command_validation_diagnostics_path(improve_dir_path: Path) -> Path:
-    """Return the redacted repository-command validation diagnostics path."""
-    return improve_dir_path / "command-validation-diagnostics.json"
-
-
 def audit_findings_path(
     improve_dir_path: Path, category: str, group_name: str
 ) -> Path:

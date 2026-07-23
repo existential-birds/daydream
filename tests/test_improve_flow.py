@@ -1982,39 +1982,20 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
 
     assert [call for call in stub.calls if call["marker"] == "audit"]
     assert [call for call in stub.calls if call["marker"] == "plan-writer"]
-    recon = json.loads(_dd(improve_monorepo_target, "recon.json").read_text())
+    recon_path = _dd(improve_monorepo_target, "recon.json")
+    recon_text = recon_path.read_text()
+    recon = json.loads(recon_text)
     assert recon["commands"] == []
-    diagnostics_path = _dd(
-        improve_monorepo_target,
-        "command-validation-diagnostics.json",
-    )
-    diagnostics = json.loads(diagnostics_path.read_text())
-    assert diagnostics["counts"] == {
-        "total_candidates": 2,
-        "accepted": 0,
-        "rejected": 2,
-    }
-    assert [item["candidate_id"] for item in diagnostics["rejections"]] == [
-        "test-suite",
-        "git-diff",
-    ]
-    assert all(
-        item["evidence"] == {
-            "source_path": "pyproject.toml",
-            "line_anchor": {"start_line": 5 + index, "end_line": 5 + index},
+    assert recon["command_rejections"] == [
+        {
+            "code": "RECON_APPLICABILITY_INVALID",
+            "pointer": f"/commands/{index}/applicability/scope/kind",
         }
-        and item["validation_stage"] == "schema"
-        and item["errors"] == [
-            {
-                "code": "RECON_APPLICABILITY_INVALID",
-                "pointer": f"/commands/{index}/applicability/scope/kind",
-            }
-        ]
-        for index, item in enumerate(diagnostics["rejections"])
-    )
-    diagnostics_text = diagnostics_path.read_text()
-    assert "verbatim_excerpt" not in diagnostics_text
-    assert "uv run pytest" not in diagnostics_text
+        for index in range(2)
+    ]
+    # No rejected candidate's content survives into the persisted artifact.
+    assert "verbatim_excerpt" not in recon_text
+    assert "uv run pytest" not in recon_text
     report = _dd(improve_monorepo_target, "report.md")
     plans = sorted(
         (improve_monorepo_target / "daydream_plans").glob(
@@ -2047,9 +2028,15 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
         for event in trajectory["extra"]["phase_events"]
         if event["event"] == "command_validation"
     ]
-    assert validation_events[0]["metadata"]["counts"] == diagnostics["counts"]
+    assert validation_events[0]["metadata"]["counts"] == {
+        "total_candidates": 2,
+        "accepted": 0,
+        "rejected": 2,
+    }
+    assert validation_events[0]["metadata"]["reasons"] == {
+        "RECON_APPLICABILITY_INVALID": 2
+    }
     assert recon["artifact_provenance"]["session_id"] == trajectory["session_id"]
-    assert diagnostics["artifact_provenance"]["session_id"] == trajectory["session_id"]
 
 
 @pytest.mark.anyio
@@ -2071,28 +2058,11 @@ async def test_unrelated_recon_container_error_preserves_valid_commands(
 
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
-    diagnostics_path = _dd(
-        improve_monorepo_target,
-        "command-validation-diagnostics.json",
-    )
-    diagnostics = json.loads(diagnostics_path.read_text())
-    expected_error = {
-        "code": "RECON_CONTAINER_INVALID",
-        "pointer": "/languages",
-    }
-    assert diagnostics["counts"] == {
-        "total_candidates": 2,
-        "accepted": 2,
-        "rejected": 0,
-    }
-    assert diagnostics["container_errors"] == [expected_error]
-    assert diagnostics["rejections"] == []
-    diagnostics_text = diagnostics_path.read_text()
     recon_text = _dd(improve_monorepo_target, "recon.json").read_text()
-    assert "secret-model-prose" not in diagnostics_text + recon_text
-    assert "verbatim_excerpt" not in diagnostics_text
-    assert "uv run pytest" not in diagnostics_text
+    # The malformed `languages` value is replaced wholesale, never persisted.
+    assert "secret-model-prose" not in recon_text
     recon = json.loads(recon_text)
+    assert recon["languages"] == []
     assert len(recon["commands"]) == 2
     assert all(
         command["evidence"]["verbatim_excerpt"]
@@ -2102,7 +2072,7 @@ async def test_unrelated_recon_container_error_preserves_valid_commands(
         }
         for command in recon["commands"]
     )
-    assert recon["command_rejections"] == [expected_error]
+    assert recon["command_rejections"] == []
 
 
 @pytest.mark.anyio
@@ -2138,29 +2108,16 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
     assert [call for call in stub.calls if call["marker"] == "audit"]
     assert [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert _dd(improve_monorepo_target, "report.md").is_file()
-    diagnostics_path = _dd(
-        improve_monorepo_target,
-        "command-validation-diagnostics.json",
-    )
-    diagnostics_text = diagnostics_path.read_text()
-    diagnostics = json.loads(diagnostics_text)
-    error = {"code": "RECON_COMMANDS_INVALID", "pointer": "/commands"}
-    assert diagnostics["counts"] == {
-        "total_candidates": 0,
-        "accepted": 0,
-        "rejected": 0,
-    }
-    assert diagnostics["container_errors"] == [error]
-    assert diagnostics["rejections"] == [
-        {
-            "candidate_id": "commands-container",
-            "evidence": {"source_path": None, "line_anchor": None},
-            "validation_stage": "container",
-            "errors": [error],
-        }
+    recon_text = _dd(improve_monorepo_target, "recon.json").read_text()
+    recon = json.loads(recon_text)
+    assert recon["commands"] == []
+    assert recon["command_rejections"] == [
+        {"code": "RECON_COMMANDS_INVALID", "pointer": "/commands"}
     ]
-    for private_value in (secret, model_prose, rejected_command, "verbatim_excerpt"):
-        assert private_value not in diagnostics_text
+    # `model_prose` is legitimate recon prose and stays; the rejected
+    # candidate's own content must never reach the persisted artifact.
+    for private_value in (secret, rejected_command, "verbatim_excerpt"):
+        assert private_value not in recon_text
 
     console_output = capsys.readouterr().out
     for private_value in (secret, model_prose, rejected_command):
@@ -2767,10 +2724,6 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         encoding="utf-8"
     )
     assert "high-leverage-title" in report
-    assert _dd(
-        improve_monorepo_target,
-        "command-validation-diagnostics.json",
-    ).is_file()
     recon = json.loads(
         _dd(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
     )
