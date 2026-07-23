@@ -1154,6 +1154,74 @@ class _IncrementalPlanBackend(_ImproveStubBackend):
             yield event
 
 
+class _OutOfOrderPlanBackend(_ImproveStubBackend):
+    """Make the first-selected plan writer be the last one to return.
+
+    The hold is on the other writers' completion count, not on a sleep, so the
+    completion sequence is deterministic: every writer but the first-selected
+    one returns immediately, and the first-selected one only returns once the
+    rest are done. ``completion_order`` is the selection rank of each writer in
+    the order they actually finished.
+    """
+
+    def __init__(self, target: Path, *, n_findings: int) -> None:
+        super().__init__(target, n_findings=n_findings)
+        self._selected_path = (
+            target / ".daydream" / "improve" / "selected.json"
+        )
+        self.completion_order: list[int] = []
+
+    def _selection(self) -> list[str]:
+        return list(
+            json.loads(self._selected_path.read_text(encoding="utf-8"))[
+                "selected"
+            ]
+        )
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ):
+        rank: int | None = None
+        if _is_plan_writer_prompt(prompt, output_schema):
+            selection = self._selection()
+            rank = selection.index(_finding_from_prompt(prompt)["fingerprint"])
+            if rank == 0:
+                with anyio.move_on_after(10):
+                    while len(self.completion_order) < len(selection) - 1:
+                        await anyio.sleep(0.01)
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+        if rank is not None:
+            self.completion_order.append(rank)
+
+
+def _index_numbers_by_fingerprint(index_text: str) -> dict[str, int]:
+    return {
+        match.group(2): int(match.group(1))
+        for match in re.finditer(
+            r"\|\s+\[(\d{3})\]\([^)]+\)\s+<!-- fingerprint:([^ ]+) -->",
+            index_text,
+        )
+    }
+
+
 @pytest.fixture
 def tmp_git_repo(improve_monorepo_target: Path) -> Path:
     return improve_monorepo_target
@@ -2735,6 +2803,48 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     for filename in _PLAN_FILE_BY_TITLE.values():
         assert f"({filename})" in index
+
+
+@pytest.mark.anyio
+async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_order(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three writers, completion order rotated away from selection order.
+
+    The first-selected finding's writer returns last, so if numbers were
+    claimed as writers finished it would end up with the highest number. It
+    keeps 001 because numbers are reserved before any writer runs.
+    """
+    backend = _OutOfOrderPlanBackend(improve_monorepo_target, n_findings=3)
+    backend.vet_reject_titles = {"Phantom N+1"}
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda *args, **kwargs: backend,
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    selected = json.loads(
+        _dd(improve_monorepo_target, "selected.json").read_text()
+    )["selected"]
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert code == 0
+    assert len(selected) == 3
+    assert backend.completion_order == [1, 2, 0]
+    assert _index_numbers_by_fingerprint(index) == {
+        fingerprint: rank + 1 for rank, fingerprint in enumerate(selected)
+    }
+    assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 3
+    assert index.count("| TODO |") == 3
 
 
 @pytest.mark.anyio

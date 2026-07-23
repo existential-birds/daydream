@@ -25,6 +25,7 @@ from daydream.improve.command_contract import (
 from daydream.improve.plans import (
     PlanWriteSession,
     load_rejections,
+    plan_slug,
     planned_fingerprints,
     record_rejections,
     render_plan,
@@ -1265,6 +1266,237 @@ def test_mixed_batch_writes_valid_sibling_and_blocks_invalid_sibling(
     index = (repo / "daydream_plans/README.md").read_text()
     assert "| TODO |" in index
     assert "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID" in index
+
+
+def _plan_selection(repo: Path, title: str) -> dict[str, Any]:
+    """One landed plan-writer result with its own fingerprint and slug."""
+    return {
+        "finding": _finding(fingerprint=f"fp-{plan_slug(title)}"),
+        **_assembled(repo, _authored_plan(title=title)),
+    }
+
+
+_CONCURRENT_TITLES = [
+    "Batch catalog queries",
+    "Catalog observability",
+    "Catalog cache invalidation",
+]
+
+
+@pytest.mark.parametrize(
+    ("count", "completion_order"),
+    [
+        pytest.param(1, [0], id="n1"),
+        pytest.param(3, [0, 1, 2], id="n3-completion-matches-selection"),
+        pytest.param(3, [2, 1, 0], id="n3-completion-reversed"),
+        pytest.param(3, [1, 2, 0], id="n3-completion-rotated"),
+        pytest.param(3, [2, 0, 1], id="n3-first-selected-lands-second"),
+    ],
+)
+def test_plan_numbers_follow_selection_order_not_completion_order(
+    tmp_path: Path,
+    count: int,
+    completion_order: list[int],
+) -> None:
+    """A plan's number is claimed before any writer runs.
+
+    Numbers are reserved once, in selection order; the filename a finding gets
+    therefore never depends on which writer happens to finish first.
+    """
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    titles = _CONCURRENT_TITLES[:count]
+    selections = [_plan_selection(repo, title) for title in titles]
+
+    result = _write_plans(
+        plans_dir,
+        selections,
+        planned_at=sha,
+        completion_order=completion_order,
+    )
+
+    expected = [
+        f"{rank + 1:03d}-{plan_slug(title)}.md"
+        for rank, title in enumerate(titles)
+    ]
+    assert [entry["path"] for entry in result["written"]] == expected
+    assert [entry["number"] for entry in result["written"]] == list(
+        range(1, count + 1)
+    )
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == sorted(expected)
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    for rank, title in enumerate(titles):
+        assert (
+            f"| [{rank + 1:03d}]({expected[rank]}) "
+            f"<!-- fingerprint:fp-{plan_slug(title)} -->"
+        ) in index
+    assert index.count("| TODO |") == count
+
+
+def test_each_plan_is_on_disk_before_its_slower_siblings_commit(
+    tmp_path: Path,
+) -> None:
+    """A finished plan is readable while later writers are still outstanding.
+
+    The session commits one result at a time, so after the k-th commit exactly
+    the k plans committed so far — and an index that links them — are on disk.
+    """
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
+    session = PlanWriteSession(plans_dir, planned_at=sha)
+    reservations = session.reserve(
+        [selection["finding"] for selection in selections]
+    )
+
+    observed: list[tuple[list[str], int]] = []
+    for index in (2, 0, 1):
+        outcome = session.commit(reservations[index], selections[index])
+        assert outcome.status == "written"
+        index_text = (plans_dir / "README.md").read_text(encoding="utf-8")
+        observed.append(
+            (
+                sorted(
+                    path.name
+                    for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+                ),
+                index_text.count("| TODO |"),
+            )
+        )
+
+    assert observed == [
+        (["003-catalog-cache-invalidation.md"], 1),
+        (
+            [
+                "001-batch-catalog-queries.md",
+                "003-catalog-cache-invalidation.md",
+            ],
+            2,
+        ),
+        (
+            [
+                "001-batch-catalog-queries.md",
+                "002-catalog-observability.md",
+                "003-catalog-cache-invalidation.md",
+            ],
+            3,
+        ),
+    ]
+    session.finish()
+
+
+def test_blocked_sibling_holds_its_number_without_shifting_later_plans(
+    tmp_path: Path,
+) -> None:
+    """A blocked plan neither renumbers its siblings nor leaks its number.
+
+    The blocked finding keeps 002 in the index with no file, 003 still belongs
+    to the third selection, and a later retry of the blocked finding reuses
+    002 instead of consuming a fresh number.
+    """
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    invalid = _authored_plan(title="Catalog observability")
+    invalid["test_plan"]["cases"] = []
+    issues = _issues(repo, invalid)
+    blocked = _authoring_failure_selection(
+        issues,
+        fingerprint="fp-catalog-observability",
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [
+            _plan_selection(repo, "Batch catalog queries"),
+            blocked,
+            _plan_selection(repo, "Catalog cache invalidation"),
+        ],
+        planned_at=sha,
+        completion_order=[2, 0, 1],
+    )
+
+    assert [entry["path"] for entry in result["written"]] == [
+        "001-batch-catalog-queries.md",
+        "003-catalog-cache-invalidation.md",
+    ]
+    assert len(result["failed"]) == 1
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == [
+        "001-batch-catalog-queries.md",
+        "003-catalog-cache-invalidation.md",
+    ]
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert (
+        "| 002 <!-- fingerprint:fp-catalog-observability --> | "
+        "Fix N+1 catalog queries | P1 | M | "
+        "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID) |"
+    ) in index
+
+    retried = _write_plans(
+        plans_dir,
+        [
+            _plan_selection(repo, "Catalog observability"),
+            _plan_selection(repo, "Catalog retry budgets"),
+        ],
+        planned_at=sha,
+        completion_order=[1, 0],
+    )
+
+    assert [entry["number"] for entry in retried["written"]] == [2, 4]
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == [
+        "001-batch-catalog-queries.md",
+        "002-catalog-observability.md",
+        "003-catalog-cache-invalidation.md",
+        "004-catalog-retry-budgets.md",
+    ]
+    final_index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert final_index.count("fingerprint:fp-catalog-observability") == 1
+    assert "PLAN_VALIDATION_FAILED" not in final_index
+    assert final_index.count("| TODO |") == 4
+
+
+def test_already_planned_finding_reserves_no_number_for_its_siblings(
+    tmp_path: Path,
+) -> None:
+    """A skipped finding must not consume a number its siblings need."""
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    _write_plans(
+        plans_dir,
+        [_plan_selection(repo, "Batch catalog queries")],
+        planned_at=sha,
+    )
+
+    session = PlanWriteSession(plans_dir, planned_at=sha)
+    selections = [
+        _plan_selection(repo, "Catalog observability"),
+        _plan_selection(repo, "Batch catalog queries"),
+        _plan_selection(repo, "Catalog cache invalidation"),
+    ]
+    reservations = session.reserve(
+        [selection["finding"] for selection in selections]
+    )
+
+    assert [reservation.number for reservation in reservations] == [2, None, 3]
+
+    for index in (2, 1, 0):
+        session.commit(reservations[index], selections[index])
+    result = session.finish()
+
+    assert [entry["number"] for entry in result["written"]] == [2, 3]
+    assert len(result["skipped"]) == 1
+    assert sorted(
+        path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")
+    ) == [
+        "001-batch-catalog-queries.md",
+        "002-catalog-observability.md",
+        "003-catalog-cache-invalidation.md",
+    ]
 
 
 def test_planned_at_from_an_unrelated_root_is_rejected(tmp_path: Path) -> None:
