@@ -2164,6 +2164,63 @@ def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(
         assert "hunter2realvalue" not in artifact.read_text(encoding="utf-8")
 
 
+def test_underscored_secret_key_name_is_redacted_in_quoted_source(
+    tmp_path: Path,
+) -> None:
+    """``aws_secret_access_key`` is a key name, not the bare word ``secret``.
+
+    A word-boundary match never fired inside it, so a live AWS key reached the
+    plan file: ``trajectory.redact_text`` does not match this shape either.
+    """
+    repo, sha = _repo(tmp_path)
+    (repo / "apps/catalog/api.py").write_text(
+        'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
+        "    return [load_item(item_id) for item_id in item_ids]\n",
+        encoding="utf-8",
+    )
+
+    assembled = _assembled(repo)
+    result = write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=sha,
+        commands=_recon_commands(),
+    )
+
+    excerpt = next(
+        item
+        for item in assembled["current_state_excerpts"]
+        if item["path"] == "apps/catalog/api.py"
+    )
+    assert excerpt["verbatim_excerpt"].startswith(
+        "aws_secret_access_key = <redacted>"
+    )
+    assert len(result["written"]) == 1
+    for artifact in (repo / "daydream_plans").iterdir():
+        assert "wJalrXUtnFEMI" not in artifact.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "The tokenizer: sentencepiece choice stays as the repository has it.",
+        "The passwordless: true flag in the fixture config stays untouched.",
+    ],
+)
+def test_secret_shaped_word_prefixes_are_not_treated_as_key_names(
+    tmp_path: Path,
+    prose: str,
+) -> None:
+    """Segment anchoring: ``tokenizer`` is not a ``token`` key."""
+    repo, _ = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["why_this_matters"]["problem"] = prose
+
+    assembled = _assembled(repo, plan)
+
+    assert assembled["why_this_matters"]["problem"] == prose
+
+
 def test_command_ref_schema_grammar() -> None:
     validator = Draft202012Validator(COMMAND_REF_SCHEMA)
     valid_refs = [

@@ -157,8 +157,16 @@ def resolve_review_plan_path(repo: Path, requested: str) -> Path:
 # Horizontal-only separator whitespace: see ``_ENV_VAR_PATTERN`` in
 # daydream/trajectory.py — crossing a newline makes an empty assignment eat the
 # following line.
+# The secret token is matched as a whole ``_``/``-`` separated segment of the
+# key name, not as a ``\b``-delimited word: ``_`` is itself a word character, so
+# ``\bsecret\b`` never matched inside ``aws_secret_access_key`` and a live AWS
+# key survived both this pass and ``trajectory.redact_text``. Segment anchoring
+# is what keeps ``tokenizer:``/``passwordless:`` out of the match.
 _SECRET_VALUE = re.compile(
-    r"(?i)\b(?:token|password|secret|api[_-]?key)\b[^\S\n\r]*[:=][^\S\n\r]*([^\s]+)"
+    r"(?i)(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]{1,40}[_-]){0,4}"
+    r"(?:token|password|secret|api[_-]?key)"
+    r"(?:[_-][A-Za-z0-9]{1,40}){0,4}"
+    r"[^\S\n\r]*[:=][^\S\n\r]*([^\s]+)"
 )
 # Structural placeholders are not secret values: angle-bracket slots,
 # shell/env references, and obvious placeholder words. Anything else after a
