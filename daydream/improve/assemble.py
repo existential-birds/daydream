@@ -233,6 +233,88 @@ def _dedup_scope(normalized: dict[str, Any], *, repo: Path) -> None:
         ]
 
 
+_RELOCATED_EXCERPT_MAX_LINES = 40
+
+
+def _relocate_existing_new_paths(
+    normalized: dict[str, Any],
+    *,
+    repo: Path,
+) -> None:
+    """Move a declared-new path that already exists on disk into scope.existing_paths.
+
+    ``_dedup_scope`` already settles this exact defect from disk when a path is
+    declared in both lists; a path declared only under ``new_paths`` gets the
+    same answer here rather than costing a repair generation. ``existing_paths``
+    requires an excerpt anchor and the drift stop condition quotes it, so the
+    host anchors the head of the real file, and any step that meant to
+    ``create`` the path is switched to ``modify`` so the plan stays coherent.
+
+    Three cases are deliberately left alone. Malformed and unconfined paths stay
+    in ``new_paths`` so they still fail as ``MALFORMED_PATH`` /
+    ``PATH_OUTSIDE_REPOSITORY``. A path occupied by something that is not a
+    regular file still fails as ``NEW_PATH_ALREADY_EXISTS`` — the host cannot
+    turn a directory into a file. An existing but empty file has no line to
+    anchor, and writing a new file's content into it is what ``create`` already
+    means, so it stays a create.
+    """
+    scope = normalized.get("scope")
+    if not isinstance(scope, dict):
+        return
+    new_entries = scope.get("new_paths")
+    existing_entries = scope.get("existing_paths")
+    if not isinstance(new_entries, list) or not isinstance(
+        existing_entries, list
+    ):
+        return
+    kept: list[Any] = []
+    relocated: set[str] = set()
+    for entry in new_entries:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        role = entry.get("role") if isinstance(entry, dict) else None
+        source = (
+            _read_repo_file(repo, path)
+            if isinstance(path, str)
+            and isinstance(role, str)
+            and _valid_repository_file_path(path)
+            and _path_is_confined(repo, path)
+            and _exists_on_disk(repo, path)
+            else None
+        )
+        line_count = len(source.splitlines()) if source is not None else 0
+        if line_count < 1:
+            kept.append(entry)
+            continue
+        existing_entries.append(
+            {
+                "path": path,
+                "role": role,
+                "excerpts": [
+                    {
+                        "start_line": 1,
+                        "end_line": min(
+                            line_count, _RELOCATED_EXCERPT_MAX_LINES
+                        ),
+                    }
+                ],
+            }
+        )
+        relocated.add(str(path))
+    scope["new_paths"] = kept
+    if not relocated:
+        return
+    steps = normalized.get("steps")
+    for step in steps if isinstance(steps, list) else []:
+        changes = step.get("changes") if isinstance(step, dict) else None
+        for change in changes if isinstance(changes, list) else []:
+            if (
+                isinstance(change, dict)
+                and change.get("path") in relocated
+                and change.get("operation") == "create"
+            ):
+                change["operation"] = "modify"
+
+
 def _clamp_anchor(anchor: Any, line_count: int) -> None:
     if not isinstance(anchor, dict):
         return
@@ -343,6 +425,7 @@ def _normalize_authored(
     for pattern, limit in _AUTHOR_PROSE_CLAMP_LIMITS:
         _clamp_node(normalized, pattern, limit)
     _dedup_scope(normalized, repo=repo)
+    _relocate_existing_new_paths(normalized, repo=repo)
     _clamp_excerpt_end_lines(normalized, repo=repo)
     return normalized
 
@@ -575,15 +658,18 @@ def _collect_issues(
         path = entry.get("path")
         if not isinstance(path, str) or not check_path(pointer, path):
             continue
+        # An existing regular file was already relocated into existing_paths by
+        # normalization; what survives here is a path occupied by a directory or
+        # another non-file, which no host repair can turn into a new file.
         try:
-            path_exists = (repo / path).exists()
+            occupied = (repo / path).exists() and not (repo / path).is_file()
         except (OSError, ValueError):
-            path_exists = False
-        if path_exists:
+            occupied = False
+        if occupied:
             add(
                 "NEW_PATH_ALREADY_EXISTS",
                 pointer,
-                hint="declare it under existing_paths instead",
+                hint="a directory already occupies this path; name a file path",
             )
     for index, entry in enumerate(out_entries):
         if isinstance(entry, dict):

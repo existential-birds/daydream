@@ -1792,6 +1792,67 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
     ]
 
 
+def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_new_file_plan()
+    collision = plan["scope"]["new_paths"][0]["path"]
+    (repo / collision).write_text(
+        "def test_placeholder():\n    assert True\n",
+        encoding="utf-8",
+    )
+
+    assembled = _assembled(repo, plan)
+
+    scope = assembled["scope"]
+    assert scope["new_paths"] == []
+    assert [entry["path"] for entry in scope["existing_paths"]] == [
+        "apps/catalog/api.py",
+        "tests/test_catalog.py",
+        collision,
+    ]
+    assert [
+        change["operation"]
+        for step in assembled["steps"]
+        for change in step["changes"]
+    ] == ["modify", "modify"]
+    quoted = [
+        excerpt
+        for excerpt in assembled["current_state_excerpts"]
+        if excerpt["path"] == collision
+    ]
+    assert quoted[0]["verbatim_excerpt"] == (
+        "def test_placeholder():\n    assert True"
+    )
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert (
+        f"git add apps/catalog/api.py tests/test_catalog.py {collision}"
+        in rendered
+    )
+    assert f"- `{collision}` (existing) —" in rendered
+    assert f"- `{collision}` (create) —" not in rendered
+
+
+def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _repo(tmp_path)
+    plan = _authored_new_file_plan()
+    (repo / plan["scope"]["new_paths"][0]["path"]).mkdir(parents=True)
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == [
+        "NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"
+    ]
+
+
 def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(
     tmp_path: Path,
 ) -> None:
