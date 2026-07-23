@@ -630,21 +630,6 @@ def render_plan(
         f"STOP and report: {condition['evidence_to_report']}"
         for condition in plan["stop_conditions"]
     )
-    notes = plan["maintenance_notes"]
-    future_lines = "\n".join(
-        f"- **{item['area']}**: {item['note']}"
-        for item in notes["future_interactions"]
-    )
-    risk_lines = "\n".join(
-        f"- {item['risk']} Review check: {item['review_check']}"
-        for item in notes["review_risks"]
-    )
-    deferred_lines = "\n".join(
-        f"- {item['item']} Reason: {item['reason']} "
-        f"Revisit when: {item['revisit_trigger']}"
-        for item in notes["deferred_items"]
-    ) or "- None."
-
     return (
         f"# Plan {number:03d}: {plan['title']}\n\n"
         "> **Executor instructions**: Do the \"Before you start\" checks first, then\n"
@@ -741,17 +726,7 @@ def render_plan(
         f"workflow\": `git commit -m \"{workflow['commit_message_example']}\"`\n"
         "4. Do not push and do not open a pull request.\n"
         f"5. Set this plan's Status cell in `daydream_plans/README.md` from "
-        "`TODO` to `DONE`.\n\n"
-        "## Maintenance notes\n\n"
-        "Background for reviewers. Nothing in this section is work to do.\n\n"
-        "### Future interactions\n\n"
-        + future_lines
-        + "\n\n### Review risks\n\n"
-        + risk_lines
-        + "\n\n### Deferred items\n\n"
-        "Explicitly out of scope for this plan. Do not implement them.\n\n"
-        + deferred_lines
-        + "\n"
+        "`TODO` to `DONE`.\n"
     )
 
 

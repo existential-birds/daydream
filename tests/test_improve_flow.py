@@ -364,21 +364,6 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         },
         "additional_stop_conditions": [],
         "additional_command_refs": [],
-        "maintenance_notes": {
-            "future_interactions": [
-                {
-                    "area": "Billing service discovery",
-                    "note": "Revisit the contract if service discovery becomes dynamic.",
-                }
-            ],
-            "review_risks": [
-                {
-                    "risk": "The billing service return contract could change accidentally.",
-                    "review_check": "Confirm the named regression exercises the public boundary.",
-                }
-            ],
-            "deferred_items": [],
-        },
     }
 
 
@@ -4190,7 +4175,6 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     # Ordering and section relationships are stated, not implied.
     assert "Do these in the order they are numbered." in text
     assert "write it once, not twice." in text
-    assert "Explicitly out of scope for this plan. Do not implement them." in text
 
     # Finishing is literal, and never `git add -A`.
     assert "## Finishing" in text

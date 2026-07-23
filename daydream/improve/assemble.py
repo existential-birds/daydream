@@ -103,13 +103,6 @@ _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("additional_stop_conditions", "*", "condition"),
     ("additional_stop_conditions", "*", "evidence_to_report"),
     ("additional_command_refs", "*", "note"),
-    ("maintenance_notes", "future_interactions", "*", "area"),
-    ("maintenance_notes", "future_interactions", "*", "note"),
-    ("maintenance_notes", "review_risks", "*", "risk"),
-    ("maintenance_notes", "review_risks", "*", "review_check"),
-    ("maintenance_notes", "deferred_items", "*", "item"),
-    ("maintenance_notes", "deferred_items", "*", "reason"),
-    ("maintenance_notes", "deferred_items", "*", "revisit_trigger"),
 )
 
 
@@ -1113,7 +1106,6 @@ def assemble_plan(
         "stop_conditions": _boilerplate_stop_conditions(
             normalized, len(normalized["steps"])
         ),
-        "maintenance_notes": deepcopy(normalized["maintenance_notes"]),
     }
     return assembled, ()
 

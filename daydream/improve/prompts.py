@@ -150,67 +150,6 @@ _LINE_ANCHOR_SCHEMA: dict[str, Any] = {
         "end_line": {"type": "integer", "minimum": 1},
     },
 }
-_MAINTENANCE_NOTES_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["future_interactions", "review_risks", "deferred_items"],
-    "properties": {
-        "future_interactions": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["area", "note"],
-                "properties": {
-                    "area": {
-                        "type": "string",
-                        "minLength": 5,
-                        "maxLength": 200,
-                    },
-                    "note": {
-                        "type": "string",
-                        "minLength": 20,
-                        "maxLength": 700,
-                    },
-                },
-            },
-        },
-        "review_risks": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["risk", "review_check"],
-                "properties": {
-                    key: {
-                        "type": "string",
-                        "minLength": 20,
-                        "maxLength": 700,
-                    }
-                    for key in ("risk", "review_check")
-                },
-            },
-        },
-        "deferred_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["item", "reason", "revisit_trigger"],
-                "properties": {
-                    key: {
-                        "type": "string",
-                        "minLength": 20,
-                        "maxLength": 700,
-                    }
-                    for key in ("item", "reason", "revisit_trigger")
-                },
-            },
-        },
-    },
-}
 _SLUG_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 3,
@@ -250,7 +189,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "false_assumption",
         "additional_stop_conditions",
         "additional_command_refs",
-        "maintenance_notes",
     ],
     "properties": {
         "slug": _SLUG_SCHEMA,
@@ -670,7 +608,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": _COMMAND_REF_SCHEMA,
         },
-        "maintenance_notes": _MAINTENANCE_NOTES_SCHEMA,
     },
 }
 

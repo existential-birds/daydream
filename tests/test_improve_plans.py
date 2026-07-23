@@ -651,21 +651,6 @@ def _authored_plan(*, slug: str = "batch-catalog-queries") -> dict[str, Any]:
         },
         "additional_stop_conditions": [],
         "additional_command_refs": [],
-        "maintenance_notes": {
-            "future_interactions": [
-                {
-                    "area": "Catalog pagination",
-                    "note": "Revisit the batch size if catalog pagination is introduced.",
-                }
-            ],
-            "review_risks": [
-                {
-                    "risk": "Batch results could arrive in a different item order.",
-                    "review_check": "Confirm the implementation restores requested identifier order.",
-                }
-            ],
-            "deferred_items": [],
-        },
     }
 
 
@@ -753,7 +738,6 @@ def test_assembled_plan_renders_complete_deterministic_handoff(tmp_path: Path) -
 
     assert len(result["written"]) == 1
     text = (repo / "daydream_plans/001-batch-catalog-queries.md").read_text()
-    assert "## Maintenance notes" in text
     assert "### Step 1: Batch item loading in list_catalog" in text
     assert "**Command**: `uv run pytest tests/test_catalog.py -q`" in text
     assert "**Why this gate**: Runs the focused catalog regression suite." in text
