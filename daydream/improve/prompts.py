@@ -383,13 +383,16 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                         "executor that cannot infer anything "
                                         "and will not look around the "
                                         "repository. Name every identifier, "
-                                        "literal, header, key, and import in "
-                                        "full. State what must NOT change. "
-                                        "Banned: 'the relevant X', 'the "
-                                        "appropriate Y', 'as needed', 'if "
-                                        "necessary', 'update accordingly', "
-                                        "'and similar', 'etc.' — each one is "
-                                        "a decision the executor cannot make. "
+                                        "file, literal, header, key, and "
+                                        "import in full. State what must NOT "
+                                        "change. Banned: 'the relevant X', "
+                                        "'the appropriate Y', 'as "
+                                        "appropriate', 'as needed', 'if "
+                                        "necessary', 'where applicable', "
+                                        "'update accordingly', 'and similar', "
+                                        "'etc.', 'consider', 'you may want "
+                                        "to', 'try to' — each one is a "
+                                        "decision the executor cannot make. "
                                         "If a change needs more than 4000 "
                                         "characters to specify, split it into "
                                         "several entries in this array or "
@@ -672,13 +675,11 @@ For direction findings, Impact is product/user value and Confidence is how well 
 }
 
 FINDING_FORMAT = """## Finding format
-Return findings only. Every finding must include:
-- a short title and category;
+Every finding must carry:
 - the strongest evidence as 2–5 `file:line` references;
 - a body containing concrete impact and a 1–3 sentence fix sketch;
-- Effort: S (hours), M (about a day), or L (multi-day), including tests;
-- fix Risk: LOW, MED, or HIGH;
-- Confidence: HIGH, MED, or LOW.
+- Effort measured as S (hours), M (about a day), or L (multi-day), including tests;
+- Risk measured on the fix, not on the defect.
 Do not invent a finding without direct evidence."""
 
 HARD_RULE_4 = """Never reproduce secret values. If the audit finds credentials, tokens, or `.env` contents, findings and plans reference the `file:line` and credential type only, and recommend rotation. The value itself must never appear in anything you write."""
@@ -691,9 +692,8 @@ boilerplate STOP conditions (drift, repeated verification failure,
 out-of-scope change), command records, excerpt text, plan numbering,
 planned-at stamps, and Markdown rendering — do not restate any of it.
 
-Reference verification commands instead of writing them. Every verification
-slot is either null or a reference `{recon_command_id, appended_args, note}`
-selecting one verified recon command by id. Null `appended_args` runs the
+Reference verification commands instead of writing them: each verification
+slot selects one verified recon command by id. Null `appended_args` runs the
 recon command verbatim; otherwise `appended_args` is a focused argument suffix
 appended to that command — plain arguments only, never shell operators,
 substitutions, or placeholders. The `note` states why that gate proves the
@@ -723,15 +723,10 @@ has no access to the audit that produced the plan. It will do exactly what the
 words say and nothing else — so anything you leave implicit becomes a guess.
 Concretely:
 
-- Name identifiers, files, headers, keys, imports, and literal values in full,
-  every time. Never `the relevant handler`, `the appropriate middleware`, `the
-  corresponding test`, `the existing pattern` — the executor cannot resolve
-  which one you mean.
-- Never make the executor decide. Banned in every instruction, target state,
-  test case, and done criterion: `as appropriate`, `as needed`, `if necessary`,
-  `where applicable`, `update accordingly`, `and similar`, `etc.`, `consider`,
-  `you may want to`, `try to`. Each is a decision it is not equipped to make.
-  Decide it now and state the decision.
+- The naming and banned-vocabulary rules stated on the `instruction` field
+  bind every target state, test case, and done criterion too. Each banned
+  phrase is a decision the executor is not equipped to make: decide it now and
+  state the decision.
 - Say what must NOT change, not only what must. An executor with a vague
   instruction rewrites more than you intended.
 - Make every step self-contained and ordered. A step may depend on earlier
