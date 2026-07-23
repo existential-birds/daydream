@@ -26,6 +26,7 @@ from daydream.improve.plans import (
     load_rejections,
     planned_fingerprints,
     record_rejections,
+    render_plan,
     write_plans,
 )
 from daydream.improve.prompts import (
@@ -1789,6 +1790,26 @@ def test_assemble_templates_three_boilerplate_stop_conditions_plus_false_assumpt
         "apps/catalog/api.py",
         "tests/test_catalog.py",
     ]
+
+
+def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(
+    tmp_path: Path,
+) -> None:
+    repo, planned_at = _repo(tmp_path)
+    plan = _authored_plan()
+    plan["false_assumption"]["related_step_numbers"] = [1, 7]
+
+    assembled = _assembled(repo, plan)
+
+    false_assumption = assembled["stop_conditions"][3]
+    assert false_assumption["related_step_ids"] == ["step-1"]
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=planned_at,
+        number=1,
+    )
+    assert "step-7" not in rendered
 
 
 def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(

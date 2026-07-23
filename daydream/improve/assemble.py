@@ -753,7 +753,6 @@ def _collect_issues(
             continue
         check_ref(pointer, ref)
 
-    step_count = len(steps)
     known_paths = in_scope | set(excluded_paths)
     lexical_known = [
         path
@@ -776,16 +775,6 @@ def _collect_issues(
             path_pointer = f"{pointer}/related_paths/{index}"
             if check_path(path_pointer, path) and path not in known_paths:
                 add("STOP_PATH_UNKNOWN", path_pointer, hint=known_hint)
-        numbers = condition.get("related_step_numbers")
-        for index, number in enumerate(
-            numbers if isinstance(numbers, list) else []
-        ):
-            if isinstance(number, int) and number > step_count:
-                add(
-                    "STOP_STEP_UNKNOWN",
-                    f"{pointer}/related_step_numbers/{index}",
-                    f"steps={step_count}",
-                )
 
     check_stop_references("/false_assumption", normalized.get("false_assumption"))
 

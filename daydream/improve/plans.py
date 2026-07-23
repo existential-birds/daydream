@@ -256,7 +256,6 @@ _AUTHORING_CODES = frozenset(
         "TEST_SYMBOL_DUPLICATE",
         "DONE_CRITERIA_INCOMPLETE",
         "STOP_PATH_UNKNOWN",
-        "STOP_STEP_UNKNOWN",
     }
 )
 
