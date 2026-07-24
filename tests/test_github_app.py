@@ -273,7 +273,7 @@ def test_mint_installation_token_sets_and_clears_jwt_env():
     assert git_ops.get_gh_token_env() is None  # restored after minting
 
 
-def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypatch):
+def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypatch, tmp_path):
     """A long-running review remints before its next GitHub request."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", _TEST_PEM)
@@ -295,17 +295,17 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
         return subprocess.CompletedProcess(args[0], 0, stdout="{}", stderr="")
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        identity = resolve_run_identity(Path("/tmp"), "myorg/myrepo", is_posting=True)
+        identity = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True)
 
         with patch("subprocess.run", side_effect=spy_run):
-            git_ops._run_gh(Path("/tmp"), ["api", "/user"])
+            git_ops._run_gh(tmp_path, ["api", "/user"])
 
     assert identity == "daydream-bot[bot]"
     assert minted == 2
     assert captured["env"]["GH_TOKEN"] == "ghs_fresh"
 
 
-def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch):
+def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch, tmp_path):
     """With App credentials configured and owner/repo resolvable, is_posting=False
     must never attempt minting — a read-only run has no need for a scoped token."""
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
@@ -317,21 +317,21 @@ def test_resolve_run_identity_skips_minting_when_not_posting(monkeypatch):
         raise AssertionError(f"minting must not be attempted when is_posting=False (hit {endpoint})")
 
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        identity = resolve_run_identity(Path("/tmp"), "myorg/myrepo", is_posting=False)
+        identity = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=False)
 
     assert identity == "personal-user"
 
 
-def test_resolve_user_identity_returns_login():
+def test_resolve_user_identity_returns_login(tmp_path):
     """resolve_user_identity reads the current gh-authenticated user."""
     with patch("daydream.git_ops.gh_api", return_value={"login": "personal-user"}):
-        assert resolve_user_identity(Path("/tmp")) == "personal-user"
+        assert resolve_user_identity(tmp_path) == "personal-user"
 
 
-def test_resolve_user_identity_returns_unknown_on_failure():
+def test_resolve_user_identity_returns_unknown_on_failure(tmp_path):
     """A failed user lookup is non-fatal — return 'unknown', never raise."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("boom")):
-        assert resolve_user_identity(Path("/tmp")) == "unknown"
+        assert resolve_user_identity(tmp_path) == "unknown"
 
 
 _TEST_PEM = _real_pem()
