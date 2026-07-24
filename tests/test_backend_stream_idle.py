@@ -75,7 +75,10 @@ CODEX_LINES = [
 _FAKE_CLI = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    import os, sys, time
+    import os, signal, sys, time
+
+    if os.environ.get("FAKE_CLI_IGNORE_SIGTERM") == "1":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     with open(os.environ["FAKE_CLI_PID_LOG"], "a") as fh:
         fh.write(str(os.getpid()) + "\\n")
@@ -105,6 +108,7 @@ def install_fake_cli(
     lines: list[str],
     delay: float = 0.0,
     hang: bool = False,
+    ignore_sigterm: bool = False,
 ) -> Path:
     """Put a fake *name* executable on ``$PATH``; return the spawn/pid log path."""
     bin_dir = tmp_path / "fakebin"
@@ -122,6 +126,7 @@ def install_fake_cli(
     monkeypatch.setenv("FAKE_CLI_PID_LOG", str(pid_log))
     monkeypatch.setenv("FAKE_CLI_DELAY", str(delay))
     monkeypatch.setenv("FAKE_CLI_HANG", "1" if hang else "0")
+    monkeypatch.setenv("FAKE_CLI_IGNORE_SIGTERM", "1" if ignore_sigterm else "0")
     return pid_log
 
 
@@ -380,6 +385,46 @@ async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
     """
     pid_log = install_fake_cli(
         tmp_path, monkeypatch, name="pi", lines=PI_LINES[:2], hang=True
+    )
+    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "60")  # far outside the wall budget
+
+    output, _, budget_reason = await run_agent(
+        PiBackend(model="test-model"),
+        tmp_path,
+        "review",
+        phase=DaydreamPhase.REVIEW,
+        wall_budget_s=1.0,
+    )
+
+    assert budget_reason == "wall_budget_exceeded"
+    assert output == ""
+    assert_reaped(spawned_pids(pid_log)[0])
+
+
+@pytest.mark.asyncio
+async def test_cancelled_teardown_still_escalates_to_sigkill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that ignores SIGTERM is still SIGKILLed when the wall budget fires.
+
+    The subprocess is read inside the backend generator, so a wall-budget cancel
+    lands straight in the teardown ``finally`` with the parent scope still
+    cancelled. That teardown must run to completion regardless: SIGTERM, wait the
+    grace, then SIGKILL. If it is not shielded from the cancellation, the first
+    await re-raises before the SIGKILL, and a SIGTERM-ignoring child stays alive
+    (not merely a zombie the OS would sweep) — a real leaked process. The grace
+    is shortened so the escalation is exercised in a fraction of a second.
+    """
+    monkeypatch.setattr(
+        "daydream.backends._subprocess.TERMINATE_GRACE_S", 0.5
+    )
+    pid_log = install_fake_cli(
+        tmp_path,
+        monkeypatch,
+        name="pi",
+        lines=PI_LINES[:2],
+        hang=True,
+        ignore_sigterm=True,
     )
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "60")  # far outside the wall budget
 

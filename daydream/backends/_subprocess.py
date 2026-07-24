@@ -8,6 +8,8 @@ import logging
 import math
 import os
 
+import anyio
+
 logger = logging.getLogger(__name__)
 
 # Idle-stall detection for the CLI backends' stdout stream.
@@ -38,6 +40,11 @@ logger = logging.getLogger(__name__)
 # with no wall budget at all — and for stalls that outlive the process.
 DEFAULT_STREAM_IDLE_TIMEOUT_S = 2700.0
 STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
+
+# Grace between SIGTERM and SIGKILL when reaping a subprocess. A cooperative CLI
+# exits on SIGTERM long before this; the window only bounds how long we wait on a
+# child that ignores it before forcing the kill.
+TERMINATE_GRACE_S = 5.0
 
 
 class StreamStalledError(Exception):
@@ -120,24 +127,42 @@ async def readline_with_idle_timeout(
         raise StreamStalledError(cli, timeout_s) from exc
 
 
-async def terminate_process(proc: asyncio.subprocess.Process, timeout: float = 5.0) -> None:
-    """SIGTERM *proc*, wait up to *timeout* seconds, then SIGKILL if still running."""
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+async def terminate_process(
+    proc: asyncio.subprocess.Process, timeout: float | None = None
+) -> None:
+    """SIGTERM *proc*, wait up to *timeout* seconds, then SIGKILL if still running.
+
+    Shielded from cancellation. The backend reads its subprocess inside an async
+    generator, so a wall-budget scope firing mid-read unwinds the ``CancelledError``
+    straight into the generator's ``finally`` — here — with the parent scope still
+    cancelled. anyio cancellation is level-triggered, so without the shield the
+    first ``await`` below re-raises before the wait/SIGKILL/reap can run: the child
+    is signalled but never reaped, and a SIGTERM-ignoring child is not even killed.
+    The shield lets this teardown run to completion before the cancel resumes.
+    """
+    grace = TERMINATE_GRACE_S if timeout is None else timeout
+    with anyio.CancelScope(shield=True):
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=grace)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
 
 
 async def cancel_processes(processes: list[asyncio.subprocess.Process]) -> None:
-    """Cancel every tracked subprocess: SIGTERM all first, then wait/SIGKILL each."""
+    """Cancel every tracked subprocess: SIGTERM all first, then wait/SIGKILL each.
+
+    Shielded for the same reason as :func:`terminate_process`: the reap must
+    finish even when the caller is already being cancelled.
+    """
     snapshot = list(processes)
-    for process in snapshot:
-        process.terminate()
-    for process in snapshot:
-        try:
-            await asyncio.wait_for(process.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+    with anyio.CancelScope(shield=True):
+        for process in snapshot:
+            process.terminate()
+        for process in snapshot:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
