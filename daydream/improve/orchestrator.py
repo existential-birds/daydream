@@ -718,6 +718,32 @@ def _stamp_finding(
     return stamped
 
 
+def _correct_primary_evidence_location(
+    finding: dict[str, Any],
+    *,
+    path: str,
+    line: int | None,
+) -> None:
+    """Align the primary evidence citation with a vetted path correction."""
+    evidence = finding.get("evidence")
+    if not isinstance(evidence, list):
+        return
+    evidence = list(evidence)
+    finding["evidence"] = evidence
+    for index, entry in enumerate(evidence):
+        if not isinstance(entry, str):
+            continue
+        match = _EVIDENCE_LOCATION.match(entry.strip())
+        if match is None:
+            continue
+        evidence_line = line if line is not None else int(match.group(2))
+        location = f"{path}:{evidence_line}"
+        if entry.lstrip().startswith("`"):
+            location = f"`{location}`"
+        evidence[index] = location + entry.strip()[match.end() :]
+        return
+
+
 def resolve_categories(
     tier: EffortTier,
     focus: str | None,
@@ -980,6 +1006,8 @@ def _apply_vet_verdicts(
     *,
     rejected_at_sha: str,
     default_provenance: str | None = None,
+    services: list[Service] | None = None,
+    partitions: list[Partition] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Apply 1-based, vet_id-keyed vet verdicts with fail-closed polarity.
 
@@ -1024,11 +1052,35 @@ def _apply_vet_verdicts(
         for field in corrected_fields:
             if verdict.get(field) is not None:
                 corrected[field] = verdict[field]
+        location_corrected = (
+            verdict.get("path") is not None or verdict.get("line") is not None
+        )
+        if location_corrected:
+            _correct_primary_evidence_location(
+                corrected,
+                path=str(corrected.get("path", "")),
+                line=corrected.get("line"),
+            )
         if (
             default_provenance is not None
             and corrected.get("provenance") not in _PROVENANCE_VALUES
         ):
             corrected["provenance"] = default_provenance
+        if location_corrected:
+            restamped = _stamp_finding(
+                corrected,
+                str(corrected.get("category", "")),
+                services or [],
+                partitions or [],
+            )
+            if restamped is not None:
+                corrected = restamped
+            else:
+                corrected["fingerprint"] = compute_fingerprint(
+                    str(corrected.get("path", "")),
+                    str(corrected.get("title", "")),
+                    str(corrected.get("body", "")),
+                )
         kept.append(corrected)
     return kept, rejected
 
@@ -1127,6 +1179,8 @@ async def _step_vet(ctx: FlowContext) -> None:
                             default_provenance=(
                                 "inherited" if branch_focus else None
                             ),
+                            services=ctx.data["services"],
+                            partitions=ctx.data["partitions"],
                         )
 
             task_group.start_soon(_task)

@@ -119,6 +119,27 @@ def test_grouping_is_stack_homogeneous_and_bounded() -> None:
     ]
 
 
+def test_mixed_stack_partition_is_routed_to_each_stack_specialist() -> None:
+    partition = Partition(
+        name="app",
+        root="app",
+        source="directory",
+        service=None,
+        files=("app/main.py", "app/view.tsx"),
+    )
+
+    groups, skipped = group_partitions(
+        [partition],
+        {"app/main.py": "python", "app/view.tsx": "react"},
+    )
+
+    assert skipped == []
+    assert [(group.stack, group.partitions) for group in groups] == [
+        ("python", (partition,)),
+        ("react", (partition,)),
+    ]
+
+
 def test_group_ceiling_keeps_largest_groups_and_reports_the_rest() -> None:
     parts = build_partitions([f"apps/s{i}/f{j}.py" for i in range(3) for j in range(i + 1)], [], max_files=2)
     stack_of = {f: "python" for p in parts for f in p.files}

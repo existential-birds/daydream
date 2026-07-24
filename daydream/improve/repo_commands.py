@@ -26,6 +26,45 @@ _MAKE_DECLARATION = re.compile(
 )
 _SCRIPT_KEY = re.compile(r'^\s*"(?P<key>(?:[^"\\]|\\.)*)"\s*:')
 _ID_SEPARATOR = re.compile(r"[^a-z0-9]+")
+_COMMAND_NAME_WORDS = re.compile(r"[^a-z0-9]+")
+_VERIFICATION_WORDS = frozenset(
+    {
+        "build",
+        "check",
+        "ci",
+        "compile",
+        "lint",
+        "test",
+        "tests",
+        "typecheck",
+        "validate",
+        "validation",
+        "verify",
+        "verification",
+    }
+)
+_MUTATING_WORDS = frozenset(
+    {
+        "bootstrap",
+        "clean",
+        "deploy",
+        "format",
+        "generate",
+        "generation",
+        "hook",
+        "hooks",
+        "init",
+        "install",
+        "postinstall",
+        "postpublish",
+        "preinstall",
+        "prepare",
+        "publish",
+        "release",
+        "report",
+        "setup",
+    }
+)
 _LOCKFILE_MANAGERS = (
     ("pnpm-lock.yaml", "pnpm"),
     ("yarn.lock", "yarn"),
@@ -42,6 +81,17 @@ def package_invocation(package_manager: str, script: str) -> str:
     if package_manager == "bun":
         return f"bun run {script}"
     return f"{package_manager} {script}"
+
+
+def _is_verification_name(name: str) -> bool:
+    """Return whether a declared target or script is safe to offer as a gate.
+
+    Declarations do not expose their runtime effects, so host discovery is
+    deliberately conservative: require a verification-oriented name and
+    exclude names that conventionally perform repository mutation.
+    """
+    words = {word for word in _COMMAND_NAME_WORDS.split(name.lower()) if word}
+    return bool(words & _VERIFICATION_WORDS) and not bool(words & _MUTATING_WORDS)
 
 
 def enumerate_repository_commands(
@@ -89,7 +139,7 @@ def _make_records(
         if match is None or match.group("assign"):
             continue
         for target in match.group("targets").split():
-            if target in seen:
+            if target in seen or not _is_verification_name(target):
                 continue
             seen.add(target)
             yield _record(
@@ -127,7 +177,11 @@ def _script_records(
     manager = _package_manager(base, manifest)
     lines = text.splitlines()
     for script, body in scripts.items():
-        if not isinstance(script, str) or not isinstance(body, str):
+        if (
+            not isinstance(script, str)
+            or not isinstance(body, str)
+            or not _is_verification_name(script)
+        ):
             continue
         line = _script_line(lines, script)
         yield _record(

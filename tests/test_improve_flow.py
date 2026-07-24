@@ -14,6 +14,7 @@ from daydream.git_ops import head_sha
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
 )
+from daydream.improve.partition import Partition
 from daydream.improve.plans import PLAN_INDEX_FILENAME
 from daydream.improve.prompts import (
     AUDIT_PLAYBOOK_SECTIONS,
@@ -22,6 +23,7 @@ from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_audit_prompt,
 )
+from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.improve_backend import (
@@ -486,9 +488,10 @@ async def test_partition_bound_splits_oversized_trees_via_config(
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     groups = {group_scope(call["prompt"])[0] for call in audit_calls}
     # frontend/src (12 files) splits into 3 partitions of 4; the 12 two-file
-    # services pack 2-per-group; the residue stands alone -> 10 groups.
-    assert len(groups) == 10
-    assert len(audit_calls) == 10 * len(AUDIT_CATEGORIES)
+    # services pack 2-per-group; and the mixed generic/python residue is
+    # routed to both specialists -> 11 groups.
+    assert len(groups) == 11
+    assert len(audit_calls) == 11 * len(AUDIT_CATEGORIES)
     for call in audit_calls:
         assert sum(group_file_counts(call["prompt"])) <= 5
     coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
@@ -2822,6 +2825,42 @@ def test_apply_vet_verdicts_matches_by_vet_id(
     )
     assert {f["fingerprint"] for f in kept} == expected_kept
     assert {f["fingerprint"] for f in rejected} == expected_rejected
+
+
+def test_apply_vet_verdicts_restamps_a_corrected_location() -> None:
+    findings = [
+        {
+            "fingerprint": "original",
+            "title": "Misattributed finding",
+            "category": "correctness",
+            "path": "apps/billing/api.py",
+            "line": 10,
+            "body": "The evidence belongs to catalog.",
+            "evidence": ["`apps/billing/api.py:10`"],
+        }
+    ]
+    services = [
+        Service("billing", Path("apps/billing"), "test"),
+        Service("catalog", Path("apps/catalog"), "test"),
+    ]
+    partitions = [
+        Partition("billing", "apps/billing", "test", "billing", ()),
+        Partition("catalog", "apps/catalog", "test", "catalog", ()),
+    ]
+
+    kept, _ = _apply_vet_verdicts(
+        findings,
+        [{"vet_id": 1, "keep": True, "path": "apps/catalog/api.py", "line": 20}],
+        rejected_at_sha="sha",
+        services=services,
+        partitions=partitions,
+    )
+
+    assert len(kept) == 1
+    assert kept[0]["evidence"] == ["`apps/catalog/api.py:20`"]
+    assert kept[0]["services"] == ["catalog"]
+    assert kept[0]["partition"] == "catalog"
+    assert kept[0]["fingerprint"] != "original"
 
 
 @pytest.mark.anyio

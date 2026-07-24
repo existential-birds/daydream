@@ -446,11 +446,22 @@ async def run_agent(
         # with-shape uniform otherwise (CORE-09 no-op). D-19: no ATIF construction
         # here — only inv.observe()/inv.observe_user_step() against the recorder.
         recorder = get_current_recorder()
-        _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
-        _default_delay = float(os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S", "2.0"))
-        _default_max_delay = float(
-            os.environ.get("DAYDREAM_PI_RETRY_MAX_DELAY_S", "120.0")
-        )
+        try:
+            _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
+        except ValueError:
+            _default_attempts = 3
+        if _default_attempts < 0:
+            _default_attempts = 3
+
+        def _retry_delay_from_env(name: str, default: float) -> float:
+            try:
+                value = float(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+            return value if math.isfinite(value) and value >= 0 else default
+
+        _default_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0)
+        _default_max_delay = _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0)
         max_attempts = getattr(backend, "retry_attempts", _default_attempts)
         base_delay = getattr(backend, "retry_base_delay_s", _default_delay)
         max_delay = getattr(backend, "retry_max_delay_s", _default_max_delay)

@@ -24,6 +24,9 @@ class _RetryableThenSuccessBackend:
 
     model = "test-model"
     fanout_concurrency = 4
+    retry_attempts = 1
+    retry_base_delay_s = 0.0
+    retry_max_delay_s = 0.0
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -205,6 +208,25 @@ async def test_run_agent_no_retry_on_non_retryable(monkeypatch, tmp_path: Path) 
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
     assert backend.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_ignores_malformed_retry_environment(monkeypatch, tmp_path: Path) -> None:
+    """Malformed Pi retry environment values fall back without blocking a backend call."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "not-an-integer")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "inf")
+    backend = _RetryableThenSuccessBackend()
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 0.0
+    backend.retry_max_delay_s = 0.0
+
+    output, _, _ = await run_agent(
+        backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW
+    )
+
+    assert output == "Review complete"
+    assert backend.call_count == 2
 
 
 @pytest.mark.asyncio

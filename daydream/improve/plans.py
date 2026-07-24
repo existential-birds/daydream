@@ -438,7 +438,10 @@ def _rendered_index_entries(plans_dir: Path) -> dict[str, PlanIndexEntry]:
     for line in _index_text(plans_dir).splitlines():
         if not line.startswith("|"):
             continue
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        cells = [
+            cell.strip().replace("\\|", "|")
+            for cell in re.split(r"(?<!\\)\|", line.strip("|"))
+        ]
         if len(cells) != _INDEX_COLUMNS:
             continue
         marker = _FINGERPRINT_MARKER.search(cells[0])

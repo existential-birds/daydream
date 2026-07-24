@@ -7,7 +7,7 @@ instead of inlined file lists.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -159,7 +159,8 @@ def group_partitions(
     """
     buckets: dict[str, list[Partition]] = defaultdict(list)
     for partition in partitions:
-        buckets[_dominant_stack(partition, stack_of)].append(partition)
+        for stack in sorted({stack_of.get(path, _GENERIC_STACK) for path in partition.files}):
+            buckets[stack].append(partition)
 
     bins: list[tuple[str, list[Partition]]] = []
     for stack in sorted(buckets):
@@ -219,13 +220,6 @@ def _split_directory(root: str, files: Sequence[str], max_files: int) -> list[tu
     for child in sorted(children):
         chunks.extend(_split_directory(f"{prefix}{child}", children[child], max_files))
     return chunks
-
-
-def _dominant_stack(partition: Partition, stack_of: Mapping[str, str]) -> str:
-    counts = Counter(stack_of.get(path, _GENERIC_STACK) for path in partition.files)
-    if not counts:
-        return _GENERIC_STACK
-    return min(sorted(counts), key=lambda stack: (-counts[stack], stack))
 
 
 def _parent(partition: Partition) -> str:

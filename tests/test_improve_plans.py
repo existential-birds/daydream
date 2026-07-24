@@ -405,6 +405,38 @@ def test_host_enumerates_make_targets_and_package_scripts(
     ) == commands
 
 
+def test_host_enumeration_excludes_mutating_make_targets_and_package_scripts(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Makefile").write_text(
+        "test:\n\tpytest\ninstall:\n\tpip install -r requirements.txt\n"
+        "install-hooks:\n\tpre-commit install\ngenerate-report:\n\ttool report\n",
+        encoding="utf-8",
+    )
+    (repo / "package.json").write_text(
+        json.dumps(
+            {
+                "scripts": {
+                    "test": "vitest run",
+                    "install": "npm install",
+                    "prepare": "husky install",
+                    "generate:report": "tool report",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    commands = enumerate_repository_commands(repo)
+
+    assert [item["command"] for item in commands] == [
+        "make test",
+        "npm run test",
+    ]
+
+
 @pytest.mark.parametrize(
     ("manager_file", "expected"),
     [
@@ -1664,6 +1696,34 @@ def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(
         (rank + 1, f"fp-{plan_slug(title)}", plan_slug(title), "TODO")
         for rank, title in enumerate(_CONCURRENT_TITLES)
     ]
+
+
+def test_rendered_index_recovers_escaped_pipes_during_reconciliation(
+    tmp_path: Path,
+) -> None:
+    repo, sha = _repo(tmp_path)
+    plans_dir = repo / "daydream_plans"
+    selection = _plan_selection(repo, "Batch | catalog queries")
+    _write_plans(plans_dir, [selection], planned_at=sha)
+    (plans_dir / PLAN_INDEX_FILENAME).unlink()
+    index_path = plans_dir / "README.md"
+    index_path.write_text(
+        index_path.read_text(encoding="utf-8").replace(
+            "| TODO |", "| IN \\| PROGRESS |"
+        ),
+        encoding="utf-8",
+    )
+
+    result = _write_plans(plans_dir, [selection], planned_at=sha)
+
+    assert result["written"] == []
+    sidecar = json.loads(
+        (plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [
+        (entry["number"], entry["title"], entry["status"])
+        for entry in sidecar["plans"]
+    ] == [(1, "Batch | catalog queries", "IN | PROGRESS")]
 
 
 @pytest.mark.parametrize(
