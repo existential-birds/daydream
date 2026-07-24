@@ -2908,6 +2908,39 @@ async def test_plan_writer_stream_stall_is_retried_and_the_plan_lands(
 
 
 @pytest.mark.anyio
+async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``run_agent`` owns the budget for retryable errors; the writer adds none.
+
+    A persistently rate-limited plan writer must burn exactly one attempt budget
+    and then block the finding — re-entering ``run_agent`` would hand the same
+    dead endpoint a second full budget.
+    """
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_rate_limit_always = True
+    stub.retry_attempts = 2
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans_dir = improve_monorepo_target / "daydream_plans"
+    assert code == 1
+    assert stub.plan_writer_calls == 3
+    assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
+    index = (plans_dir / "README.md").read_text(encoding="utf-8")
+    assert "BLOCKED (PLAN_WRITER_FAILED: RATE_LIMIT)" in index
+
+
+@pytest.mark.anyio
 async def test_two_consecutive_transport_crashes_block_the_finding(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

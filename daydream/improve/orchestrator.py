@@ -1656,21 +1656,25 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 async def _call_once_retried(
                     generation_prompt: str,
                 ) -> tuple[Any, str | None]:
-                    """Absorb one transport failure; a second one is terminal.
+                    """Absorb one non-retryable crash; a second one is terminal.
 
-                    ``run_agent`` already retries retryable backend errors up to
-                    its per-backend attempt budget; this is the backstop for a
-                    crash it surfaced anyway (e.g. a process exit). A deliberate
-                    tool-supervisor veto is a policy stop, not an API failure, so
-                    it propagates unretried. The retry replaces only the crashed
-                    generation, so it never restarts generation 0, and the
-                    two-generation authoring-repair budget is unchanged.
+                    ``run_agent`` already spent its per-backend attempt budget on
+                    retryable backend errors, so re-calling for one of those would
+                    just duplicate an exhausted budget — it propagates. This is
+                    the backstop for a crash ``run_agent`` never retried (e.g. a
+                    process exit). A deliberate tool-supervisor veto is a policy
+                    stop, not an API failure, so it propagates unretried. The
+                    retry replaces only the crashed generation, so it never
+                    restarts generation 0, and the two-generation
+                    authoring-repair budget is unchanged.
                     """
                     try:
                         return await _call(generation_prompt)
                     except agent._ToolSupervisorFailure:
                         raise
-                    except Exception:
+                    except Exception as exc:
+                        if getattr(exc, "retryable", False):
+                            raise
                         return await _call(generation_prompt)
 
                 async def _generate() -> dict[str, Any]:

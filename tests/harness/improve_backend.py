@@ -407,6 +407,7 @@ class ImproveStubBackend:
         self.fanout_concurrency = fanout_concurrency
         # Instant retries in-test: run_agent reads these off the backend, so a
         # retryable failure (a stall, a rate-limit) re-arms with no backoff sleep.
+        self.retry_attempts = 20
         self.retry_base_delay_s = 0.0
         self.retry_max_delay_s = 0.0
         self.audit_delay = audit_delay
@@ -437,6 +438,7 @@ class ImproveStubBackend:
         self.plan_unquoted_path_attempts = 0
         self.plan_crash_attempts = 0
         self.plan_stall_attempts = 0
+        self.plan_rate_limit_always = False
         self.plan_stop_condition_path: str | None = None
         self.plan_no_test_exemplars = False
         self.group_scoped_findings = False
@@ -698,6 +700,8 @@ class ImproveStubBackend:
             return
         if marker == "plan-writer":
             self.plan_writer_calls += 1
+            if self.plan_rate_limit_always:
+                raise _ProductionPathRateLimitError("provider rate limit")
             if self.plan_writer_calls <= self.plan_crash_attempts:
                 raise _ProductionPathPlannerError("plan writer process exited")
             if self.plan_writer_calls <= self.plan_stall_attempts:
