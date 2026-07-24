@@ -2468,6 +2468,67 @@ async def test_n_selected_findings_produce_n_plans_first_attempt(
 
 
 @pytest.mark.anyio
+async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """One finding, one plan -- no matter how many groups re-audit its code.
+
+    A partition whose files span stacks is bundled into one audit group per
+    stack, so the same code is audited more than once and returns the identical
+    finding each time. Pinning optimistic stack availability forces that
+    multi-group fan-out (the CI condition; ambient dev environments collapse to
+    a single generic group and never exercise it). The audit must collapse those
+    byte-identical findings by fingerprint, or every extra group mints a
+    duplicate plan and the plan numbers march past their true count.
+    """
+    _pin_stack_availability(monkeypatch, tmp_path)
+    stub = install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=3,
+    )
+    stub.vet_reject_titles = {"Phantom N+1"}
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    # The fan-out really did span multiple groups -- otherwise the dedup path is
+    # never taken and the assertions below prove nothing.
+    coverage = json.loads(
+        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(coverage["groups"]) > 1
+    audit_findings = json.loads(
+        improve_artifact(
+            improve_monorepo_target, "audit-findings.json"
+        ).read_text(encoding="utf-8")
+    )["findings"]
+    fingerprints = [finding["fingerprint"] for finding in audit_findings]
+    assert len(fingerprints) == len(set(fingerprints))
+
+    plans = sorted(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+    assert stub.plan_writer_calls == 3
+    assert [plan.name for plan in plans] == [
+        "001-security-finding.md",
+        "002-high-leverage-title.md",
+        "003-performance-finding.md",
+    ]
+
+
+@pytest.mark.anyio
 async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

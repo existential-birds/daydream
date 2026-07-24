@@ -927,6 +927,11 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
     }
     discarded_no_evidence = 0
     dropped_low_confidence = 0
+    # A partition whose files span stacks is bundled into one group per stack, so
+    # the same code is audited more than once and returns byte-identical findings
+    # (same fingerprint). Collapse them here — the first pass keeps the finding;
+    # later ones would otherwise inflate every count and mint a duplicate plan.
+    seen_fingerprints: set[str] = set()
     for assignment in assignments:
         result = results.get(assignment.key)
         if result is None:
@@ -946,6 +951,10 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
             if tier.high_confidence_only and stamped.get("confidence") != "HIGH":
                 dropped_low_confidence += 1
                 continue
+            fingerprint = str(stamped.get("fingerprint") or "")
+            if fingerprint in seen_fingerprints:
+                continue
+            seen_fingerprints.add(fingerprint)
             assignment_findings.append(stamped)
         per_group[assignment.group.name].extend(assignment_findings)
 
