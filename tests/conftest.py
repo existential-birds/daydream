@@ -230,6 +230,37 @@ def improve_branch_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def improve_branch_two_services_target(tmp_path: Path) -> Path:
+    """Improve monorepo whose feature branch changes billing AND catalog."""
+    project = tmp_path / "improve_branch_two"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    _git(project, "checkout", "-b", "feature")
+    for service in ("billing", "catalog"):
+        (project / "apps" / service / "api.py").write_text(
+            f'def service_name():\n    return "{service}-v2"\n'
+        )
+    _git(project, "add", "apps/billing/api.py", "apps/catalog/api.py")
+    _commit(project, "change billing and catalog api")
+    return project
+
+
+@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Git repo with a Python + React + Markdown diff on a feature branch.
 

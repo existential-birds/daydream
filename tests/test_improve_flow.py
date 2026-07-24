@@ -1419,6 +1419,38 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
 
 
 @pytest.mark.anyio
+async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
+    improve_branch_two_services_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub = install_improve_stub(monkeypatch, improve_branch_two_services_target)
+    code = await run(
+        RunConfig(
+            target=str(improve_branch_two_services_target),
+            flow_name="improve",
+            improve_focus="branch",
+            improve_scope="apps/billing",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+    assert code == 0
+    # Isolate the embedded ```diff fenced block so the assertion targets the
+    # branch diff itself, not the whole-repo recon context that legitimately
+    # names other services.
+    diff_blocks = [
+        prompt.split("```diff\n", 1)[1].split("\n```", 1)[0]
+        for call in stub.calls
+        if call["marker"] in ("audit", "vet")
+        for prompt in [call["prompt"]]
+        if "```diff\n" in prompt
+    ]
+    assert diff_blocks
+    assert all("apps/billing/api.py" in block for block in diff_blocks)
+    assert all("apps/catalog/api.py" not in block for block in diff_blocks)
+    assert all("catalog-v2" not in block for block in diff_blocks)
+
+
+@pytest.mark.anyio
 async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

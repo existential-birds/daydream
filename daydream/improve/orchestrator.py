@@ -24,6 +24,7 @@ from daydream.config import (
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.orchestrator import _diff_changed_files, get_installed_skills
+from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
@@ -319,8 +320,6 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         ctx.data["effort_tier"] = replace(
             requested, categories=None, max_concurrency=1
         )
-    ctx.data["branch_diff"] = branch_diff
-    ctx.data["branch_files"] = branch_files
 
     all_services = (
         []
@@ -341,8 +340,13 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         except ValueError as exc:
             print_error(console, "Invalid Improve Scope", str(exc))
             return Stop(1)
+        if branch_focus:
+            branch_diff, branch_files = _restrict_diff_to_services(branch_diff, services)
     if branch_focus:
         services = _services_for_files(services, tuple(branch_files))
+
+    ctx.data["branch_diff"] = branch_diff
+    ctx.data["branch_files"] = branch_files
 
     stacks: list[StackAssignment] = []
     partitions: list[Partition] = []
@@ -635,6 +639,29 @@ def _services_for_files(
             for path in files
         )
     ]
+
+
+def _restrict_diff_to_services(
+    diff: str, services: list[Service]
+) -> tuple[str, list[str]]:
+    """Keep only the diff blocks whose file lives under a scoped service root.
+
+    Under ``--scope`` the branch diff must not leak changes from out-of-scope
+    services into audit and vetting prompts, so both the diff text and the
+    derived changed-file list are narrowed to the scoped roots.
+    """
+    roots = tuple(service.root.as_posix() for service in services)
+    selected: list[str] = []
+    files: list[str] = []
+    for block in _DIFF_BLOCK_SPLIT.split(diff):
+        path = _diff_block_path(block)
+        if path is None:
+            continue
+        if any(path == root or path.startswith(f"{root}/") for root in roots):
+            selected.append(block)
+            if path not in files:
+                files.append(path)
+    return "".join(selected), files
 
 
 def _stacks_for_services(
