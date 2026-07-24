@@ -308,7 +308,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
         model = "test-model"
         fanout_concurrency = 3
-        # retry_attempts read by agent.py via getattr(backend, "retry_attempts", 3)
+        # retry_attempts read by agent.py via getattr(backend, "retry_attempts", 20)
         retry_attempts = 3
         retry_base_delay_s = 0.01
 

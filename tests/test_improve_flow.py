@@ -2642,6 +2642,50 @@ async def test_plan_writer_transport_crash_is_retried_once_and_the_plan_lands(
 
 
 @pytest.mark.anyio
+async def test_plan_writer_stream_stall_is_retried_and_the_plan_lands(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled plan-writer stream is retried, not terminal, and the plan lands.
+
+    A ``StreamStalledError`` is the usual symptom of a flaky endpoint. It is
+    retryable, so ``run_agent`` re-arms a fresh subprocess and the plan writer
+    completes on the second attempt — one blip must never sink a finding.
+    """
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.plan_stall_attempts = 1
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            improve_plan_description="add rate limiting",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    plans = list(
+        (improve_monorepo_target / "daydream_plans").glob(
+            "[0-9][0-9][0-9]-*.md"
+        )
+    )
+    assert code == 0
+    assert stub.plan_writer_calls == 2
+    assert len(plans) == 1
+    assert "## Steps" in plans[0].read_text(encoding="utf-8")
+    diagnostics = json.loads(
+        improve_artifact(
+            improve_monorepo_target,
+            "plan-write-diagnostics.json",
+        ).read_text(encoding="utf-8")
+    )
+    assert [
+        attempt["disposition"] for attempt in diagnostics["attempts"]
+    ] == ["success"]
+
+
+@pytest.mark.anyio
 async def test_two_consecutive_transport_crashes_block_the_finding(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -43,15 +43,16 @@ STREAM_IDLE_TIMEOUT_ENV = "DAYDREAM_STREAM_IDLE_TIMEOUT_S"
 class StreamStalledError(Exception):
     """Raised when a backend CLI produces no stdout for the idle window.
 
-    Terminal by construction. ``retryable`` is a hard ``False`` so
-    ``agent.run_agent``'s retry loop — which re-arms per attempt and runs up to
-    ``retry_attempts + 1`` times — cannot multiply one stall into N stalls. A
-    stall costs the idle window once; retrying would multiply the dead air by
-    the attempt count, which is precisely the failure the timeout exists to
-    bound.
+    ``retryable`` is ``True``: a stalled stream is the most common symptom of a
+    flaky endpoint, and every provider (Anthropic included) drops connections
+    often enough that treating a stall as terminal makes one blip kill a whole
+    run. ``agent.run_agent``'s retry loop re-arms a fresh subprocess per attempt,
+    which is exactly what recovers from a dead connection. Each attempt is still
+    bounded by the idle window, so the worst case is ``attempts × window`` of
+    dead air only when the endpoint stays dead for the entire retry budget.
     """
 
-    retryable = False
+    retryable = True
 
     def __init__(self, cli: str, timeout_s: float) -> None:
         super().__init__(

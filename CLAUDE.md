@@ -190,10 +190,19 @@ The improve phases deliberately run with no wall budget.
 
 Independently, the pi and codex backends bound their stdout stream with an idle
 timeout (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`, default 2700s): a subprocess that
-emits nothing for that long is killed and the turn fails with a terminal
-`StreamStalledError`. It fires on the absence of output, never on slow output,
-and sits above the wall budget so it can only bite where nothing else bounds the
-turn.
+emits nothing for that long is killed and the turn fails with a `StreamStalledError`.
+It fires on the absence of output, never on slow output, and sits above the wall
+budget so it can only bite where nothing else bounds the turn. A stall is
+**retryable** — a dead stream is the usual symptom of a flaky endpoint, so
+`run_agent` re-arms a fresh subprocess and retries it like any other transport
+failure. Each attempt is re-bounded by the idle window.
+
+`run_agent` retries any backend error whose `retryable` flag is set, with
+exponential backoff, up to the backend's attempt budget. The default is **20
+attempts** for every backend (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides it) because
+every provider — Anthropic included — drops connections often enough that a
+smaller budget lets one blip kill a whole run. Only a deliberate tool-supervisor
+veto and a non-transport logic error are terminal; API/transport failures are not.
 
 ### Config and per-phase model overrides
 
@@ -318,7 +327,7 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `PI_PROVIDER` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`--provider` / `--thinking`; `PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
 | `PI_API_KEY` | Pi backend | Copied into the child process's provider-native credential env var (e.g. `ZAI_API_KEY`), never onto argv/CLI flags (security); ignored with a warning if the provider has no mapped native var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is terminal, never retried. |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is retryable: `run_agent` re-arms a fresh subprocess and retries it like any other transport failure, each attempt re-bounded by the idle window. |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
 | `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |
 | `ANTHROPIC_API_KEY` | Benchmark | Direct Anthropic judge (`anthropic-direct` route) |

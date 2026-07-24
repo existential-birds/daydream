@@ -447,11 +447,11 @@ async def run_agent(
         # here — only inv.observe()/inv.observe_user_step() against the recorder.
         recorder = get_current_recorder()
         try:
-            _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "3"))
+            _default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
         except ValueError:
-            _default_attempts = 3
+            _default_attempts = 20
         if _default_attempts < 0:
-            _default_attempts = 3
+            _default_attempts = 20
 
         def _retry_delay_from_env(name: str, default: float) -> float:
             try:

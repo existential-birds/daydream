@@ -36,6 +36,7 @@ import anyio
 import pytest
 
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
+from daydream.backends._subprocess import StreamStalledError
 from daydream.config import AUDIT_CATEGORIES
 
 
@@ -404,6 +405,10 @@ class ImproveStubBackend:
         self._write_attempted = False
         self.reasoning_effort: str | None = None
         self.fanout_concurrency = fanout_concurrency
+        # Instant retries in-test: run_agent reads these off the backend, so a
+        # retryable failure (a stall, a rate-limit) re-arms with no backoff sleep.
+        self.retry_base_delay_s = 0.0
+        self.retry_max_delay_s = 0.0
         self.audit_delay = audit_delay
         self.audit_active = 0
         self.audit_peak = 0
@@ -431,6 +436,7 @@ class ImproveStubBackend:
         self.plan_missing_path_attempts = 0
         self.plan_unquoted_path_attempts = 0
         self.plan_crash_attempts = 0
+        self.plan_stall_attempts = 0
         self.plan_stop_condition_path: str | None = None
         self.plan_no_test_exemplars = False
         self.group_scoped_findings = False
@@ -694,6 +700,8 @@ class ImproveStubBackend:
             self.plan_writer_calls += 1
             if self.plan_writer_calls <= self.plan_crash_attempts:
                 raise _ProductionPathPlannerError("plan writer process exited")
+            if self.plan_writer_calls <= self.plan_stall_attempts:
+                raise StreamStalledError(cli="pi", timeout_s=1.0)
             if self.inject_credential:
                 yield TextEvent(text="OPENAI_API_KEY=sk-secret123456")
             for index in range(self.plan_tool_calls_before_result):

@@ -158,7 +158,7 @@ Be concise in your responses. Do not narrate exploration step by step; report
 findings and conclusions."""
 
 
-_PI_DEFAULT_RETRY_ATTEMPTS = 10
+_PI_DEFAULT_RETRY_ATTEMPTS = 20
 _PI_DEFAULT_RETRY_BASE_DELAY = 10.0
 _PI_DEFAULT_RETRY_MAX_DELAY = 120.0
 _PI_DEFAULT_FANOUT_CONCURRENCY = 10
@@ -553,7 +553,7 @@ class PiBackend:
             StreamStalledError: If the ``pi`` subprocess emits nothing on stdout
                 for the idle window (see
                 :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
-                Terminal — never retried.
+                Retryable — ``run_agent`` re-arms a fresh subprocess and retries.
             NotImplementedError: If ``agents`` is non-empty (Pi backend does not
                 support exploration subagents).
         """

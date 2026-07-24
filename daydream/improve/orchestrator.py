@@ -1591,14 +1591,20 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                 async def _call_once_retried(
                     generation_prompt: str,
                 ) -> tuple[Any, str | None]:
-                    """Absorb one transport crash; a second one is terminal.
+                    """Absorb one transport failure; a second one is terminal.
 
-                    The retry replaces only the crashed generation, so a crash
-                    on the repair never restarts generation 0, and the
+                    ``run_agent`` already retries retryable backend errors up to
+                    its per-backend attempt budget; this is the backstop for a
+                    crash it surfaced anyway (e.g. a process exit). A deliberate
+                    tool-supervisor veto is a policy stop, not an API failure, so
+                    it propagates unretried. The retry replaces only the crashed
+                    generation, so it never restarts generation 0, and the
                     two-generation authoring-repair budget is unchanged.
                     """
                     try:
                         return await _call(generation_prompt)
+                    except agent._ToolSupervisorFailure:
+                        raise
                     except Exception:
                         return await _call(generation_prompt)
 

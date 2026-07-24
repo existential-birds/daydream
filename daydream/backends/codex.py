@@ -113,7 +113,7 @@ class CodexBackend:
             StreamStalledError: If the ``codex`` subprocess emits nothing on
                 stdout for the idle window (see
                 :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
-                Terminal — never retried.
+                Retryable — ``run_agent`` re-arms a fresh subprocess and retries.
             NotImplementedError: If ``agents`` is non-empty (Codex backend
                 does not support exploration subagents).
         """
