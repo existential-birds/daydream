@@ -219,14 +219,13 @@ def render_plan(
     *,
     plan: dict[str, Any],
     planned_at: str,
+    planned_on: date,
     number: int,
-    planned_on: date | None = None,
     run_session_id: str | None = None,
 ) -> str:
     """Render validated PlanWriterResult data without authored Markdown."""
     finding = _redact_model_value(finding)
     plan = _redact_model_value(plan)
-    planned_date = planned_on or date.today()
     scope = plan["scope"]
     why = plan["why_this_matters"]
     current_state: list[str] = []
@@ -357,7 +356,7 @@ def render_plan(
         f"- **Effort**: {finding.get('effort', '—')}\n"
         f"- **Risk**: {finding.get('risk', '—')}\n"
         f"- **Category**: {finding.get('category', '—')}\n"
-        f"- **Planned at**: commit `{planned_at[:7]}`, {planned_date.isoformat()}\n\n"
+        f"- **Planned at**: commit `{planned_at[:7]}`, {planned_on.isoformat()}\n\n"
         + (
             f"Daydream run: `{run_session_id}`\n\n"
             if run_session_id is not None

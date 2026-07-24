@@ -178,7 +178,7 @@ async def test_pi_silent_stream_trips_idle_timeout_and_reaps_subprocess(
 
     assert excinfo.value.cli == "pi"
     assert excinfo.value.timeout_s == 1.0
-    assert excinfo.value.retryable is True
+    assert excinfo.value.retryable is False
     pids = spawned_pids(pid_log)
     assert len(pids) == 1, f"expected one pi subprocess, saw {pids}"
     assert_reaped(pids[0])
@@ -199,7 +199,7 @@ async def test_codex_silent_stream_trips_idle_timeout_and_reaps_subprocess(
         await drain(backend, tmp_path)
 
     assert excinfo.value.cli == "codex"
-    assert excinfo.value.retryable is True
+    assert excinfo.value.retryable is False
     pids = spawned_pids(pid_log)
     assert len(pids) == 1, f"expected one codex subprocess, saw {pids}"
     assert_reaped(pids[0])
@@ -312,24 +312,16 @@ def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # --------------------------------------------------------------------------
-# Retryable — driven through run_agent, the production call site. A stalled
-# stream is the usual symptom of a flaky endpoint, so run_agent re-arms a fresh
-# subprocess and retries it rather than letting one blip kill the run.
+# Terminal — driven through run_agent, the production call site. A stalled
+# stream must not cause the backend to relaunch after the full idle window.
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_stall_is_retried_until_the_budget_exhausts(
+async def test_stall_is_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A persistently-stalling ``pi`` is retried ``retry_attempts + 1`` times.
-
-    ``run_agent``'s retry loop re-arms the backend per attempt. A stall is
-    retryable, so with three retries configured exactly four ``pi`` subprocesses
-    must be launched (a fresh connection each time — what recovers from a dead
-    endpoint). Only after the budget exhausts does the error reach the caller and
-    land in the ATIF trajectory.
-    """
+    """A persistently-stalling ``pi`` reaches the caller without relaunching."""
     pid_log = install_fake_cli(
         tmp_path, monkeypatch, name="pi", lines=PI_LINES[:2], hang=True
     )
@@ -355,10 +347,7 @@ async def test_stall_is_retried_until_the_budget_exhausts(
             await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
     pids = spawned_pids(pid_log)
-    assert len(pids) == 4, (
-        f"stall must be retried retry_attempts+1 times — saw {len(pids)} "
-        f"pi subprocesses: {pids}"
-    )
+    assert len(pids) == 1, f"stall must not relaunch pi — saw {pids}"
     for pid in pids:
         assert_reaped(pid)
 

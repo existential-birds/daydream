@@ -41,6 +41,8 @@ from daydream.improve.assemble import (
 )
 from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
+    path_is_confined,
+    valid_repository_file_path,
     validate_host_commands,
     validate_recon_commands,
 )
@@ -111,7 +113,7 @@ RECON_SCHEMA: dict[str, Any] = {
 }
 
 _EVIDENCE_LOCATION = re.compile(
-    r"^`?(.+?):(\d+)(?::\d+)?(?:`|\b)"
+    r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)"
 )
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 
@@ -686,17 +688,44 @@ def _stacks_for_services(
     return scoped
 
 
-def _evidence_paths(finding: dict[str, Any]) -> list[str]:
+def _evidence_paths(
+    finding: dict[str, Any], *, repo: Path
+) -> list[str] | None:
     evidence = finding.get("evidence")
-    if not isinstance(evidence, list):
-        return []
+    if not isinstance(evidence, list) or not evidence:
+        return None
     paths: list[str] = []
     for entry in evidence:
         if not isinstance(entry, str):
-            continue
+            return None
         match = _EVIDENCE_LOCATION.match(entry.strip())
-        if match is not None:
-            paths.append(match.group(1).strip("`"))
+        if match is None:
+            return None
+        path = match.group(1).strip("`")
+        if (
+            not valid_repository_file_path(path)
+            or not path_is_confined(repo, path)
+        ):
+            return None
+        candidate = Path(path)
+        if candidate.is_absolute():
+            return None
+        try:
+            resolved = (repo / candidate).resolve()
+            resolved.relative_to(repo.resolve())
+        except (OSError, ValueError):
+            return None
+        if not resolved.is_file():
+            return None
+        try:
+            line_count = len(resolved.read_text(errors="replace").splitlines())
+        except OSError:
+            return None
+        start_line = int(match.group(2))
+        end_line = int(match.group(3) or start_line)
+        if start_line < 1 or end_line < start_line or end_line > line_count:
+            return None
+        paths.append(path)
     return paths
 
 
@@ -719,9 +748,11 @@ def _stamp_finding(
     category: str,
     services: list[Service],
     partitions: list[Partition],
+    *,
+    repo: Path,
 ) -> dict[str, Any] | None:
-    evidence_paths = _evidence_paths(finding)
-    if not evidence_paths:
+    evidence_paths = _evidence_paths(finding, repo=repo)
+    if evidence_paths is None:
         return None
     stamped = dict(finding)
     stamped["category"] = category
@@ -942,6 +973,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 assignment.category,
                 services,
                 partitions,
+                repo=ctx.work.repo,
             )
             if stamped is None:
                 discarded_no_evidence += 1
@@ -1039,6 +1071,7 @@ def _apply_vet_verdicts(
     verdicts: list[Any],
     *,
     rejected_at_sha: str,
+    repo: Path | None = None,
     default_provenance: str | None = None,
     services: list[Service] | None = None,
     partitions: list[Partition] | None = None,
@@ -1106,15 +1139,12 @@ def _apply_vet_verdicts(
                 str(corrected.get("category", "")),
                 services or [],
                 partitions or [],
+                repo=repo or Path.cwd(),
             )
             if restamped is not None:
                 corrected = restamped
             else:
-                corrected["fingerprint"] = compute_fingerprint(
-                    str(corrected.get("path", "")),
-                    str(corrected.get("title", "")),
-                    str(corrected.get("body", "")),
-                )
+                continue
         kept.append(corrected)
     return kept, rejected
 
@@ -1210,6 +1240,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                             batch_findings,
                             verdicts,
                             rejected_at_sha=ctx.work.head_sha,
+                            repo=ctx.work.repo,
                             default_provenance=(
                                 "inherited" if branch_focus else None
                             ),

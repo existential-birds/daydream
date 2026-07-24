@@ -41,7 +41,7 @@ from enum import Enum
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_PI_MODEL = "glm-5.2"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
@@ -124,18 +124,18 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "verify": "claude-sonnet-5",
         "exploration": "claude-sonnet-5",
         "per_stack_review": "claude-sonnet-5",
-        "review": "claude-opus-4-8",
-        "arbiter": "claude-opus-4-8",
+        "review": "claude-opus-5",
+        "arbiter": "claude-opus-5",
         "suppression": "claude-sonnet-5",
         "supervise": "claude-sonnet-5",
-        "wonder": "claude-opus-4-8",
-        "merge": "claude-opus-4-8",
+        "wonder": "claude-opus-5",
+        "merge": "claude-opus-5",
         "intent": "claude-sonnet-5",
-        "pr_feedback": "claude-opus-4-8",
+        "pr_feedback": "claude-opus-5",
         "recon": "claude-sonnet-5",
         "audit": "claude-sonnet-5",
-        "vet": "claude-opus-4-8",
-        "plan_write": "claude-opus-4-8",
+        "vet": "claude-opus-5",
+        "plan_write": "claude-opus-5",
     },
     "codex": {
         "parse": "gpt-5.6-luna",

@@ -50,16 +50,12 @@ TERMINATE_GRACE_S = 5.0
 class StreamStalledError(Exception):
     """Raised when a backend CLI produces no stdout for the idle window.
 
-    ``retryable`` is ``True``: a stalled stream is the most common symptom of a
-    flaky endpoint, and every provider (Anthropic included) drops connections
-    often enough that treating a stall as terminal makes one blip kill a whole
-    run. ``agent.run_agent``'s retry loop re-arms a fresh subprocess per attempt,
-    which is exactly what recovers from a dead connection. Each attempt is still
-    bounded by the idle window, so the worst case is ``attempts × window`` of
-    dead air only when the endpoint stays dead for the entire retry budget.
+    ``retryable`` is ``False``: the idle window is a terminal bound for a
+    subprocess invocation, so a persistent stalled stream cannot consume the
+    generic retry budget.
     """
 
-    retryable = True
+    retryable = False
 
     def __init__(self, cli: str, timeout_s: float) -> None:
         super().__init__(

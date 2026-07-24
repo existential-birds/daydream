@@ -48,8 +48,8 @@ def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
     """
     bare = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-5"    # table default
-    assert _resolved_model(bare, "arbiter") == "claude-opus-4-8"             # table default
-    assert _resolved_model(bare, "review") == "claude-opus-4-8"              # unchanged
+    assert _resolved_model(bare, "arbiter") == "claude-opus-5"             # table default
+    assert _resolved_model(bare, "review") == "claude-opus-5"              # unchanged
 
     fc = DaydreamFileConfig(
         model=None,
@@ -58,8 +58,8 @@ def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
     )
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_model(cfg, "per_stack_review") == "file-psr"   # file phase override wins
-    assert _resolved_model(cfg, "review") == "claude-opus-4-8"      # review untouched by the override
-    assert _resolved_model(cfg, "arbiter") == "claude-opus-4-8"     # arbiter untouched
+    assert _resolved_model(cfg, "review") == "claude-opus-5"      # review untouched by the override
+    assert _resolved_model(cfg, "arbiter") == "claude-opus-5"     # arbiter untouched
 
 
 def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:

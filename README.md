@@ -204,7 +204,7 @@ Per-phase model/backend selection and global defaults live in a config file, rea
 ```toml
 # pyproject.toml  →  [tool.daydream]
 [tool.daydream]
-model = "claude-opus-4-8"     # global default across phases
+model = "claude-opus-5"     # global default across phases
 backend = "claude"            # global default backend
 
 [tool.daydream.phases.fix]    # per-phase override
@@ -213,7 +213,7 @@ model = "gpt-5.6-terra"
 reasoning_effort = "medium"
 
 [tool.daydream.phases.review]
-model = "claude-opus-4-8"
+model = "claude-opus-5"
 ```
 
 Supervisor settings are config-file-only:
@@ -230,7 +230,7 @@ The LLM supervisor uses one batched call. Configure its model under
 
 ```toml
 # .daydream.toml  (top-level keys; no [tool.daydream] prefix)
-model = "claude-opus-4-8"
+model = "claude-opus-5"
 
 [phases.fix]
 backend = "codex"

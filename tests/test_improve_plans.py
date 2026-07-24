@@ -1,6 +1,7 @@
 import json
 import subprocess
 from copy import deepcopy
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -2321,6 +2322,7 @@ def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert (
@@ -2452,6 +2454,7 @@ def test_the_drift_condition_names_only_paths_the_plan_quotes(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     for path in drift["related_paths"]:
@@ -2502,6 +2505,7 @@ def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert (
@@ -2561,6 +2565,7 @@ def test_undeclared_test_case_path_is_declared_new_when_absent_from_disk(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert (
@@ -2616,6 +2621,7 @@ def test_step_gate_scope_mismatch_falls_back_to_the_repository_wide_command(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     step_section = rendered.partition("### Step 1:")[2].partition("## Test plan")[0]
@@ -2652,6 +2658,7 @@ def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert "**Command**: `uv run pytest apps/billing`" in rendered
@@ -2691,6 +2698,7 @@ def test_scope_mismatched_ref_with_appended_args_keeps_its_command(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert "**Command**: `uv run pytest apps/catalog -k batches`" in rendered
@@ -2740,6 +2748,7 @@ def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert f"`tests/test_catalog.py::{symbol}` (unit)" in rendered
@@ -2832,6 +2841,7 @@ def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert (
@@ -2855,6 +2865,7 @@ def test_assemble_drops_out_of_range_stop_step_numbers_instead_of_blocking(
         _finding(),
         plan=assembled,
         planned_at=planned_at,
+        planned_on=date(2024, 1, 1),
         number=1,
     )
     assert "step-7" not in rendered

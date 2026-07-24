@@ -70,7 +70,7 @@ def test_phase_default_models_claude_tier_assignments():
     assert claude["parse"] == "claude-haiku-4-5"
     # Expensive tier: REVIEW, WONDER, MERGE, PR_FEEDBACK, VET, PLAN_WRITE
     for phase in ("review", "wonder", "merge", "pr_feedback", "vet", "plan_write"):
-        assert claude[phase] == "claude-opus-4-8"
+        assert claude[phase] == "claude-opus-5"
     # Mid tier: FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, RECON, AUDIT
     for phase in ("fix", "test", "exploration", "per_stack_review", "intent", "recon", "audit"):
         assert claude[phase] == "claude-sonnet-5"
@@ -80,7 +80,7 @@ def test_per_stack_review_and_arbiter_split():
     """#168: per-stack fan-out defaults to Sonnet; the arbiter stays on Opus."""
     claude = PHASE_DEFAULT_MODELS["claude"]
     assert claude["per_stack_review"] == "claude-sonnet-5"
-    assert claude["arbiter"] == "claude-opus-4-8"
+    assert claude["arbiter"] == "claude-opus-5"
     codex = PHASE_DEFAULT_MODELS["codex"]
     assert codex["per_stack_review"] == "gpt-5.6-terra"
     assert codex["arbiter"] == "gpt-5.6-sol"

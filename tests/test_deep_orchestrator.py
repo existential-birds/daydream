@@ -2751,8 +2751,8 @@ def test_intent_phase_resolves_to_sonnet_default(
     )
 
     # An explicit global model override still wins over the phase default.
-    backend_override = _resolve_backend(RunConfig(model="claude-opus-4-8"), "intent", {})
-    assert backend_override.model == "claude-opus-4-8", (
+    backend_override = _resolve_backend(RunConfig(model="claude-opus-5"), "intent", {})
+    assert backend_override.model == "claude-opus-5", (
         f"RunConfig(model=...) override should win for intent, got {backend_override.model!r}"
     )
 
@@ -3453,10 +3453,10 @@ async def test_per_stack_sonnet_merge_opus_and_arbiter_on_high_severity(
     assert set(per_stack_models) == {"claude-sonnet-5"}
 
     # (b) Merge backend created with an Opus model id.
-    assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-4-8"]
+    assert models_where(lambda pl: "cross-stack merge agent" in pl) == ["claude-opus-5"]
 
     # (c) Opus arbiter created exactly once when a high-severity record exists.
-    assert models_where(lambda pl: "you are the arbiter" in pl) == ["claude-opus-4-8"]
+    assert models_where(lambda pl: "you are the arbiter" in pl) == ["claude-opus-5"]
 
     # The rendered merge artifact on disk reflects the arbitrated finding.
     report = (multi_stack_target / ".review-output.md").read_text()
@@ -3653,7 +3653,7 @@ async def test_precision_on_drops_unconfirmed_low_finding(
     # The arbiter still ran on the HIGH finding (fail-open, unchanged by #232).
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
     assert len(arbiter_calls) == 1
-    assert arbiter_calls[0]["model"] == "claude-opus-4-8"
+    assert arbiter_calls[0]["model"] == "claude-opus-5"
 
 
 async def test_precision_off_keeps_low_finding(

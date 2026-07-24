@@ -165,6 +165,8 @@ def _redact_strings(value: Any) -> Any:
 
 
 def _exists_on_disk(repo: Path, path: str) -> bool:
+    if not _valid_repository_file_path(path) or not _path_is_confined(repo, path):
+        return False
     try:
         return (repo / path).is_file()
     except (OSError, ValueError):
@@ -172,8 +174,13 @@ def _exists_on_disk(repo: Path, path: str) -> bool:
 
 
 def _read_repo_file(repo: Path, path: str) -> str | None:
+    if not _valid_repository_file_path(path) or not _path_is_confined(repo, path):
+        return None
     try:
-        return (repo / path).read_text(encoding="utf-8")
+        candidate = repo / path
+        if not candidate.is_file():
+            return None
+        return candidate.read_text(encoding="utf-8")
     except (OSError, UnicodeError, ValueError):
         return None
 

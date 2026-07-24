@@ -13,6 +13,7 @@ from daydream.extensions.loader import build_registry
 from daydream.git_ops import head_sha
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
+    _stamp_finding,
 )
 from daydream.improve.partition import Partition
 from daydream.improve.plans import PLAN_INDEX_FILENAME
@@ -3092,7 +3093,7 @@ def test_apply_vet_verdicts_matches_by_vet_id(
     assert {f["fingerprint"] for f in rejected} == expected_rejected
 
 
-def test_apply_vet_verdicts_restamps_a_corrected_location() -> None:
+def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> None:
     findings = [
         {
             "fingerprint": "original",
@@ -3104,6 +3105,10 @@ def test_apply_vet_verdicts_restamps_a_corrected_location() -> None:
             "evidence": ["`apps/billing/api.py:10`"],
         }
     ]
+    (tmp_path / "apps/billing").mkdir(parents=True)
+    (tmp_path / "apps/catalog").mkdir(parents=True)
+    (tmp_path / "apps/billing/api.py").write_text("first\n" * 10)
+    (tmp_path / "apps/catalog/api.py").write_text("first\n" * 20)
     services = [
         Service("billing", Path("apps/billing"), "test"),
         Service("catalog", Path("apps/catalog"), "test"),
@@ -3117,6 +3122,7 @@ def test_apply_vet_verdicts_restamps_a_corrected_location() -> None:
         findings,
         [{"vet_id": 1, "keep": True, "path": "apps/catalog/api.py", "line": 20}],
         rejected_at_sha="sha",
+        repo=tmp_path,
         services=services,
         partitions=partitions,
     )
@@ -3126,6 +3132,51 @@ def test_apply_vet_verdicts_restamps_a_corrected_location() -> None:
     assert kept[0]["services"] == ["catalog"]
     assert kept[0]["partition"] == "catalog"
     assert kept[0]["fingerprint"] != "original"
+
+
+@pytest.mark.parametrize(
+    "citation",
+    [
+        "../outside.py:1",
+        "missing.py:1",
+        "valid.py:3",
+        "valid.py:2:3",
+    ],
+)
+def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(
+    tmp_path: Path,
+    citation: str,
+) -> None:
+    (tmp_path / "valid.py").write_text("first\nsecond\n")
+
+    stamped = _stamp_finding(
+        {"evidence": [citation]},
+        "correctness",
+        [],
+        [],
+        repo=tmp_path,
+    )
+
+    assert stamped is None
+
+
+def test_stamp_finding_rejects_evidence_crossing_a_symlink(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "outside"
+    outside.mkdir()
+    (outside / "secret.py").write_text("secret\n")
+    (tmp_path / "escape").symlink_to(outside, target_is_directory=True)
+
+    stamped = _stamp_finding(
+        {"evidence": ["escape/secret.py:1"]},
+        "security",
+        [],
+        [],
+        repo=tmp_path,
+    )
+
+    assert stamped is None
 
 
 @pytest.mark.anyio
@@ -3185,8 +3236,8 @@ async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
 
     assert code == 0
     tiers = _tiers_by_marker(calls)
-    assert tiers["plan-writer"] == {("claude-opus-4-8", "max")}
-    assert tiers["vet"] == {("claude-opus-4-8", "xhigh")}
+    assert tiers["plan-writer"] == {("claude-opus-5", "max")}
+    assert tiers["vet"] == {("claude-opus-5", "xhigh")}
     assert tiers["audit"] == {("claude-sonnet-5", "high")}
     assert tiers["recon"] == {("claude-sonnet-5", "low")}
 
@@ -3220,7 +3271,7 @@ async def test_config_file_phase_override_outranks_plan_write_defaults(
     assert tiers["plan-writer"] == {("claude-sonnet-5", "medium")}
     # Unrelated phases keep their own defaults.
     assert tiers["recon"] == {("claude-sonnet-5", "low")}
-    assert tiers["vet"] == {("claude-opus-4-8", "xhigh")}
+    assert tiers["vet"] == {("claude-opus-5", "xhigh")}
 
 
 @pytest.mark.anyio
