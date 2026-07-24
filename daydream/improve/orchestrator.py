@@ -23,7 +23,7 @@ from daydream.config import (
 )
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.deep.orchestrator import _diff_changed_files, get_installed_skills
+from daydream.deep.orchestrator import _diff_changed_files
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
@@ -353,14 +353,12 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     groups: list[PartitionGroup] = []
     skipped: list[Partition] = []
     if not description_mode:
-        installed = get_installed_skills()
-        availability = (
-            installed if installed is not None else ctx.registry.stack_keys()
-        )
+        # Availability is resolved once in runner.run and threaded via config;
+        # None flows through to detect_stacks' optimistic default.
         tracked = branch_files if branch_focus else git_ops.ls_files(target)
         stacks = detect_stacks(
             tracked,
-            skill_availability=availability,
+            skill_availability=ctx.config.skill_availability,
             registry=ctx.registry,
         )
         if ctx.config.improve_scope:

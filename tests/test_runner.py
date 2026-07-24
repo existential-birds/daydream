@@ -21,6 +21,12 @@ def test_run_config_exploration_depth():
     assert cfg.exploration_depth == 2
 
 
+def test_run_config_skill_availability_defaults_to_none():
+    assert RunConfig().skill_availability is None
+    cfg = RunConfig(skill_availability=frozenset({"python"}))
+    assert cfg.skill_availability == frozenset({"python"})
+
+
 def test_run_config_exploration_context_defaults_to_none():
     cfg = RunConfig()
     assert cfg.exploration_context is None

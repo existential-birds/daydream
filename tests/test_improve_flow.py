@@ -2584,6 +2584,79 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
 
 @pytest.mark.anyio
+async def test_injected_skill_availability_drives_routing_without_env(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RunConfig.skill_availability=frozenset() forces generalist routing, no probe.
+
+    Proves availability is data carried on RunConfig, not ambient filesystem I/O:
+    the field is injected directly (this test manipulates no CLAUDE_CONFIG_DIR /
+    env and patches no ``get_installed_skills``), and the empty set collapses
+    every stack into a single generic audit group.
+    """
+    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+            skill_availability=frozenset(),
+        )
+    )
+
+    assert code == 0
+    coverage = json.loads(
+        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(coverage["groups"]) == 1
+    assert coverage["groups"][0]["stack"] == "generic"
+
+
+@pytest.mark.anyio
+async def test_injected_nonempty_skill_availability_routes_multistack_without_env(
+    improve_scaled_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-empty injected set routes multi-stack, differing from the ambient probe.
+
+    The autouse hermetic fixture makes the probe return an empty set (generalist,
+    one group). Injecting ``frozenset({"python"})`` instead must split the python
+    services into their own group while react (no injected skill) falls back to
+    generic — proving the injected field, not the environment probe, drives
+    routing. This test manipulates no env and patches no ``get_installed_skills``.
+    """
+    install_improve_stub(
+        monkeypatch, improve_scaled_monorepo_target, n_findings=0
+    )
+
+    code = await run(
+        RunConfig(
+            target=str(improve_scaled_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+            skill_availability=frozenset({"python"}),
+        )
+    )
+
+    assert code == 0
+    coverage = json.loads(
+        improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    stacks = {group["stack"] for group in coverage["groups"]}
+    assert stacks == {"python", "generic"}
+    # python is isolated from generic -> multi-stack routing, not a 1-group collapse.
+    assert len(coverage["groups"]) == 2
+
+
+@pytest.mark.anyio
 async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

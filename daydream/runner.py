@@ -214,6 +214,11 @@ class RunConfig:
         improve_scope: Optional service name/root/glob to audit.
         improve_plan_description: One-line request for ``daydream improve plan``;
             switches the flow to single-request investigation mode.
+        skill_availability: Stack keys with an installed Beagle review skill,
+            resolved once by :func:`run` from ``get_installed_skills()``. ``None``
+            means unresolved or registry-unreadable (→ optimistic routing in
+            ``detect_stacks``). Set explicitly to inject availability and bypass
+            the probe (tests).
 
     """
 
@@ -273,6 +278,7 @@ class RunConfig:
     improve_focus: str | None = None
     improve_scope: str | None = None
     improve_plan_description: str | None = None
+    skill_availability: frozenset[str] | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -620,6 +626,16 @@ async def run(config: RunConfig | None = None) -> int:
     except ExtensionError as exc:
         print_error(console, "Extension Error", str(exc))
         return 1
+
+    # Resolve installed-skill availability once, here at the composition root, so
+    # the orchestrators consume it as data instead of each probing the filesystem.
+    # None (unreadable registry) flows straight through to detect_stacks' optimistic
+    # default. An explicitly injected value is kept (the probe is skipped).
+    if config.skill_availability is None:
+        from daydream.deep.orchestrator import get_installed_skills
+
+        installed = get_installed_skills()
+        config.skill_availability = frozenset(installed) if installed is not None else None
 
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.
