@@ -4,8 +4,7 @@ Replay fixtures for `PiBackend`. Each file is a scripted `pi --mode json` stdout
 stream (one JSON object per LF-delimited line) consumed by
 `tests/harness/pi_replay.make_mock_process_from_fixture`.
 
-Event vocabulary mirrors `pi-mono` `AgentSessionEvent` (see
-`docs/plans/2026-06-21-pi-backend.md` §4):
+Event vocabulary mirrors `pi-mono` `AgentSessionEvent`:
 
 - Line 0 — session header (`{"type":"session","id":"..."}`).
 - `agent_start` / `agent_end` — agent lifecycle.

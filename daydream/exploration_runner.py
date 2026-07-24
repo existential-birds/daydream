@@ -1,13 +1,11 @@
-"""Pre-scan orchestrator.
+"""Exploration orchestrator.
 
-Counts changed files in a diff, selects an exploration tier (skip / single /
-parallel), launches specialist ``backend.execute()`` calls in parallel (one
-per specialist), parses each specialist's structured-JSON result into a partial
-``ExplorationContext``, and merges everything (including the static tree-sitter
-file map from ``detect_affected_files``) into a single context.
+Provides two exploration entries:
 
-The orchestrator is intentionally tier-driven so a trivial diff produces zero
-backend calls and a multi-file diff fans out to three parallel specialists.
+- ``pre_scan`` is diff-scoped. It selects a tier from changed-file count and
+  combines specialist results with the static tree-sitter file map.
+- ``repo_scan`` is repo-scoped and diff-less. It samples tracked files and runs
+  only the repo-survey specialist to discover repository conventions.
 """
 
 from __future__ import annotations
@@ -15,6 +13,9 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
+from daydream import git_ops
+from daydream.backends import effective_fanout_concurrency
+from daydream.config import DEFAULT_TOOL_CALL_BUDGET, DEFAULT_WALL_BUDGET_S
 from daydream.exploration import (
     Convention,
     Dependency,
@@ -28,6 +29,7 @@ from daydream.prompts.exploration_subagents import (
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
     build_pattern_scanner_prompt,
+    build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
 from daydream.trajectory import DaydreamPhase, get_current_recorder, maybe_fork
@@ -231,13 +233,18 @@ async def pre_scan(
 
     specialist_max_turns = EXPLORATION_MAX_TURNS
     recorder = get_current_recorder()
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(10, backend)
+    )
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
-        async with maybe_fork(recorder, f"explore-{name}"):
+        async with limiter, maybe_fork(recorder, f"explore-{name}"):
             try:
                 structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
+                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 )
                 if isinstance(structured, dict):
                     results[name] = structured
@@ -285,9 +292,84 @@ async def pre_scan(
     return merge_contexts(static_context, subagent_context)
 
 
+def _sample_paths(paths: list[str], limit: int) -> list[str]:
+    """Take up to ``limit`` paths spread evenly across a sorted path list.
+
+    Head-truncating `git ls-files` on a large repo yields only the alphabetical
+    head -- dotfile directories such as `.agents/` and `.claude/` -- so the
+    survey never sees the source tree. An even stride keeps every top-level area
+    represented while staying deterministic.
+    """
+    if limit <= 0 or not paths:
+        return []
+    if len(paths) <= limit:
+        return list(paths)
+    stride = len(paths) / limit
+    return [paths[int(i * stride)] for i in range(limit)]
+
+
+async def repo_scan(
+    backend: Backend,
+    repo_root: Path,
+    *,
+    max_files: int = 500,
+) -> ExplorationContext:
+    """Discover repository conventions from a bounded tracked-file sample.
+
+    Returns conventions and guidelines only. The tracked-file sample seeds the
+    survey prompt but is not returned: a repo-scoped run has no affected files,
+    and emitting one would mislabel the whole repository as change-relevant.
+    """
+    import anyio
+
+    from daydream.agent import run_agent
+
+    paths: list[str] = []
+    try:
+        paths = git_ops.ls_files(repo_root)
+    except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+        pass
+
+    sample = _sample_paths(paths, max(0, max_files))
+    survey: dict[str, Any] = {}
+    recorder = get_current_recorder()
+
+
+    async def _run_specialist() -> None:
+        async with maybe_fork(recorder, "explore-repo_survey"):
+            try:
+                structured, _, _ = await run_agent(
+                    backend,
+                    repo_root,
+                    build_repo_survey_prompt(sample, len(paths), cwd=repo_root),
+                    output_schema=PATTERN_SCANNER_SCHEMA,
+                    max_turns=EXPLORATION_MAX_TURNS,
+                    phase=DaydreamPhase.EXPLORATION,
+                    read_only=True,
+                    wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                    tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                )
+                if isinstance(structured, dict):
+                    survey.update(structured)
+            except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                pass
+
+    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
+        await _run_specialist()
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
+
+    return ExplorationContext(
+        conventions=_coerce_conventions(survey.get("conventions")),
+        guidelines=_coerce_guidelines(survey.get("guidelines")),
+    )
+
+
 __all__ = [
     "Tier",
     "count_changed_files",
     "pre_scan",
+    "repo_scan",
     "select_tier",
 ]

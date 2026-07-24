@@ -21,6 +21,7 @@ Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -28,8 +29,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from daydream.trajectory import now_iso
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from claude_agent_sdk.types import AgentDefinition
 
 
@@ -247,20 +246,45 @@ AgentEvent = (
 )
 
 
+class AgentEventStream(AsyncIterator[AgentEvent], Protocol):
+    """Closable event stream owned by one backend invocation.
+
+    Closing the stream must release only the resources created by the matching
+    :meth:`Backend.execute` call. It must not interrupt other streams returned
+    by the same backend instance.
+    """
+
+    async def aclose(self) -> None:
+        """Close this invocation and release its resources."""
+        ...
+
+
 class Backend(Protocol):
     """Protocol for agent backends.
 
     Each backend yields a stream of AgentEvent instances from execute().
 
-    Optional extension: backends may expose ``fanout_concurrency: int`` to
-    advertise how many parallel execute() calls phase_per_stack_reviews should
-    run concurrently. When absent, the caller falls back to 4 via
-    ``getattr(backend, "fanout_concurrency", 4)``.
+    Optional extension: backends may expose ``fanout_concurrency: int`` as a
+    scheduling hint for orchestrator-managed parallel calls. Callers combine
+    the hint with their workflow ceiling via
+    :func:`effective_fanout_concurrency`; absent hints fall back to four.
 
     Optional extension: backends may expose ``concise_fix_prompts: bool`` to
     request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
     produces verbose reasoning). When absent, the caller falls back to False via
     ``getattr(backend, "concise_fix_prompts", False)``.
+
+    Optional extension: backends may expose ``reasoning_effort``, the per-phase
+    reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
+    and applied through the driver's native knob (Claude
+    ``ClaudeAgentOptions.effort``, Codex ``-c model_reasoning_effort=``, Pi
+    ``--thinking``). All three shipped backends set it; it stays off the
+    protocol because each narrows it to its own driver's literal vocabulary.
+    Read it via ``getattr(backend, "reasoning_effort", None)``. It is set at
+    construction rather than per ``execute`` call because a backend instance is
+    already cached per resolved ``(kind, model, reasoning_effort)`` triple, so
+    one instance serves exactly one effort level. ``None`` means no source
+    supplied one and the driver applies its own ambient default.
     """
 
     model: str
@@ -274,7 +298,8 @@ class Backend(Protocol):
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+        persist_session: bool = True,
+    ) -> AgentEventStream:
         """Yield AgentEvents for *prompt*.
 
         Args:
@@ -292,12 +317,28 @@ class Backend(Protocol):
                 index/object-store operations.  Callers relying on a
                 git-immutable guarantee must not assume ``read_only=True`` is
                 sufficient across all backends.
+            persist_session: When False, request an invocation that leaves no
+                resumable backend session. Backends without persisted sessions
+                accept and ignore this option.
+        """
+        ...
+    async def cancel(self) -> None:
+        """Cancel every active invocation on this backend.
+
+        This backend-wide operation is reserved for process shutdown. Callers
+        ending one invocation must close the corresponding AgentEventStream.
         """
         ...
 
-    async def cancel(self) -> None: ...
-
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
+
+
+def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:
+    """Combine a positive workflow ceiling with a backend scheduling hint."""
+    hint = getattr(backend, "fanout_concurrency", 4)
+    if not isinstance(hint, int) or isinstance(hint, bool) or hint <= 0:
+        hint = 4
+    return min(workflow_ceiling, hint)
 
 
 def create_backend(
@@ -311,9 +352,11 @@ def create_backend(
             defaults here. Pi receives ``None`` unchanged so its own configured
             default can win before Pi's GLM fallback is selected.
         cwd: Target workspace used to resolve Pi's configured default model.
-        reasoning_effort: Optional reasoning-effort override (e.g. "low",
-            "medium", "high"). Only Codex applies this today (forwarded as
-            ``-c model_reasoning_effort=...``); ignored for claude/pi.
+        reasoning_effort: Optional reasoning-effort override (one of
+            ``daydream.config.REASONING_EFFORT_LEVELS``). Every backend applies
+            it through its own native knob: Claude via
+            ``ClaudeAgentOptions.effort``, Codex via
+            ``-c model_reasoning_effort=...``, Pi via ``--thinking``.
 
     Returns:
         A Backend instance whose ``.model`` attribute is a non-empty string.
@@ -325,13 +368,13 @@ def create_backend(
 
     if name == "claude":
         from daydream.backends.claude import ClaudeBackend
-        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL)
+        return ClaudeBackend(model=model or DEFAULT_CLAUDE_MODEL, reasoning_effort=reasoning_effort)
     if name == "codex":
         from daydream.backends.codex import CodexBackend
         return CodexBackend(model=model or DEFAULT_CODEX_MODEL, reasoning_effort=reasoning_effort)
     if name == "pi":
         from daydream.backends.pi import PiBackend
-        return PiBackend(model=model, cwd=cwd)
+        return PiBackend(model=model, cwd=cwd, reasoning_effort=reasoning_effort)
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
 
 
@@ -340,6 +383,7 @@ from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
     "AgentEvent",
+    "AgentEventStream",
     "Backend",
     "ClaudeBackend",
     "ContinuationToken",
@@ -354,4 +398,5 @@ __all__ = [
     "ToolStartEvent",
     "TurnEndEvent",
     "create_backend",
+    "effective_fanout_concurrency",
 ]

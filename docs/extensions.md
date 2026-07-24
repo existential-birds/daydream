@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 2`** (supported: `1..2`).
+Current contract version: **`EXTENSION_API_VERSION = 3`** (supported: `1..3`).
 
 ## Extension module contract
 
@@ -23,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 2          # must be within daydream's supported range
+DAYDREAM_EXT_API = 3          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
@@ -120,12 +120,24 @@ not bump the version.
 
 ### Changelog
 
+- **Version 3** — additive. Adds the `improve` flow and its steps, the
+  `audit:<category>[:<stack>]` skill slots, and three new prompt slots: `audit`
+  (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
+  `recon_summary`, `cwd`, `tier`, where `group` is a partition-group mapping of
+  `name`, `stack`, `file_count`, `partitions[{name, root, file_count, service}]`),
+  `vet`, and `plan-writer`. Every one of these names is new in
+  this release, so no v1 or v2 extension can have overridden them. No existing
+  flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
+  method changed. The floor therefore stays at `1`: the supported range is
+  `1..3` and an extension declaring `DAYDREAM_EXT_API = 1` or `2` keeps loading
+  unchanged. New forks should declare `DAYDREAM_EXT_API = 3`; a fork only needs
+  to bump if it wants to override one of the new slots.
 - **Version 2** — adds the synchronous tool-supervisor seam, the
   `ToolDecision` result, and the public `items_file` findings surface. The
-  extension module literal is now `DAYDREAM_EXT_API = 2`.
+  extension module literal for that contract is `DAYDREAM_EXT_API = 2`. Still
+  within the supported range.
 - **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract. Remains within the supported range (`1..2`) as the current
-  deprecation window: a v1 extension still loads under v2 tooling.
+  contract. Still within the supported range.
 
 ## Tool supervision
 
@@ -151,10 +163,11 @@ synchronous; it must not be declared with `async def`.
 
 Return `ToolDecision(veto=False)` to let the invocation continue. Return
 `ToolDecision(veto=True, reason="...")` to abort the current agent turn; a veto
-requires a non-blank reason. Daydream cancels the backend, records the partial
-turn, and returns a `tool_vetoed:<name>` budget reason to the caller. If the
-supervisor raises, the failure propagates as an extension failure rather than
-being treated as a backend retry.
+requires a non-blank reason. Daydream closes the current invocation's event
+stream, records the partial turn, and returns a `tool_vetoed:<name>` budget
+reason to the caller. Other invocations sharing the backend continue running.
+If the supervisor raises, the failure propagates as an extension failure rather
+than being treated as a backend retry.
 
 `register_tool_supervisor` accepts only one callable per registry. A second
 registration or a non-callable value raises `ExtensionError`. If an extension
@@ -203,7 +216,8 @@ policy or the built-in policy.
 
 ### Flows and steps
 
-Four flows are registered: `deep`, `shallow`, `review`, and `pr-feedback`.
+Five flows are registered: `deep`, `shallow`, `review`, `pr-feedback`, and
+`improve`.
 Each step's *config key* is its `[tool.daydream.phases.<key>]` key
 (`FlowStep.config_phase`, defaulting to the step name) — the key per-phase
 model/backend overrides resolve against.
@@ -270,6 +284,20 @@ an existing config key.
 | 4 | `commit-push` | `review` |
 | 5 | `respond-feedback` | `pr_feedback` |
 
+#### `improve` (`daydream improve <target>`)
+
+| # | Step | Config key |
+|---|------|------------|
+| 1 | `recon` | `recon` |
+| 2 | `audit` | `audit` |
+| 3 | `vet` | `vet` |
+| 4 | `select-plans` | `select-plans` |
+| 5 | `write-plans` | `plan_write` |
+| 6 | `improve-report` | `recon` |
+
+The improve run configuration also carries `improve_effort`, `improve_focus`,
+`improve_scope`, and `improve_plan_description`.
+
 Steps carry `enabled` predicates internally (tier gates, `--loop` mode,
 resume points); a step listed here may be skipped for a given run, but the
 name is stable.
@@ -287,6 +315,19 @@ name is stable.
 | `structural` | `beagle-core:review-structure` |
 | `pr-feedback-fetch` | `beagle-core:fetch-pr-feedback` |
 | `pr-feedback-respond` | `beagle-core:respond-pr-feedback` |
+| `audit:correctness:python` | `beagle-python:review-python` |
+| `audit:correctness:react` | `beagle-react:review-frontend` |
+| `audit:correctness:elixir` | `beagle-elixir:review-elixir` |
+| `audit:correctness:go` | `beagle-go:review-go` |
+| `audit:correctness:rust` | `beagle-rust:review-rust` |
+| `audit:correctness:ios` | `beagle-ios:review-ios` |
+| `audit:security:elixir` | `beagle-elixir:elixir-security-review` |
+| `audit:performance:elixir` | `beagle-elixir:elixir-performance-review` |
+| `audit:tests:python` | `beagle-python:pytest-code-review` |
+| `audit:tests:go` | `beagle-go:go-testing-code-review` |
+| `audit:tests:rust` | `beagle-rust:rust-testing-code-review` |
+| `audit:tests:elixir` | `beagle-elixir:exunit-code-review` |
+| `audit:tech-debt` | `beagle-core:review-structure` |
 
 `phase:<name>` is the phase-bound slot convention: no `phase:*` slot is
 registered by default, but when a fork binds one, the phase resolves its skill
@@ -295,7 +336,7 @@ reads its own `phase:<name>` slot).
 
 ### Prompts
 
-The 12 registered prompt names and the exact kwargs their builders receive
+The 15 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -313,6 +354,48 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
 | `verify` | `items`, `cwd`, `output_path` |
+| `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
+| `vet` | `findings`, `cwd` |
+| `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
+
+#### `plan-writer` compatibility and output contract
+
+The `plan-writer` override keeps its existing keyword-only callable contract.
+In particular, `verification_commands` remains a `Sequence[str]` of literal
+repository command strings so an existing override may continue to join or
+render those values directly. The serialized `recon_summary` contains the full
+typed recon command records, including ids, working directories, applicability,
+expected results, and evidence. Override authors should use those typed records
+when composing detailed command guidance; adding a required `recon_commands`
+kwarg would break exact-signature builders.
+
+A plan-writer must ask the backend to return `PlanWriterResult` structured
+data, not authored Markdown. `PLAN_WRITER_CONTRACT_INSTRUCTIONS` is available
+from `daydream.improve.prompts` for overrides that want to compose the built-in
+typed-contract guidance. Regardless of prompt content, the host supplies its
+own `PLAN_AUTHOR_SCHEMA` as the backend `output_schema` for the plan-write
+call. `daydream.improve.assemble.assemble_plan` is the single validation
+boundary: it validates the authored object against that schema, applies the
+deterministic repairs, collects every remaining authoring defect as a pointered
+`AssemblyIssue`, and only then expands the result into the host-owned assembled
+plan shape that `render_plan` consumes. A wholesale prompt override cannot
+replace or weaken that boundary.
+
+Legacy override output containing `{markdown: ...}` fails closed: every
+required authoring field is absent, so assembly returns one
+`AUTHOR_SCHEMA_INVALID` issue per missing key, the finding is indexed as
+`BLOCKED`, sanitized diagnostics record only stable metadata and error codes,
+and no plan file is written. There is intentionally no Markdown-to-typed
+adapter. Override authors must update their prompt to request
+`PlanWriterResult`.
+
+This compatibility repair does not bump `EXTENSION_API_VERSION` or its support
+floor. The documented prompt name and kwargs are unchanged, and the legacy
+`verification_commands` value shape is preserved. The authoritative output
+validation is a host safety boundary, not a
+fork-selectable schema. A future release that renames this kwarg or replaces it
+with required typed command kwargs must follow the breaking-change version
+policy above.
 
 ### Stable `ctx.data` keys
 
@@ -350,7 +433,7 @@ def register(r):
 
 ### Filter findings and supervise tools
 
-This v2 recipe inserts a step after `load-items` to rewrite the canonical
+This recipe inserts a step after `load-items` to rewrite the canonical
 findings file, and registers a singleton supervisor for tool invocations:
 
 ```python
@@ -358,7 +441,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 2
+DAYDREAM_EXT_API = 3
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -488,7 +571,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 2
+DAYDREAM_EXT_API = 3
 
 def _ro_prompt(skill):
     return f"RO-GATE {skill}"
@@ -521,7 +604,7 @@ A fork-defined phase has no entry in the built-in `PHASE_DEFAULT_MODELS` /
 `PHASE_DEFAULT_EFFORT` tables, so it skips only that tier: CLI `--model` /
 `--reasoning-effort` still win, then the phase table, then the config-file
 global, then the backend default. Set `model` / `reasoning_effort` on the phase table
-to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort-codex-only)
+to pin it (see the README's [Reasoning Effort](../README.md#reasoning-effort)
 section for the precedence chain).
 
 ### Validate the registry
@@ -535,7 +618,7 @@ supervisor is `registered` or `none`, resolve-checks every flow entry, skill
 slot, and stack rule, and prints a registry summary. Broken references exit 1
 naming the broken piece. Runs anywhere — no target repo needed.
 
-## Exclusions (Version 2)
+## Exclusions (Version 3)
 
 - **No backend registration.** Backends are the built-in `Backend`
   implementations (claude, codex, pi); forks cannot register new ones.

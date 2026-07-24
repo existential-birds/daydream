@@ -93,7 +93,7 @@ async def test_fork_overrides_pr_feedback_fetch_skill(
         "    r.override_skill('pr-feedback-fetch', 'ro-core:fetch-pr-feedback')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     rc = await runner.run_feedback(
         RunConfig(target=str(multi_stack_target), bot="x[bot]", non_interactive=True), pr=1
@@ -119,7 +119,7 @@ async def test_stack_slot_override_reaches_shallow_skill_flag(
         "    r.override_skill('stack:python', 'ro-python:review-python')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(feature_branch_repo),
@@ -200,7 +200,7 @@ async def test_phase_review_slot_supplies_shallow_skill(
         "    r.override_skill('phase:review', 'ro-python:review-python')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(feature_branch_repo),

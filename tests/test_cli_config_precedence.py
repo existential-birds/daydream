@@ -48,8 +48,8 @@ def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
     """
     bare = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=DaydreamFileConfig())
     assert _resolved_model(bare, "per_stack_review") == "claude-sonnet-5"    # table default
-    assert _resolved_model(bare, "arbiter") == "claude-opus-4-8"             # table default
-    assert _resolved_model(bare, "review") == "claude-opus-4-8"              # unchanged
+    assert _resolved_model(bare, "arbiter") == "claude-opus-5"             # table default
+    assert _resolved_model(bare, "review") == "claude-opus-5"              # unchanged
 
     fc = DaydreamFileConfig(
         model=None,
@@ -58,8 +58,8 @@ def test_per_stack_review_and_arbiter_resolution(tmp_path: Path) -> None:
     )
     cfg = RunConfig(target=str(tmp_path), backend=None, model=None, file_config=fc)
     assert _resolved_model(cfg, "per_stack_review") == "file-psr"   # file phase override wins
-    assert _resolved_model(cfg, "review") == "claude-opus-4-8"      # review untouched by the override
-    assert _resolved_model(cfg, "arbiter") == "claude-opus-4-8"     # arbiter untouched
+    assert _resolved_model(cfg, "review") == "claude-opus-5"      # review untouched by the override
+    assert _resolved_model(cfg, "arbiter") == "claude-opus-5"     # arbiter untouched
 
 
 def test_backend_precedence_mirrors_model(tmp_path: Path) -> None:
@@ -110,7 +110,13 @@ def test_reasoning_effort_precedence_cli_over_file(tmp_path: Path) -> None:
     cfg.reasoning_effort = None
     assert _resolved_reasoning_effort(cfg, "review") == "file-global"  # no phase override -> file global
     cfg2 = RunConfig(target=str(tmp_path), reasoning_effort=None, file_config=DaydreamFileConfig())
-    assert _resolved_reasoning_effort(cfg2, "review") is None  # no source -> backend applies its own default
+    # No CLI or file source -> the per-backend table is the terminal tier. The
+    # default backend is claude, which is tiered for improve phases only.
+    assert _resolved_reasoning_effort(cfg2, "plan_write") == "max"
+    # A phase with no entry for this backend still resolves to None, leaving
+    # the driver's ambient default in place.
+    assert _resolved_reasoning_effort(cfg2, "review") is None
+    assert _resolved_reasoning_effort(cfg2, "not_a_phase") is None
 
 
 def _codex_backend(cfg: RunConfig, phase: str, cache: dict | None = None) -> CodexBackend:
@@ -150,12 +156,19 @@ def test_phase_default_effort_table_is_the_lowest_precedence_tier(tmp_path: Path
     assert _codex_backend(cfg2, "parse").reasoning_effort == "high"
 
 
-def test_claude_phases_resolve_to_no_reasoning_effort(tmp_path: Path) -> None:
-    """Only Codex has an effort table, so Claude phases carry no effort at all."""
+def test_claude_effort_is_improve_only(tmp_path: Path) -> None:
+    """Claude is tiered for improve phases and left alone for deep-review ones.
+
+    Deep phases have no Claude entry, so they resolve to None and the CLI keeps
+    applying the ambient default it always had — improve tiering must not move
+    deep-review behavior.
+    """
     cfg = RunConfig(target=str(tmp_path), backend="claude", model=None, file_config=DaydreamFileConfig())
     assert _resolved_reasoning_effort(cfg, "arbiter") is None
-    backend = _resolve_backend(cfg, "arbiter")
-    assert getattr(backend, "reasoning_effort", None) is None
+    assert _resolved_reasoning_effort(cfg, "review") is None
+    assert getattr(_resolve_backend(cfg, "arbiter"), "reasoning_effort") is None
+    assert _resolved_reasoning_effort(cfg, "plan_write") == "max"
+    assert getattr(_resolve_backend(cfg, "plan_write"), "reasoning_effort") == "max"
 
 
 def test_backend_cache_splits_on_table_default_effort(tmp_path: Path) -> None:

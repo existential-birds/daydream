@@ -21,6 +21,12 @@ def test_run_config_exploration_depth():
     assert cfg.exploration_depth == 2
 
 
+def test_run_config_skill_availability_defaults_to_none():
+    assert RunConfig().skill_availability is None
+    cfg = RunConfig(skill_availability=frozenset({"python"}))
+    assert cfg.skill_availability == frozenset({"python"})
+
+
 def test_run_config_exploration_context_defaults_to_none():
     cfg = RunConfig()
     assert cfg.exploration_context is None
@@ -323,13 +329,13 @@ class TestResolveBackendPhaseModel:
     def test_table_default_used_when_no_flag(self):
         config = RunConfig(backend="claude")  # no review_model override
         backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-4-8"  # claude REVIEW default
+        assert backend.model == "claude-opus-5"  # claude REVIEW default
 
     def test_table_default_for_phase_without_flag(self):
         # WONDER has no override flag but should still get the table default.
         config = RunConfig(backend="claude")
         backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-4-8"
+        assert backend.model == "claude-opus-5"
 
     def test_codex_table_default(self):
         config = RunConfig(backend="codex")

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from daydream.trajectory import DaydreamPhase
 
 # Current/preferred extension contract version; doubles as the max accepted (range ceiling).
-EXTENSION_API_VERSION: int = 2
+EXTENSION_API_VERSION: int = 3
 # Oldest extension contract version still accepted (range floor).
 MIN_SUPPORTED_EXTENSION_API_VERSION: int = 1
 

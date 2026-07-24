@@ -146,6 +146,121 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
 
 
 @pytest.fixture
+def improve_monorepo_target(tmp_path: Path) -> Path:
+    """Committed multi-service repository for improve-flow real-path tests."""
+    project = tmp_path / "improve_monorepo"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    web = project / "web"
+    web.mkdir()
+    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
+def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
+    """Committed monorepo large enough that partition fan-out must split."""
+    project = tmp_path / "improve_scaled"
+    for index in range(12):  # 12 conventional-root services
+        root = project / "apps" / f"svc{index:02d}"
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f'[project]\nname = "svc{index:02d}"\n')
+        (root / "api.py").write_text(f'def service_name():\n    return "svc{index:02d}"\n')
+    for sub in ("alpha", "beta", "gamma"):  # uncovered react tree, no service signal
+        pkg = project / "frontend" / "src" / sub
+        pkg.mkdir(parents=True)
+        for index in range(4):
+            (pkg / f"view{index}.tsx").write_text("export const V = () => <div/>;\n")
+    (project / "README.md").write_text("# scaled\n")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "improve-scaled"\n\n[tool.daydream]\ntest-command = "uv run pytest"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
+def improve_branch_target(tmp_path: Path) -> Path:
+    """Improve monorepo with one billing change committed on a feature branch."""
+    project = tmp_path / "improve_branch"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    web = project / "web"
+    web.mkdir()
+    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    _git(project, "checkout", "-b", "feature")
+    (project / "apps" / "billing" / "api.py").write_text(
+        'def service_name():\n    return "billing-v2"\n'
+    )
+    _git(project, "add", "apps/billing/api.py")
+    _commit(project, "change billing api")
+    return project
+
+
+@pytest.fixture
+def improve_branch_two_services_target(tmp_path: Path) -> Path:
+    """Improve monorepo whose feature branch changes billing AND catalog."""
+    project = tmp_path / "improve_branch_two"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    _git(project, "checkout", "-b", "feature")
+    for service in ("billing", "catalog"):
+        (project / "apps" / service / "api.py").write_text(
+            f'def service_name():\n    return "{service}-v2"\n'
+        )
+    _git(project, "add", "apps/billing/api.py", "apps/catalog/api.py")
+    _commit(project, "change billing and catalog api")
+    return project
+
+
+@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Git repo with a Python + React + Markdown diff on a feature branch.
 
@@ -362,6 +477,39 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_skill_availability(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No test may read the developer's ``~/.claude`` for skill availability.
+
+    ``get_installed_skills()`` reads ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json``
+    (default ``~/.claude``). Left unpinned, the detected stacks — and so the
+    improve partition-group count and any count that follows from it — silently
+    track which Beagle plugins the machine happens to have installed. That is
+    why plan-count assertions passed locally (dev box with no stack plugins →
+    one generic group) and failed on CI (absent registry → optimistic split).
+
+    Default = generalist: a readable registry with zero plugins makes
+    ``get_installed_skills()`` return an empty set, so every stack falls back to
+    generic routing. This is the "works for everyone" baseline the fallback
+    exists to guarantee. Tests that set ``CLAUDE_CONFIG_DIR`` themselves run
+    after this autouse fixture and win, opting into other conditions (e.g.
+    ``_pin_stack_availability`` points at an absent dir → optimistic).
+
+    The env seam is deliberate over monkeypatching the function name:
+    ``get_installed_skills`` is imported by value into
+    ``daydream.improve.orchestrator``, so patching
+    ``daydream.deep.orchestrator.get_installed_skills`` would not touch improve's
+    bound name. ``CLAUDE_CONFIG_DIR`` controls the data the function reads at
+    call time and covers both flows regardless of import binding.
+    """
+    cfg = tmp_path_factory.mktemp("claude-config")
+    (cfg / "plugins").mkdir()
+    (cfg / "plugins" / "installed_plugins.json").write_text('{"plugins": {}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
 
 
 @pytest.fixture(autouse=True)

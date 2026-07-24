@@ -24,6 +24,9 @@ class _RetryableThenSuccessBackend:
 
     model = "test-model"
     fanout_concurrency = 4
+    retry_attempts = 1
+    retry_base_delay_s = 0.0
+    retry_max_delay_s = 0.0
 
     def __init__(self) -> None:
         self.call_count = 0
@@ -37,6 +40,7 @@ class _RetryableThenSuccessBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:
@@ -69,6 +73,7 @@ class _NonRetryableBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         raise PiError("auth failed", retryable=False)
@@ -99,9 +104,43 @@ class _AlwaysRetryableBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         raise PiError("429 rate limit", retryable=True)
+        yield  # make this an async generator
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, *a: Any, **kw: Any) -> str:
+        return ""
+
+
+class _PlainErrorBackend:
+    """Raises a non-retryable plain exception with NO ``.category`` (Claude/Codex-style)."""
+
+    model = "test-model"
+    fanout_concurrency = 4
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ):
+        self.call_count += 1
+        # A human-readable reason plus a secret-shaped substring, to prove the
+        # message surfaces AND that secrets are scrubbed at the host boundary.
+        raise RuntimeError("overloaded-502 ZAI_API_KEY=leaked-secret-abc123")
         yield  # make this an async generator
 
     async def cancel(self) -> None:
@@ -129,6 +168,7 @@ class _PartialThenRetryBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:
@@ -168,6 +208,46 @@ async def test_run_agent_no_retry_on_non_retryable(monkeypatch, tmp_path: Path) 
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
     assert backend.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_agent_ignores_malformed_retry_environment(monkeypatch, tmp_path: Path) -> None:
+    """Malformed Pi retry environment values fall back without blocking a backend call."""
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "not-an-integer")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "inf")
+    backend = _RetryableThenSuccessBackend()
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 0.0
+    backend.retry_max_delay_s = 0.0
+
+    output, _, _ = await run_agent(
+        backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW
+    )
+
+    assert output == "Review complete"
+    assert backend.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_run_agent_surfaces_backend_error_message(monkeypatch, tmp_path: Path) -> None:
+    """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
+    from rich.console import Console
+
+    rec = Console(record=True, force_terminal=True, width=200)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    backend = _PlainErrorBackend()
+
+    with pytest.raises(RuntimeError, match="overloaded-502"):
+        await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+
+    out = rec.export_text()
+    assert "Backend Execution Error" in out
+    # The exception MESSAGE (not just "RuntimeError") must reach the user.
+    assert "overloaded-502" in out
+    # ...but a secret embedded in that message is redacted at the host boundary.
+    assert "leaked-secret-abc123" not in out
+    assert "[REDACTED_ENV_VAR]" in out
 
 
 @pytest.mark.asyncio
@@ -228,7 +308,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 
         model = "test-model"
         fanout_concurrency = 3
-        # retry_attempts read by agent.py via getattr(backend, "retry_attempts", 3)
+        # retry_attempts read by agent.py via getattr(backend, "retry_attempts", 20)
         retry_attempts = 3
         retry_base_delay_s = 0.01
 
@@ -244,6 +324,7 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
             agents: Any = None,
             max_turns: Any = None,
             read_only: bool = False,
+            persist_session: bool = True,
         ):
             key = (
                 "fail-once"
@@ -326,6 +407,7 @@ class _StreamDropThenSuccessBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         self.call_count += 1
         if self.call_count == 1:

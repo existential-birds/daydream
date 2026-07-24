@@ -106,7 +106,7 @@ async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch)
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], []])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -125,7 +125,7 @@ async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypat
     issue = {"id": 1, "description": "Persistent issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], [issue], [issue]])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -144,7 +144,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     reverted = []
     monkeypatch.setattr(
@@ -170,7 +170,7 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
     issue2 = {"id": 2, "description": "Issue B", "file": "main.py", "line": 2}
     backend = loop_mock_backend(review_results=[[issue1, issue2], [issue1], []])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     captured_summary = {}
 
@@ -206,7 +206,7 @@ async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue]])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -226,7 +226,7 @@ async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkey
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], [issue], []])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -248,7 +248,7 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     config = RunConfig(
@@ -268,7 +268,7 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     captured_summary: dict[str, Any] = {}
@@ -298,7 +298,7 @@ async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop
     """No commit when first iteration is already clean (no fixes applied)."""
     backend = loop_mock_backend(review_results=[[]])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -318,7 +318,7 @@ async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkey
     (loop_target / "untracked.py").write_text("dirty")
 
     backend = loop_mock_backend(review_results=[[]])
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -378,7 +378,7 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], []])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -432,7 +432,7 @@ async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, monke
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
     backend = TurnCapturingBackend(parse_results=[[issue]])
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     config = RunConfig(
         target=str(loop_target), skill="python", quiet=True,
@@ -451,7 +451,7 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
     backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     sha_calls: list[Path] = []

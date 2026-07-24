@@ -10,7 +10,7 @@ the cwd-grounding instruction — the deterministic contract the fix locks.
 from __future__ import annotations
 
 import subprocess
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,8 @@ class _PromptCapturingBackend:
         agents=None,
         max_turns=None,
         read_only=False,
-    ) -> AsyncIterator[AgentEvent]:
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
         self.prompts.append(prompt)
         result: dict[str, Any] = {}
         if output_schema == PATTERN_SCANNER_SCHEMA:
@@ -79,7 +80,11 @@ def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[
     assert "services/taste/parser.go" in diff_text
 
     backend = _PromptCapturingBackend()
-    anyio.run(pre_scan, backend, linked, diff_text)
+
+    async def run_pre_scan() -> None:
+        await pre_scan(backend, linked, diff_text)
+
+    anyio.run(run_pre_scan)
 
     assert backend.prompts, "expected specialist prompts to be captured"
     joined = "\n".join(backend.prompts)

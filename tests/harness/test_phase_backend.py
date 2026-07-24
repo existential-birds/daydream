@@ -26,7 +26,7 @@ def mock_ui_loop(monkeypatch):
 async def test_shared_phase_backend_drives_shallow_loop(feature_branch_repo, mock_ui_loop, monkeypatch):
     """An issue on iteration 1, clean on iteration 2 → the loop runs twice and exits 0."""
     backend = PhaseDispatchBackend(parse_results=[[ISSUE], []])
-    monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
 
     exit_code = await run(
         RunConfig(

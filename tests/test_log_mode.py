@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import io
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -54,7 +54,8 @@ class _LogModeStubBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[Any]:
+        persist_session: bool = True,
+    ) -> AsyncGenerator[Any, None]:
         """Emit the configured events in sequence."""
         for event in self.events:
             yield event
@@ -71,7 +72,7 @@ class _LogModeStubBackend:
 def _capture_stdout_and_run(config: RunConfig, backend: Backend, monkeypatch: pytest.MonkeyPatch) -> str:
     """Run daydream with the given config and capture stdout output."""
     # Patch create_backend to return our test backend
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     # Mock external dependencies
     monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)

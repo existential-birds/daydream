@@ -25,6 +25,8 @@ make check     # lint + typecheck + full pytest (the gate)
 # Golden paths (near-zero-flag; `daydream /path` == `daydream review /path`)
 daydream /path/to/project                          # review -> fix -> test (deep multi-stack)
 daydream --comment /path/to/project                # review -> post inline PR comments, then exit
+daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
+daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
 
 # Other verbs / flags
 daydream --shallow -s python /path/to/project      # shallow Python review-fix-test loop
@@ -110,7 +112,8 @@ and unusable.
 
 ```text
 cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
-              -> deep/orchestrator.py | flows/{shallow,review,pr_feedback}.py
+              -> deep/orchestrator.py | improve/orchestrator.py
+              |  flows/{shallow,review,pr_feedback}.py
               -> phases.py -> agent.py -> Backend.execute()
               \-> ui/ (terminal output)
 ```
@@ -118,9 +121,9 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 - `runner.run()` is the async entry. It builds the per-run extension `Registry`
   (`build_registry()`), sets it on a `ContextVar`, and dispatches one of five
   registered flows — `deep` (default), `shallow`, `review` (`--review`/`--comment`),
-  `pr-feedback` (`daydream feedback <pr#>`), or a custom extension flow
-  (`--flow NAME`) — each a preamble plus `flows.run_flow()` over the flow's
-  ordered `FlowStep` list.
+  `pr-feedback` (`daydream feedback <pr#>`), or `improve`
+  (`daydream improve`) — or a custom extension flow (`--flow NAME`). Each uses
+  a preamble plus `flows.run_flow()` over the flow's ordered `FlowStep` list.
 - `agent.run_agent()` is the only agent call site. Never call a backend/SDK directly
   from phases. It wraps `Backend.execute()` and drives the Rich UI + trajectory recorder.
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel
@@ -137,6 +140,7 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 | Flows | `FlowContext` + `run_flow()` engine (ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups); shallow/review/pr-feedback step functions | `flows/` |
 | Extensions | Versioned extension API: `Registry` (phases+flows, skill slots, named prompts, stack rules), `daydream_ext` loader, built-in seeding | `extensions/` |
 | Deep orchestrator | Deep-flow step functions (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
+| Improve advisor | Read-only repository reconnaissance, category audits, vetting, prioritization, and host-rendered plan artifacts | `improve/` |
 | Phases | Stateless async `phase_*()` workflow steps and prompt builders | `phases.py` |
 | Agent | Backend wrapper, event stream to UI, global state, budget enforcement | `agent.py` |
 | Trajectory | ATIF v1.7 recorder, redaction, ContextVar propagation | `trajectory.py` |
@@ -182,6 +186,24 @@ and recorder are backend-agnostic.
 Every `run_agent()` call is bounded by wall-clock and tool-call limits, tiered by
 phase. Budget exhaustion emits a `TurnEndEvent` and marks the trajectory partial.
 The default wall budget is 1800s; the default tool-call budget varies by phase.
+The improve phases deliberately run with no wall budget.
+
+Independently, the pi and codex backends bound their stdout stream with an idle
+timeout (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`, default 2700s): a subprocess that
+emits nothing for that long is killed and the turn fails with a `StreamStalledError`.
+It fires on the absence of output, never on slow output, and sits above the wall
+budget so it can only bite where nothing else bounds the turn. A stall is
+**not retryable** — the idle window is a terminal bound on a subprocess
+invocation, so `run_agent` does not re-arm a fresh subprocess and a stalled
+stream cannot consume the generic retry budget.
+
+`run_agent` retries any backend error whose `retryable` flag is set, with
+exponential backoff, up to the backend's attempt budget. The default is **20
+attempts** for every backend (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides it) because
+every provider — Anthropic included — drops connections often enough that a
+smaller budget lets one blip kill a whole run. Only a deliberate tool-supervisor
+veto, a stalled stream, and a non-transport logic error are terminal;
+API/transport failures are not.
 
 ### Config and per-phase model overrides
 
@@ -198,6 +220,30 @@ config-file phase override > config-file global > backend default. Resolved in
 `runner._resolve_backend()`. `[tool.daydream.phases.<phase>]` accepts any registered
 step's config key, including fork-defined phases (per-flow key tables in
 `docs/extensions.md`).
+
+Improve runtime controls are CLI-derived `RunConfig` fields:
+`improve_effort`, `improve_focus`, `improve_scope`, and
+`improve_plan_description`. They have no environment
+variable equivalents. Service discovery and the audit fan-out bounds are
+config-file-only:
+
+```toml
+[tool.daydream.improve]
+service_roots = ["apps/*", "web"]
+partition_max_files = 400   # per-partition file cap (default 400)
+max_partition_groups = 8    # audit groups per run (tier default: standard 8, deep unbounded)
+
+[tool.daydream.improve.service_groups]
+commerce = ["apps/billing", "apps/catalog"]
+```
+
+Use the equivalent top-level `[improve]` and `[improve.service_groups]` tables
+in `.daydream.toml`. Both bounds also accept their hyphenated spellings
+(`partition-max-files`, `max-partition-groups`); non-positive values are
+ignored. Audit fan-out is `partition-groups × categories`; when
+`max_partition_groups` binds, the largest groups are kept and every skipped
+partition is named in `.daydream/improve/coverage.json` and the report's
+"What was not audited" section.
 
 ### Deep-review pipeline
 
@@ -220,7 +266,7 @@ hunks are inlined directly into a single review prompt.
 
 A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
 (discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
-The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 2);
+The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 3);
 extensions can also register one `ToolDecision`-returning tool supervisor, and
 `daydream ext validate` resolve-checks the loaded registry. The versioned contract —
 name inventories, module shape, supervision seam, and bump policy — is
@@ -279,8 +325,10 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `DAYDREAM_EXT_DIR` | Extensions | Explicit path to the `daydream_ext` package (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` | Git ops | Override `gh` CLI timeout |
 | `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
-| `PI_PROVIDER` / `PI_API_KEY` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags |
+| `PI_PROVIDER` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`--provider` / `--thinking`; `PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
+| `PI_API_KEY` | Pi backend | Copied into the child process's provider-native credential env var (e.g. `ZAI_API_KEY`), never onto argv/CLI flags (security); ignored with a warning if the provider has no mapped native var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is not retryable: the idle window is a terminal bound on a subprocess invocation, so `run_agent` does not re-arm a fresh subprocess and a stalled stream cannot consume the retry budget. |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
 | `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |
 | `ANTHROPIC_API_KEY` | Benchmark | Direct Anthropic judge (`anthropic-direct` route) |

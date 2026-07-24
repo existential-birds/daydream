@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookJSONOutput, HookMatcher
 from claude_agent_sdk.types import (
     AgentDefinition,
     AssistantMessage,
+    EffortLevel,
     HookCallback,
     ResultMessage,
     TextBlock,
@@ -289,6 +290,25 @@ def _make_skill_guard(allowed_skills: frozenset[str]) -> HookCallback:
     return _skill_guard
 
 
+_CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset(("low", "medium", "high", "xhigh", "max"))
+
+
+def _claude_effort(value: str | None) -> EffortLevel | None:
+    """Narrow a resolved reasoning effort to the SDK's ``EffortLevel``.
+
+    Raises at construction rather than letting an unsupported level reach the
+    CLI as ``--effort <junk>``, which fails mid-run with an opaque message.
+    """
+    if value is None:
+        return None
+    if value not in _CLAUDE_EFFORT_LEVELS:
+        raise ValueError(
+            f"Claude backend does not support reasoning effort {value!r}; "
+            f"expected one of {sorted(_CLAUDE_EFFORT_LEVELS)}"
+        )
+    return cast(EffortLevel, value)
+
+
 class ClaudeBackend:
     """Backend that wraps the Claude Agent SDK.
 
@@ -297,8 +317,9 @@ class ClaudeBackend:
 
     concise_fix_prompts = False
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, *, reasoning_effort: str | None = None):
         self.model = model
+        self.reasoning_effort = _claude_effort(reasoning_effort)
         self.fanout_concurrency = 4
         self._active_clients: set[ClaudeSDKClient] = set()
 
@@ -311,7 +332,8 @@ class ClaudeBackend:
         agents: dict[str, AgentDefinition] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt and yield unified events.
 
         Args:
@@ -324,6 +346,8 @@ class ClaudeBackend:
                 not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
                 — under ``bypassPermissions`` ``allowed_tools`` does not restrict
                 the toolset — so the tool list is left unchanged.
+            persist_session: Accepted for backend protocol parity. Claude does
+                not expose persisted CLI sessions here, so this is ignored.
 
         Raises:
             ClaudeAgentError: If the agent run ends with an error result
@@ -354,6 +378,8 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
+            # None leaves the CLI's ambient default; the SDK omits --effort.
+            effort=self.reasoning_effort,
             hooks={
                 "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
             },
@@ -373,9 +399,11 @@ class ClaudeBackend:
 
         async with ClaudeSDKClient(options=options) as client:
             self._active_clients.add(client)
+            response = client.receive_response()
+            response_terminated = False
             try:
                 await client.query(prompt)
-                async for msg in client.receive_response():
+                async for msg in response:
                     if isinstance(msg, AssistantMessage):
                         msg_model = getattr(msg, "model", None)
                         if isinstance(msg_model, str) and msg_model:
@@ -436,6 +464,7 @@ class ClaudeBackend:
                                 )
 
                     elif isinstance(msg, ResultMessage):
+                        response_terminated = True
                         if msg.is_error:
                             detail = msg.result or msg.subtype or "unknown error"
                             if msg.subtype == "error_max_turns":
@@ -467,6 +496,12 @@ class ClaudeBackend:
                     structured_output=structured_result,
                     continuation=None,
                 )
+            except GeneratorExit:
+                if not response_terminated:
+                    await client.interrupt()
+                    async for _ in response:
+                        pass
+                raise
             finally:
                 self._active_clients.discard(client)
 

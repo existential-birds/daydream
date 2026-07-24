@@ -124,6 +124,34 @@ async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     }
 
 
+async def test_emit_command_validation_summary_is_structured_and_redacted(
+    tmp_path: Path,
+) -> None:
+    rec = _make_recorder(tmp_path)
+
+    rec.emit_command_validation_summary(
+        total_candidates=33,
+        accepted=4,
+        rejected=29,
+        reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
+    )
+
+    event = rec._phase_events[0]
+    assert event.event == "command_validation"
+    assert event.phase is DaydreamPhase.RECON
+    assert event.metadata == {
+        "counts": {
+            "total_candidates": 33,
+            "accepted": 4,
+            "rejected": 29,
+        },
+        "reasons": {
+            "RECON_EVIDENCE_MISMATCH": 28,
+            "RECON_MALFORMED_COMMAND": 1,
+        },
+    }
+
+
 async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> None:
     """Phase events appear in Trajectory.extra["phase_events"] when present."""
     rec = _make_recorder(tmp_path)
@@ -369,7 +397,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: PhaseDispatchBackend(),
+        lambda name, model=None, **kwargs: PhaseDispatchBackend(),
     )
 
     # Patch phase_test_and_heal to avoid running a real test suite.

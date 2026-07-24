@@ -165,7 +165,7 @@ async def test_pr_feedback_real_path(
 
     _silence(monkeypatch)
     stub = _PRFeedbackStubBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: stub)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
