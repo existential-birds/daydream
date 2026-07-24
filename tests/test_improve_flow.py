@@ -2529,6 +2529,61 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
 
 
 @pytest.mark.anyio
+async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero stack skills → generic routing → the audit still runs and plans land.
+
+    This is the "works for everyone" baseline the generalist fallback exists to
+    guarantee. It relies on the autouse ``_hermetic_skill_availability`` fixture
+    (empty plugin registry → ``get_installed_skills()`` returns an empty set), so
+    it deliberately does NOT call ``_pin_stack_availability``. Every stack falls
+    back to generic, collapsing the monorepo into a single generic audit group;
+    the flow must still produce one plan per selected finding.
+    """
+    stub = install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=3,
+    )
+    stub.vet_reject_titles = {"Phantom N+1"}
+
+    code = await run(
+        RunConfig(
+            target=str(improve_monorepo_target),
+            flow_name="improve",
+            non_interactive=True,
+            archive=False,
+        )
+    )
+
+    assert code == 0
+    # Generalist routing: one group, and its stack is the generic fallback value.
+    coverage = json.loads(
+        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(coverage["groups"]) == 1
+    assert coverage["groups"][0]["stack"] == "generic"
+
+    plans = sorted(
+        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
+    )
+    assert stub.plan_writer_calls == 3
+    assert len(plans) == 3
+    for plan_path in plans:
+        plan_text = plan_path.read_text(encoding="utf-8")
+        assert "`uv run pytest apps/billing/test_api.py -q`" in plan_text
+        assert "exit 0 and the selected pytest tests pass" in plan_text
+    index = (improve_monorepo_target / "daydream_plans" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert index.count("| TODO |") == 3
+
+
+@pytest.mark.anyio
 async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

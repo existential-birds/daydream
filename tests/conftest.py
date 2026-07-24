@@ -480,6 +480,39 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_skill_availability(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No test may read the developer's ``~/.claude`` for skill availability.
+
+    ``get_installed_skills()`` reads ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json``
+    (default ``~/.claude``). Left unpinned, the detected stacks — and so the
+    improve partition-group count and any count that follows from it — silently
+    track which Beagle plugins the machine happens to have installed. That is
+    why plan-count assertions passed locally (dev box with no stack plugins →
+    one generic group) and failed on CI (absent registry → optimistic split).
+
+    Default = generalist: a readable registry with zero plugins makes
+    ``get_installed_skills()`` return an empty set, so every stack falls back to
+    generic routing. This is the "works for everyone" baseline the fallback
+    exists to guarantee. Tests that set ``CLAUDE_CONFIG_DIR`` themselves run
+    after this autouse fixture and win, opting into other conditions (e.g.
+    ``_pin_stack_availability`` points at an absent dir → optimistic).
+
+    The env seam is deliberate over monkeypatching the function name:
+    ``get_installed_skills`` is imported by value into
+    ``daydream.improve.orchestrator``, so patching
+    ``daydream.deep.orchestrator.get_installed_skills`` would not touch improve's
+    bound name. ``CLAUDE_CONFIG_DIR`` controls the data the function reads at
+    call time and covers both flows regardless of import binding.
+    """
+    cfg = tmp_path_factory.mktemp("claude-config")
+    (cfg / "plugins").mkdir()
+    (cfg / "plugins" / "installed_plugins.json").write_text('{"plugins": {}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+
+@pytest.fixture(autouse=True)
 def _reset_trajectory_recorder():
     """Clear the trajectory ContextVar before AND after every test.
 
