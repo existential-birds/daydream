@@ -644,32 +644,12 @@ def ext_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExtDir:
 
 @pytest.fixture
 def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Install the subprocess ``gh`` shim and shrink the ``gh`` timeout budget.
+    """Route ``gh`` invocations to the in-process fake (tests/harness/fake_gh.py).
 
-    Every test using this fixture spawns a real ``gh`` subprocess (the fake
-    shim), so it is auto-marked ``integration`` by
-    :func:`pytest_collection_modifyitems` and excluded from the pre-push gate.
-
-    The shim replies in milliseconds, so the production 60s / 2-retry budget
-    only serves to turn a CPU-starved interpreter cold start into a 3 x 60s =
-    180s stall (the original fake-gh flake). Cap each attempt at 15s with a
-    single retry: the typical run stays sub-second, the worst case is 30s.
+    No subprocess is spawned: ``gh`` argv is answered synchronously at the
+    ``subprocess.run`` boundary inside ``git_ops`` (everything else — real
+    ``git`` against temp worktrees included — runs for real). No fork and no
+    wall clock means these tests cannot flake under host load, so they run
+    everywhere, pre-push gate included.
     """
-    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", "15")
-    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "1")
-    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
-
-
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """Auto-mark every test that drives the subprocess ``gh`` shim ``integration``.
-
-    These tests spawn a real ``gh`` subprocess and so carry process cold-start
-    cost that flakes under host CPU saturation. Marking them keeps the pre-push
-    gate (``-m "not integration"``) fast and deterministic; CI runs the full
-    suite, preserving their coverage.
-    """
-    for item in items:
-        if "fake_gh" in getattr(item, "fixturenames", ()):
-            item.add_marker("integration")
+    return install_fake_gh(tmp_path / "fake-gh-state", monkeypatch)

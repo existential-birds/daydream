@@ -7,7 +7,6 @@ the code-exchange behavior is testable without real GitHub: the test drives
 ``_handle_code`` directly, monkeypatching only the manifest-code exchange.
 """
 
-import json
 import sys
 from pathlib import Path
 
@@ -165,7 +164,7 @@ def test_verify_healthy_install_passes_all_checks(
 
     Exercises every required check on its passing shape, and — with local App
     creds present — drives the App-installed (``/app/installations``) and
-    permission (``GET /app``) checks through the real ``gh`` subprocess seam.
+    permission (``GET /app``) checks through the real ``gh_api`` seam.
 
     Uses ``repo_with_origin`` (has a bare remote) so the workflows check can
     resolve ``origin/main`` via ``git show origin/main:.github/workflows/…``.
@@ -219,16 +218,6 @@ def cli_main(argv: list[str]) -> int:
     raise AssertionError("cli.main() must exit via sys.exit")
 
 
-def _pr_create_calls(fake_gh: FakeGh) -> list[dict]:
-    """Read the recorded ``gh pr create`` invocations from the shim's call log."""
-    path = fake_gh.bin_dir / "calls.jsonl"
-    if not path.exists():
-        return []
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if json.loads(line).get("kind") == "pr create"
-    ]
 
 
 def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
@@ -259,7 +248,7 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     assert {c.name for c in fake_gh.secret_set_calls()} == set(config.SETUP_SECRET_NAMES)
     assert fake_gh.variable_set_calls()[-1].name == config.BOT_HANDLE_VAR
     # The bot goes live on merge: a reviewable PR was opened on a non-default branch.
-    pr_calls = _pr_create_calls(fake_gh)
+    pr_calls = fake_gh.command_calls("pr create")
     assert len(pr_calls) == 1
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
 

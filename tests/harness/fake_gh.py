@@ -1,12 +1,17 @@
-"""Fake ``gh`` executable harness for real-path ``post-findings`` tests.
+"""In-process fake ``gh`` harness for real-path tests.
 
-Installs an executable Python shim named ``gh`` into a tmp dir prepended to
-``PATH`` so the real ``git_ops._run_gh`` subprocess seam, the ``gh_api``
-tempfile-``--input`` path, and JSON response parsing all run for real. Only
-the GitHub network boundary (the ``gh`` binary itself) is faked.
+:func:`install_fake_gh` patches ``subprocess.run`` as seen by
+:mod:`daydream.git_ops` (the single point of contact for all ``gh`` calls)
+with a router: an argv starting with ``gh`` is answered synchronously by
+:func:`_handle_gh`; every other command (``git`` against real temp
+worktrees, most importantly) runs for real. Everything of daydream's runs
+unchanged — ``_run_gh``'s env/token merging and stdin piping, the ``gh_api``
+tempfile-``--input`` path, JSON response parsing — only the OS process spawn
+is replaced. No fork, no ``PATH`` shim, no wall-clock timeout: the fake
+cannot stall, so these tests are deterministic under any host load.
 
-The shim records every invocation (argv + parsed ``--input`` payload) to a
-JSONL log the :class:`FakeGh` helper parses, and replies from a canned
+The handler records every invocation (argv + parsed ``--input`` payload) to
+a JSONL log the :class:`FakeGh` helper parses, and replies from a canned
 response map (``responses.json``) plus built-in behaviors:
 
 - ``gh api graphql`` with a ``reviewThreads`` query returns the configured
@@ -33,8 +38,8 @@ Any other invocation exits non-zero so unexpected calls surface as failures.
 from __future__ import annotations
 
 import json
-import os
-import sys
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,26 +69,45 @@ _EMPTY_THREADS_RESPONSE: dict[str, Any] = {
     }
 }
 
-# Standalone stdlib-only shim; it must not import daydream (it runs as the
-# ``gh`` subprocess spawned by git_ops._run_gh).
-_SHIM_SOURCE = '''#!/usr/bin/env python3
-"""Fake ``gh`` shim installed by tests/harness/fake_gh.py."""
-import json
-import re
-import sys
-from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-CALLS = HERE / "calls.jsonl"
-RESPONSES = HERE / "responses.json"
-
-_EMPTY_THREADS = {
-    "data": {"repository": {"pullRequest": {"reviewThreads": {
-        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}}}
-}
+# --- Request handler (the fake ``gh`` itself) --------------------------------
+#
+# Each handler returns ``(returncode, stdout, stderr)`` — the observable
+# surface of a ``gh`` invocation. State (call log, canned responses, comment
+# id counter) lives in files under ``state_dir`` so :class:`FakeGh` can
+# inspect and configure it independently of the handler.
 
 
-def _parse(argv):
+def _read_responses(state: Path) -> dict[str, Any]:
+    path = state / "responses.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _record(state: Path, record: dict[str, Any]) -> None:
+    with (state / "calls.jsonl").open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _emit(value: Any, jq: str | None) -> str:
+    """Render a response the way ``gh`` prints it: NDJSON of ``@json``-encoded values under ``--jq``."""
+    if jq is None:
+        return json.dumps(value) + "\n"
+    # Production only ever passes the `(.[]) | @json` flattening filter, whose
+    # output is one JSON-encoded element per line.
+    items = value if isinstance(value, list) else [value]
+    return "".join(json.dumps(item) + "\n" for item in items)
+
+
+def _next_comment_seq(state: Path) -> int:
+    """Monotonic counter so each posted comment gets a distinct id."""
+    seq_file = state / "comment_seq"
+    n = int(seq_file.read_text()) + 1 if seq_file.exists() else 1
+    seq_file.write_text(str(n))
+    return n
+
+
+def _parse_api(argv: list[str]) -> tuple[str, str, Any, str | None]:
+    """Parse a ``gh api`` argv (after ``api``) into method/endpoint/payload/jq."""
     method = "GET"
     endpoint = None
     payload = None
@@ -110,179 +134,119 @@ def _parse(argv):
     return method, (endpoint or "").lstrip("/"), payload, jq
 
 
-def _emit(value, jq):
-    """Print a response the way gh does: NDJSON of @json-encoded values under --jq."""
-    if jq is None:
-        print(json.dumps(value))
-        return
-    # Production only ever passes the `(.[]) | @json` flattening filter, whose
-    # output is one JSON-encoded element per line.
-    for item in value if isinstance(value, list) else [value]:
-        print(json.dumps(item))
+def _handle_set(kind: str, argv: list[str], stdin_text: str, state: Path) -> tuple[int, str, str]:
+    """Handle ``secret set`` / ``variable set``. Value via stdin or ``--body``."""
+    body = _argv_opt(argv, "--body")
+    stdin = "" if body is not None else stdin_text
+    _record(state, {"kind": kind + " set", "argv": argv, "stdin": stdin})
+    return 0, "", ""
 
 
-def _opt(argv, name):
-    """Return the value following ``name`` in argv, or None."""
-    for i, tok in enumerate(argv):
-        if tok == name and i + 1 < len(argv):
-            return argv[i + 1]
-    return None
-
-
-def _next_comment_seq():
-    """Monotonic counter so each posted comment gets a distinct id."""
-    seq_file = HERE / "comment_seq"
-    n = int(seq_file.read_text()) + 1 if seq_file.exists() else 1
-    seq_file.write_text(str(n))
-    return n
-
-
-def _record(kind, argv, stdin):
-    with CALLS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps({"kind": kind, "argv": argv, "stdin": stdin}) + "\\n")
-
-
-def _handle_set(kind, argv):
-    """Handle ``secret set`` / ``variable set``. Value via stdin or --body."""
-    name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
-    body = _opt(argv, "--body")
-    stdin = "" if body is not None else sys.stdin.read()
-    _record(kind + " set", argv, stdin)
-    return 0
-
-
-def _handle_list(kind, argv):
+def _handle_list(kind: str, argv: list[str], state: Path) -> tuple[int, str, str]:
     """Handle ``secret list`` / ``variable list`` with ``--json name``."""
-    _record(kind + " list", argv, "")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
-    names = responses.get(kind + "-list", [])
-    print(json.dumps([{"name": n} for n in names]))
-    return 0
+    _record(state, {"kind": kind + " list", "argv": argv, "stdin": ""})
+    names = _read_responses(state).get(kind + "-list", [])
+    return 0, json.dumps([{"name": n} for n in names]) + "\n", ""
 
 
-def _handle_pr_create(argv):
-    _record("pr create", argv, "")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
-    url = responses.get("pr-create")
+def _handle_pr_create(argv: list[str], state: Path) -> tuple[int, str, str]:
+    _record(state, {"kind": "pr create", "argv": argv, "stdin": ""})
+    url = _read_responses(state).get("pr-create")
     if url is None:
-        sys.stderr.write("fake gh: no pr-create response configured\\n")
-        return 1
-    print(url)
-    return 0
+        return 1, "", "fake gh: no pr-create response configured\n"
+    return 0, str(url) + "\n", ""
 
 
-def _handle_pr_view(argv):
-    _record("pr view", argv, "")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
-    value = responses.get("pr-view")
+def _handle_pr_view(argv: list[str], state: Path) -> tuple[int, str, str]:
+    _record(state, {"kind": "pr view", "argv": argv, "stdin": ""})
+    value = _read_responses(state).get("pr-view")
     if value is None:
-        sys.stderr.write("fake gh: no pr-view response configured\\n")
-        return 1
-    print(json.dumps(value))
-    return 0
+        return 1, "", "fake gh: no pr-view response configured\n"
+    return 0, json.dumps(value) + "\n", ""
 
 
-def _handle_pr_list(argv):
-    _record("pr list", argv, "")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+def _handle_pr_list(argv: list[str], state: Path) -> tuple[int, str, str]:
+    _record(state, {"kind": "pr list", "argv": argv, "stdin": ""})
+    responses = _read_responses(state)
     value = responses.get("pr-list")
     if value is None:
         pr_view = responses.get("pr-view")
         if pr_view is None:
-            sys.stderr.write("fake gh: no pr-list or pr-view response configured\\n")
-            return 1
+            return 1, "", "fake gh: no pr-list or pr-view response configured\n"
         value = [pr_view]
-    print(json.dumps(value))
-    return 0
+    return 0, json.dumps(value) + "\n", ""
 
 
-def _handle_repo_view(argv):
-    _record("repo view", argv, "")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+def _handle_repo_view(argv: list[str], state: Path) -> tuple[int, str, str]:
+    _record(state, {"kind": "repo view", "argv": argv, "stdin": ""})
+    responses = _read_responses(state)
     value = responses.get("repo-view")
     if value is None:
         if "pr-view" not in responses:
-            sys.stderr.write("fake gh: no repo-view response configured\\n")
-            return 1
+            return 1, "", "fake gh: no repo-view response configured\n"
         value = "acme/widgets"
     if isinstance(value, dict):
         value = value.get("nameWithOwner")
     if not isinstance(value, str):
-        sys.stderr.write("fake gh: invalid repo-view response configured\\n")
-        return 1
-    print(value)
-    return 0
+        return 1, "", "fake gh: invalid repo-view response configured\n"
+    return 0, value + "\n", ""
 
 
-def main():
-    argv = sys.argv[1:]
-    if argv[:2] in (["secret", "set"], ["variable", "set"]):
-        return _handle_set(argv[0], argv)
-    if argv[:2] in (["secret", "list"], ["variable", "list"]):
-        return _handle_list(argv[0], argv)
-    if argv[:2] == ["pr", "view"]:
-        return _handle_pr_view(argv)
-    if argv[:2] == ["pr", "list"]:
-        return _handle_pr_list(argv)
-    if argv[:2] == ["pr", "create"]:
-        return _handle_pr_create(argv)
-    if argv[:2] == ["repo", "view"]:
-        return _handle_repo_view(argv)
-    if not argv or argv[0] != "api":
-        sys.stderr.write("fake gh: unsupported invocation: %r\\n" % (argv,))
-        return 1
-    method, endpoint, payload, jq = _parse(argv[1:])
-    with CALLS.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(
-            {"argv": argv, "method": method, "endpoint": endpoint, "payload": payload}
-        ) + "\\n")
-    responses = json.loads(RESPONSES.read_text(encoding="utf-8")) if RESPONSES.exists() else {}
+def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
+    method, endpoint, payload, jq = _parse_api(argv[1:])
+    _record(state, {"argv": argv, "method": method, "endpoint": endpoint, "payload": payload})
+    responses = _read_responses(state)
     if endpoint == "graphql":
         query = (payload or {}).get("query", "")
         if "minimizeComment" in query:
-            print(json.dumps({"data": {"minimizeComment": {
-                "minimizedComment": {"isMinimized": True}}}}))
-            return 0
+            reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
+            return 0, json.dumps(reply) + "\n", ""
         if "reviewThreads" in query:
-            print(json.dumps(responses.get("graphql_threads", _EMPTY_THREADS)))
-            return 0
-        sys.stderr.write("fake gh: unrecognized graphql query\\n")
-        return 1
-    key = method + " " + endpoint
+            return 0, json.dumps(responses.get("graphql_threads", _EMPTY_THREADS_RESPONSE)) + "\n", ""
+        return 1, "", "fake gh: unrecognized graphql query\n"
+    key = f"{method} {endpoint}"
     if key in responses:
-        _emit(responses[key], jq)
-        return 0
+        return 0, _emit(responses[key], jq), ""
     # Query strings select/paginate; the canned response is keyed by path alone.
-    bare_key = method + " " + endpoint.split("?")[0]
+    bare_key = f"{method} {endpoint.split('?')[0]}"
     if bare_key in responses:
-        _emit(responses[bare_key], jq)
-        return 0
-    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/reviews", endpoint):
-        _emit([], jq)
-        return 0
-    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/reviews", endpoint):
-        print(json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}))
-        return 0
-    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\\d+/comments", endpoint):
+        return 0, _emit(responses[bare_key], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
+        return 0, _emit([], jq), ""
+    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
+        return 0, json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}) + "\n", ""
+    if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
         # Real GitHub 422s a file-level comment whose path is not in the PR
         # diff; `diff-paths`, when configured, reproduces that rejection.
         allowed = responses.get("diff-paths")
         path = (payload or {}).get("path")
         if allowed is not None and path not in allowed:
-            sys.stderr.write("fake gh: path %r not in PR diff (422)\\n" % (path,))
-            return 1
-        print(json.dumps({
-            "id": 9000 + _next_comment_seq(),
+            return 1, "", f"fake gh: path {path!r} not in PR diff (422)\n"
+        reply = {
+            "id": 9000 + _next_comment_seq(state),
             "html_url": "https://github.test/fake/pull/7#discussion_r1",
-        }))
-        return 0
-    sys.stderr.write("fake gh: no canned response for %s\\n" % key)
-    return 1
+        }
+        return 0, json.dumps(reply) + "\n", ""
+    return 1, "", f"fake gh: no canned response for {key}\n"
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-'''
+def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str, str]:
+    """Answer one ``gh`` invocation (argv after ``gh``). Returns (rc, stdout, stderr)."""
+    if argv[:2] in (["secret", "set"], ["variable", "set"]):
+        return _handle_set(argv[0], argv, stdin_text, state)
+    if argv[:2] in (["secret", "list"], ["variable", "list"]):
+        return _handle_list(argv[0], argv, state)
+    if argv[:2] == ["pr", "view"]:
+        return _handle_pr_view(argv, state)
+    if argv[:2] == ["pr", "list"]:
+        return _handle_pr_list(argv, state)
+    if argv[:2] == ["pr", "create"]:
+        return _handle_pr_create(argv, state)
+    if argv[:2] == ["repo", "view"]:
+        return _handle_repo_view(argv, state)
+    if not argv or argv[0] != "api":
+        return 1, "", f"fake gh: unsupported invocation: {argv!r}\n"
+    return _handle_api(argv, state)
 
 
 @dataclass
@@ -327,12 +291,12 @@ class GhSetCall:
 
 
 class FakeGh:
-    """Driver/inspector for the installed fake ``gh`` shim."""
+    """Driver/inspector for the in-process fake ``gh``."""
 
-    def __init__(self, bin_dir: Path) -> None:
-        self.bin_dir = bin_dir
-        self._calls_path = bin_dir / "calls.jsonl"
-        self._responses_path = bin_dir / "responses.json"
+    def __init__(self, state_dir: Path) -> None:
+        self.state_dir = state_dir
+        self._calls_path = state_dir / "calls.jsonl"
+        self._responses_path = state_dir / "responses.json"
 
     # --- inspection ---------------------------------------------------------
 
@@ -500,17 +464,16 @@ class FakeGh:
         return {}
 
 
-def install_fake_gh(bin_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Write the ``gh`` shim into ``bin_dir`` and prepend it to ``PATH``."""
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    shim = bin_dir / "gh"
-    # Pin the shebang to the interpreter running the suite. A bare
-    # ``#!/usr/bin/env python3`` resolves ``python3`` off PATH to whatever shim
-    # comes first (e.g. a pyenv shim), whose cold-start can intermittently
-    # exceed git_ops's 60s ``gh`` timeout and flake every fake-gh test. The
-    # current interpreter is always present and starts immediately.
-    source = _SHIM_SOURCE.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
-    shim.write_text(source, encoding="utf-8")
-    shim.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return FakeGh(bin_dir)
+def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
+    """Route ``gh`` invocations to the in-process handler; run everything else for real."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    real_run = subprocess.run
+
+    def router(args: Any, *pargs: Any, **kwargs: Any) -> Any:
+        if isinstance(args, (list, tuple)) and args and args[0] == "gh":
+            rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
+            return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", router)
+    return FakeGh(state_dir)
