@@ -21,6 +21,7 @@ import pytest
 
 from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
 from daydream.config import SKILL_MAP
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 
 if TYPE_CHECKING:
     from daydream.pr_review import PRInfo
@@ -1601,6 +1602,11 @@ def _intent_prompt(stub: _StubBackend) -> str:
     return next(c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower())
 
 
+def _per_stack_prompts(stub: _StubBackend) -> list[str]:
+    """Recover every captured per-stack (and structural) review prompt."""
+    return [c["prompt"] for c in stub.calls if "you are reviewing the " in c["prompt"].lower()]
+
+
 async def test_pr_body_reaches_intent_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
@@ -1617,6 +1623,9 @@ async def test_pr_body_reaches_intent_prompt(
     rc = await run(make_config(multi_stack_target, pr_number=7))
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
+    per_stack = _per_stack_prompts(stub)
+    assert per_stack
+    assert all(AUTHORITATIVE_INTENT_RULE in p for p in per_stack)
 
 
 async def test_no_pr_body_degrades_cleanly(
@@ -1644,6 +1653,9 @@ async def test_no_pr_body_degrades_cleanly(
     assert ".daydream/diff.patch" in intent
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
+    per_stack = _per_stack_prompts(stub)
+    assert per_stack
+    assert all(AUTHORITATIVE_INTENT_RULE not in p for p in per_stack)
 
 
 async def test_non_interactive_intent_prompt_carries_pr_body(
