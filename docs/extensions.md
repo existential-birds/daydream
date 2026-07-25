@@ -412,7 +412,7 @@ every other key is internal and may change without a version bump:
 | `alts_path` | Path to the alternatives-review output |
 | `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON and may include top-level `held`. An extension may read this file and rewrite its `items` before downstream consumers run. |
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
-| `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
+| `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description with non-whitespace content grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
 
 This keyword-only addition to the five in-scope prompt builders does not bump
 `EXTENSION_API_VERSION` or its support floor. It is an additive kwarg per the

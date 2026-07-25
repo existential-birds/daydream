@@ -713,9 +713,9 @@ async def _step_intent(ctx: FlowContext) -> None:
     """TTT intent analysis, grounded by the PR description when it is fresh.
 
     On exit, ``ctx.data["intent_authoritative"]`` is set to True when a fresh,
-    head-matched PR description was available (issue #279). Downstream reviewers
-    read this key to determine whether to include the authoritative-intent
-    precedence rule in their prompts.
+    head-matched PR description with non-whitespace content grounded the intent
+    phase (issue #279). Downstream reviewers read this key to determine whether
+    to include the authoritative-intent precedence rule in their prompts.
     """
     from daydream import git_ops
 
@@ -748,7 +748,8 @@ async def _step_intent(ctx: FlowContext) -> None:
                 pr_description = pr_view.get("body") or None
     # Issue #279: publish whether a fresh, head-matched PR description grounded
     # the intent phase, so downstream reviewers can include the precedence rule.
-    ctx.data["intent_authoritative"] = pr_description is not None
+    # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
+    ctx.data["intent_authoritative"] = bool(pr_description and pr_description.strip())
     async with phase_scope(DaydreamPhase.INTENT):
         ctx.data["intent_summary"] = await phase_understand_intent(
             ctx.backend_for("intent"),

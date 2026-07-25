@@ -1602,9 +1602,52 @@ def _intent_prompt(stub: _StubBackend) -> str:
     return next(c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower())
 
 
-def _per_stack_prompts(stub: _StubBackend) -> list[str]:
-    """Recover every captured per-stack (and structural) review prompt."""
-    return [c["prompt"] for c in stub.calls if "you are reviewing the " in c["prompt"].lower()]
+def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
+    """Classify captured prompts for the five finding-producing builders (#279).
+
+    Keys: ``per-stack``, ``generic-fallback``, ``structural``, ``arbiter``,
+    ``merge``. Per-stack matches skilled stack reviews; generic-fallback is
+    the README / missing-skill path. Structural / arbiter / merge use their
+    own stable opening phrases.
+    """
+    by_kind: dict[str, list[str]] = {
+        "per-stack": [],
+        "generic-fallback": [],
+        "structural": [],
+        "arbiter": [],
+        "merge": [],
+    }
+    for c in stub.calls:
+        pl = c["prompt"].lower()
+        if "you are reviewing the generic-fallback stack" in pl:
+            by_kind["generic-fallback"].append(c["prompt"])
+        elif "you are reviewing the " in pl:
+            by_kind["per-stack"].append(c["prompt"])
+        elif "you are the structural reviewer" in pl:
+            by_kind["structural"].append(c["prompt"])
+        elif "you are the arbiter" in pl:
+            by_kind["arbiter"].append(c["prompt"])
+        elif "cross-stack merge agent" in pl:
+            by_kind["merge"].append(c["prompt"])
+    return by_kind
+
+
+def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
+    """Assert the precedence rule is present/absent in every finding-producing prompt."""
+    by_kind = _review_prompts_by_kind(stub)
+    # Arbiter only runs when parse emits high/contested; tests that call this
+    # helper set parse_severity="high" so all five kinds are exercised.
+    missing = [k for k, prompts in by_kind.items() if not prompts]
+    assert not missing, f"expected prompts for all five kinds, missing: {missing}"
+    for kind, prompts in by_kind.items():
+        if expect_present:
+            assert all(AUTHORITATIVE_INTENT_RULE in p for p in prompts), (
+                f"{kind}: expected AUTHORITATIVE_INTENT_RULE in every prompt"
+            )
+        else:
+            assert all(AUTHORITATIVE_INTENT_RULE not in p for p in prompts), (
+                f"{kind}: expected AUTHORITATIVE_INTENT_RULE absent from every prompt"
+            )
 
 
 async def test_pr_body_reaches_intent_prompt(
@@ -1619,13 +1662,13 @@ async def test_pr_body_reaches_intent_prompt(
         lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # High severity so the scoped arbiter fires and all five builders are covered.
+    stub.parse_severity = "high"
 
     rc = await run(make_config(multi_stack_target, pr_number=7))
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
-    per_stack = _per_stack_prompts(stub)
-    assert per_stack
-    assert all(AUTHORITATIVE_INTENT_RULE in p for p in per_stack)
+    _assert_authoritative_rule_gated(stub, expect_present=True)
 
 
 async def test_no_pr_body_degrades_cleanly(
@@ -1643,6 +1686,7 @@ async def test_no_pr_body_degrades_cleanly(
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None: None)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
 
     rc = await run(make_config(multi_stack_target, pr_number=7))
     assert rc == 0
@@ -1653,9 +1697,34 @@ async def test_no_pr_body_degrades_cleanly(
     assert ".daydream/diff.patch" in intent
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
-    per_stack = _per_stack_prompts(stub)
-    assert per_stack
-    assert all(AUTHORITATIVE_INTENT_RULE not in p for p in per_stack)
+    _assert_authoritative_rule_gated(stub, expect_present=False)
+
+
+async def test_whitespace_only_pr_body_is_not_authoritative(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
+    """Whitespace-only PR bodies must not publish intent_authoritative (#279).
+
+    ``build_intent_prompt`` strips and ignores blank bodies; the orchestrator
+    flag must match so downstream prompts never get the precedence rule without
+    author-stated intent.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_pr_view",
+        lambda repo, pr=None: {"number": 7, "body": "   \n\t  "},
+    )
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+
+    rc = await run(make_config(multi_stack_target, pr_number=7))
+    assert rc == 0
+    intent = _intent_prompt(stub)
+    assert "pull request description" not in intent.lower()
+    assert AUTHORITATIVE_INTENT_RULE not in intent
+    _assert_authoritative_rule_gated(stub, expect_present=False)
 
 
 async def test_non_interactive_intent_prompt_carries_pr_body(
