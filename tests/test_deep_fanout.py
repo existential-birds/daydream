@@ -9,39 +9,14 @@ import anyio
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.detection import StackAssignment
 from daydream.phases import phase_per_stack_reviews
+from tests.harness.backend import ScriptedBackend, Turn
+
+# The minimal turn a per-stack review agent has to emit to satisfy run_agent.
+_REVIEW_TURN: Turn = [TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)]
 
 
-class _RecordingBackend:
-    """Records every execute call; verifies no `agents` kwarg was passed."""
-
-    model = "mock-model"  # satisfies the Backend protocol's `model: str` member
-
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
-        self.agents_seen: list[Any] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ):
-        self.prompts.append(prompt)
-        self.agents_seen.append(agents)
-        # Emit minimal events to satisfy run_agent.
-        yield TextEvent(text="done")
-        yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
+def _review_backend(**attrs: Any) -> ScriptedBackend:
+    return ScriptedBackend(events=_REVIEW_TURN, model="mock-model", **attrs)
 
 
 def _mk_stacks() -> list[StackAssignment]:
@@ -79,7 +54,7 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
     """D-17: each stack gets exactly one backend.execute call."""
-    backend = _RecordingBackend()
+    backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
@@ -98,7 +73,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
 
 async def test_fan_out_never_passes_agents_kwarg(tmp_path: Path, make_work) -> None:
     """D-38 (Codex parity): the `agents` kwarg to backend.execute must be None."""
-    backend = _RecordingBackend()
+    backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
@@ -110,12 +85,12 @@ async def test_fan_out_never_passes_agents_kwarg(tmp_path: Path, make_work) -> N
         alternatives_path=alts,
     )
 
-    assert all(a is None for a in backend.agents_seen)
+    assert all(c["agents"] is None for c in backend.calls)
 
 
 async def test_fan_out_unique_output_paths(tmp_path: Path, make_work) -> None:
     """D-18: per-stack output paths are unique and deterministic."""
-    backend = _RecordingBackend()
+    backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, _ = await phase_per_stack_reviews(
@@ -135,7 +110,7 @@ async def test_fan_out_unique_output_paths(tmp_path: Path, make_work) -> None:
 
 async def test_fan_out_closure_capture(tmp_path: Path, make_work) -> None:
     """Pitfall 2: no late-binding bug -- each task gets its own prompt."""
-    backend = _RecordingBackend()
+    backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
@@ -177,7 +152,7 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     monkeypatch.setattr(_prompts, "build_structural_prompt", _capture_structural)
     monkeypatch.setattr(_prompts, "build_per_stack_prompt", _capture_per_stack)
 
-    backend = _RecordingBackend()
+    backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     stacks = [
@@ -215,28 +190,16 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
 async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
-    class _FlakyBackend(_RecordingBackend):
-        fanout_concurrency = 4
-
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            output_schema: Any = None,
-            continuation: Any = None,
-            agents: Any = None,
-            max_turns: Any = None,
-            read_only: bool = False,
-            persist_session: bool = True,
-        ):
-            self.prompts.append(prompt)
-            self.agents_seen.append(agents)
+    # Prompt-conditional, so it stays a dispatch fake: ScriptedBackend scripts by
+    # call index and the fan-out completion order is not fixed.
+    class _FlakyBackend(ScriptedBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any):
             if "react" in prompt.lower():
                 raise RuntimeError("simulated react failure")
-            yield TextEvent(text="ok")
-            yield ResultEvent(structured_output=None, continuation=None)
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
 
-    backend = _FlakyBackend()
+    backend = _FlakyBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
@@ -256,11 +219,11 @@ async def test_fan_out_continues_after_one_failure(tmp_path: Path, make_work) ->
     assert "simulated react failure" in failures["react"]
 
 
-class _PiShapeBackend(_RecordingBackend):
+class _PiShapeBackend(ScriptedBackend):
     """Mock backend that uses PiBackend's real skill formatter."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(events=_REVIEW_TURN)
         from daydream.backends.pi import PiBackend
 
         self._pi = PiBackend(model="glm-5.2")
@@ -373,8 +336,10 @@ async def test_fanout_default_concurrency(tmp_path: Path, make_work, monkeypatch
 
     monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
 
-    # _RecordingBackend has no fanout_concurrency attr → getattr(..., 4) returns 4.
-    backend = _RecordingBackend()
+    # The default-limiter path is only reached when the attribute is ABSENT, so
+    # drop the one ScriptedBackend always sets → getattr(..., 4) returns 4.
+    backend = _review_backend()
+    del backend.fanout_concurrency
     assert not hasattr(backend, "fanout_concurrency")
     diff, intent, alts = _mk_context_files(tmp_path)
 
@@ -401,10 +366,7 @@ async def test_fanout_low_concurrency(tmp_path: Path, make_work, monkeypatch) ->
 
     monkeypatch.setattr(anyio, "CapacityLimiter", patched_limiter)
 
-    class _LowConcurrencyBackend(_RecordingBackend):
-        fanout_concurrency = 2
-
-    backend = _LowConcurrencyBackend()
+    backend = _review_backend(fanout_concurrency=2)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(

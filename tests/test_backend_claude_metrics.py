@@ -7,14 +7,14 @@ Covers Phase 2 / Plan 02-03:
     field names (`prompt_tokens` / `completion_tokens`); the SDK boundary
     keys (`input_tokens` / `output_tokens`) are renamed at emission time.
 
-Reuses the existing mock-block dataclasses in tests/test_backend_claude.py
-and extends MockAssistantMessage / MockResultMessage with the `usage` and
+Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py and
+extends MockAssistantMessage / MockResultMessage with the `usage` and
 `message_id` fields needed by Phase 2.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,92 +26,39 @@ from daydream.backends import (
     TextEvent,
 )
 from daydream.backends.claude import ClaudeBackend
-from tests.test_backend_claude import (
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
     MockTextBlock,
-    MockThinkingBlock,
-    MockToolResultBlock,
-    MockToolUseBlock,
-    MockUserMessage,
+    patch_claude_sdk,
+    scripted_client,
 )
 
 
 # Phase 2 extensions: AssistantMessage needs message_id + usage; ResultMessage needs usage.
 @dataclass
-class MockAssistantMessageWithUsage:
-    """Mirror of MockAssistantMessage plus EVNT-06 fields (message_id, usage)."""
+class MockAssistantMessageWithUsage(MockAssistantMessage):
+    """Shared MockAssistantMessage plus EVNT-06 fields (message_id, usage)."""
 
-    content: list[Any] = field(default_factory=list)
     message_id: str = ""
     usage: dict[str, Any] | None = None
 
 
 @dataclass
-class MockResultMessageWithUsage:
-    """Mirror of MockResultMessage plus EVNT-04/05 usage field."""
+class MockResultMessageWithUsage(MockResultMessage):
+    """Shared MockResultMessage plus the EVNT-04/05 usage field."""
 
-    total_cost_usd: float | None = 0.001
-    structured_output: Any = None
     usage: dict[str, Any] | None = None
-    is_error: bool = False
-    result: str | None = None
-    subtype: str = "success"
-
-
-class _MockClaudeSDKClient:
-    """Mock client driven by a class-level `messages` sequence.
-
-    Mirrors the pattern in tests/test_backend_claude.py (e.g.
-    MockClaudeSDKClientCapture) — a class attribute holds the canned
-    sequence and `receive_response()` yields it.
-    """
-
-    messages: list[Any] = []
-
-    def __init__(self, options: Any = None):
-        self.options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        for msg in type(self).messages:
-            yield msg
-
-
-def _patch_sdk(monkeypatch, client_cls) -> None:
-    """Patch the SDK module-level names that `claude.py` resolves at runtime.
-
-    Mirrors the `patch_sdk` fixture in tests/test_backend_claude.py:140-152
-    but uses MockAssistantMessageWithUsage / MockResultMessageWithUsage so
-    the new EVNT-04..06 fields are available on the message objects the
-    backend's isinstance dispatch sees.
-    """
-    monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_cls)
-    monkeypatch.setattr("daydream.backends.claude.AssistantMessage", MockAssistantMessageWithUsage)
-    monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
-    monkeypatch.setattr("daydream.backends.claude.ResultMessage", MockResultMessageWithUsage)
-    monkeypatch.setattr("daydream.backends.claude.TextBlock", MockTextBlock)
-    monkeypatch.setattr("daydream.backends.claude.ThinkingBlock", MockThinkingBlock)
-    monkeypatch.setattr("daydream.backends.claude.ToolUseBlock", MockToolUseBlock)
-    monkeypatch.setattr("daydream.backends.claude.ToolResultBlock", MockToolResultBlock)
 
 
 async def _collect_events(monkeypatch, messages: list[Any]) -> list[Any]:
     """Drive ClaudeBackend.execute with a canned message sequence; return events."""
-
-    class _Client(_MockClaudeSDKClient):
-        pass
-
-    _Client.messages = messages
-
-    _patch_sdk(monkeypatch, _Client)
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client(messages),
+        assistant_message=MockAssistantMessageWithUsage,
+        result_message=MockResultMessageWithUsage,
+    )
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
     async for event in backend.execute(Path("/tmp"), "test prompt"):

@@ -6,8 +6,6 @@ cache value, the human-sourced observation in history, and the prior label
 echoed to stdout — not mere dispatch.
 """
 
-from typing import Any
-
 from daydream import cli
 from daydream.archive.index import (
     append_label_observation,
@@ -15,26 +13,11 @@ from daydream.archive.index import (
     query_runs,
     upsert_run,
 )
-from daydream.archive.manifest import Manifest
-
-
-def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
-    defaults: dict[str, Any] = {
-        "session_id": session_id,
-        "archived_at": "2026-04-29T00:00:00+00:00",
-        "status": "complete",
-        "run_flow": "normal",
-        "skill": "python",
-        "model": "opus",
-        "backend": "claude",
-        "archive_path": "/tmp/archive/runs/sess-0001",
-    }
-    defaults.update(overrides)
-    return Manifest(**defaults)
+from tests.harness.trajectory import make_manifest
 
 
 def test_label_command_sets_human_label_and_shows_prior(tmp_path, archive_dir, capsys):
-    upsert_run(archive_dir, _make_manifest(session_id="sess-0001"))
+    upsert_run(archive_dir, make_manifest(session_id="sess-0001"))
     append_label_observation(
         archive_dir,
         "sess-0001",
@@ -54,7 +37,7 @@ def test_label_command_sets_human_label_and_shows_prior(tmp_path, archive_dir, c
 
 
 def test_label_command_accepts_unknown(tmp_path, archive_dir):
-    upsert_run(archive_dir, _make_manifest(session_id="sess-0002"))
+    upsert_run(archive_dir, make_manifest(session_id="sess-0002"))
     assert cli._handle_label_command(["sess-0002", "--outcome", "unknown"]) == 0
 
 

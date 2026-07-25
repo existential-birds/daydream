@@ -20,41 +20,13 @@ from daydream.workspace import (
     copy_files_into_ephemeral,
     open_workspace,
 )
+from tests.harness.git_helpers import bare_remote as _bare_remote
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import configure_identity as _configure_identity
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 
-# --- Helpers (mirrors tests/test_git_ops.py for isolation) ------------------
-
-
-def _git(repo: Path, *args: str, check: bool = True) -> str:
-    proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-    return proc.stdout.strip()
-
-
-def _configure_identity(repo: Path) -> None:
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Tester")
-
-
-def _commit(repo: Path, message: str) -> str:
-    _git(repo, "commit", "-m", message)
-    return _git(repo, "rev-parse", "HEAD")
-
-
-def _init_repo(repo: Path) -> None:
-    repo.mkdir(parents=True, exist_ok=True)
-    _git(repo, "init", "-b", "main")
-    _configure_identity(repo)
-
-
-def _bare_remote(path: Path) -> Path:
-    path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init", "--bare", "-b", "main")
-    return path
+# --- Helpers (workspace-specific: bare-origin push plumbing) ----------------
 
 
 def _make_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:

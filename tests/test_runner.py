@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -10,9 +10,23 @@ from typing import Any
 import pytest
 
 from daydream import runner
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend, Turn
+
+_RESULT = ResultEvent(structured_output=None, continuation=None)
+# A failing test run, then the heal fix agent's turn.
+_FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
+_FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
+# Raised if the heal loop calls the backend past its script -- the bounded-loop guard.
+_BEYOND_SCRIPT: Turn = (AssertionError("backend invoked beyond scripted call count"),)
+
+
+def _handoff_turn(body: str) -> Turn:
+    """The read-only failure-summarizer's structured handoff response."""
+    return (ResultEvent(structured_output={"handoff_prompt": body}, continuation=None),)
 
 
 def test_run_config_exploration_depth():
@@ -38,26 +52,14 @@ def test_run_config_exploration_context_defaults_to_none():
 # --- Stage 4.1b dispatch tests ---------------------------------------------
 
 
-def _fake_work(repo: Path) -> WorkContext:
-    """Build a synthetic ``WorkContext`` for dispatch unit tests."""
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha="DEADBEEF",
-        head_branch="feat/x",
-        head_sha="CAFEBABE",
-        is_ephemeral=False,
-        run_id="20260101000000-deadbeef",
-    )
-
-
 @pytest.fixture
-def patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def patch_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_work: Callable[..., WorkContext]
+):
     """Stub ``open_workspace`` and the in-place fallback so dispatch tests
     don't touch git. Yields the synthetic ``WorkContext`` callers will see.
     """
-    work = _fake_work(tmp_path)
+    work = make_work(tmp_path)
 
     @asynccontextmanager
     async def _fake_open_workspace(*_args: Any, **_kwargs: Any) -> AsyncIterator[WorkContext]:
@@ -70,153 +72,94 @@ def patch_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 @pytest.fixture
-def silence_runner_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Drop the noisy ``print_phase_hero`` banner during dispatch tests."""
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
+def silence_runner_ui(silence_console: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop ``daydream.runner``'s UI helpers (notably the ``print_phase_hero``
+    banner) plus the shallow flow's end-of-run summary.
+
+    ``daydream.flows.shallow``'s own ``print_phase_hero``/``print_dim`` bindings
+    are deliberately left live: the HEAL-hero ordering test spies on them.
+    """
+    silence_console("daydream.runner")
+    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
+
+
+_DISPATCH_TARGETS = (
+    "_run_pr_feedback",
+    "_run_comment",
+    "_run_review",
+    "_run_loop_shallow",
+    "_run_loop_deep",
+    "_run_improve",
+)
 
 
 @pytest.mark.asyncio
-async def test_run_dispatches_to_pr_feedback_when_pr_number_set(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+@pytest.mark.parametrize(
+    ("expected_target", "config_kwargs", "expected_attr", "expected_value"),
+    [
+        ("_run_pr_feedback", {"pr_number": 42, "bot": "botname"}, "pr_number", 42),
+        # Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback.
+        ("_run_loop_deep", {"pr_number": 42, "bot": None}, "pr_number", 42),
+        ("_run_comment", {"output_mode": "comment"}, "output_mode", "comment"),
+        ("_run_review", {"output_mode": "review"}, "output_mode", "review"),
+        ("_run_loop_shallow", {"output_mode": "loop", "shallow": True}, "shallow", True),
+        # Stage 4.2: deep is the default. No flags required to route here.
+        ("_run_loop_deep", {"output_mode": "loop"}, "shallow", False),
+        ("_run_improve", {"flow_name": "improve"}, "flow_name", "improve"),
+    ],
+    ids=[
+        "pr_feedback_when_pr_number_set",
+        "auto_detected_pr_number_goes_deep",
+        "comment_mode",
+        "review_mode",
+        "shallow_loop_when_explicit",
+        "deep_loop_by_default",
+        "improve_flow",
+    ],
+)
+async def test_run_dispatches_to_expected_flow(
+    expected_target,
+    config_kwargs,
+    expected_attr,
+    expected_value,
+    monkeypatch,
+    patch_workspace,
+    silence_runner_ui,
+    tmp_path,
+    make_config,
 ):
-    called: dict[str, Any] = {}
+    """``run()`` routes each flag combination to exactly one flow entrypoint.
 
-    async def stub(work, config):
-        called["work"] = work
-        called["pr"] = config.pr_number
-        return 0
+    Every dispatch function is stubbed, so the recorded call list also proves
+    exclusivity: shallow runs only when ``--shallow`` is explicitly set, and an
+    auto-detected ``pr_number`` (no ``bot``) must not reach PR feedback.
+    """
+    called: list[tuple[str, WorkContext, RunConfig]] = []
 
-    monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
-    config = RunConfig(target=str(tmp_path), pr_number=42, bot="botname")
+    def _record(name: str):
+        async def stub(work, config):
+            called.append((name, work, config))
+            return 0
+
+        return stub
+
+    for name in _DISPATCH_TARGETS:
+        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+
+    config = make_config(tmp_path, **config_kwargs)
 
     exit_code = await runner.run(config)
     assert exit_code == 0
-    assert called["pr"] == 42
-    assert called["work"] is patch_workspace
-
-
-@pytest.mark.asyncio
-async def test_auto_detected_pr_number_dispatches_to_deep_loop(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback."""
-    called: dict[str, Any] = {}
-
-    async def stub(work, config):
-        called["pr_number"] = config.pr_number
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
-    config = RunConfig(target=str(tmp_path), pr_number=42, bot=None)
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["pr_number"] == 42
-
-
-@pytest.mark.asyncio
-async def test_run_dispatches_to_comment_mode(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    called: dict[str, Any] = {}
-
-    async def stub(work, config):
-        called["mode"] = config.output_mode
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_comment", stub)
-    config = RunConfig(target=str(tmp_path), output_mode="comment")
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["mode"] == "comment"
-
-
-@pytest.mark.asyncio
-async def test_run_dispatches_to_review_mode(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    called: dict[str, Any] = {}
-
-    async def stub(work, config):
-        called["mode"] = config.output_mode
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_review", stub)
-    config = RunConfig(target=str(tmp_path), output_mode="review")
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["mode"] == "review"
-
-
-@pytest.mark.asyncio
-async def test_run_dispatches_to_shallow_loop(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    called: dict[str, bool] = {}
-
-    async def stub(work, config):
-        called["shallow"] = config.shallow
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_shallow", stub)
-    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=True)
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["shallow"] is True
-
-
-@pytest.mark.asyncio
-async def test_run_dispatches_to_deep_loop(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """Stage 4.2: deep is the default. No flags required to route here."""
-    called: dict[str, bool] = {}
-
-    async def stub(work, config):
-        called["routed"] = True
-        called["shallow"] = config.shallow
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
-    # Default RunConfig (no shallow, no deep) goes deep — that's the new default.
-    config = RunConfig(target=str(tmp_path), output_mode="loop")
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called["routed"] is True
-    assert called["shallow"] is False
-
-
-@pytest.mark.asyncio
-async def test_run_dispatches_to_shallow_loop_when_explicit(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
-):
-    """Shallow runs only when ``--shallow`` is explicitly set (paired w/ deep default)."""
-    called: dict[str, bool] = {}
-
-    async def shallow_stub(work, config):
-        called["shallow"] = True
-        return 0
-
-    async def deep_stub(work, config):
-        called["deep"] = True
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_loop_shallow", shallow_stub)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", deep_stub)
-    config = RunConfig(target=str(tmp_path), output_mode="loop", shallow=True)
-
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called == {"shallow": True}
+    assert [name for name, _work, _config in called] == [expected_target]
+    _name, work, seen_config = called[0]
+    assert work is patch_workspace
+    observed = getattr(seen_config, expected_attr)
+    assert observed == expected_value and type(observed) is type(expected_value)
 
 
 @pytest.mark.asyncio
 async def test_comment_mode_errors_when_no_open_pr_for_branch(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
 ):
     """``--comment --branch X`` with no open PR for X exits 1 with a clear error."""
     monkeypatch.setattr(
@@ -230,11 +173,7 @@ async def test_comment_mode_errors_when_no_open_pr_for_branch(
 
     monkeypatch.setattr("daydream.runner.print_error", fake_print_error)
 
-    config = RunConfig(
-        target=str(tmp_path),
-        output_mode="comment",
-        branch="feat/missing",
-    )
+    config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
     exit_code = await runner.run(config)
 
     assert exit_code == 1
@@ -244,7 +183,7 @@ async def test_comment_mode_errors_when_no_open_pr_for_branch(
 
 @pytest.mark.asyncio
 async def test_run_feedback_routes_through_pr_feedback(
-    monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
 ):
     """``run_feedback`` sets ``pr_number`` and re-enters dispatch."""
     called: dict[str, Any] = {}
@@ -254,7 +193,7 @@ async def test_run_feedback_routes_through_pr_feedback(
         return 0
 
     monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
-    config = RunConfig(target=str(tmp_path), bot="botname")
+    config = make_config(tmp_path, bot="botname")
 
     exit_code = await runner.run_feedback(config, 99)
     assert exit_code == 0
@@ -265,27 +204,20 @@ async def test_run_feedback_routes_through_pr_feedback(
 
 @pytest.mark.asyncio
 async def test_pr_feedback_banner_echoes_resolved_backend_model(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, make_work, make_config
 ):
     """The PR-feedback banner reports the model id that the resolved backend
     actually carries — not a parallel literal hardcoded in the runner. Tests
     propagation, not a specific id.
     """
-    work = _fake_work(tmp_path)
-
-    class _StubBackend:
-        fanout_concurrency = 4
-
-        def __init__(self, model: str):
-            self.model = model
-
+    work = make_work(tmp_path)
     chosen_model = "fixture-model-xyz"
 
     # ``FlowContext.backend_for`` resolves through ``daydream.runner._resolve_backend``
     # (late import) and passes ``cache=`` by keyword.
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None, **_kwargs: _StubBackend(chosen_model),
+        lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model=chosen_model),
     )
 
     async def _no_op_fetch(*_args, **_kwargs):
@@ -304,11 +236,7 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
         lambda _console, message: captured.append(message),
     )
 
-    config = RunConfig(
-        target=str(tmp_path),
-        pr_number=42,
-        bot="botname",
-    )
+    config = make_config(tmp_path, pr_number=42, bot="botname")
 
     exit_code = await runner._run_pr_feedback(work, config)
     assert exit_code == 0
@@ -379,7 +307,7 @@ class TestResolveBackendPhaseModel:
 
 @pytest.mark.asyncio
 async def test_run_loop_shallow_heal_hero_followed_by_model_line(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
 ):
     """The HEAL phase hero in ``_run_loop_shallow`` must be followed by a dim
     ``Model: <name>`` line scoped to the fix backend.
@@ -393,21 +321,13 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     # Pre-create the review file so the check_review_file_exists guard passes.
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - Bug\n")
 
-    work = _fake_work(tmp_path)
+    work = make_work(tmp_path)
 
     # Stub backends to carry distinct phase-specific models so the dim line's
     # source is unambiguous.
-    class _StubBackend:
-        fanout_concurrency = 4
-
-        def __init__(self, model: str):
-            self.model = model
-
     backends_by_phase = {
-        "review": _StubBackend("review-model-xyz"),
-        "parse": _StubBackend("parse-model-xyz"),
-        "fix": _StubBackend("fix-model-xyz"),
-        "test": _StubBackend("test-model-xyz"),
+        phase: ScriptedBackend(model=f"{phase}-model-xyz")
+        for phase in ("review", "parse", "fix", "test")
     }
 
     monkeypatch.setattr(
@@ -444,20 +364,7 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     monkeypatch.setattr("daydream.flows.shallow.print_phase_hero", _hero_spy)
     monkeypatch.setattr("daydream.flows.shallow.print_dim", _dim_spy)
 
-    # Silence misc UI noise.
-    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
-
-    config = RunConfig(
-        target=str(tmp_path),
-        start_at="fix",
-        cleanup=False,
-        loop=False,
-        shallow=True,
-    )
+    config = make_config(tmp_path, start_at="fix", loop=False, shallow=True)
 
     exit_code = await runner._run_loop_shallow(work, config)
     assert exit_code == 0
@@ -479,7 +386,9 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     )
 
 
-async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp_path):
+async def test_shallow_items_canonicalized_and_severity_ordered(
+    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+):
     """Shallow items carry ``lens="per-stack"`` + a ``severity`` derived from
     confidence, and ``phase_fix`` receives them severity-sorted.
 
@@ -493,17 +402,11 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     # Pre-create the review file so the check_review_file_exists guard passes.
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. low.py:1 - L\n2. high.py:2 - H\n")
 
-    work = _fake_work(tmp_path)
-
-    class _StubBackend:
-        fanout_concurrency = 4
-
-        def __init__(self, model: str):
-            self.model = model
+    work = make_work(tmp_path)
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None, **_kwargs: _StubBackend("stub-model"),
+        lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -529,22 +432,7 @@ async def test_shallow_items_canonicalized_and_severity_ordered(monkeypatch, tmp
     monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
     monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _stub_phase_commit_push)
 
-    # Silence UI noise.
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
-
-    config = RunConfig(
-        target=str(tmp_path),
-        start_at="fix",
-        cleanup=False,
-        loop=False,
-        shallow=True,
-    )
+    config = make_config(tmp_path, start_at="fix", loop=False, shallow=True)
 
     exit_code = await runner._run_loop_shallow(work, config)
     assert exit_code == 0
@@ -570,7 +458,8 @@ def test_runconfig_defaults_non_interactive_false():
     ids=["deep_loop", "shallow", "pr_feedback", "comment"],
 )
 async def test_run_threads_non_interactive_into_agent_state(
-    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path
+    dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,
+    make_config,
 ):
     """``config.non_interactive=True`` flips the agent singleton flag before any
     promptable phase, on every dispatch branch ``run()`` can take. Each case
@@ -586,7 +475,7 @@ async def test_run_threads_non_interactive_into_agent_state(
             return 0
 
         monkeypatch.setattr(dispatch_target, stub)
-        config = RunConfig(target=str(tmp_path), non_interactive=True, **config_kwargs)
+        config = make_config(tmp_path, non_interactive=True, **config_kwargs)
 
         exit_code = await runner.run(config)
         assert exit_code == 0
@@ -599,7 +488,9 @@ async def test_run_threads_non_interactive_into_agent_state(
 
 
 @pytest.mark.asyncio
-async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch, tmp_path):
+async def test_non_interactive_shallow_calls_phase_commit_push_auto(
+    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+):
     """When non_interactive=True and tests pass, _run_loop_shallow must call
     phase_commit_push_auto — not the interactive phase_commit_push.
 
@@ -617,15 +508,11 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
 
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
 
-    work = _fake_work(tmp_path)
-
-    class _StubBackend:
-        model = "stub-model"
-        fanout_concurrency = 4
+    work = make_work(tmp_path)
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, _phase, cache=None, **_kwargs: _StubBackend(),
+        lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
 
     async def _stub_phase_parse_feedback(_backend, _work):
@@ -652,21 +539,8 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
     monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
 
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
-
-    config = RunConfig(
-        target=str(tmp_path),
-        start_at="fix",
-        cleanup=False,
-        loop=False,
-        shallow=True,
-        non_interactive=True,
+    config = make_config(
+        tmp_path, start_at="fix", loop=False, shallow=True, non_interactive=True
     )
 
     exit_code = await runner._run_loop_shallow(work, config)
@@ -679,8 +553,85 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(monkeypatch,
     )
 
 
+async def _drive_shallow_failing_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    work: WorkContext,
+    config: RunConfig,
+    *,
+    script: list[Turn],
+    stdin_guard_message: str,
+    apply_agent_state: Callable[[], None],
+) -> tuple[int, ScriptedBackend, list[bool]]:
+    """Drive ``_run_loop_shallow`` with the REAL ``phase_test_and_heal`` over a
+    scripted failing test run.
+
+    Holds everything the two failing-shallow real-path tests share: the review
+    file seed, the scripted backend bound to the ``test`` phase, stubbed
+    parse/fix, one commit spy across BOTH commit variants, a stdin trap, and the
+    agent-state reset bracket. The differing script, config, agent axis, and
+    assertions stay at the call sites.
+
+    ``_BEYOND_SCRIPT`` is appended so a heal loop that runs past its script
+    raises instead of silently replaying the last turn forever.
+
+    Returns:
+        ``(exit_code, test_backend, commit_calls)``.
+    """
+    from daydream.agent import reset_state
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+
+    test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model")
+    stub_backend = ScriptedBackend(model="stub-model")
+
+    monkeypatch.setattr(
+        "daydream.runner._resolve_backend",
+        lambda _config, phase, cache=None, **_kwargs: (
+            test_backend if phase == "test" else stub_backend
+        ),
+    )
+
+    async def _stub_phase_parse_feedback(_backend, _work):
+        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
+
+    async def _stub_phase_fix(*_args, **_kwargs):
+        return None
+
+    commit_calls: list[bool] = []
+
+    async def _spy_commit(*_args, **_kwargs):
+        commit_calls.append(True)
+
+    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
+    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_commit)
+    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_commit)
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError(stdin_guard_message)
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+    monkeypatch.setattr(
+        "daydream.phases.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+
+    reset_state()
+    apply_agent_state()
+    try:
+        exit_code = await runner._run_loop_shallow(work, config)
+    finally:
+        reset_state()
+
+    return exit_code, test_backend, commit_calls
+
+
 @pytest.mark.asyncio
-async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkeypatch, tmp_path):
+async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(
+    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+):
     """Real-path: a non-interactive shallow run whose tests FAIL writes a handoff
     and exits 1 without launching the fix agent or reading stdin.
 
@@ -694,89 +645,21 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
     -- whose ``_build_fix_prompt`` text ("Analyze the failures and fix them",
     asserted absent) -- and ``prompt_user`` would read stdin (rigged to fail).
     """
-    import importlib
-    import sys
-    from pathlib import Path as _Path
+    from daydream.agent import set_non_interactive
 
-    _tests_dir = str(_Path(__file__).parent)
-    if _tests_dir not in sys.path:
-        sys.path.insert(0, _tests_dir)
-    _SummarizerBackend = importlib.import_module("test_phases")._SummarizerBackend
-
-    from daydream.agent import reset_state, set_non_interactive
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
-
-    work = _fake_work(tmp_path)
-
-    # The test phase's backend yields a failing test run, then the read-only
-    # summarizer's handoff body -- exactly the choice-"4" path the guard takes.
-    test_backend = _SummarizerBackend([
-        "fail",
-        ("handoff", "# Handoff\n\nnon-interactive failure context"),
-    ])
-
-    class _StubBackend:
-        model = "stub-model"
-        fanout_concurrency = 4
-
-    def _resolve(_config, phase, cache=None, **_kwargs):
-        return test_backend if phase == "test" else _StubBackend()
-
-    monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
-
-    async def _stub_phase_parse_feedback(_backend, _work):
-        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
-
-    async def _stub_phase_fix(*_args, **_kwargs):
-        return None
-
-    commit_calls: list[bool] = []
-
-    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
-        commit_calls.append(True)
-
-    async def _spy_phase_commit_push(*_args, **_kwargs):
-        commit_calls.append(True)
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
-
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
-
-    monkeypatch.setattr("builtins.input", _forbidden_input)
-
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        "daydream.phases.console",
-        type("C", (), {"print": lambda *a, **kw: None})(),
+    exit_code, test_backend, commit_calls = await _drive_shallow_failing_run(
+        monkeypatch,
+        tmp_path,
+        make_work(tmp_path),
+        make_config(tmp_path, start_at="fix", loop=False, shallow=True, non_interactive=True),
+        # The test phase's backend yields a failing test run, then the read-only
+        # summarizer's handoff body -- exactly the choice-"4" path the guard takes.
+        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\nnon-interactive failure context")],
+        stdin_guard_message=(
+            "input() was called in non-interactive mode -- stdin must not be touched"
+        ),
+        apply_agent_state=lambda: set_non_interactive(True),
     )
-
-    config = RunConfig(
-        target=str(tmp_path),
-        start_at="fix",
-        cleanup=False,
-        loop=False,
-        shallow=True,
-        non_interactive=True,
-    )
-
-    reset_state()
-    set_non_interactive(True)
-    try:
-        exit_code = await runner._run_loop_shallow(work, config)
-    finally:
-        reset_state()
 
     assert exit_code == 1
 
@@ -788,15 +671,17 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(monkey
 
     # Exactly two test-backend calls: the failing test run + the read-only
     # summarizer. The mutating heal fix agent was never launched.
-    assert len(test_backend.captured_prompts) == 2
-    assert "read-only failure-summarizer" in test_backend.captured_prompts[1]
+    assert len(test_backend.prompts) == 2
+    assert "read-only failure-summarizer" in test_backend.prompts[1]
     assert all(
-        "Analyze the failures and fix them" not in p for p in test_backend.captured_prompts
-    ), test_backend.captured_prompts
+        "Analyze the failures and fix them" not in p for p in test_backend.prompts
+    ), test_backend.prompts
 
 
 @pytest.mark.asyncio
-async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_path):
+async def test_yes_shallow_failing_tests_bounded_fix_and_abort(
+    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+):
     """Real-path: a --yes shallow run whose tests FAIL runs ONE fix attempt then aborts.
 
     Drives ``_run_loop_shallow`` with the REAL ``phase_test_and_heal`` (not stubbed)
@@ -810,91 +695,31 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
     exactly one call (the fix agent), proving the fix ran once and only once.
     stdin must never be touched.
     """
-    import importlib
-    import sys
-    from pathlib import Path as _Path
+    from daydream.agent import set_assume
 
-    _tests_dir = str(_Path(__file__).parent)
-    if _tests_dir not in sys.path:
-        sys.path.insert(0, _tests_dir)
-    _SummarizerBackend = importlib.import_module("test_phases")._SummarizerBackend
-
-    from daydream.agent import reset_state, set_assume
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
-
-    work = _fake_work(tmp_path)
-
-    # Script: fail → fix (one bounded attempt) → fail → handoff (summarizer).
-    # Any 5th call raises via _SummarizerBackend's guard, proving the loop ends.
-    test_backend = _SummarizerBackend([
-        "fail",
-        "fix",
-        "fail",
-        ("handoff", "# Handoff\n\n--yes bounded fix failure"),
-    ])
-
-    class _StubBackend:
-        model = "stub-model"
-        fanout_concurrency = 4
-
-    def _resolve(_config, phase, cache=None, **_kwargs):
-        return test_backend if phase == "test" else _StubBackend()
-
-    monkeypatch.setattr("daydream.runner._resolve_backend", _resolve)
-
-    async def _stub_phase_parse_feedback(_backend, _work):
-        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
-
-    async def _stub_phase_fix(*_args, **_kwargs):
-        return None
-
-    commit_calls: list[bool] = []
-
-    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
-        commit_calls.append(True)
-
-    async def _spy_phase_commit_push(*_args, **_kwargs):
-        commit_calls.append(True)
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
-
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError("input() must not be called under --yes")
-
-    monkeypatch.setattr("builtins.input", _forbidden_input)
-
-    monkeypatch.setattr("daydream.runner.print_phase_hero", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_dim", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_info", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_warning", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.runner.print_skipped_phases", lambda *a, **kw: None)
-    monkeypatch.setattr(
-        "daydream.phases.console",
-        type("C", (), {"print": lambda *a, **kw: None})(),
+    exit_code, test_backend, commit_calls = await _drive_shallow_failing_run(
+        monkeypatch,
+        tmp_path,
+        make_work(tmp_path),
+        make_config(
+            tmp_path,
+            start_at="fix",
+            loop=False,
+            shallow=True,
+            non_interactive=False,
+            assume="yes",
+        ),
+        # Script: fail → fix (one bounded attempt) → fail → handoff (summarizer).
+        # Any 5th call raises via the beyond-script turn, proving the loop ends.
+        script=[
+            _FAIL_TURN,
+            _FIX_TURN,
+            _FAIL_TURN,
+            _handoff_turn("# Handoff\n\n--yes bounded fix failure"),
+        ],
+        stdin_guard_message="input() must not be called under --yes",
+        apply_agent_state=lambda: set_assume("yes"),
     )
-
-    config = RunConfig(
-        target=str(tmp_path),
-        start_at="fix",
-        cleanup=False,
-        loop=False,
-        shallow=True,
-        assume="yes",
-    )
-
-    reset_state()
-    set_assume("yes")
-    try:
-        exit_code = await runner._run_loop_shallow(work, config)
-    finally:
-        reset_state()
 
     assert exit_code == 1
 
@@ -906,9 +731,9 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(monkeypatch, tmp_
 
     # Exactly four test-backend calls: fail → fix → fail → summarizer. No 5th
     # call (bounded-loop guard fired); call 4 ran read-only.
-    assert len(test_backend.captured_prompts) == 4, test_backend.captured_prompts
-    assert "Analyze the failures and fix them" in test_backend.captured_prompts[1]
-    assert "read-only failure-summarizer" in test_backend.captured_prompts[3]
+    assert len(test_backend.prompts) == 4, test_backend.prompts
+    assert "Analyze the failures and fix them" in test_backend.prompts[1]
+    assert "read-only failure-summarizer" in test_backend.prompts[3]
     assert test_backend.read_only_calls == [False, False, False, True], (
         test_backend.read_only_calls
     )

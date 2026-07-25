@@ -12,7 +12,6 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -23,22 +22,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     now_iso,
 )
-
-
-def _make_recorder(
-    tmp_path: Path,
-    *,
-    on_write: Any = None,
-) -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder with an optional on_write callback."""
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="test",
-        on_write=on_write,
-    )
+from tests.harness.trajectory import make_recorder
 
 
 def _add_user_step(recorder: TrajectoryRecorder) -> None:
@@ -64,7 +48,7 @@ async def test_on_write_fires_on_normal_write(tmp_path: Path) -> None:
     def on_write(recorder: TrajectoryRecorder, status: str) -> None:
         callback_calls.append((recorder.session_id, status))
 
-    recorder = _make_recorder(tmp_path, on_write=on_write)
+    recorder = make_recorder(tmp_path, on_write=on_write)
     async with recorder:
         _add_user_step(recorder)
 
@@ -80,7 +64,7 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
     def on_write(recorder: TrajectoryRecorder, status: str) -> None:
         callback_calls.append((recorder.session_id, status))
 
-    recorder = _make_recorder(tmp_path, on_write=on_write)
+    recorder = make_recorder(tmp_path, on_write=on_write)
     async with recorder:
         pass
 
@@ -252,7 +236,7 @@ async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     def on_write_boom(recorder: TrajectoryRecorder, status: str) -> None:
         raise RuntimeError("archive exploded")
 
-    recorder = _make_recorder(tmp_path, on_write=on_write_boom)
+    recorder = make_recorder(tmp_path, on_write=on_write_boom)
     async with recorder:
         _add_user_step(recorder)
 

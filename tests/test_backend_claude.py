@@ -1,7 +1,6 @@
 # tests/test_backend_claude.py
 """Tests for ClaudeBackend."""
 
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,90 +15,36 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
-
-# Mock SDK types (same pattern as test_integration.py)
-
-
-@dataclass
-class MockTextBlock:
-    text: str
-
-
-@dataclass
-class MockToolUseBlock:
-    id: str
-    name: str
-    input: dict[str, Any] | None = None
-
-
-@dataclass
-class MockToolResultBlock:
-    tool_use_id: str
-    content: str | None = None
-    is_error: bool = False
-
-
-@dataclass
-class MockThinkingBlock:
-    thinking: str
-
-
-@dataclass
-class MockAssistantMessage:
-    content: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class MockUserMessage:
-    content: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class MockResultMessage:
-    total_cost_usd: float | None = 0.001
-    structured_output: Any = None
-    is_error: bool = False
-    result: str | None = None
-    subtype: str = "success"
+from tests.harness.claude_sdk import (
+    MockAssistantMessage,
+    MockResultMessage,
+    MockTextBlock,
+    MockThinkingBlock,
+    MockToolResultBlock,
+    MockToolUseBlock,
+    MockUserMessage,
+    patch_claude_sdk,
+    scripted_client,
+)
 
 
 @pytest.fixture
 def patch_sdk(monkeypatch):
     """Return a function that patches the SDK imports in claude.py."""
     def _patch(client_class):
-        monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_class)
-        monkeypatch.setattr("daydream.backends.claude.AssistantMessage", MockAssistantMessage)
-        monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
-        monkeypatch.setattr("daydream.backends.claude.ResultMessage", MockResultMessage)
-        monkeypatch.setattr("daydream.backends.claude.TextBlock", MockTextBlock)
-        monkeypatch.setattr("daydream.backends.claude.ThinkingBlock", MockThinkingBlock)
-        monkeypatch.setattr("daydream.backends.claude.ToolUseBlock", MockToolUseBlock)
-        monkeypatch.setattr("daydream.backends.claude.ToolResultBlock", MockToolResultBlock)
+        patch_claude_sdk(monkeypatch, client_class)
     return _patch
 
 
-def _scripted_client(messages: list[Any]) -> type:
-    """Build a one-off ClaudeSDKClient stand-in yielding *messages* verbatim."""
-
-    class _ScriptedClient:
-        def __init__(self, options: Any = None) -> None:
-            self.options = options
-            self._prompt: str = ""
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args: Any) -> None:
-            return None
-
-        async def query(self, prompt: str) -> None:
-            self._prompt = prompt
-
-        async def receive_response(self):
-            for m in messages:
-                yield m
-
-    return _ScriptedClient
+def _capturing_client(captured: dict[str, Any]) -> type:
+    """A scripted client that records the ``ClaudeAgentOptions`` it was built with."""
+    return scripted_client(
+        [
+            MockAssistantMessage(content=[MockTextBlock(text="OK")]),
+            MockResultMessage(total_cost_usd=0.01),
+        ],
+        captured=captured,
+    )
 
 
 async def _drive_claude_backend_to_list(
@@ -110,7 +55,7 @@ async def _drive_claude_backend_to_list(
     prompt: str = "go",
 ) -> list[Any]:
     """Drive ClaudeBackend.execute with a scripted SDK message sequence."""
-    patch_sdk_fn(_scripted_client(messages))
+    patch_sdk_fn(scripted_client(messages))
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
     async for event in backend.execute(Path("/tmp"), prompt, output_schema=output_schema):
@@ -243,7 +188,7 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk):
     "no issues found" despite the agent never running.
     """
     patch_sdk(
-        _scripted_client(
+        scripted_client(
             [
                 MockAssistantMessage(content=[MockTextBlock(text="Invalid API key · Fix external API key")]),
                 MockResultMessage(
@@ -276,7 +221,7 @@ async def test_max_turns_result_raises_typed_error(patch_sdk):
     from daydream.backends.claude import MaxTurnsError
 
     patch_sdk(
-        _scripted_client(
+        scripted_client(
             [
                 MockAssistantMessage(content=[MockTextBlock(text="working on it")]),
                 MockResultMessage(
@@ -381,13 +326,14 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk):
     denying an unknown/future tool (the fail-closed property a narrow matcher
     would silently lose).
     """
-    patch_sdk(MockClaudeSDKClientCapture)
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
 
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=True):
         pass
 
-    opts = MockClaudeSDKClientCapture.captured_options
+    opts = captured["options"]
     assert opts is not None
     hooks = opts.hooks
     assert hooks is not None and "PreToolUse" in hooks
@@ -440,13 +386,14 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk)
     was actually built onto the production options: a ``find /`` root scan denies,
     a scoped ``find core/...`` allows.
     """
-    patch_sdk(MockClaudeSDKClientCapture)
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
 
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=False):
         pass
 
-    opts = MockClaudeSDKClientCapture.captured_options
+    opts = captured["options"]
     assert opts is not None
     hooks = opts.hooks
     assert hooks is not None and "PreToolUse" in hooks
@@ -492,35 +439,13 @@ async def test_read_only_guard_denies_mutation_allows_inspection():
     assert deny_malformed["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-class MockClaudeSDKClientCapture:
-    """Mock client that captures the options it was constructed with."""
-
-    captured_options = None
-
-    def __init__(self, options: Any = None):
-        MockClaudeSDKClientCapture.captured_options = options
-        self._prompt: str = ""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass
-
-    async def query(self, prompt: str):
-        self._prompt = prompt
-
-    async def receive_response(self):
-        yield MockAssistantMessage(content=[MockTextBlock(text="OK")])
-        yield MockResultMessage(total_cost_usd=0.01)
-
-
 @pytest.mark.asyncio
 async def test_execute_passes_agents_dict_to_options(patch_sdk):
     """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
     from claude_agent_sdk.types import AgentDefinition
 
-    patch_sdk(MockClaudeSDKClientCapture)
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
 
     pattern_scanner = AgentDefinition(
@@ -545,7 +470,7 @@ async def test_execute_passes_agents_dict_to_options(patch_sdk):
     async for event in backend.execute(Path("/tmp"), "Go", agents=agents):
         events.append(event)
 
-    opts = MockClaudeSDKClientCapture.captured_options
+    opts = captured["options"]
     assert opts is not None
     assert opts.agents == {
         "pattern-scanner": pattern_scanner,
@@ -558,14 +483,15 @@ async def test_execute_passes_agents_dict_to_options(patch_sdk):
 @pytest.mark.asyncio
 async def test_execute_passes_none_when_no_agents(patch_sdk):
     """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
-    patch_sdk(MockClaudeSDKClientCapture)
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
 
     events = []
     async for event in backend.execute(Path("/tmp"), "Go"):
         events.append(event)
 
-    opts = MockClaudeSDKClientCapture.captured_options
+    opts = captured["options"]
     assert opts is not None
     agents_val = getattr(opts, "agents", None)
     assert agents_val is None
@@ -742,13 +668,14 @@ async def test_execute_registers_skill_guard(patch_sdk):
     production options must deny Claude Code's built-in ``review`` skill while
     still allowing a beagle-namespaced key (skills chain within the plugin).
     """
-    patch_sdk(MockClaudeSDKClientCapture)
+    captured: dict[str, Any] = {}
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
 
     async for _ in backend.execute(Path("/tmp"), "Analyze the staged diff and report intent."):
         pass
 
-    opts = MockClaudeSDKClientCapture.captured_options
+    opts = captured["options"]
     assert opts is not None
     hooks = opts.hooks
     assert hooks is not None and "PreToolUse" in hooks
@@ -812,12 +739,7 @@ async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk):
     """The resolved per-phase effort arrives as ClaudeAgentOptions.effort."""
     captured: dict[str, Any] = {}
 
-    class _CapturingClient(_scripted_client([MockResultMessage(total_cost_usd=0.0)])):
-        def __init__(self, options: Any = None) -> None:
-            captured["options"] = options
-            super().__init__(options)
-
-    patch_sdk(_CapturingClient)
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus", reasoning_effort="max")
     async for _ in backend.execute(Path("/tmp"), "go"):
         pass
@@ -829,12 +751,7 @@ async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk):
 async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk):
     captured: dict[str, Any] = {}
 
-    class _CapturingClient(_scripted_client([MockResultMessage(total_cost_usd=0.0)])):
-        def __init__(self, options: Any = None) -> None:
-            captured["options"] = options
-            super().__init__(options)
-
-    patch_sdk(_CapturingClient)
+    patch_sdk(_capturing_client(captured))
     backend = ClaudeBackend(model="opus")
     async for _ in backend.execute(Path("/tmp"), "go"):
         pass

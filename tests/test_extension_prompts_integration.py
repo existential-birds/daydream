@@ -11,8 +11,8 @@ and the exit code.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -21,69 +21,16 @@ from daydream.backends import ResultEvent, TextEvent
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
+from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
 
 
-class RecordingBackend:
-    """Prompt-recording stub modelled on the skills-integration variant.
-
-    Dispatches on prompt content just enough to drive the shallow flow to a
-    clean exit: writes the review-output file for review prompts (built-in OR
-    the fork-overridden ``RO-REVIEW`` shape), returns an empty issues list for
-    parse prompts, and reports passing tests.
-    """
-
-    model = "mock-model"
-    fanout_concurrency = 4
-
-    def __init__(self) -> None:
-        self.prompts: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        self.prompts.append(prompt)
-        pl = prompt.lower()
-
-        if "ro-review" in pl or "review the changes" in pl:
-            (cwd / ".review-output.md").write_text("# Review\n\nNo issues found.\n")
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        if "extract only actionable issues" in pl:
-            yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": []}, continuation=None)
-            return
-
-        if "test suite" in pl:
-            yield TextEvent(text="All tests passed")
-            yield ResultEvent(structured_output=None, continuation=None)
-            return
-
-        yield TextEvent(text="")
-        yield ResultEvent(structured_output=None, continuation=None)
-
-    async def cancel(self) -> None:
-        pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        # Mirror ClaudeBackend: append args so the test can read the skill from the prompt.
-        result = f"/{skill_key}"
-        if args:
-            result = f"{result} {args}"
-        return result
-
-
 async def test_fork_prompt_override_reaches_backend(
-    ext_dir: ExtDir, feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    mute_side_effects: Callable[..., None],
 ) -> None:
     """A daydream_ext override of the ``review`` prompt replaces the prompt wholesale.
 
@@ -96,18 +43,16 @@ async def test_fork_prompt_override_reaches_backend(
         "def register(r):\n"
         "    r.override_prompt('review', lambda **kw: f\"RO-REVIEW {kw['skill_invocation']}\")\n"
     )
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
-
-    rc = await runner.run(
-        RunConfig(
-            target=str(feature_branch_repo),
-            shallow=True,
-            skill="python",
-            non_interactive=True,
-            archive=False,
+    backend = ScriptedBackend(
+        events=(
+            TextEvent(text=""),
+            ResultEvent(structured_output={"issues": []}, continuation=None),
         )
     )
+    install_backend(backend)
+    mute_side_effects("daydream.flows.shallow")
+
+    rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
 
     assert rc == 0
     review_prompts = [p for p in backend.prompts if p.startswith("RO-REVIEW")]
@@ -149,23 +94,14 @@ def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:
 async def test_plan_writer_override_receives_legacy_string_commands_and_typed_output_succeeds(
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
 ) -> None:
     ext_dir.write_module(_plan_writer_override())
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: backend,
-    )
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert rc == 0
     plan_calls = [
@@ -189,7 +125,8 @@ async def test_plan_writer_override_receives_legacy_string_commands_and_typed_ou
 async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagnostics(
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
 ) -> None:
     """A legacy markdown-blob payload blocks on missing authored content.
 
@@ -201,19 +138,9 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     ext_dir.write_module(_plan_writer_override())
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=1)
     backend.return_legacy_plan = True
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: backend,
-    )
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     diagnostics = improve_artifact(
@@ -244,23 +171,14 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
 async def test_plan_writer_prompt_exception_blocks_only_that_plan(
     ext_dir: ExtDir,
     improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
 ) -> None:
     ext_dir.write_module(_plan_writer_override(raises_on_first_call=True))
     backend = ImproveStubBackend(improve_monorepo_target, n_findings=2)
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: backend,
-    )
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     index = (plans_dir / "README.md").read_text(encoding="utf-8")

@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,8 @@ from tests.harness.improve_backend import (
     install_improve_stub,
     install_per_phase_improve_stubs,
 )
+
+MakeConfig = Callable[..., RunConfig]
 
 _GROUP = {
     "name": "group-01",
@@ -270,6 +273,7 @@ async def test_credentials_never_reach_improve_observables(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     secret = "OPENAI_API_KEY=sk-secret123456"
     stub = install_improve_stub(
@@ -279,14 +283,7 @@ async def test_credentials_never_reach_improve_observables(
     )
     stub.inject_credential = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 1
     console_output = capsys.readouterr().out
@@ -308,18 +305,13 @@ async def test_credentials_never_reach_improve_observables(
 
 @pytest.mark.anyio
 async def test_improve_recon_writes_artifacts_and_never_mutates_source(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     before = _git_status_porcelain(improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
     dd = improve_monorepo_target / ".daydream" / "improve"
     assert (dd / "report.md").is_file()
@@ -389,6 +381,7 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     """One recon pass carries the audited roots, so it can return per-service commands."""
     _pin_stack_availability(monkeypatch, tmp_path)
@@ -396,14 +389,7 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
         monkeypatch, improve_scaled_monorepo_target, n_findings=0
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_scaled_monorepo_target, flow_name="improve"))
 
     assert code == 0
     recon_calls = [call for call in stub.calls if call["marker"] == "recon"]
@@ -421,6 +407,7 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     # Default bound (400): partitions = 12 services + frontend + residue, which
@@ -429,14 +416,7 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
         monkeypatch, improve_scaled_monorepo_target, n_findings=0
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_scaled_monorepo_target, flow_name="improve"))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -464,6 +444,7 @@ async def test_partition_bound_splits_oversized_trees_via_config(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     # max-partition-groups is raised out of the way so the bound alone is measured.
@@ -475,15 +456,11 @@ async def test_partition_bound_splits_oversized_trees_via_config(
         monkeypatch, improve_scaled_monorepo_target, n_findings=0
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            file_config=file_config,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_scaled_monorepo_target,
+        flow_name="improve",
+        file_config=file_config,
+    ))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -507,6 +484,7 @@ async def test_group_ceiling_skips_smallest_groups_and_reports_them(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     file_config = _append_improve_config(
@@ -517,15 +495,11 @@ async def test_group_ceiling_skips_smallest_groups_and_reports_them(
         monkeypatch, improve_scaled_monorepo_target, n_findings=0
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            file_config=file_config,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_scaled_monorepo_target,
+        flow_name="improve",
+        file_config=file_config,
+    ))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -542,21 +516,18 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     stub = install_improve_stub(
         monkeypatch, improve_scaled_monorepo_target, n_findings=0
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            improve_effort="quick",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_scaled_monorepo_target,
+        flow_name="improve",
+        improve_effort="quick",
+    ))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -570,19 +541,14 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
 
 @pytest.mark.anyio
 async def test_all_audit_assignments_failing_exits_nonzero(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.fail_categories = set(AUDIT_CATEGORIES)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 1
     assert not improve_artifact(improve_monorepo_target, "report.md").exists()
@@ -590,7 +556,9 @@ async def test_all_audit_assignments_failing_exits_nonzero(
 
 @pytest.mark.anyio
 async def test_small_repo_collapses_to_bounded_groups(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     target = tmp_path / "single_package"
@@ -602,14 +570,7 @@ async def test_small_repo_collapses_to_bounded_groups(
     commit(target, "initial")
     stub = install_improve_stub(monkeypatch, target, n_findings=0)
 
-    code = await run(
-        RunConfig(
-            target=str(target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(target, flow_name="improve"))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -629,6 +590,7 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     file_config = _append_improve_config(
@@ -640,15 +602,11 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     )
     stub.fail_categories = {"docs"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            file_config=file_config,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_scaled_monorepo_target,
+        flow_name="improve",
+        file_config=file_config,
+    ))
 
     assert code == 0
     report = improve_artifact(improve_scaled_monorepo_target, "report.md").read_text()
@@ -673,18 +631,12 @@ async def test_clean_full_coverage_reports_nothing_skipped(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     coverage = json.loads(improve_artifact(improve_monorepo_target, "coverage.json").read_text())
@@ -702,6 +654,7 @@ async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     stub = install_improve_stub(
@@ -711,14 +664,7 @@ async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
     # finding lands in the uncovered `web/` tree, which no service covers.
     stub.group_scoped_findings = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     audit = json.loads(improve_artifact(improve_monorepo_target, "audit-findings.json").read_text())
@@ -744,6 +690,7 @@ async def test_vet_batches_are_bounded_and_parallel(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     # One partition group and one category keep the batch math exact: 45
@@ -756,16 +703,12 @@ async def test_vet_batches_are_bounded_and_parallel(
     stub.findings_per_category = 45
     stub.vet_reject_titles = {"Security finding 45"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="security",
-            file_config=file_config,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_focus="security",
+        file_config=file_config,
+    ))
 
     assert code == 0
     vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
@@ -793,6 +736,7 @@ async def test_vet_batch_failure_fails_closed_per_batch(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
     file_config = _append_improve_config(
@@ -803,16 +747,12 @@ async def test_vet_batch_failure_fails_closed_per_batch(
     stub.findings_per_category = 45
     stub.fail_vet_titles = {"Security finding 41"}  # the third batch's agent raises
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="security",
-            file_config=file_config,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_focus="security",
+        file_config=file_config,
+    ))
 
     assert code == 0
     vetted = json.loads(improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text())
@@ -827,6 +767,7 @@ async def test_vet_batch_failure_fails_closed_per_batch(
 async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -834,14 +775,7 @@ async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
         n_findings=0,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
@@ -863,18 +797,12 @@ async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
 async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_commands(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.all_recon_commands_invalid = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert [call for call in stub.calls if call["marker"] == "audit"]
     assert [call for call in stub.calls if call["marker"] == "plan-writer"]
@@ -939,6 +867,7 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
 async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """The host enumerates Make/manifest commands the model is told to skip.
 
@@ -985,14 +914,7 @@ async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     }
     stub.plan_gate_on_first_menu_id = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     recon = json.loads(
@@ -1033,6 +955,7 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     """A broken enumerator degrades to the model's commands, never silently."""
     monkeypatch.setattr(
@@ -1041,14 +964,7 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     )
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     recon = json.loads(
@@ -1069,18 +985,12 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
 async def test_unrelated_recon_container_error_preserves_valid_commands(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.recon_languages_override = {"secret-model-prose": "must not persist"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
@@ -1106,6 +1016,7 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     secret = "OPENAI_API_KEY=sk-secret123456"
@@ -1121,14 +1032,7 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
         "intent_docs": [model_prose],
     }
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 1
     assert [call for call in stub.calls if call["marker"] == "audit"]
@@ -1173,18 +1077,15 @@ async def test_effort_and_focus_select_the_audited_categories_read_only(
     effort: str,
     focus: str | None,
     expected_categories: list[str],
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_effort=effort,
-            improve_focus=focus,
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_effort=effort,
+        improve_focus=focus,
+    ))
     audited = json.loads(
         improve_artifact(improve_monorepo_target, "audit-findings.json").read_text()
     )
@@ -1197,6 +1098,7 @@ async def test_effort_and_focus_select_the_audited_categories_read_only(
 async def test_repo_with_no_test_files_still_receives_a_plan(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A repository with zero tests must still be plannable.
 
@@ -1212,14 +1114,7 @@ async def test_repo_with_no_test_files_still_receives_a_plan(
     )
     stub.plan_no_test_exemplars = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans = sorted(
         (improve_monorepo_target / "daydream_plans").glob(
@@ -1250,6 +1145,7 @@ async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     _force_interactive(monkeypatch)
     monkeypatch.setattr(
@@ -1262,14 +1158,11 @@ async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=False,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        non_interactive=False,
+    ))
 
     recon = json.loads(
         improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
@@ -1303,6 +1196,7 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     _force_interactive(monkeypatch)
     monkeypatch.setattr(
@@ -1318,14 +1212,11 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=False,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        non_interactive=False,
+    ))
 
     plan_files = sorted(
         (improve_monorepo_target / "daydream_plans").glob(
@@ -1363,18 +1254,12 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
 
 @pytest.mark.anyio
 async def test_focus_next_is_direction_only_and_plans_are_spikes(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="next",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    await run(make_config(improve_monorepo_target, flow_name="improve", improve_focus="next"))
     audited = json.loads(
         improve_artifact(improve_monorepo_target, "audit-findings.json").read_text()
     )
@@ -1387,18 +1272,12 @@ async def test_focus_next_is_direction_only_and_plans_are_spikes(
 
 @pytest.mark.anyio
 async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
-    improve_branch_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_branch_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_branch_target)
-    await run(
-        RunConfig(
-            target=str(improve_branch_target),
-            flow_name="improve",
-            improve_focus="branch",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    await run(make_config(improve_branch_target, flow_name="improve", improve_focus="branch"))
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert all(
         "apps/billing/api.py" in call["prompt"] for call in audit_calls
@@ -1421,19 +1300,17 @@ async def test_branch_focus_scopes_audit_to_merge_base_diff_and_tags_provenance(
 
 @pytest.mark.anyio
 async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
-    improve_branch_two_services_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_branch_two_services_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_branch_two_services_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_branch_two_services_target),
-            flow_name="improve",
-            improve_focus="branch",
-            improve_scope="apps/billing",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_branch_two_services_target,
+        flow_name="improve",
+        improve_focus="branch",
+        improve_scope="apps/billing",
+    ))
     assert code == 0
     # Isolate the embedded ```diff fenced block so the assertion targets the
     # branch diff itself, not the whole-repo recon context that legitimately
@@ -1453,35 +1330,28 @@ async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
 
 @pytest.mark.anyio
 async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="branch",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_focus="branch",
+    ))
     assert code == 1
 
 
 @pytest.mark.anyio
 async def test_failed_category_is_reported_not_silently_dropped(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.fail_categories = {"performance"}
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
     assert "performance" in report.lower()
@@ -1490,18 +1360,13 @@ async def test_failed_category_is_reported_not_silently_dropped(
 
 @pytest.mark.anyio
 async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.vet_reject_titles = {"Phantom N+1"}
-    await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     vetted = json.loads(
         improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text()
@@ -1520,16 +1385,13 @@ async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
 
 @pytest.mark.anyio
 async def test_previously_rejected_finding_is_not_revetted_or_rereported(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.vet_reject_titles = {"Phantom N+1"}
-    config = RunConfig(
-        target=str(improve_monorepo_target),
-        flow_name="improve",
-        non_interactive=True,
-        archive=False,
-    )
+    config =make_config(improve_monorepo_target, flow_name="improve")
     await run(config)
 
     stub.calls.clear()
@@ -1543,7 +1405,9 @@ async def test_previously_rejected_finding_is_not_revetted_or_rereported(
 
 @pytest.mark.anyio
 async def test_non_interactive_run_selects_top_findings_and_writes_plans(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     monkeypatch.setattr("builtins.input", _forbidden_input)
     install_improve_stub(
@@ -1551,14 +1415,7 @@ async def test_non_interactive_run_selects_top_findings_and_writes_plans(
         improve_monorepo_target,
         n_findings=8,
     )
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     selected = json.loads(
         improve_artifact(improve_monorepo_target, "selected.json").read_text()
     )
@@ -1587,6 +1444,7 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     slow_title: str,
+    make_config: MakeConfig,
 ) -> None:
     """Each plan lands as its writer completes, numbered by selection order.
 
@@ -1602,14 +1460,7 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     fast_title = next(
@@ -1637,6 +1488,7 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
 async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_order(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Three writers, completion order rotated away from selection order.
 
@@ -1651,14 +1503,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     selected = json.loads(
@@ -1697,6 +1542,7 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
 async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     backend = IncrementalPlanBackend(
         improve_monorepo_target,
@@ -1708,14 +1554,7 @@ async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 0
@@ -1732,7 +1571,9 @@ async def test_plan_writer_crash_leaves_the_finished_plan_on_disk(
 
 @pytest.mark.anyio
 async def test_all_legacy_plan_results_block_and_return_failure(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -1741,14 +1582,7 @@ async def test_all_legacy_plan_results_block_and_return_failure(
     )
     stub.return_legacy_plan = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -1771,6 +1605,7 @@ async def test_all_legacy_plan_results_block_and_return_failure(
 async def test_real_improve_flow_plans_from_live_dirty_source_without_running_candidates(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     source_path = improve_monorepo_target / "apps/billing/api.py"
     user_edit = (
@@ -1825,14 +1660,7 @@ async def test_real_improve_flow_plans_from_live_dirty_source_without_running_ca
         }
     ]
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     generated = sorted(plans_dir.glob("[0-9][0-9][0-9]-high-leverage-title.md"))
@@ -1885,6 +1713,7 @@ async def test_schema_invalid_planner_metadata_never_reaches_observables(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -1893,14 +1722,7 @@ async def test_schema_invalid_planner_metadata_never_reaches_observables(
     )
     stub.return_secret_invalid_enum = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 1
     index = (
@@ -1923,7 +1745,9 @@ async def test_schema_invalid_planner_metadata_never_reaches_observables(
 
 @pytest.mark.anyio
 async def test_interactive_selection_honors_user_choice(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "2")
@@ -1932,14 +1756,11 @@ async def test_interactive_selection_honors_user_choice(
         improve_monorepo_target,
         n_findings=8,
     )
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=False,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        non_interactive=False,
+    ))
     assert code == 0
     selected = json.loads(
         improve_artifact(improve_monorepo_target, "selected.json").read_text()
@@ -1950,21 +1771,16 @@ async def test_interactive_selection_honors_user_choice(
 
 @pytest.mark.anyio
 async def test_report_orders_by_leverage_and_separates_direction(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(
         monkeypatch,
         improve_monorepo_target,
         n_findings=9,
     )
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
     assert report.index("high-leverage-title") < report.index(
@@ -1976,18 +1792,16 @@ async def test_report_orders_by_leverage_and_separates_direction(
 
 @pytest.mark.anyio
 async def test_scope_slices_search_but_report_names_the_unaudited_rest(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_scope="apps/billing",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_scope="apps/billing",
+    ))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -2008,21 +1822,19 @@ async def test_scope_slices_search_but_report_names_the_unaudited_rest(
 
 @pytest.mark.anyio
 async def test_group_scope_expands_named_service_group_to_all_members(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_scope="core",
-            file_config=DaydreamFileConfig(
-                improve_service_groups={"core": ["apps/billing", "apps/catalog"]}
-            ),
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_scope="core",
+        file_config=DaydreamFileConfig(
+            improve_service_groups={"core": ["apps/billing", "apps/catalog"]}
+        ),
+    ))
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -2036,18 +1848,16 @@ async def test_group_scope_expands_named_service_group_to_all_members(
 
 @pytest.mark.anyio
 async def test_plan_subverb_skips_audit_and_writes_single_plan(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     assert code == 0
     assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
@@ -2064,19 +1874,16 @@ async def test_plan_subverb_skips_audit_and_writes_single_plan(
 async def test_plan_subverb_repairs_schema_invalid_plan_once(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.return_secret_invalid_enum_once = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2139,19 +1946,16 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
     stub_value: bool | int,
     error_code: str,
     error_pointer: str | None,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, stub_attr, stub_value)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2191,21 +1995,18 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
 async def test_plan_subverb_clamps_over_length_prose_without_repair(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     over_length_role = "Billing role " + "x" * 293
     assert len(over_length_role) == 306
     stub.plan_file_role_override = over_length_role
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2236,6 +2037,7 @@ async def test_plan_subverb_clamps_over_length_prose_without_repair(
 async def test_plan_subverb_accepts_placeholder_secret_syntax(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_problem_override = (
@@ -2243,15 +2045,11 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
         "production and X-Internal-Service-Secret: test-secret in tests."
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2273,6 +2071,7 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
 async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A credential on a quoted source line must not reach the plan on disk.
 
@@ -2294,14 +2093,7 @@ async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
         n_findings=1,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans = list(
         (improve_monorepo_target / "daydream_plans").glob(
@@ -2324,6 +2116,7 @@ async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
 async def test_secret_value_never_reaches_any_artifact(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -2336,14 +2129,7 @@ async def test_secret_value_never_reaches_any_artifact(
     )
     stub.plan_bad_recon_id_attempts = 1
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2380,19 +2166,16 @@ async def test_secret_value_never_reaches_any_artifact(
 async def test_sloppy_but_salvageable_output_is_normalized_and_written(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_sloppy = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2435,6 +2218,7 @@ async def test_sloppy_but_salvageable_output_is_normalized_and_written(
 async def test_n_selected_findings_produce_n_plans_first_attempt(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -2443,14 +2227,7 @@ async def test_n_selected_findings_produce_n_plans_first_attempt(
     )
     stub.vet_reject_titles = {"Phantom N+1"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     plans = sorted(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
@@ -2473,6 +2250,7 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     """One finding, one plan -- no matter how many groups re-audit its code.
 
@@ -2492,14 +2270,7 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
     )
     stub.vet_reject_titles = {"Phantom N+1"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     # The fan-out really did span multiple groups -- otherwise the dedup path is
@@ -2533,6 +2304,7 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
 async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Zero stack skills → generic routing → the audit still runs and plans land.
 
@@ -2550,14 +2322,7 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     )
     stub.vet_reject_titles = {"Phantom N+1"}
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     # Generalist routing: one group, and its stack is the generic fallback value.
@@ -2585,96 +2350,72 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("target_fixture", "injected", "expected_group_stacks"),
+    [
+        # An empty set collapses every stack into a single generic audit group.
+        pytest.param(
+            "improve_monorepo_target", frozenset[str](), ["generic"], id="empty-generalist"
+        ),
+        # A non-empty set splits the python services into their own group while
+        # react (no injected skill) falls back to generic.
+        pytest.param(
+            "improve_scaled_monorepo_target",
+            frozenset({"python"}),
+            ["generic", "python"],
+            id="nonempty-multistack",
+        ),
+    ],
+)
 async def test_injected_skill_availability_drives_routing_without_env(
-    improve_monorepo_target: Path,
+    target_fixture: str,
+    injected: frozenset[str],
+    expected_group_stacks: list[str],
+    request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
-    """RunConfig.skill_availability=frozenset() forces generalist routing, no probe.
+    """``RunConfig.skill_availability`` alone drives audit routing, with no probe.
 
     Proves availability is data carried on RunConfig, not ambient filesystem I/O:
     the field is injected directly (this test manipulates no CLAUDE_CONFIG_DIR /
-    env and patches no ``get_installed_skills``), and the empty set collapses
-    every stack into a single generic audit group.
+    env and patches no ``get_installed_skills``). The autouse hermetic fixture
+    makes the probe return an empty set, so a non-empty injected set producing
+    multi-stack routing can only have come from the injected field.
     """
-    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
+    target: Path = request.getfixturevalue(target_fixture)
+    install_improve_stub(monkeypatch, target, n_findings=0)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-            skill_availability=frozenset(),
-        )
-    )
+    code = await run(make_config(
+        target,
+        flow_name="improve",
+        skill_availability=injected,
+    ))
 
     assert code == 0
     coverage = json.loads(
-        improve_artifact(improve_monorepo_target, "coverage.json").read_text(
-            encoding="utf-8"
-        )
+        improve_artifact(target, "coverage.json").read_text(encoding="utf-8")
     )
-    assert len(coverage["groups"]) == 1
-    assert coverage["groups"][0]["stack"] == "generic"
-
-
-@pytest.mark.anyio
-async def test_injected_nonempty_skill_availability_routes_multistack_without_env(
-    improve_scaled_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A non-empty injected set routes multi-stack, differing from the ambient probe.
-
-    The autouse hermetic fixture makes the probe return an empty set (generalist,
-    one group). Injecting ``frozenset({"python"})`` instead must split the python
-    services into their own group while react (no injected skill) falls back to
-    generic — proving the injected field, not the environment probe, drives
-    routing. This test manipulates no env and patches no ``get_installed_skills``.
-    """
-    install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
-
-    code = await run(
-        RunConfig(
-            target=str(improve_scaled_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-            skill_availability=frozenset({"python"}),
-        )
-    )
-
-    assert code == 0
-    coverage = json.loads(
-        improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    stacks = {group["stack"] for group in coverage["groups"]}
-    assert stacks == {"python", "generic"}
-    # python is isolated from generic -> multi-stack routing, not a 1-group collapse.
-    assert len(coverage["groups"]) == 2
+    # One group per expected stack: no collapse, and no stack split in two.
+    assert len(coverage["groups"]) == len(expected_group_stacks)
+    assert sorted(group["stack"] for group in coverage["groups"]) == expected_group_stacks
 
 
 @pytest.mark.anyio
 async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_bad_recon_id_attempts = 1
     stub.plan_missing_path_attempts = 1
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2716,6 +2457,7 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
 async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """The drift STOP condition must never ship without text to compare.
 
@@ -2725,15 +2467,11 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_unquoted_path_attempts = 1
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2781,20 +2519,17 @@ def _out_of_scope_section(plan_text: str) -> str:
 async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     deleted = "apps/billing/legacy_loader.py"
     stub.plan_stop_condition_path = deleted
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plan_calls = [
         call for call in stub.calls if call["marker"] == "plan-writer"
@@ -2826,66 +2561,33 @@ async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
 
 
 @pytest.mark.anyio
-async def test_plan_writer_transport_crash_is_retried_once_and_the_plan_lands(
+@pytest.mark.parametrize(
+    "failure_attr",
+    [
+        pytest.param("plan_crash_attempts", id="transport-crash"),
+        pytest.param("plan_stall_attempts", id="stream-stall"),
+    ],
+)
+async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
+    failure_attr: str,
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.plan_crash_attempts = 1
+    """A transient plan-writer failure is retried, not terminal, and the plan lands.
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
-    assert code == 0
-    assert stub.plan_writer_calls == 2
-    assert len(plans) == 1
-    assert "## Steps" in plans[0].read_text(encoding="utf-8")
-    diagnostics = json.loads(
-        improve_artifact(
-            improve_monorepo_target,
-            "plan-write-diagnostics.json",
-        ).read_text(encoding="utf-8")
-    )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["success"]
-
-
-@pytest.mark.anyio
-async def test_plan_writer_stream_stall_is_retried_and_the_plan_lands(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A stalled plan-writer stream is retried, not terminal, and the plan lands.
-
-    A ``StreamStalledError`` is the usual symptom of a flaky endpoint. It is
-    retryable, so ``run_agent`` re-arms a fresh subprocess and the plan writer
-    completes on the second attempt — one blip must never sink a finding.
+    A transport crash or a ``StreamStalledError`` is the usual symptom of a flaky
+    endpoint. It is retryable, so ``run_agent`` re-arms a fresh subprocess and the
+    plan writer completes on the second attempt — one blip must never sink a finding.
     """
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    stub.plan_stall_attempts = 1
+    setattr(stub, failure_attr, 1)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plans = list(
         (improve_monorepo_target / "daydream_plans").glob(
@@ -2911,6 +2613,7 @@ async def test_plan_writer_stream_stall_is_retried_and_the_plan_lands(
 async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """``run_agent`` owns the budget for retryable errors; the writer adds none.
 
@@ -2922,15 +2625,11 @@ async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
     stub.plan_rate_limit_always = True
     stub.retry_attempts = 2
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -2944,19 +2643,16 @@ async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
 async def test_two_consecutive_transport_crashes_block_the_finding(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_crash_attempts = 2
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -2981,7 +2677,9 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
 
 @pytest.mark.anyio
 async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(
         monkeypatch,
@@ -2990,14 +2688,7 @@ async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
     )
     before_status = _git_status_porcelain(improve_monorepo_target)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     assert _git_status_porcelain(improve_monorepo_target) == before_status
@@ -3010,29 +2701,14 @@ async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
 
 @pytest.mark.anyio
 async def test_every_agent_call_in_every_mode_is_read_only(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     configs = (
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        ),
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_focus="next",
-            non_interactive=True,
-            archive=False,
-        ),
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="x",
-            non_interactive=True,
-            archive=False,
-        ),
+        make_config(improve_monorepo_target, flow_name="improve"),
+        make_config(improve_monorepo_target, flow_name="improve", improve_focus="next"),
+        make_config(improve_monorepo_target, flow_name="improve", improve_plan_description="x"),
     )
     for config in configs:
         stub = install_improve_stub(monkeypatch, improve_monorepo_target)
@@ -3043,18 +2719,13 @@ async def test_every_agent_call_in_every_mode_is_read_only(
 
 @pytest.mark.anyio
 async def test_trajectory_records_improve_flow_and_phases(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     trajectories = list(
@@ -3216,6 +2887,7 @@ def test_stamp_finding_rejects_evidence_crossing_a_symlink(
 async def test_improve_pi_calls_are_ephemeral(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(
         monkeypatch,
@@ -3223,14 +2895,7 @@ async def test_improve_pi_calls_are_ephemeral(
         n_findings=1,
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     improve_calls = [
@@ -3248,68 +2913,62 @@ async def test_improve_pi_calls_are_ephemeral(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("file_config", "expected_tiers"),
+    [
+        # Plan authoring runs on the top model tier at max reasoning; recon does not.
+        pytest.param(
+            None,
+            {
+                "plan-writer": ("claude-opus-5", "max"),
+                "vet": ("claude-opus-5", "xhigh"),
+                "audit": ("claude-sonnet-5", "high"),
+                "recon": ("claude-sonnet-5", "low"),
+            },
+            id="built-in-defaults",
+        ),
+        # A ``[tool.daydream.phases.plan_write]`` table still wins over those
+        # defaults, and unrelated phases keep their own.
+        pytest.param(
+            DaydreamFileConfig(
+                phases={"plan_write": {"model": "claude-sonnet-5", "reasoning_effort": "medium"}}
+            ),
+            {
+                "plan-writer": ("claude-sonnet-5", "medium"),
+                "recon": ("claude-sonnet-5", "low"),
+                "vet": ("claude-opus-5", "xhigh"),
+            },
+            id="phase-table-override",
+        ),
+    ],
+)
 async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    file_config: DaydreamFileConfig | None,
+    expected_tiers: dict[str, tuple[str, str]],
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
-    """Plan authoring runs on the top model tier at max reasoning; recon does not.
-
-    Observed at the ``Backend.execute`` seam: each recorded turn carries the
+    """Observed at the ``Backend.execute`` seam: each recorded turn carries the
     model and reasoning effort the backend serving it was constructed with.
     """
     calls = install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
 
     code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
+        make_config(improve_monorepo_target, flow_name="improve", file_config=file_config)
     )
 
     assert code == 0
     tiers = _tiers_by_marker(calls)
-    assert tiers["plan-writer"] == {("claude-opus-5", "max")}
-    assert tiers["vet"] == {("claude-opus-5", "xhigh")}
-    assert tiers["audit"] == {("claude-sonnet-5", "high")}
-    assert tiers["recon"] == {("claude-sonnet-5", "low")}
-
-
-@pytest.mark.anyio
-async def test_config_file_phase_override_outranks_plan_write_defaults(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A ``[tool.daydream.phases.plan_write]`` table still wins over the new defaults."""
-    calls = install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
-
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            file_config=DaydreamFileConfig(
-                phases={
-                    "plan_write": {
-                        "model": "claude-sonnet-5",
-                        "reasoning_effort": "medium",
-                    }
-                }
-            ),
-            non_interactive=True,
-            archive=False,
-        )
-    )
-
-    assert code == 0
-    tiers = _tiers_by_marker(calls)
-    assert tiers["plan-writer"] == {("claude-sonnet-5", "medium")}
-    # Unrelated phases keep their own defaults.
-    assert tiers["recon"] == {("claude-sonnet-5", "low")}
-    assert tiers["vet"] == {("claude-opus-5", "xhigh")}
+    for marker, expected in expected_tiers.items():
+        assert tiers[marker] == {expected}, marker
 
 
 @pytest.mark.anyio
 async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A plan turn spending 200 tool calls completes and writes its plan.
 
@@ -3322,14 +2981,7 @@ async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
     )
     stub.plan_tool_calls_before_result = 200
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     plans = list(
@@ -3348,7 +3000,9 @@ async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
 
 @pytest.mark.anyio
 async def test_long_step_instruction_reaches_the_plan_whole(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A 2000-char step instruction renders in full, ending on its last word.
 
@@ -3364,15 +3018,11 @@ async def test_long_step_instruction_reaches_the_plan_whole(
     assert 1500 < len(instruction) <= 4000
     stub.plan_instruction_override = instruction
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     assert code == 0
     plan_text = next(
@@ -3384,21 +3034,19 @@ async def test_long_step_instruction_reaches_the_plan_whole(
 
 @pytest.mark.anyio
 async def test_over_length_instruction_is_repaired_not_silently_truncated(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Past the schema ceiling the host asks for a rewrite instead of cutting."""
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="add rate limiting",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="add rate limiting",
+    ))
 
     assert code == 1
     diagnostics = json.loads(
@@ -3421,7 +3069,9 @@ async def test_over_length_instruction_is_repaired_not_silently_truncated(
 
 @pytest.mark.anyio
 async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Redaction must not delete plan content it mistakes for a secret value.
 
@@ -3441,15 +3091,11 @@ async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
         "INTERNAL_SERVICE_SECRET="
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            improve_plan_description="repoint dev env secrets",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(
+        improve_monorepo_target,
+        flow_name="improve",
+        improve_plan_description="repoint dev env secrets",
+    ))
 
     assert code == 0
     plan_text = next(
@@ -3468,19 +3114,14 @@ async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
 
 @pytest.mark.anyio
 async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Walk the rendered artifact for the points a zero-context agent stalls on."""
     install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     plan_path = next(
@@ -3548,7 +3189,9 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
 
 @pytest.mark.anyio
 async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A step the model left ungated must not render a dead end.
 
@@ -3560,14 +3203,7 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
     )
     stub.plan_ungate_steps = True
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     text = next(
@@ -3600,7 +3236,9 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
 
 @pytest.mark.anyio
 async def test_plan_writer_is_told_to_leave_the_executor_no_decisions(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """The anti-ambiguity contract and per-field guidance reach the writer.
 
@@ -3611,14 +3249,7 @@ async def test_plan_writer_is_told_to_leave_the_executor_no_decisions(
         monkeypatch, improve_monorepo_target, n_findings=1
     )
 
-    code = await run(
-        RunConfig(
-            target=str(improve_monorepo_target),
-            flow_name="improve",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
     call = next(c for c in stub.calls if c["marker"] == "plan-writer")

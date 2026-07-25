@@ -12,18 +12,27 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 import pytest
 
 from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.config import SKILL_MAP
+
+if TYPE_CHECKING:
+    from daydream.pr_review import PRInfo
+    from daydream.runner import RunConfig
 
 # Broken partial-fix content the stub writes before raising MaxTurnsError, so a
 # test can prove the orchestrator both captured it (recovery patch) and reverted
 # the working file to its pre-fix state.
 _PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
+
+MakeConfig = Callable[..., "RunConfig"]
+Mute = Callable[..., None]
 
 
 class _StubBackend:
@@ -595,14 +604,20 @@ class _StubBackend:
         return f"/{skill_key}"
 
 
-def _silence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence interactive UI helpers in deep orchestrator + phases."""
+def _silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
+    """Silence noise-only UI helpers in deep orchestrator + phases.
+
+    ``prompts=False`` leaves the real ``prompt_user`` in place at both seams, for
+    tests that drive a genuine gate.
+    """
     monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-    # resolve_or_prompt routes through agent.prompt_user; patch it too so those
-    # gates don't block on stdin.
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    if prompts:
+        monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+        # resolve_or_prompt routes through agent.prompt_user; patch it too so those
+        # gates don't block on stdin.
+        monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
 
 
 def _force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -716,7 +731,58 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
     }
 
 
-def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+def _record(**overrides: Any) -> dict[str, Any]:
+    """Build one on-disk per-stack record (the shape a merge resume reads back)."""
+    record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1}
+    record.update(overrides)
+    return record
+
+
+def _prime_merge_resume(
+    target: Path,
+    *,
+    python: list[dict[str, Any]] | None = None,
+    react: list[dict[str, Any]] | None = None,
+    generic: list[dict[str, Any]] | None = None,
+    structure: list[dict[str, Any]] | None = None,
+) -> Path:
+    """Prime the deep artifacts a ``--start-at`` resume reads, returning the deep dir.
+
+    ``intent.md`` + ``alternatives.json`` are the TTT artifacts every resume gate
+    requires. Any stack passed a record list also gets its
+    ``stack-<name>-records.json``; a stack left as ``None`` is deliberately
+    absent (the shape that drives the missing-records guard).
+    """
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "intent.md").write_text("primed intent")
+    (deep / "alternatives.json").write_text("[]")
+    for stack, records in (
+        ("python", python),
+        ("react", react),
+        ("generic", generic),
+        ("structure", structure),
+    ):
+        if records is not None:
+            (deep / f"stack-{stack}-records.json").write_text(json.dumps(records))
+    return deep
+
+
+async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
+    """Async stand-in for phase_test_and_heal that always passes.
+
+    Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
+    tests in this module use the ``mute_side_effects`` fixture instead.
+    """
+    return (True, 0)
+
+
+async def _noop_commit(*_a: Any, **_k: Any) -> None:
+    """Async no-op stand-in for phase_commit_push (see ``_ok`` on why it stays)."""
+    return None
+
+
+def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
     """Provide the PR metadata required by the findings-out artifact."""
     from daydream import git_ops
     from daydream.pr_review import PRInfo
@@ -739,14 +805,15 @@ def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
         url="https://example.invalid/pr/7",
     )
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n: pr)
+    return pr
 
 
 async def test_supervise_rules_drops_deny_globbed_finding(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """Rule supervision rewrites the canonical items before findings-out."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _pin_findings_pr(monkeypatch, multi_stack_target)
@@ -766,13 +833,10 @@ async def test_supervise_rules_drops_deny_globbed_finding(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             findings_out=str(out),
-            start_at="review",
-            cleanup=False,
-            non_interactive=True,
             file_config=load_file_config(multi_stack_target),
             trajectory_path=traj,
         )
@@ -796,13 +860,14 @@ async def test_supervise_rules_drops_deny_globbed_finding(
 
 
 async def test_supervise_hold_excluded_but_rendered(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Held findings leave the actionable items but remain visible in the report."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [
         _merge_item(1, "vendor/generated.py", "high", desc="hold this finding"),
@@ -812,21 +877,10 @@ async def test_supervise_hold_excluded_but_rendered(
         1: {"action": "hold", "reason": "needs human review"},
         2: {"action": "allow", "reason": "confirmed"},
     }
-    (multi_stack_target / ".daydream.toml").write_text(
-        'supervisor = "llm"\n'
-    )
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            cleanup=False,
-            non_interactive=True,
-            file_config=load_file_config(multi_stack_target),
-        )
+        make_config(multi_stack_target, file_config=load_file_config(multi_stack_target))
     )
 
     assert rc == 0
@@ -841,11 +895,11 @@ async def test_supervise_hold_excluded_but_rendered(
 
 
 async def test_supervise_llm_drop_records_step(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """LLM supervision drops by canonical id and records its deep stage."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _pin_findings_pr(monkeypatch, multi_stack_target)
@@ -861,17 +915,16 @@ async def test_supervise_llm_drop_records_step(
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
     traj = tmp_path / "trajectory.json"
+
     async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("findings-out must not post to the PR")
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             findings_out=str(out),
-            cleanup=False,
-            non_interactive=True,
             file_config=load_file_config(multi_stack_target),
             trajectory_path=traj,
         )
@@ -887,13 +940,14 @@ async def test_supervise_llm_drop_records_step(
 
 
 async def test_supervise_llm_edit_revises_severity(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """LLM edit verdicts revise severity in canonical items and findings-out."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="downgrade me")]
@@ -902,18 +956,12 @@ async def test_supervise_llm_edit_revises_severity(
     }
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             findings_out=str(out),
-            cleanup=False,
-            non_interactive=True,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -927,13 +975,14 @@ async def test_supervise_llm_edit_revises_severity(
 
 
 async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """All findings may be dropped while findings-out still writes an empty artifact."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop everything")]
@@ -941,18 +990,12 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
         'supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n'
     )
     out = multi_stack_target / "findings.json"
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             findings_out=str(out),
-            cleanup=False,
-            non_interactive=True,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -962,31 +1005,26 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
 
 
 async def test_supervise_off_byte_identical(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """No config and explicit off produce the same canonical items bytes."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     _pin_findings_pr(monkeypatch, multi_stack_target)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="first finding"),
         _merge_item(2, "App.tsx", "low", desc="second finding"),
     ]
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", lambda *_a, **_k: None)
     out = multi_stack_target / "findings.json"
 
     empty_config = load_file_config(multi_stack_target)
     first_rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
-            pr_number=7,
-            findings_out=str(out),
-            cleanup=False,
-            non_interactive=True,
-            file_config=empty_config,
+        make_config(
+            multi_stack_target, pr_number=7, findings_out=str(out), file_config=empty_config
         )
     )
     first_items = (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_bytes()
@@ -994,12 +1032,10 @@ async def test_supervise_off_byte_identical(
 
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "off"\n')
     second_rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             findings_out=str(out),
-            cleanup=False,
-            non_interactive=True,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -1012,13 +1048,14 @@ async def test_supervise_off_byte_identical(
 
 
 async def test_supervise_dropped_finding_never_reaches_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """A dropped finding is absent from the real fix prompt and remains unmodified."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="drop before fix"),
@@ -1027,18 +1064,13 @@ async def test_supervise_dropped_finding_never_reaches_fix(
     (multi_stack_target / ".daydream.toml").write_text(
         'supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
     source_before = (multi_stack_target / "api.py").read_bytes()
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -1049,18 +1081,8 @@ async def test_supervise_dropped_finding_never_reaches_fix(
     assert "drop before fix" not in prompts
 
 
-async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
-    """Async stand-in for phase_test_and_heal that always passes."""
-    return (True, 0)
-
-
-async def _noop_commit(*_a: Any, **_k: Any) -> None:
-    """Async no-op stand-in for phase_commit_push."""
-    return None
-
-
 async def test_run_deep_renders_prescan_summary_not_json(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON.
 
@@ -1071,7 +1093,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
     """
     from rich.console import Console
 
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
     # runs and its conventions reach the rendered summary).
@@ -1082,14 +1104,13 @@ async def test_run_deep_renders_prescan_summary_not_json(
     )
 
     _silence(monkeypatch)
+    mute_side_effects()
     rec = Console(record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
     _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(multi_stack_target, assume="yes", output_mode="loop")
     )
     assert exit_code == 0
     out = rec.export_text()
@@ -1098,24 +1119,25 @@ async def test_run_deep_renders_prescan_summary_not_json(
 
 
 async def test_parallel_fix_applies_all_disjoint_files(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC#3: every disjoint-file group is applied (each per-file sentinel lands).
 
     A serial loop + single-sentinel stub would fail this -- it asserts EVERY
     per-file ``.fixed-*`` marker, not just the last one written.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
     assert exit_code == 0
     for f in files:
@@ -1123,7 +1145,7 @@ async def test_parallel_fix_applies_all_disjoint_files(
 
 
 async def test_parallel_fix_same_file_no_race(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """3 items on ONE file + 1 on another. The 3 same-file findings collapse into
     ONE batched fix turn that addresses every marker in severity order, while the
@@ -1131,10 +1153,11 @@ async def test_parallel_fix_same_file_no_race(
     anyio.sleep(0) makes any cross-file race deterministic; per-file partitioning
     keeps shared.py's markers ordered and intact.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     shared = multi_stack_target / "shared.py"
     stub.fix_append_path = shared
@@ -1144,17 +1167,17 @@ async def test_parallel_fix_same_file_no_race(
         _merge_item(3, "shared.py", "low", desc="marker-3"),
         _merge_item(4, "other.py", "high", desc="other"),
     ]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
     assert exit_code == 0
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
 
 
 async def test_parallel_fix_failure_isolated_returns_nonzero(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero.
 
@@ -1162,10 +1185,11 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     apply, a warning naming bad.py must surface (non-silent), commit must be
     skipped, and the run must exit 1 (locked nonzero-on-failure decision).
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_fail_file = "bad.py"
     stub.merge_items = [
@@ -1185,7 +1209,9 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
     assert exit_code == 1  # decision: nonzero on failure
     assert (multi_stack_target / ".fixed-good1_py").exists()  # other groups applied
@@ -1199,6 +1225,8 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back,
     its partial content saved, and the archived run is marked ``partial``.
@@ -1218,10 +1246,11 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     Fails if the persistence/revert is removed: without (a) the manifest stays
     ``complete``; without (c) ``App.tsx`` keeps the broken partial edit.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.merge_items = [
@@ -1230,11 +1259,14 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     ]
     pre_fix_apptsx = (multi_stack_target / "App.tsx").read_text()
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
-
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=True,
+        )
     )
     assert exit_code == 1  # dropped fix group => nonzero
 
@@ -1262,6 +1294,8 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: a stray untracked file a failed group creates -- one that is
     NOT the group's key file -- is enumerated in the manifest and never deleted.
@@ -1277,10 +1311,11 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     Fails if the enumeration is removed: without (a) the orphan is invisible in
     the archive -- the exact "half-broken tree presented as clean" gap.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_orphan_file = "store/uuid.go"
@@ -1289,11 +1324,14 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
         _merge_item(2, "App.tsx", "high"),
     ]
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
-
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=True,
+        )
     )
     assert exit_code == 1
 
@@ -1311,7 +1349,7 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
 
 
 async def test_parallel_fix_commit_runs_once_after_all(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC#6: commit stays serial and runs exactly once, after every parallel fix lands.
 
@@ -1320,10 +1358,11 @@ async def test_parallel_fix_commit_runs_once_after_all(
     commit that observed every fix -- a regression moving commit inside the fan-out would
     see a partial set (False) or commit more than once.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py"]
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
@@ -1334,10 +1373,11 @@ async def test_parallel_fix_commit_runs_once_after_all(
             all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
         )
 
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
     assert exit_code == 0
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
@@ -1353,32 +1393,32 @@ def _fix_prompts(stub: _StubBackend) -> list[str]:
 
 
 async def test_fix_tool_veto_blocks_denied_write(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Built-in rules veto a deferred denied Write and record the abort/event."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="protected write")]
     stub.deferred_write_pairs = ["api.py"]
     (multi_stack_target / ".daydream.toml").write_text(
         'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
     source_before = (multi_stack_target / "api.py").read_bytes()
     traj = tmp_path / "trajectory.json"
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
             file_config=load_file_config(multi_stack_target),
             trajectory_path=traj,
         )
@@ -1393,30 +1433,26 @@ async def test_fix_tool_veto_blocks_denied_write(
 
 
 async def test_fix_tool_veto_allows_unmatched_write(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Built-in rules allow a Write whose path does not match the deny glob."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "App.tsx", "high", desc="allowed write")]
     stub.deferred_write_pairs = ["App.tsx"]
     (multi_stack_target / ".daydream.toml").write_text(
         'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -1427,32 +1463,28 @@ async def test_fix_tool_veto_allows_unmatched_write(
 
 
 async def test_fix_tool_veto_stops_subsequent_calls(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """A vetoed first deferred Write prevents the generator's later Write."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="first"), _merge_item(2, "App.tsx", "low", desc="second")]
     stub.deferred_write_pairs = ["api.py", "App.tsx"]
     (multi_stack_target / ".daydream.toml").write_text(
         'tool_supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n'
     )
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
     api_before = (multi_stack_target / "api.py").read_bytes()
     app_before = (multi_stack_target / "App.tsx").read_bytes()
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -1463,28 +1495,24 @@ async def test_fix_tool_veto_stops_subsequent_calls(
 
 
 async def test_fix_tool_supervisor_off_writes(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """With tool supervision off, the deferred Write resumes and writes."""
     from daydream.config_file import load_file_config
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
+    mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="unprotected write")]
     stub.deferred_write_pairs = ["api.py"]
     (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "off"\n')
-    async def _no_post(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -1494,7 +1522,7 @@ async def test_fix_tool_supervisor_off_writes(
 
 
 async def test_confirmed_intent_reaches_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """The confirmed author intent reaches every deep fix prompt so a fixer
     can't undo a deliberate decision.
@@ -1505,26 +1533,25 @@ async def test_confirmed_intent_reaches_fix_prompt(
     file's text plus the "don't undo deliberate intent" rule into each fix
     prompt. Asserts on observable fix-prompt content, not that a call happened.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
+    mute_side_effects()
     monkeypatch.setattr(
         "daydream.git_ops.gh_pr_view",
         lambda repo, pr=None: {"body": INTENT_SENTINEL},
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
     rc = await run(
-        RunConfig(
-            target=str(multi_stack_target),
+        make_config(
+            multi_stack_target,
             pr_number=7,
             assume="yes",
             output_mode="loop",
-            cleanup=False,
+            non_interactive=False,
         )
     )
     assert rc == 0
@@ -1575,10 +1602,10 @@ def _intent_prompt(stub: _StubBackend) -> str:
 
 
 async def test_pr_body_reaches_intent_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """The PR description body is threaded into the initial intent prompt."""
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr(
@@ -1587,13 +1614,13 @@ async def test_pr_body_reaches_intent_prompt(
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    rc = await run(make_config(multi_stack_target, pr_number=7))
     assert rc == 0
     assert PR_SENTINEL in _intent_prompt(stub)
 
 
 async def test_no_pr_body_degrades_cleanly(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """No PR body -> intent prompt is byte-for-byte today's behavior.
 
@@ -1602,13 +1629,13 @@ async def test_no_pr_body_degrades_cleanly(
     GitHub pull request (so it never hunts for or asks about open PRs), and
     forbid skill/slash-command invocation.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None: None)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+    rc = await run(make_config(multi_stack_target, pr_number=7))
     assert rc == 0
     intent = _intent_prompt(stub)
     assert PR_SENTINEL not in intent
@@ -1620,7 +1647,7 @@ async def test_no_pr_body_degrades_cleanly(
 
 
 async def test_non_interactive_intent_prompt_carries_pr_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Real-path: the unattended (non-interactive) deep run auto-accepts the
     proposed intent with no human corrector -- and STILL threads the PR body
@@ -1633,19 +1660,15 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
     proving stdin is never touched in non-interactive mode.
     """
     from daydream.agent import get_non_interactive, reset_state
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
+    mute_side_effects()
     monkeypatch.setattr(
         "daydream.git_ops.gh_pr_view",
         lambda repo, pr=None: {"number": 7, "body": PR_SENTINEL},
     )
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     def _forbidden_input(*_a: Any, **_kw: Any) -> str:
         raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
@@ -1656,14 +1679,7 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
     rc = -1
     try:
         assert get_non_interactive() is False
-        config = RunConfig(
-            target=str(multi_stack_target),
-            pr_number=7,
-            start_at="review",
-            cleanup=False,
-            non_interactive=True,
-        )
-        rc = await run(config)
+        rc = await run(make_config(multi_stack_target, pr_number=7))
         assert get_non_interactive() is True
     finally:
         reset_state()
@@ -1674,13 +1690,13 @@ async def test_non_interactive_intent_prompt_carries_pr_body(
 
 @pytest.mark.asyncio
 async def test_non_open_pr_state_suppresses_pr_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """When gh_pr_view returns a non-OPEN state (CLOSED or MERGED), the
     orchestrator must NOT thread the PR body into the intent prompt — trusting
     a stale description would be wrong.  Asserts on the observable prompt
     content, not on internal state."""
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     for state in ("CLOSED", "MERGED"):
@@ -1690,7 +1706,7 @@ async def test_non_open_pr_state_suppresses_pr_body(
         )
         stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-        rc = await run(RunConfig(target=str(multi_stack_target), pr_number=7, start_at="review", cleanup=False))
+        rc = await run(make_config(multi_stack_target, pr_number=7))
         assert rc == 0
         intent = _intent_prompt(stub)
         assert PR_SENTINEL not in intent, f"PR body must be suppressed when state={state!r}"
@@ -1888,7 +1904,9 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
     assert any("fix" in msg.lower() or "apply" in msg.lower() for msg in asked)
 
 
-async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_yes_auto_applies_fix(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
     """Task 6 real-path: ``--yes`` (assume="yes") auto-applies fixes without prompting.
 
     Drives ``runner.run`` through the deep orchestrator's fix gate with
@@ -1896,7 +1914,7 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
     ``phase_fix`` — the observable consequence is the sentinel file the stub
     writes when it receives a fix prompt.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -1919,13 +1937,7 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
         lambda *a, **kw: (_ for _ in ()).throw(AssertionError("phases.prompt_user called under --yes")),
     )
 
-    config = RunConfig(
-        target=str(multi_stack_target),
-        assume="yes",
-        output_mode="loop",
-        cleanup=False,
-    )
-    exit_code = await run(config)
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
 
     assert exit_code == 0
     assert not any(
@@ -1971,11 +1983,7 @@ async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    # Prime required TTT artifacts for the resume gate.
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
+    _prime_merge_resume(multi_stack_target)
 
     exit_code = await _run_deep(multi_stack_target, start_at="per-stack")
     assert exit_code == 0
@@ -1991,10 +1999,7 @@ async def test_resume_overwrites(multi_stack_target: Path, monkeypatch: pytest.M
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     # Prime TTT artifacts and an OLD per-stack review that must be overwritten.
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
+    deep = _prime_merge_resume(multi_stack_target)
     old = deep / "stack-python-review.md"
     old.write_text("STALE CONTENT")
 
@@ -2013,32 +2018,19 @@ async def test_resume_merge_consumes_saved_records(
     against reconstructed stack-*-review.md paths, so resume failed when those
     markdown files were absent even though the validated records.json existed.
     """
-    import json
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    # Prime records but NOT the review.md files -- resume must consume records.json.
-    (deep / "stack-python-records.json").write_text(
-        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
-    )
-    (deep / "stack-react-records.json").write_text(
-        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
-    )
-    # Markdown routes to the generic bucket; prime its records so merge-resume
-    # validation (every detected stack must have records or be a failure) passes.
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1}])
-    )
-    # Structure meta-stack also runs in production -- prime its records.
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}]
-        )
+    # Records are primed but NOT the review.md files -- resume must consume
+    # records.json. Every detected stack (including the generic bucket the
+    # markdown file routes to, and the structure meta-stack) needs records, else
+    # the merge-resume validation fails the run.
+    _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(description="py issue")],
+        react=[_record(description="tsx issue", file="App.tsx")],
+        generic=[_record(description="docs issue", file="README.md")],
+        structure=[_record(description="structural issue")],
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -2074,65 +2066,61 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
     assert all(c[1] == 5 for c in progress_calls)
 
 
-def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
-    registry = config_dir / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text(
+def _registry_text(plugin_names: list[str]) -> str:
+    return (
         '{"version": 2, "plugins": {'
         + ", ".join(f'"{name}@marketplace": []' for name in plugin_names)
         + "}}"
     )
 
 
-def test_get_installed_skills_full(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """All per-stack beagle plugins present -> full SKILL_MAP coverage."""
-    from daydream.config import SKILL_MAP
-    from daydream.deep.orchestrator import get_installed_skills
-
-    plugin_names = [skill.split(":", 1)[0] for skill in SKILL_MAP.values()]
-    _write_plugin_registry(tmp_path, plugin_names)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    assert get_installed_skills() == set(SKILL_MAP.keys())
-
-
-def test_get_installed_skills_partial(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Missing beagle-go plugin -> go is excluded from availability."""
-    from daydream.deep.orchestrator import get_installed_skills
-
-    _write_plugin_registry(tmp_path, ["beagle-python", "beagle-react"])
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    result = get_installed_skills()
-    assert result == {"python", "react"}
-
-
-def test_get_installed_skills_missing_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Missing registry file -> None (signals 'unknown' to the caller)."""
-    from daydream.deep.orchestrator import get_installed_skills
-
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    assert get_installed_skills() is None
-
-
-def test_get_installed_skills_malformed_registry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Unparseable registry -> None (fall back to optimistic availability)."""
-    from daydream.deep.orchestrator import get_installed_skills
-
-    registry = tmp_path / "plugins" / "installed_plugins.json"
+def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
+    registry = config_dir / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text("not json {{{")
+    registry.write_text(_registry_text(plugin_names))
+
+
+@pytest.mark.parametrize(
+    ("registry_text", "expected"),
+    [
+        pytest.param(
+            _registry_text([skill.split(":", 1)[0] for skill in SKILL_MAP.values()]),
+            set(SKILL_MAP.keys()),
+            id="all-plugins-present-full-coverage",
+        ),
+        pytest.param(
+            _registry_text(["beagle-python", "beagle-react"]),
+            {"python", "react"},
+            id="missing-beagle-go-excludes-go",
+        ),
+        pytest.param(None, None, id="missing-registry-signals-unknown"),
+        pytest.param("not json {{{", None, id="unparseable-registry-optimistic"),
+        # Regression: `data.get("plugins", {})` raised AttributeError when the
+        # registry parsed to a non-dict, aborting deep mode instead of returning None.
+        pytest.param("[]", None, id="non-dict-root-payload"),
+        # Regression: iterating ``data.get("plugins", {})`` raised TypeError when the
+        # `plugins` field was e.g. a list, aborting deep mode instead of returning None.
+        pytest.param(
+            '{"version": 2, "plugins": ["beagle-python@marketplace"]}',
+            None,
+            id="non-dict-plugins-field",
+        ),
+    ],
+)
+def test_get_installed_skills(
+    registry_text: str | None, expected: set[str] | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registry shape -> resolved skill availability (``None`` == unknown, fall
+    back to optimistic availability)."""
+    from daydream.deep.orchestrator import get_installed_skills
+
+    if registry_text is not None:
+        registry = tmp_path / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(registry_text)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
-    assert get_installed_skills() is None
+    assert get_installed_skills() == expected
 
 
 def test_run_deep_routes_missing_skill_to_generic(
@@ -2312,44 +2300,6 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     assert "simulated react failure" in prompt
 
 
-def test_get_installed_skills_non_dict_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Non-dict root JSON -> None (fall back to optimistic availability).
-
-    Regression: previously `data.get("plugins", {})` raised AttributeError
-    when the registry parsed to a non-dict, aborting deep mode instead of
-    returning None.
-    """
-    from daydream.deep.orchestrator import get_installed_skills
-
-    registry = tmp_path / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text("[]")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    assert get_installed_skills() is None
-
-
-def test_get_installed_skills_non_dict_plugins_field(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`plugins` field is not a mapping -> None.
-
-    Regression: previously iterating ``data.get("plugins", {})`` raised
-    TypeError when the `plugins` field was e.g. a list, aborting deep
-    mode instead of returning None.
-    """
-    from daydream.deep.orchestrator import get_installed_skills
-
-    registry = tmp_path / "plugins" / "installed_plugins.json"
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    registry.write_text('{"version": 2, "plugins": ["beagle-python@marketplace"]}')
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-
-    assert get_installed_skills() is None
-
-
 async def test_resume_merge_errors_on_missing_stack_records(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2359,19 +2309,11 @@ async def test_resume_merge_errors_on_missing_stack_records(
     files happened to exist on disk, so a detected stack with no prior records
     would silently disappear from the merged report.
     """
-    import json
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    # Prime records for python only; react and generic are missing.
-    (deep / "stack-python-records.json").write_text(
-        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
-    )
+    # Records for python only; react and generic are missing.
+    _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")])
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 1
@@ -2389,28 +2331,16 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     The merge agent still runs and the missing bucket is surfaced as an
     uncovered stack rather than being flagged as a records-file gap.
     """
-    import json
-
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-python-records.json").write_text(
-        json.dumps([{"id": 1, "description": "py issue", "file": "api.py", "line": 1}])
-    )
-    (deep / "stack-react-records.json").write_text(
-        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1}])
-    )
-    # Structure meta-stack also runs in production -- prime its records.
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [{"id": 1, "description": "structural issue", "file": "api.py", "line": 1}]
-        )
-    )
     # No records for the generic bucket, but it's listed as a prior failure.
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(description="py issue")],
+        react=[_record(description="tsx issue", file="App.tsx")],
+        structure=[_record(description="structural issue")],
+    )
     (deep / "per-stack-failures.json").write_text(
         json.dumps({"generic": "simulated generic failure"})
     )
@@ -2435,8 +2365,6 @@ async def test_orchestrator_threads_structural_records_to_merge(
     the structure records file, (b) the dedup input lists do NOT contain the
     sentinel structural record.
     """
-    import json as _json
-
     from daydream.deep import dedup as _dedup
     from daydream.deep import prompts as _prompts
 
@@ -2474,38 +2402,14 @@ async def test_orchestrator_threads_structural_records_to_merge(
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-python-records.json").write_text(
-        _json.dumps(
-            [{"id": "py-1", "description": "py issue", "file": "api.py", "line": 1}]
-        )
-    )
-    (deep / "stack-react-records.json").write_text(
-        _json.dumps(
-            [{"id": "react-1", "description": "tsx issue", "file": "App.tsx", "line": 1}]
-        )
-    )
-    (deep / "stack-generic-records.json").write_text(
-        _json.dumps(
-            [{"id": "generic-1", "description": "docs issue", "file": "README.md", "line": 1}]
-        )
-    )
-    # Structural record carries a sentinel id so we can verify it never lands
+    # The structural record carries a sentinel id so we can verify it never lands
     # in the dedup input lists.
-    (deep / "stack-structure-records.json").write_text(
-        _json.dumps(
-            [
-                {
-                    "id": "structure-1",
-                    "description": "1000-line file budget violated",
-                    "file": "api.py",
-                    "line": 1,
-                }
-            ]
-        )
+    _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(id="py-1", description="py issue")],
+        react=[_record(id="react-1", description="tsx issue", file="App.tsx")],
+        generic=[_record(id="generic-1", description="docs issue", file="README.md")],
+        structure=[_record(id="structure-1", description="1000-line file budget violated")],
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -2621,10 +2525,7 @@ async def test_resume_fix_skips_pr_post(
 
     # Prime the fix-resume artifacts: the verifier and fix gate both read the
     # canonical merged-items.json, so prime it alongside the markdown report.
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
+    deep = _prime_merge_resume(multi_stack_target)
     (multi_stack_target / REVIEW_OUTPUT_FILE).write_text(
         "# Review\n\n## Issues\n\n1. [api.py:1] primed issue\n   rationale\n"
     )
@@ -2655,7 +2556,7 @@ async def test_resume_fix_skips_pr_post(
 
 
 async def test_resolve_backend_called_with_each_phase_in_deep_flow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """The deep orchestrator must call _resolve_backend with each spec phase,
     not just 'review'. This is a wiring test, not a model-value test.
@@ -2687,26 +2588,14 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    # Suppress the PR post side effect.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
+    # Stub the outward-facing tail phases (they still trigger their resolver call)
+    # plus phase_fix, so the fix loop doesn't mutate the workspace.
+    mute_side_effects()
 
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    # Stub fix/test_and_heal/commit_push so they don't mutate the workspace or run
-    # tests, but still trigger their resolver call.
     async def _stub_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         return None
 
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
     monkeypatch.setattr("daydream.phases.phase_fix", _stub_fix)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -2721,7 +2610,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
 
 def test_intent_phase_resolves_to_sonnet_default(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default.
 
@@ -2794,7 +2683,7 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(
 
 
 async def test_verifier_runs_after_merge_before_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """Recommendation verifier runs as a sub-step of the fix gate.
 
@@ -2808,31 +2697,8 @@ async def test_verifier_runs_after_merge_before_fix(
     """
     from daydream.deep.artifacts import verdicts_path
 
-    # Accept the fix gate so the fix loop runs; pin interactivity so the gate
-    # honours the "y" stub.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    # Suppress the PR post and don't mutate the workspace in test_and_heal /
-    # commit_push. phase_fix stays REAL so verdict propagation is observable.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    # phase_fix stays REAL so verdict propagation is observable.
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -2877,21 +2743,13 @@ async def test_verifier_runs_after_merge_before_fix(
 
 
 async def test_verifier_contradicts_propagates_to_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """When the verifier returns `contradicts` for an issue_id matching a parsed
     feedback item, the orchestrator attaches the verdict and phase_fix inlines
     `Verifier verdict: contradicts` into the fix-agent prompt.
     """
-    # Pin interactivity so the fix gate honours the "y" stub.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
     # Parsed feedback uses id=1, so this verdict matches and the orchestrator
     # attaches it to that item.
     stub.verifier_verdict = "contradicts"
@@ -2899,19 +2757,6 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
         "assumes endpoint returns JSON",
         "assumes caller is authenticated",
     ]
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -2944,7 +2789,7 @@ async def test_verifier_contradicts_propagates_to_fix_prompt(
 
 
 async def test_heal_loop_receives_feedback_items_in_fix_prompt(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """Deep mode threads parsed feedback_items into phase_test_and_heal so the
     heal loop's fix prompt names the changed files.
@@ -2958,9 +2803,7 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     scope instruction -- the observable consequence of feedback_items flowing
     parse -> orchestrator -> phase_test_and_heal -> _build_fix_prompt.
     """
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    _silence(monkeypatch, prompts=False)
     # Drives the REAL interactive heal menu; pin interactivity so non-TTY pytest
     # stdin doesn't auto-resolve to non-interactive and bypass it.
     _force_interactive(monkeypatch)
@@ -2976,15 +2819,8 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fail_first_test_run = True  # first run fails, second passes
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
     # phase_test_and_heal stays REAL so feedback_items must flow through it.
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    mute_side_effects(heal=False)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0, "deep run did not complete -- heal loop should pass on the second test run"
@@ -3009,7 +2845,7 @@ async def test_heal_loop_receives_feedback_items_in_fix_prompt(
 
 
 async def test_structural_finding_reaches_fix_loop(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """The fix gate feeds the canonical merged-items.json (structural included),
     severity-ordered, into phase_fix -- never the LLM re-parse that dropped
@@ -3020,15 +2856,7 @@ async def test_structural_finding_reaches_fix_loop(
     markdown re-parse), and items MUST arrive severity-ordered (high before low,
     stable within a tier).
     """
-    # Pin interactivity so the fix gate honours the "y" stub.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
     # One per-stack(high) + one per-stack(low); phase_cross_stack_merge appends
     # the structure meta-stack as structural(high), giving the required mix.
     stub.merge_items = [
@@ -3064,19 +2892,7 @@ async def test_structural_finding_reaches_fix_loop(
     async def _capture_fix(backend, work, items, item_nums, total, **kwargs):  # noqa: ARG001
         fixed.extend(items)
 
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
     monkeypatch.setattr("daydream.phases.phase_fix_batched", _capture_fix)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -3090,7 +2906,7 @@ async def test_structural_finding_reaches_fix_loop(
 
 
 async def test_start_at_fix_recovers_merged_items(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
     """--start-at fix with ONLY the deep-dir merged-items.json present (canonical
     repo review-output.md ABSENT) still loads items and reaches phase_fix.
@@ -3103,41 +2919,18 @@ async def test_start_at_fix_recovers_merged_items(
     """
     from daydream.config import REVIEW_OUTPUT_FILE
 
-    # Pin interactivity so the fix gate honours the "y" stub.
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    _install_stub_backend(monkeypatch, multi_stack_target)
+    _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
     fixed: list[dict[str, Any]] = []
 
     async def _capture_fix(backend, work, item, idx, total, **kwargs):  # noqa: ARG001
         fixed.append(item)
 
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
     monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     # Prime fix-resume prerequisites EXCEPT the canonical markdown report -- only
     # the deep-dir merged-items.json exists, no review-output.md anywhere.
-    deep = multi_stack_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
+    deep = _prime_merge_resume(multi_stack_target)
     (deep / "merged-items.json").write_text(
         json.dumps(
             {
@@ -3193,13 +2986,15 @@ def _silence_gate_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     both the orchestrator and phases so the apply-fixes gate runs the genuine
     production code path under test.
     """
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    _silence(monkeypatch, prompts=False)
 
 
 async def test_apply_fixes_gate_non_interactive_takes_safe_default(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """Real-path: non-interactive deep run declines fixes and exits 0 without
     reading stdin.
@@ -3217,16 +3012,12 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     """
     from daydream.agent import get_non_interactive, reset_state
     from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
     # The PR post runs before the gate; stub the non-idempotent GitHub write.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, multi_stack_target)
 
     # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
     fix_calls: list[Any] = []
@@ -3248,13 +3039,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     exit_code = -1
     try:
         assert get_non_interactive() is False
-        config = RunConfig(
-            target=str(multi_stack_target),
-            cleanup=False,
-            non_interactive=True,
-            trajectory_path=traj,
-        )
-        exit_code = await run(config)
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj))
         assert get_non_interactive() is True
     finally:
         reset_state()
@@ -3281,7 +3066,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
 
 
 async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Real-path: an EOF on stdin at the apply-fixes gate is caught and resolved
     to the safe default -- the deep run declines fixes and returns 0, no crash.
@@ -3294,15 +3079,11 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     """
     from daydream.agent import get_non_interactive, reset_state
     from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
+    mute_side_effects()
     _install_stub_backend(monkeypatch, multi_stack_target)
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     fix_calls: list[Any] = []
 
@@ -3326,9 +3107,8 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     exit_code = -1
     try:
         assert get_non_interactive() is False
-        config = RunConfig(target=str(multi_stack_target), cleanup=False, non_interactive=False)
         # If the gate did not catch EOFError, this await would raise.
-        exit_code = await run(config)
+        exit_code = await run(make_config(multi_stack_target, non_interactive=False))
     finally:
         reset_state()
 
@@ -3710,32 +3490,22 @@ async def test_precision_on_keeps_low_finding_with_evidence(
     assert "api.py" in files
 
 
-def _prime_merge_resume_records(deep: Path, *, python_severity: str | None) -> None:
+def _prime_merge_resume_records(target: Path, *, python_severity: str | None) -> Path:
     """Write the per-stack records a `--start-at merge` resume needs on disk.
 
     Every detected stack (python, react, generic, structure) must have a records
     file or be a recorded failure, else the resume guard returns 1. The python
     record optionally carries ``python_severity`` to drive arbiter selection.
     """
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    py_record: dict[str, Any] = {
-        "id": 1, "description": "py issue", "file": "api.py", "line": 1, "evidence": "api.py:1"
-    }
+    py_record = _record(description="py issue", evidence="api.py:1")
     if python_severity is not None:
-        py_record["severity"] = python_severity
-        py_record["confidence"] = "HIGH"
-        py_record["rationale"] = "stub"
-    (deep / "stack-python-records.json").write_text(json.dumps([py_record]))
-    (deep / "stack-react-records.json").write_text(
-        json.dumps([{"id": 1, "description": "tsx issue", "file": "App.tsx", "line": 1, "evidence": "App.tsx:1"}])
-    )
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps([{"id": 1, "description": "docs issue", "file": "README.md", "line": 1, "evidence": "README.md:1"}])
-    )
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps([{"id": 1, "description": "structural issue", "file": "api.py", "line": 1, "evidence": "api.py:1"}])
+        py_record |= {"severity": python_severity, "confidence": "HIGH", "rationale": "stub"}
+    return _prime_merge_resume(
+        target,
+        python=[py_record],
+        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
+        structure=[_record(description="structural issue", evidence="api.py:1")],
     )
 
 
@@ -3752,8 +3522,7 @@ async def test_merge_resume_reruns_arbiter_when_marker_absent(
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    _prime_merge_resume_records(deep, python_severity="high")
+    deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
     assert not (deep / "arbiter-complete.marker").exists()
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -3775,8 +3544,7 @@ async def test_merge_resume_skips_arbiter_when_marker_present(
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
 
-    deep = multi_stack_target / ".daydream" / "deep"
-    _prime_merge_resume_records(deep, python_severity="high")
+    deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
     (deep / "arbiter-complete.marker").write_text("")
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -3809,7 +3577,11 @@ def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
 
 
 async def test_run_terminates_under_tool_call_budget(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC#6a real-path: a runaway fix turn is capped by the tool-call budget.
 
@@ -3824,7 +3596,7 @@ async def test_run_terminates_under_tool_call_budget(
     stub stream never completes, so ``run`` never returns -- the ``fail_after``
     timeout turns that regression into a failure instead of an infinite hang.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     # Patch the binding actually read at the fix call site (Task 5 imported the
@@ -3833,18 +3605,13 @@ async def test_run_terminates_under_tool_call_budget(
     monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_fix = True
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
-            RunConfig(
-                target=str(multi_stack_target),
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                cleanup=False,
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
 
@@ -3861,7 +3628,11 @@ async def test_run_terminates_under_tool_call_budget(
 
 
 async def test_run_terminates_under_wall_budget(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#169 real-path: a runaway fix turn is capped by the wall-clock budget.
 
@@ -3878,7 +3649,7 @@ async def test_run_terminates_under_wall_budget(
     scope is ``nullcontext()`` in production -- the tool-call budget trips instead, so
     ``stop_reason`` is ``tool_call_budget_exceeded`` and this assertion fails.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     # Patch the binding read at the fix call site (phases imported the constant by
@@ -3888,18 +3659,13 @@ async def test_run_terminates_under_wall_budget(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_fix = True
     stub.runaway_fix_sleep_s = 0.05
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
-            RunConfig(
-                target=str(multi_stack_target),
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                cleanup=False,
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
 
@@ -3949,7 +3715,11 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
 
 
 async def test_run_caps_runaway_file_group_serial_fixes(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget.
 
@@ -3966,7 +3736,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     api.py findings (six "fix this issue" turns) and no budget event exists --
     both assertions fail.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     # Lower the group serial-item ceiling at the binding the orchestrator resolves
@@ -3977,18 +3747,13 @@ async def test_run_caps_runaway_file_group_serial_fixes(
         _merge_item(7, "App.tsx", "high")
     ]
     stub.fail_batched_fix_file = "api.py"  # force the per-finding fallback for api.py
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
-            RunConfig(
-                target=str(multi_stack_target),
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                cleanup=False,
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
     assert isinstance(exit_code, int)
@@ -4025,7 +3790,11 @@ async def test_run_caps_runaway_file_group_serial_fixes(
 
 
 async def test_run_leaves_small_file_group_unbudgeted(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: under a high ceiling the group budget is purely additive.
 
@@ -4034,7 +3803,7 @@ async def test_run_leaves_small_file_group_unbudgeted(
     and no budget failure is recorded. Proves the guard changes nothing when a
     group stays within budget (spec AC#5).
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.deep.orchestrator.DEFAULT_GROUP_MAX_SERIAL_ITEMS", 20)
@@ -4043,18 +3812,13 @@ async def test_run_leaves_small_file_group_unbudgeted(
         _merge_item(7, "App.tsx", "high")
     ]
     stub.fail_batched_fix_file = "api.py"
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
-            RunConfig(
-                target=str(multi_stack_target),
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                cleanup=False,
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
     assert isinstance(exit_code, int)
@@ -4072,7 +3836,11 @@ async def test_run_leaves_small_file_group_unbudgeted(
 
 
 async def test_run_batched_wall_trip_carries_into_group_fallback(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a batched turn's OWN wall trip carries into the fallback.
 
@@ -4095,7 +3863,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     own ``wall_budget_exceeded`` stop_reason proves it failed via the real budget
     path rather than a stub raise.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     # Tiny per-invocation wall so the batched turn (scaled to N * 0.3s) trips after
@@ -4111,18 +3879,13 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     ]
     stub.runaway_batched_fix_file = "api.py"  # batched api.py turn trips its own wall budget
     stub.runaway_batched_sleep_s = 0.05
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(
-            RunConfig(
-                target=str(multi_stack_target),
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                cleanup=False,
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
             )
         )
     assert isinstance(exit_code, int)
@@ -4166,7 +3929,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
 
 
 async def test_run_batches_same_file_findings_into_one_fix_turn(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """#202 real-path: N findings on ONE file collapse to a single FIX run_agent turn.
 
@@ -4183,7 +3946,7 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     """
     import re
 
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -4195,11 +3958,12 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
         _merge_item(3, "api.py", "low"),
         _merge_item(4, "App.tsx", "high"),
     ]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     exit_code = await run(
-        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
 
     assert exit_code == 0
@@ -4228,7 +3992,11 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
 
 
 async def test_environmental_failure_aborts_heal_loop(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC#6b real-path: an environmental test failure aborts heal without a fix turn.
 
@@ -4245,36 +4013,22 @@ async def test_environmental_failure_aborts_heal_loop(
     With the short-circuit in place the sentinel is absent, the run returns an int
     failure exit code, and a TEST-phase trajectory step is recorded with no fix.
     """
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    _silence(monkeypatch, prompts=False)
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.environmental_test_failure = True  # every test run reports infra-down
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
     # phase_test_and_heal stays REAL so the environmental short-circuit runs.
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    mute_side_effects(heal=False)
 
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(multi_stack_target),
-        trajectory_path=traj,
-        assume="yes",
-        output_mode="loop",
-        cleanup=False,
+    exit_code = await run(
+        make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop")
     )
-    exit_code = await run(config)
 
     # Environmental failure is not healable -> run reports failure, not success.
     assert isinstance(exit_code, int)
@@ -4301,43 +4055,33 @@ async def test_environmental_failure_aborts_heal_loop(
 
 
 def _install_accept_gate_pipeline(
-    monkeypatch: pytest.MonkeyPatch, target: Path
+    monkeypatch: pytest.MonkeyPatch, target: Path, mute: Mute
 ) -> _StubBackend:
     """Patch the deep pipeline for a fix-gate-ACCEPT run.
 
-    Bundles the per-test setup the two alternatives diff-tier tests share:
-    pin the interactive stdin/CI axis so a forced accept is honoured, silence
-    the deep UI noise (including the recommendation verification summary),
-    force every ``prompt_user`` seam to ``"y"`` (belt-and-suspenders alongside
+    Bundles the setup every accept-the-gate test shares: pin the interactive
+    stdin/CI axis so a forced accept is honoured, silence the deep UI noise
+    (including the recommendation verification summary), force every
+    ``prompt_user`` seam to ``"y"`` (belt-and-suspenders alongside
     ``assume="yes"``, which short-circuits the gate before any prompt runs),
-    and stub the non-idempotent PR-post / test / commit steps. Returns the
-    stub backend.
+    and stub the non-idempotent PR-post / test / commit steps. ``phase_fix``
+    stays REAL. Returns the stub backend.
     """
     _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **kw: None)
+    _silence(monkeypatch, prompts=False)
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:  # noqa: ARG001
-        return None
-
-    async def _stub_test(backend, work, feedback_items=None):  # noqa: ARG001
-        return (True, 0)
-
-    async def _stub_commit(backend, work):  # noqa: ARG001
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _stub_test)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _stub_commit)
+    mute()
 
     return _install_stub_backend(monkeypatch, target)
 
 
 async def test_alternatives_skipped_for_trivial_diff(
-    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    feature_branch_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC4 real-path (negative): a 1-file diff skips the alternatives (wonder) phase.
 
@@ -4347,18 +4091,20 @@ async def test_alternatives_skipped_for_trivial_diff(
     the stub, and ``alternatives.json`` written as ``[]`` (downstream per-stack
     and merge consumers still find the file). Intent still runs unconditionally.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     target = feature_branch_repo
 
     # Accept the fix gate so the full pipeline runs; the shared helper pins
     # interactivity, silences deep UI noise, and stubs the non-idempotent
     # PR-post / test / commit steps.
-    stub = _install_accept_gate_pipeline(monkeypatch, target)
+    stub = _install_accept_gate_pipeline(monkeypatch, target, mute_side_effects)
 
     traj = tmp_path / "trajectory.json"
     exit_code = await run(
-        RunConfig(target=str(target), trajectory_path=traj, assume="yes", output_mode="loop", cleanup=False)
+        make_config(
+            target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False
+        )
     )
     assert exit_code == 0
 
@@ -4389,7 +4135,11 @@ async def test_alternatives_skipped_for_trivial_diff(
 
 
 async def test_alternatives_runs_for_multi_file_diff(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC4 real-path (positive): a >=2-file diff runs the alternatives phase.
 
@@ -4398,16 +4148,20 @@ async def test_alternatives_runs_for_multi_file_diff(
     The alternatives phase MUST run: an ``alternatives`` value among the run's
     trajectory ``daydream_phase`` steps and a ``wonder`` prompt dispatched.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     # Accept the fix gate; the shared helper pins interactivity, silences deep
     # UI noise, and stubs the non-idempotent PR-post / test / commit steps.
-    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target)
+    stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
     traj = tmp_path / "trajectory.json"
     exit_code = await run(
-        RunConfig(
-            target=str(multi_stack_target), trajectory_path=traj, assume="yes", output_mode="loop", cleanup=False
+        make_config(
+            multi_stack_target,
+            trajectory_path=traj,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
         )
     )
     assert exit_code == 0
@@ -4609,7 +4363,11 @@ def _count_merge_prompts(calls: list[dict[str, Any]]) -> int:
 
 
 async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
-    tiny_diff_target: Path, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """AC2 (real-path): a ≤2-file two-language diff collapses the fan-out.
 
@@ -4624,7 +4382,7 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
     yields strictly more review prompts and a recorded merge-agent prompt, while
     the tiny-diff run yields strictly fewer and no merge prompt.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     # Run BOTH repos through the identical harness so the count comparison is a
     # paired observation, not an absolute threshold.
@@ -4633,12 +4391,8 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
         _silence(monkeypatch)
         shared_calls = _install_model_capturing_stubs(monkeypatch, target)
         # Stub the post-merge side effects so the run terminates cleanly.
-        monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-        monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
-        async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-            return None
-        monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-        rc = await run(RunConfig(target=str(target), start_at="review", cleanup=False))
+        mute_side_effects()
+        rc = await run(make_config(target))
         assert rc == 0, f"deep run on {target.name} exited {rc}"
         return list(shared_calls)
 
@@ -4668,7 +4422,7 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
 
 
 async def test_ac3_multi_stack_fanout_unchanged_by_short_circuit(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC3 (regression guard): the ≥3-file fan-out is byte-for-byte unchanged.
 
@@ -4681,17 +4435,12 @@ async def test_ac3_multi_stack_fanout_unchanged_by_short_circuit(
     ``agent_count == 12`` for this fixture) stays green: 4 stacks → 12 agents,
     unchanged because no collapse fires above the threshold.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     shared_calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False))
+    mute_side_effects()
+    rc = await run(make_config(multi_stack_target))
     assert rc == 0
 
     # 4 stacks → 4 review prompts (python + react + generic + structure).
@@ -4701,7 +4450,7 @@ async def test_ac3_multi_stack_fanout_unchanged_by_short_circuit(
 
 
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC5 (real-path): per-stack review prompts contain inlined diff hunks and
     NO ``Read it directly`` / diff_path instruction.
@@ -4717,19 +4466,13 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     so "diff.patch is Read 0 times" is proven by the absence of the Read
     instruction in the recorded prompt, not by counting Read events.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     shared_calls = _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="review", cleanup=False))
+    rc = await run(make_config(tiny_diff_target))
     assert rc == 0
 
     # The per-stack review prompt is the one carrying the scope discriminator.
@@ -4762,7 +4505,7 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
 
 
 async def test_ac6_single_stack_merged_items_carry_structural_lens(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``.
 
@@ -4772,19 +4515,13 @@ async def test_ac6_single_stack_merged_items_carry_structural_lens(
     drift. Real-path: drive the tiny-diff flow, parse merged-items.json, and
     assert at least one item carries ``lens="structural"``.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_model_capturing_stubs(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="review", cleanup=False))
+    rc = await run(make_config(tiny_diff_target))
     assert rc == 0
 
     items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
@@ -4799,7 +4536,7 @@ async def test_ac6_single_stack_merged_items_carry_structural_lens(
 
 
 async def test_ac_fix_resume_on_tiny_diff(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Issue #172 risk: ``--start-at fix`` resume on a tiny diff works.
 
@@ -4810,20 +4547,14 @@ async def test_ac_fix_resume_on_tiny_diff(
     test primes the tiny-diff artifacts with a first run, then resumes with
     ``--start-at fix`` and asserts the fix loop reads the JSON and applies.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     # Phase 1: produce merged-items.json via a full tiny-diff run.
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    rc = await run(RunConfig(target=str(tiny_diff_target), assume="no", cleanup=False))
+    rc = await run(make_config(tiny_diff_target, assume="no"))
     assert rc == 0
     items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
     assert items_file.is_file(), "priming run did not produce merged-items.json"
@@ -4834,7 +4565,7 @@ async def test_ac_fix_resume_on_tiny_diff(
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
     rc = await run(
-        RunConfig(target=str(tiny_diff_target), start_at="fix", assume="yes", cleanup=False)
+        make_config(tiny_diff_target, start_at="fix", assume="yes", non_interactive=False)
     )
     assert rc == 0
     fix_prompts = [c for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
@@ -4842,7 +4573,7 @@ async def test_ac_fix_resume_on_tiny_diff(
 
 
 async def test_ac_merge_resume_on_tiny_diff(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Issue #172: ``--start-at merge`` resume on a tiny diff routes to the
     single-stack merge writer, not the multi-stack merge agent.
@@ -4859,7 +4590,7 @@ async def test_ac_merge_resume_on_tiny_diff(
     to recompute ``single_stack_mode`` on resume surfaces as a hard failure
     instead of silently routing through the multi-stack merge agent.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -4870,44 +4601,22 @@ async def test_ac_merge_resume_on_tiny_diff(
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_cross_stack_merge", _fail_merge)
     # Stub the post-merge side effects so the run terminates cleanly.
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
-
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    mute_side_effects()
 
     # Prime the deep artifacts the merge-resume branch reads from disk. The
     # tiny-diff collapse yields a ``generic`` (collapsed language) stack plus
     # the ``structure`` meta-stack, so records files must match both.
-    deep = tiny_diff_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps(
-            [{"id": "gen-1", "description": "generic per-stack issue", "file": "api.py", "line": 1,
-              "evidence": "api.py:1"}]
-        )
-    )
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "structure-1",
-                    "description": "file-size budget violated",
-                    "file": "api.py",
-                    "line": 1,
-                    "evidence": "api.py:1",
-                }
-            ]
-        )
+    _prime_merge_resume(
+        tiny_diff_target,
+        generic=[
+            _record(id="gen-1", description="generic per-stack issue", evidence="api.py:1")
+        ],
+        structure=[
+            _record(id="structure-1", description="file-size budget violated", evidence="api.py:1")
+        ],
     )
 
-    rc = await run(
-        RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False)
-    )
+    rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0
 
     items_file = tiny_diff_target / ".daydream" / "deep" / "merged-items.json"
@@ -4996,7 +4705,7 @@ async def test_evidence_gate_drops_speculative_finding(
 
 
 async def test_evidence_gate_all_speculative_yields_empty(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Issue #227 (AC5, N=1): a single-stack run whose only findings are all
     speculative writes an EMPTY merged-items.json without crashing and records
@@ -5008,54 +4717,35 @@ async def test_evidence_gate_all_speculative_yields_empty(
     confidence. Both must be dropped, leaving ``items == []`` and a
     ``dropped-speculative.json`` recording both.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    deep = tiny_diff_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "gen-1",
-                    "description": "speculative generic finding",
-                    "file": "api.py",
-                    "line": 1,
-                    "confidence": "MEDIUM",
-                    "rationale": "inferred from the diff alone, no exploration evidence",
-                    "evidence": "",
-                }
-            ]
-        )
-    )
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "structure-1",
-                    "description": "speculative structural finding",
-                    "file": "api.py",
-                    "line": 1,
-                    "confidence": "LOW",
-                    "rationale": "hunch",
-                    "evidence": "api.py:1",
-                }
-            ]
-        )
+    deep = _prime_merge_resume(
+        tiny_diff_target,
+        generic=[
+            _record(
+                id="gen-1",
+                description="speculative generic finding",
+                confidence="MEDIUM",
+                rationale="inferred from the diff alone, no exploration evidence",
+                evidence="",
+            )
+        ],
+        structure=[
+            _record(
+                id="structure-1",
+                description="speculative structural finding",
+                confidence="LOW",
+                rationale="hunch",
+                evidence="api.py:1",
+            )
+        ],
     )
 
-    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0
 
     items = json.loads((deep / "merged-items.json").read_text())["items"]
@@ -5069,7 +4759,7 @@ async def test_evidence_gate_all_speculative_yields_empty(
 
 
 async def test_evidence_gate_keeps_whole_file_structural_finding(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Issue #227 (findings 3/5): a structural (host-tagged, whole-file) finding
     with ``line: 0`` and colon-free evidence SURVIVES the gate -- the structural
@@ -5080,54 +4770,37 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
     whose ``line`` is 0: without the structural carve-out it would fail both
     ``has_file_line`` and ``has_citation`` and be dropped as speculative.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    deep = tiny_diff_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "gen-1",
-                    "description": "grounded generic finding",
-                    "file": "api.py",
-                    "line": 1,
-                    "confidence": "MEDIUM",
-                    "rationale": "r",
-                    "evidence": "api.py:1",
-                }
-            ]
-        )
-    )
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "structure-1",
-                    "description": "module exceeds 800 LOC budget",
-                    "file": "big.py",
-                    "line": 0,
-                    "confidence": "HIGH",
-                    "rationale": "file-size budget violated",
-                    "evidence": "big.py is 800 lines",
-                }
-            ]
-        )
+    deep = _prime_merge_resume(
+        tiny_diff_target,
+        generic=[
+            _record(
+                id="gen-1",
+                description="grounded generic finding",
+                confidence="MEDIUM",
+                rationale="r",
+                evidence="api.py:1",
+            )
+        ],
+        structure=[
+            _record(
+                id="structure-1",
+                description="module exceeds 800 LOC budget",
+                file="big.py",
+                line=0,
+                confidence="HIGH",
+                rationale="file-size budget violated",
+                evidence="big.py is 800 lines",
+            )
+        ],
     )
 
-    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0
 
     items = json.loads((deep / "merged-items.json").read_text())["items"]
@@ -5143,7 +4816,7 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
 
 
 async def test_evidence_gate_clears_stale_dropped_sidecar(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Issue #227 (findings 4/6): a resume that drops 0 findings clears a stale
     ``dropped-speculative.json`` left by a prior run, so the sidecar cannot
@@ -5153,58 +4826,40 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
     Primes a stale sidecar alongside well-evidenced records (0 drops) and
     asserts the sidecar is gone after the run.
     """
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-
-    deep = tiny_diff_target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    (deep / "intent.md").write_text("primed intent")
-    (deep / "alternatives.json").write_text("[]")
-    (deep / "stack-generic-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "gen-1",
-                    "description": "grounded generic finding",
-                    "file": "api.py",
-                    "line": 1,
-                    "confidence": "MEDIUM",
-                    "rationale": "r",
-                    "evidence": "api.py:1",
-                }
-            ]
-        )
-    )
-    (deep / "stack-structure-records.json").write_text(
-        json.dumps(
-            [
-                {
-                    "id": "structure-1",
-                    "description": "grounded structural finding",
-                    "file": "big.py",
-                    "line": 1,
-                    "confidence": "HIGH",
-                    "rationale": "r",
-                    "evidence": "big.py:1",
-                }
-            ]
-        )
+    deep = _prime_merge_resume(
+        tiny_diff_target,
+        generic=[
+            _record(
+                id="gen-1",
+                description="grounded generic finding",
+                confidence="MEDIUM",
+                rationale="r",
+                evidence="api.py:1",
+            )
+        ],
+        structure=[
+            _record(
+                id="structure-1",
+                description="grounded structural finding",
+                file="big.py",
+                confidence="HIGH",
+                rationale="r",
+                evidence="big.py:1",
+            )
+        ],
     )
     # Stale sidecar from a prior run that dropped a finding.
     (deep / "dropped-speculative.json").write_text(
         json.dumps({"dropped_count": 1, "dropped_ids": [99], "dropped_items": [{"id": 99}]})
     )
 
-    rc = await run(RunConfig(target=str(tiny_diff_target), start_at="merge", cleanup=False))
+    rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0
 
     # The well-evidenced records survive (0 drops), so the sidecar is neither
@@ -5217,7 +4872,7 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
 
 
 async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings
     artifact from the canonical merged items and STOPS -- no PR post, no fix.
@@ -5237,9 +4892,7 @@ async def test_deep_findings_out_emits_artifact_and_stops(
           state (real ``git status --porcelain`` empty vs. baseline) and none of
           the stub's ``.fixed-*`` fix sentinels exist.
     """
-    from daydream import git_ops
-    from daydream.pr_review import PRInfo
-    from daydream.runner import RunConfig, run
+    from daydream.runner import run
 
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
@@ -5251,34 +4904,20 @@ async def test_deep_findings_out_emits_artifact_and_stops(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
 
-    head = git_ops.head_sha(multi_stack_target)
-    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
-        cwd=multi_stack_target, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
-                owner="o", repo="r", url="https://example.invalid/pr/7")
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n: pr)
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
 
     out = multi_stack_target / "findings.json"
     reviewed_sources = ("api.py", "App.tsx", "README.md")
     source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
 
-    rc = await run(RunConfig(
-        target=str(multi_stack_target),
-        pr_number=7,
-        findings_out=str(out),
-        start_at="review",
-        cleanup=False,
-        non_interactive=True,
-    ))
+    rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out)))
 
     # (b) exit 0
     assert rc == 0
     # (a) artifact written + PR-pinned
     data = json.loads(out.read_text())
     assert data["pr_number"] == 7
-    assert data["head_sha"] == head
+    assert data["head_sha"] == pr.head_sha
     assert data["repo"] == "o/r"
     assert all(re.fullmatch(r"[0-9a-f]{64}", f["fingerprint"]) for f in data["findings"])
     # (d) no fix applied -- the reviewed source is byte-identical and no fix sentinel
