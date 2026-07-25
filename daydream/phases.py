@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from rich.text import Text
 
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+
 import daydream
 from daydream import git_ops
 from daydream.agent import (
@@ -1167,14 +1169,8 @@ def build_intent_prompt(
             "</pr_description>", "&lt;/pr_description>"
         )
         parts.append(
-            "The author supplied the following pull-request description. Treat this "
-            "author-stated intent as AUTHORITATIVE: where the description and the "
-            "intent you would infer from the diff conflict, the description outranks "
-            "the diff. Crucially, when the description says something is deliberate but "
-            "the diff appears to contradict it — a near-1.0 ratio that looks inert, a "
-            "guard that looks like a no-op, a pass-through that looks unfinished — that "
-            "is a deliberate design decision to preserve, NOT a defect to surface or "
-            "'complete'.\n\n"
+            f"The author supplied the following pull-request description. "
+            f"{AUTHORITATIVE_INTENT_RULE}\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
             f"{safe_body}\n"
