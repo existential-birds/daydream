@@ -261,7 +261,7 @@ async def test_shallow_run_captures_recommended_patch(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
     backend = _FixEditingBackend(feature_branch_repo)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: backend)
 
     exit_code = await run(
         RunConfig(

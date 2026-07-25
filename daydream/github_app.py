@@ -326,12 +326,15 @@ def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: b
 
     Always clears any previously injected token first, so a run never
     inherits the App identity of an earlier run in the same process.
-    Without App credentials, returns the ambient ``gh`` identity. With
-    credentials, mints a scoped installation token, injects it into every
-    ``gh`` subprocess via the ``git_ops`` token singleton, and returns the
-    App identity captured during minting. When the owner/repo cannot be determined and the
-    run is not posting, falls back to the ambient identity; when posting,
-    that is a hard abort so ``gh`` never silently falls back to ambient auth.
+    Minting is only attempted when ``is_posting`` is true — a read-only run
+    never needs a scoped installation token. When not posting, any
+    configured App credentials are ignored entirely and the ambient ``gh``
+    identity is returned unconditionally. When posting, without App
+    credentials the ambient identity is returned; with credentials, a
+    scoped installation token is minted, injected into every ``gh``
+    subprocess via the ``git_ops`` token singleton, and the App identity
+    captured during minting is returned. When posting and the owner/repo
+    cannot be determined, or minting fails, that is a hard abort.
 
     Args:
         target_dir: Resolved target directory for ``gh repo view`` fallback.
@@ -352,14 +355,12 @@ def resolve_run_identity(target_dir: Path, pr_repo: str | None, *, is_posting: b
         credentials = resolve_credentials()
     except ValueError as exc:
         raise GitHubAppError(str(exc)) from exc
-    if credentials is None:
+    if credentials is None or not is_posting:
         return resolve_user_identity(target_dir)
 
     owner_repo = _owner_repo_for(pr_repo, target_dir)
     if owner_repo is None:
-        if is_posting:
-            raise GitHubAppError("Cannot determine owner/repo for installation token minting")
-        return resolve_user_identity(target_dir)
+        raise GitHubAppError("Cannot determine owner/repo for installation token minting")
 
     owner, repo = owner_repo
     try:

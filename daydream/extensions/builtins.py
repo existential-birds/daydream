@@ -1,8 +1,8 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
-does today: built-in skill slots, prompt names, and all four flow definitions
-(pr-feedback, review/comment, shallow, deep).
+does today: built-in skill slots, prompt names, and all five flow definitions
+(pr-feedback, review/comment, shallow, deep, improve).
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -26,8 +26,24 @@ def register_builtins(registry: Registry) -> None:
     registry.override_skill("pr-feedback-fetch", config.PR_FEEDBACK_FETCH_SKILL)
     registry.override_skill("pr-feedback-respond", config.PR_FEEDBACK_RESPOND_SKILL)
 
+    _register_improve_builtins(registry)
     _register_builtin_prompts(registry)
     _register_builtin_flows(registry)
+
+
+def _register_improve_builtins(registry: Registry) -> None:
+    """Seed improve audit skill slots and named prompts."""
+    from daydream import config
+    from daydream.improve import prompts
+
+    for category, stack_skills in config.AUDIT_SKILL_MAP.items():
+        for stack, skill in stack_skills.items():
+            slot = f"audit:{category}" if stack == "*" else f"audit:{category}:{stack}"
+            registry.override_skill(slot, skill)
+
+    registry.override_prompt("audit", prompts.build_audit_prompt)
+    registry.override_prompt("vet", prompts.build_vet_prompt)
+    registry.override_prompt("plan-writer", prompts.build_plan_writer_prompt)
 
 
 def _register_builtin_prompts(registry: Registry) -> None:
@@ -57,6 +73,7 @@ def _register_builtin_flows(registry: Registry) -> None:
     """Seed the built-in flow definitions."""
     from daydream.deep import orchestrator as deep
     from daydream.flows import pr_feedback, review, shallow
+    from daydream.improve import orchestrator as improve
 
     for step in pr_feedback.STEPS:
         registry.register_phase(step)
@@ -73,3 +90,7 @@ def _register_builtin_flows(registry: Registry) -> None:
     for step in deep.STEPS:
         registry.register_phase(step)
     registry.set_flow("deep", [step.name for step in deep.STEPS])
+
+    for step in improve.STEPS:
+        registry.register_phase(step)
+    registry.set_flow("improve", [step.name for step in improve.STEPS])

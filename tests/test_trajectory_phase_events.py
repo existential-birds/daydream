@@ -15,31 +15,13 @@ from daydream.backends import (
 )
 from daydream.trajectory import (
     DaydreamPhase,
-    DaydreamRunFlow,
     PhaseEvent,
     Step,
-    TrajectoryRecorder,
     get_current_recorder,
     phase_scope,
 )
 from tests.harness.phase_backend import PhaseDispatchBackend
-
-# --- Helpers ---------------------------------------------------------------
-
-
-def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> TrajectoryRecorder:
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name=agent_model_name,
-        session_id="test",
-    )
-
-
-def _read_trajectory(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 # --- PhaseEvent.to_dict ----------------------------------------------------
 
@@ -86,7 +68,7 @@ def test_phase_event_to_dict_includes_metadata() -> None:
 
 async def test_emit_phase_start_end_appends_events(tmp_path: Path) -> None:
     """emit_phase_start/emit_phase_end append PhaseEvents in order."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.REVIEW)
     rec.emit_phase_end(DaydreamPhase.REVIEW)
     assert len(rec._phase_events) == 2
@@ -97,14 +79,14 @@ async def test_emit_phase_start_end_appends_events(tmp_path: Path) -> None:
 
 async def test_emit_phase_carries_metadata(tmp_path: Path) -> None:
     """Keyword metadata is stored on the PhaseEvent."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.DEEP, stage="arbiter")
     assert rec._phase_events[0].metadata == {"stage": "arbiter"}
 
 
 async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     """Supervisor decisions and tool vetoes are recorded as phase events."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
 
     rec.emit_supervisor_verdict(7, "drop", "duplicate")
     rec.emit_tool_veto("Write", "protected path", phase=DaydreamPhase.FIX)
@@ -124,9 +106,37 @@ async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     }
 
 
+async def test_emit_command_validation_summary_is_structured_and_redacted(
+    tmp_path: Path,
+) -> None:
+    rec = make_recorder(tmp_path)
+
+    rec.emit_command_validation_summary(
+        total_candidates=33,
+        accepted=4,
+        rejected=29,
+        reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
+    )
+
+    event = rec._phase_events[0]
+    assert event.event == "command_validation"
+    assert event.phase is DaydreamPhase.RECON
+    assert event.metadata == {
+        "counts": {
+            "total_candidates": 33,
+            "accepted": 4,
+            "rejected": 29,
+        },
+        "reasons": {
+            "RECON_EVIDENCE_MISMATCH": 28,
+            "RECON_MALFORMED_COMMAND": 1,
+        },
+    }
+
+
 async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> None:
     """Phase events appear in Trajectory.extra["phase_events"] when present."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         rec.emit_phase_start(DaydreamPhase.REVIEW)
         rec.emit_phase_end(DaydreamPhase.REVIEW)
@@ -134,7 +144,7 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="x"))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     assert atif_validate(traj, validate_images=False) is True
     events = traj["extra"]["phase_events"]
     assert len(events) == 2
@@ -144,12 +154,12 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
 
 async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
     """When no phase events emitted, extra has no phase_events key."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="x"))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     assert "phase_events" not in traj["extra"]
 
 
@@ -158,7 +168,7 @@ async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
 
 async def test_phase_scope_emits_events_when_recorder_active(tmp_path: Path) -> None:
     """phase_scope emits start/end when a recorder is active via ContextVar."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         async with phase_scope(DaydreamPhase.FIX):
             assert len(rec._phase_events) == 1  # start emitted
@@ -176,7 +186,7 @@ async def test_phase_scope_noop_without_recorder() -> None:
 
 async def test_phase_scope_emits_end_even_on_exception(tmp_path: Path) -> None:
     """phase_end fires even when the body raises (finally clause)."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         with pytest.raises(RuntimeError, match="boom"):
             async with phase_scope(DaydreamPhase.TEST):
@@ -190,7 +200,7 @@ async def test_phase_scope_emits_end_even_on_exception(tmp_path: Path) -> None:
 
 async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     """An Invocation scope registers started_at/ended_at timestamps."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             assert inv.started_at != ""
@@ -198,7 +208,7 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
             inv.observe(TextEvent(text="hi"))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
         assert inv.ended_at != ""
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
     assert len(subs) == 1
     assert subs[0]["phase"] == "review"
@@ -214,11 +224,11 @@ async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None
     __aexit__ with a fresh timestamp. ended_at must be stamped after that flush,
     otherwise it predates its own last step and underreports timing (#203).
     """
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="open step, never closed before exit"))
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     sub = traj["extra"]["subtrajectories"][0]
     step_ts = [s["timestamp"] for s in traj["steps"] if s["step_id"] in sub["step_ids"]]
     assert step_ts, "expected the open step to be flushed by finish()"
@@ -229,19 +239,19 @@ async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None
 
 async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
     """Zero invocations → extra has no subtrajectories key, even with steps present."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         # Seed a step so _write does not take its empty-steps early return,
         # but open NO invocation — so _register_subtrajectory never fires.
         rec._extend_steps([Step(step_id=1, source="user", message="seed")])
     assert rec.path.exists()
-    data = _read_trajectory(rec.path)
+    data = read_trajectory(rec.path)
     assert "subtrajectories" not in data["extra"]
 
 
 async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path) -> None:
     """Multiple invocations produce multiple subtrajectory entries with sequential step_ids."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="a"))
@@ -249,7 +259,7 @@ async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path)
         async with rec.invocation(phase=DaydreamPhase.PARSE) as inv:
             inv.observe(TextEvent(text="b"))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
     assert len(subs) == 2
     assert subs[0]["step_ids"] == [1]
@@ -260,7 +270,7 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
     """Fork siblings register subtrajectory entries on the parent (issue #212)."""
     from daydream.trajectory import maybe_fork
 
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     async with rec:
         # Seed a parent step so _write does not take its empty-steps early
         # return; in a real run the parent always has prior-phase steps.
@@ -269,7 +279,7 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                 inv.observe(TextEvent(text="fixing foo"))
                 inv.observe(ResultEvent(structured_output=None, continuation=None))
-    traj = _read_trajectory(rec.path)
+    traj = read_trajectory(rec.path)
     subs = traj["extra"].get("subtrajectories", [])
     assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
     sub = subs[0]
@@ -289,13 +299,13 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
 
 async def test_compute_phase_timings_returns_none_when_empty(tmp_path: Path) -> None:
     """No phase events → None (backward compat)."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     assert rec.compute_phase_timings() is None
 
 
 async def test_compute_phase_timings_pairs_start_end(tmp_path: Path) -> None:
     """A matched start/end pair yields wall_clock_seconds and occurrences=1."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.REVIEW)
     rec.emit_phase_end(DaydreamPhase.REVIEW)
     timings = rec.compute_phase_timings()
@@ -307,7 +317,7 @@ async def test_compute_phase_timings_pairs_start_end(tmp_path: Path) -> None:
 
 async def test_compute_phase_timings_sums_repeated_phase(tmp_path: Path) -> None:
     """Two occurrences of the same phase sum into one bucket with occurrences=2."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     for _ in range(2):
         rec.emit_phase_start(DaydreamPhase.FIX)
         rec.emit_phase_end(DaydreamPhase.FIX)
@@ -318,7 +328,7 @@ async def test_compute_phase_timings_sums_repeated_phase(tmp_path: Path) -> None
 
 async def test_compute_phase_timings_deep_stages_fold_into_one_bucket(tmp_path: Path) -> None:
     """DEEP stage='review' and stage='arbiter' fold into the 'deep' bucket."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.DEEP, stage="review")
     rec.emit_phase_end(DaydreamPhase.DEEP, stage="review")
     rec.emit_phase_start(DaydreamPhase.DEEP, stage="arbiter")
@@ -330,7 +340,7 @@ async def test_compute_phase_timings_deep_stages_fold_into_one_bucket(tmp_path: 
 
 async def test_compute_phase_timings_orphaned_end_skipped(tmp_path: Path) -> None:
     """An end with no matching start contributes zero occurrences."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.REVIEW)
     rec.emit_phase_end(DaydreamPhase.REVIEW)
     rec.emit_phase_end(DaydreamPhase.FIX)  # orphaned — no start
@@ -343,7 +353,7 @@ async def test_compute_phase_timings_orphaned_end_skipped(tmp_path: Path) -> Non
 
 async def test_compute_phase_timings_orphaned_start_pruned(tmp_path: Path) -> None:
     """A start with no matching end is pruned — no zero-occurrence bucket (symmetric to orphaned ends)."""
-    rec = _make_recorder(tmp_path)
+    rec = make_recorder(tmp_path)
     rec.emit_phase_start(DaydreamPhase.FIX)  # orphaned — no end
     rec.emit_phase_start(DaydreamPhase.REVIEW)
     rec.emit_phase_end(DaydreamPhase.REVIEW)
@@ -358,7 +368,11 @@ async def test_compute_phase_timings_orphaned_start_pruned(tmp_path: Path) -> No
 
 
 async def test_shallow_run_emits_phase_events_and_subtrajectories(
-    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    feature_branch_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Any,
+    mute_side_effects: Any,
 ) -> None:
     """Shallow single-pass run writes trajectory and manifest timing data."""
     from daydream.config import REVIEW_OUTPUT_FILE
@@ -369,34 +383,12 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None: PhaseDispatchBackend(),
+        lambda name, model=None, **kwargs: PhaseDispatchBackend(),
     )
 
-    # Patch phase_test_and_heal to avoid running a real test suite.
-    async def _ok_test(*_a: Any, **_kw: Any) -> tuple[bool, int]:
-        return True, 0
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _ok_test)
-
-    for name in (
-        "print_phase_hero",
-        "print_info",
-        "print_success",
-        "print_warning",
-        "print_dim",
-        "print_skipped_phases",
-    ):
-        monkeypatch.setattr(f"daydream.runner.{name}", lambda *a, **kw: None)
-    for name in (
-        "print_phase_hero",
-        "print_info",
-        "print_success",
-        "print_warning",
-        "print_dim",
-        "print_summary",
-        "print_iteration_divider",
-    ):
-        monkeypatch.setattr(f"daydream.flows.shallow.{name}", lambda *a, **kw: None)
+    mute_side_effects("daydream.flows.shallow")
+    silence_console("daydream.runner")
+    silence_console("daydream.flows.shallow")
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
@@ -445,7 +437,10 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 
 
 async def test_deep_run_emits_phase_events_and_manifest_timings(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Any,
 ) -> None:
     """Real-path: deep run writes trajectory with DEEP review phase_events + phase_timings.
 
@@ -456,17 +451,12 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     the trajectory's ``extra["phase_events"]`` must carry the deep review
     boundary. Asserts the on-disk trajectory JSON + manifest.
     """
-    # Reuse the battle-tested stub backend + silence helpers.
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    # Stub the non-idempotent GitHub write (PR comment posting).
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
+    mute_side_effects()
 
     from daydream.runner import RunConfig, run
 
@@ -522,26 +512,18 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
 
 
 async def test_deep_run_accept_gate_wraps_fix_test_verify(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Any,
 ) -> None:
     """Accepted deep fix gate records fix/test/verify timing events."""
-    from tests.test_deep_orchestrator import (
-        _install_stub_backend,
-        _noop_commit,
-        _ok,
-        _silence,
-    )
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    # Avoid real test execution or git commits while exercising the runner path.
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     from daydream.runner import RunConfig, run
 
@@ -580,7 +562,10 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
 
 
 async def test_parallel_fix_registers_subtrajectories(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Any,
 ) -> None:
     """Real-path: parallel fix phase registers per-file subtrajectory entries.
 
@@ -589,13 +574,7 @@ async def test_parallel_fix_registers_subtrajectories(
     ``recorder.fork()`` path. Asserts multiple ``fix`` entries appear in
     ``extra["subtrajectories"]``.
     """
-    from tests.test_deep_orchestrator import (
-        _install_stub_backend,
-        _merge_item,
-        _noop_commit,
-        _ok,
-        _silence,
-    )
+    from tests.test_deep_orchestrator import _install_stub_backend, _merge_item, _silence
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -605,12 +584,7 @@ async def test_parallel_fix_registers_subtrajectories(
         _merge_item(2, "App.tsx", "medium"),
     ]
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
-        return None
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    mute_side_effects()
 
     from daydream.runner import RunConfig, run
 

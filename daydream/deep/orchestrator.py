@@ -1532,14 +1532,11 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
                 print_error(console, "Missing Deep Artifact", str(exc))
                 return 1
 
-        # Stack detection (from diff file list).
+        # Stack detection (from diff file list). Availability is resolved once in
+        # runner.run and threaded via config; None flows through to detect_stacks'
+        # optimistic default.
         changed_files = _diff_changed_files(diff)
-        installed = get_installed_skills()
-        # Optimistic fallback when detection fails: SDK-level MissingSkillError is
-        # still caught downstream in phase_per_stack_reviews, so preserving the
-        # pre-D-16 behavior is safer than routing everything to generic.
-        skill_availability = installed if installed is not None else get_registry().stack_keys()
-        stacks = detect_stacks(changed_files, skill_availability=skill_availability)
+        stacks = detect_stacks(changed_files, skill_availability=config.skill_availability)
         # Issue #172 — tiny-diff short-circuit. When the diff is small enough
         # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
         # to a single combined assignment and skip merge+arbiter downstream.

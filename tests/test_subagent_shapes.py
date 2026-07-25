@@ -11,7 +11,6 @@ No pre-recorded fixture files.
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,8 +27,12 @@ from daydream.backends import (
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
-    Invocation,
     TrajectoryRecorder,
+)
+from tests.harness.trajectory import (
+    make_recorder,
+    observe_text_and_result,
+    read_trajectory,
 )
 
 
@@ -65,36 +68,9 @@ class MockBackend:
         return f"/{skill_key}"
 
 
-def _make_recorder(
-    tmp_path: Path,
-    *,
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
-    agent_model_name: str = "opus",
-) -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder rooted in tmp_path."""
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=run_flow,
-        target_dir=tmp_path,
-        agent_model_name=agent_model_name,
-        session_id="test",
-    )
-
-
-def _read_trajectory(path: Path) -> dict[str, Any]:
-    """Load the produced trajectory JSON from disk."""
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _observe_text_and_result(inv: Invocation, text: str = "output") -> None:
-    """Observe a TextEvent + ResultEvent to produce a minimal agent step."""
-    inv.observe(TextEvent(text=text))
-    inv.observe(ResultEvent(structured_output=None, continuation=None))
-
-
 async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
     """Deep-mode fork: 2 per-stack children with run_flow=DEEP."""
-    recorder = _make_recorder(tmp_path, run_flow=DaydreamRunFlow.DEEP)
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.DEEP)
     children: list[TrajectoryRecorder] = []
 
     async with recorder:
@@ -102,10 +78,10 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
             async with recorder.fork(desc) as child:
                 children.append(child)
                 async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
-                    _observe_text_and_result(inv, f"{desc}-output")
+                    observe_text_and_result(inv, f"{desc}-output")
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
-    parent_traj = _read_trajectory(recorder.path)
+    parent_traj = read_trajectory(recorder.path)
 
     dispatch_steps = [
         s for s in parent_traj["steps"]
@@ -121,7 +97,7 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
     assert atif_validate(parent_traj) is True
 
     for child in children:
-        child_traj = _read_trajectory(child.path)
+        child_traj = read_trajectory(child.path)
         assert atif_validate(child_traj) is True
         agent_steps = [s for s in child_traj["steps"] if s["source"] == "agent"]
         assert len(agent_steps) >= 1
@@ -135,7 +111,7 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     trajectory files land in the per-run trajectories/ subdir, and each child
     inherits the parent's session_id.
     """
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     children: list[TrajectoryRecorder] = []
     descriptors = ("explore-pattern-scanner", "explore-dependency-tracer", "explore-test-mapper")
 
@@ -144,10 +120,10 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
             async with recorder.fork(desc) as child:
                 children.append(child)
                 async with child.invocation(phase=DaydreamPhase.EXPLORATION) as inv:
-                    _observe_text_and_result(inv, f"{desc}-output")
+                    observe_text_and_result(inv, f"{desc}-output")
         recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
 
-    parent_traj = _read_trajectory(recorder.path)
+    parent_traj = read_trajectory(recorder.path)
     assert atif_validate(parent_traj) is True
 
     dispatch_steps = [
@@ -169,7 +145,7 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     assert descriptors_found == set(descriptors)
 
     for child in children:
-        child_traj = _read_trajectory(child.path)
+        child_traj = read_trajectory(child.path)
         assert atif_validate(child_traj) is True
         assert child_traj["session_id"] == parent_traj["session_id"]
 
@@ -181,29 +157,29 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
 
 async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> None:
     """SUBA-08: Concurrent siblings have independent step_id sequences starting at 1."""
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     children: list[TrajectoryRecorder] = []
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            _observe_text_and_result(inv, "parent-step-1")
+            observe_text_and_result(inv, "parent-step-1")
 
         for desc in ("child-a", "child-b"):
             async with recorder.fork(desc) as child:
                 children.append(child)
                 for j in range(3):
                     async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                        _observe_text_and_result(inv, f"{desc}-step-{j}")
+                        observe_text_and_result(inv, f"{desc}-step-{j}")
 
         recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
 
-    parent_traj = _read_trajectory(recorder.path)
+    parent_traj = read_trajectory(recorder.path)
     parent_step_ids = [s["step_id"] for s in parent_traj["steps"]]
     assert parent_step_ids == list(range(1, len(parent_step_ids) + 1))
 
     all_child_ids: list[list[int]] = []
     for child in children:
-        child_traj = _read_trajectory(child.path)
+        child_traj = read_trajectory(child.path)
         child_ids = [s["step_id"] for s in child_traj["steps"]]
         assert child_ids[0] == 1
         assert child_ids == list(range(1, len(child_ids) + 1))
@@ -216,7 +192,7 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
 
 async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> None:
     """SUBA-09: Parent FinalMetrics.total_prompt_tokens excludes child contributions."""
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -244,8 +220,8 @@ async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> No
 
         recorder.create_dispatch_step(phase=DaydreamPhase.FIX)
 
-    parent_traj = _read_trajectory(recorder.path)
-    child_traj = _read_trajectory(child.path)
+    parent_traj = read_trajectory(recorder.path)
+    child_traj = read_trajectory(child.path)
 
     assert parent_traj["final_metrics"]["total_prompt_tokens"] == 100
     assert child_traj["final_metrics"]["total_prompt_tokens"] == 500
@@ -253,16 +229,16 @@ async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> No
 
 async def test_continuation_appends_to_same_trajectory_no_sibling(tmp_path: Path) -> None:
     """SUBA-05: Sequential invocations (continuation) stay in one file, no siblings."""
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.FIX) as inv:
-            _observe_text_and_result(inv, "first-continuation")
+            observe_text_and_result(inv, "first-continuation")
         async with recorder.invocation(phase=DaydreamPhase.TEST) as inv:
-            _observe_text_and_result(inv, "second-continuation")
+            observe_text_and_result(inv, "second-continuation")
 
     assert recorder.path.exists()
-    traj = _read_trajectory(recorder.path)
+    traj = read_trajectory(recorder.path)
 
     traj_dir = tmp_path / ".daydream" / "trajectories"
     assert not traj_dir.exists() or len(list(traj_dir.iterdir())) == 0

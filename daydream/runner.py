@@ -10,6 +10,7 @@ to a private helper based on ``config.bot`` / ``config.flow_name`` /
         "review"             -> _run_review     (registered "review" flow, report only, no posting)
         "shallow"            -> _run_loop_shallow (registered "shallow" flow)
         "deep"               -> _run_loop_deep  (deep multi-stack pipeline)
+        "improve"            -> _run_improve    (repo-wide read-only advisor)
         other registered     -> _run_custom_flow (fork-registered custom flow)
     output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
     output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
@@ -51,6 +52,7 @@ from daydream.agent import (
 )
 from daydream.backends import Backend, create_backend
 from daydream.config import (
+    EFFORT_TIERS,
     PHASE_DEFAULT_EFFORT,
     PHASE_DEFAULT_MODELS,
     REVIEW_SKILLS,
@@ -203,6 +205,20 @@ class RunConfig:
         flow_name: Name of a registered flow to dispatch (``--flow``); built-in
             names route to their dedicated helper, other registered names to the
             generic custom-flow runner.
+        improve_effort: Improve audit *breadth* tier (quick, standard, or deep),
+            resolved to an ``EFFORT_TIERS`` entry that selects categories, audit
+            fanout concurrency, confidence filtering, and finding caps. It does
+            not select the model or reasoning effort — those are per-phase
+            (``PHASE_DEFAULT_MODELS`` / ``PHASE_DEFAULT_EFFORT``).
+        improve_focus: Optional improve focus mode.
+        improve_scope: Optional service name/root/glob to audit.
+        improve_plan_description: One-line request for ``daydream improve plan``;
+            switches the flow to single-request investigation mode.
+        skill_availability: Stack keys with an installed Beagle review skill,
+            resolved once by :func:`run` from ``get_installed_skills()``. ``None``
+            means unresolved or registry-unreadable (→ optimistic routing in
+            ``detect_stacks``). Set explicitly to inject availability and bypass
+            the probe (tests).
 
     """
 
@@ -258,6 +274,11 @@ class RunConfig:
     # suppression predicate is never called and arbiter output is unchanged.
     precision_mode: bool = False
     flow_name: str | None = None
+    improve_effort: str = "standard"
+    improve_focus: str | None = None
+    improve_scope: str | None = None
+    improve_plan_description: str | None = None
+    skill_availability: frozenset[str] | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
@@ -404,8 +425,8 @@ def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
     passes nothing).
 
     Like :func:`_resolved_model`, the default-table lookup keys off the backend
-    kind resolved by :func:`_resolved_backend_name`. Only the Codex backend
-    consumes the resolved value today, and only ``codex`` has a default table.
+    kind resolved by :func:`_resolved_backend_name`. All three backends consume
+    the resolved value through their own native knob.
     """
     file_config = _file_config_or_empty(config)
     backend_name = _resolved_backend_name(config, phase)
@@ -439,7 +460,8 @@ def _resolve_backend(
     - Reasoning effort via :func:`_resolved_reasoning_effort`
       (``config.reasoning_effort`` → file-config phase → file-config global →
       ``PHASE_DEFAULT_EFFORT`` → ``None``, where ``None`` falls through to the
-      backend's own default). Only Codex applies the resolved value.
+      backend's own default). All three backends apply the resolved value
+      through their native knob.
 
     Args:
         config: Run configuration with backend/model/reasoning-effort and
@@ -460,11 +482,15 @@ def _resolve_backend(
     resolved_effort = _resolved_reasoning_effort(config, phase)
 
     def _make() -> Backend:
+        # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
+        # default model, and widening it churns every patched create_backend.
         if backend_name == "pi":
-            return create_backend(backend_name, model=resolved_model, cwd=cwd)
-        if backend_name == "codex":
-            return create_backend(backend_name, model=resolved_model, reasoning_effort=resolved_effort)
-        return create_backend(backend_name, model=resolved_model)
+            return create_backend(
+                backend_name, model=resolved_model, cwd=cwd, reasoning_effort=resolved_effort
+            )
+        return create_backend(
+            backend_name, model=resolved_model, reasoning_effort=resolved_effort
+        )
 
     if cache is None:
         return _make()
@@ -601,6 +627,16 @@ async def run(config: RunConfig | None = None) -> int:
         print_error(console, "Extension Error", str(exc))
         return 1
 
+    # Resolve installed-skill availability once, here at the composition root, so
+    # the orchestrators consume it as data instead of each probing the filesystem.
+    # None (unreadable registry) flows straight through to detect_stacks' optimistic
+    # default. An explicitly injected value is kept (the probe is skipped).
+    if config.skill_availability is None:
+        from daydream.deep.orchestrator import get_installed_skills
+
+        installed = get_installed_skills()
+        config.skill_availability = frozenset(installed) if installed is not None else None
+
     # Resolve target dir outside the workspace context so path-validation errors
     # short-circuit before any git work.
     if config.target is not None:
@@ -629,7 +665,11 @@ async def run(config: RunConfig | None = None) -> int:
 
     # ``--comment``/``--review`` skip the test phase, hence the .env copy too.
     # ``--flow review`` matches this behaviour for parity.
-    skip_tests = config.output_mode != "loop" or _flow_is_review
+    skip_tests = (
+        config.output_mode != "loop"
+        or _flow_is_review
+        or config.flow_name == "improve"
+    )
 
     # ``open_workspace`` runs ``assert_is_worktree`` and surfaces
     # ``NotAWorktreeError`` (a ``GitError``) caught below — a loud error instead of
@@ -729,6 +769,8 @@ async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
     if name == "deep":
         _require_reviewable_branch(work, config)
         return await _run_loop_deep(work, config)
+    if name == "improve":
+        return await _run_improve(work, config)
 
     return await _run_custom_flow(work, config)
 
@@ -1016,6 +1058,38 @@ async def _run_review_or_comment(
 
 
 # Helper: generic custom flow (--flow <name>)
+
+
+async def _run_improve(work: WorkContext, config: RunConfig) -> int:
+    """Preamble for the registered repository-wide improve flow."""
+    from daydream.improve.artifacts import improve_dir
+
+    target_dir = work.repo
+    directory = improve_dir(target_dir)
+    tier = EFFORT_TIERS[config.improve_effort]
+
+    async with _open_recorder(
+        config=config,
+        target_dir=target_dir,
+        work=work,
+        flow_kind=DaydreamRunFlow.IMPROVE,
+    ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["improve_dir"] = directory
+        ctx.data["effort_tier"] = tier
+
+        console.print()
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Effort: {config.improve_effort}")
+        print_info(console, f"Focus: {config.improve_focus or 'all'}")
+        print_info(console, f"Model: {ctx.backend_for('recon').model}")
+        print_info(
+            console,
+            f"GitHub identity: {escape_markup(config.identity)}",
+        )
+        console.print()
+
+        return await run_flow(ctx.registry, "improve", ctx)
 
 
 async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:

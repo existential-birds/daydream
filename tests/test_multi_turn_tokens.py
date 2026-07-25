@@ -12,8 +12,7 @@ last_seen_cumulative subtract step.
 
 from __future__ import annotations
 
-import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -29,11 +28,8 @@ from daydream.backends import (
     ResultEvent,
     TextEvent,
 )
-from daydream.trajectory import (
-    DaydreamPhase,
-    DaydreamRunFlow,
-    TrajectoryRecorder,
-)
+from daydream.trajectory import DaydreamPhase
+from tests.harness.trajectory import make_recorder, read_trajectory
 
 
 # -- Token value constants for the 3-turn sequence --------------------------
@@ -68,10 +64,11 @@ class MockBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
         events = self.events
 
-        async def _gen() -> AsyncIterator[AgentEvent]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
             for event in events:
                 yield event
 
@@ -82,22 +79,6 @@ class MockBackend:
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
         return f"/{skill_key}"
-
-
-def _make_recorder(tmp_path: Path, *, agent_model_name: str = "opus") -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder rooted in tmp_path."""
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name=agent_model_name,
-        session_id="test",
-    )
-
-
-def _read_trajectory(path: Path) -> dict[str, Any]:
-    """Load the produced trajectory JSON from disk."""
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _make_backend(turn_idx: int) -> MockBackend:
@@ -118,12 +99,12 @@ def _make_backend(turn_idx: int) -> MockBackend:
 
 async def _run_three_turns(tmp_path: Path) -> dict[str, Any]:
     """Drive 3 sequential run_agent() calls, return the trajectory dict."""
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     async with recorder:
         for i in range(3):
             backend = _make_backend(i)
             await run_agent(backend, tmp_path, f"prompt {i + 1}", phase=PHASES[i])
-    return _read_trajectory(recorder.path)
+    return read_trajectory(recorder.path)
 
 
 async def test_per_call_token_values_not_cumulative(tmp_path: Path) -> None:

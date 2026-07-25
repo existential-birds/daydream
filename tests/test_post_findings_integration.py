@@ -1,13 +1,14 @@
-"""Real-path integration tests for the ``daydream post-findings`` verb.
+"""Real-path tests for the ``daydream post-findings`` verb.
 
 Every test enters from ``cli.main`` (sys.argv patched — the production
-entrypoint) with a fake ``gh`` executable prepended to ``PATH``
-(``tests/harness/fake_gh.py``), so the real ``git_ops._run_gh`` subprocess
-seam, the ``gh_api`` tempfile-``--input`` path, and JSON parsing all run for
-real. Only the GitHub network boundary (the ``gh`` binary) is faked.
+entrypoint) with ``gh`` faked in-process at the ``subprocess.run`` boundary
+(``tests/harness/fake_gh.py``), so ``git_ops._run_gh``, the ``gh_api``
+tempfile-``--input`` path, and JSON parsing all run for real. Only the
+GitHub network boundary (the ``gh`` process) is faked — synchronously, with
+no fork and no clock, so these tests are deterministic under any host load.
 
 Assertions are on observable outcomes: exit codes, the review payloads that
-crossed the subprocess boundary, and the GraphQL mutations issued — never on
+crossed the ``gh`` boundary, and the GraphQL mutations issued — never on
 in-process bookkeeping.
 """
 

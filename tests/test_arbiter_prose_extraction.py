@@ -101,6 +101,7 @@ class _PiLikeBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         yield TextEvent(text=self._message)
         structured = extract_json(self._message) if output_schema else None
@@ -214,6 +215,7 @@ class _SplitTextBackend:
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
+        persist_session: bool = True,
     ):
         yield TextEvent(text=self._text)
         yield ResultEvent(structured_output=self._structured if output_schema else None, continuation=None)

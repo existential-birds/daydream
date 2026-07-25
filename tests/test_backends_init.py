@@ -1,5 +1,9 @@
 # tests/test_backends_init.py
-"""Tests for backend protocol, event types, and factory."""
+"""Tests for the backend protocol and the ``create_backend`` factory.
+
+The ``AgentEvent`` dataclass field/default assertions live in
+``tests/test_backends_events.py``; they used to be duplicated here.
+"""
 
 
 from pathlib import Path
@@ -9,69 +13,15 @@ import pytest
 from daydream.backends import (
     ClaudeBackend,
     ContinuationToken,
-    CostEvent,
     ResultEvent,
-    TextEvent,
-    ThinkingEvent,
-    ToolResultEvent,
-    ToolStartEvent,
     create_backend,
 )
-
-
-def test_text_event_has_text_field():
-    event = TextEvent(text="hello")
-    assert event.text == "hello"
-
-
-def test_thinking_event_has_text_field():
-    event = ThinkingEvent(text="reasoning...")
-    assert event.text == "reasoning..."
-
-
-def test_tool_start_event_fields():
-    event = ToolStartEvent(id="t1", name="Bash", input={"command": "ls"})
-    assert event.id == "t1"
-    assert event.name == "Bash"
-    assert event.input == {"command": "ls"}
-
-
-def test_tool_result_event_fields():
-    event = ToolResultEvent(id="t1", output="file.py", is_error=False)
-    assert event.id == "t1"
-    assert event.output == "file.py"
-    assert event.is_error is False
-
-
-def test_cost_event_fields():
-    event = CostEvent(cost_usd=0.01, input_tokens=100, output_tokens=50)
-    assert event.cost_usd == 0.01
-    assert event.input_tokens == 100
-    assert event.output_tokens == 50
-
-
-def test_cost_event_nullable_fields():
-    event = CostEvent(cost_usd=None, input_tokens=None, output_tokens=None)
-    assert event.cost_usd is None
 
 
 def test_continuation_token_fields():
     token = ContinuationToken(backend="codex", data={"thread_id": "abc"})
     assert token.backend == "codex"
     assert token.data == {"thread_id": "abc"}
-
-
-def test_result_event_fields():
-    token = ContinuationToken(backend="codex", data={})
-    event = ResultEvent(structured_output={"key": "val"}, continuation=token)
-    assert event.structured_output == {"key": "val"}
-    assert event.continuation is token
-
-
-def test_result_event_nullable():
-    event = ResultEvent(structured_output=None, continuation=None)
-    assert event.structured_output is None
-    assert event.continuation is None
 
 
 def test_create_backend_claude_default_uses_config_constant():
@@ -138,11 +88,13 @@ def test_agent_definition_importable():
 @pytest.mark.asyncio
 async def test_backend_execute_accepts_agents_kwarg():
     """MockBackend (satisfying Backend protocol) should accept agents=None."""
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from daydream.backends import AgentEvent, Backend
 
     class MockBackendWithAgents:
+        model = "mock-model"
+
         async def execute(
             self,
             cwd,
@@ -150,8 +102,9 @@ async def test_backend_execute_accepts_agents_kwarg():
             output_schema=None,
             continuation=None,
             agents=None,
+            max_turns=None,
             read_only=False,
-        ) -> AsyncIterator[AgentEvent]:
+        ) -> AsyncGenerator[AgentEvent, None]:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
@@ -166,3 +119,19 @@ async def test_backend_execute_accepts_agents_kwarg():
     async for event in backend.execute(Path("/tmp"), "test", agents=None):
         events.append(event)
     assert len(events) == 1
+
+
+def test_create_backend_forwards_reasoning_effort_to_every_driver():
+    """All three backends carry the resolved effort, not just Codex."""
+    from daydream.backends import create_backend
+
+    for name in ("claude", "codex", "pi"):
+        backend = create_backend(name, reasoning_effort="max")
+        assert backend.reasoning_effort == "max", name
+
+
+def test_create_backend_without_reasoning_effort_leaves_it_unset():
+    from daydream.backends import create_backend
+
+    for name in ("claude", "codex", "pi"):
+        assert create_backend(name).reasoning_effort is None, name

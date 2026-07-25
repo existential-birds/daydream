@@ -12,6 +12,7 @@ extension-seam plan, one flow migration at a time.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +26,19 @@ from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
+from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import FakeGh
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 KEEP_ME = "KEEP_ME"
 DROP_ME = "DROP_ME"
+
+MakeConfig = Callable[..., RunConfig]
+InstallBackend = Callable[[object], object]
+
+# The no-op turn every non-dispatching stub in this file yielded: empty text plus
+# a terminal result.
+_EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
 FILTER_ITEMS_EXT = """
@@ -161,6 +170,7 @@ async def test_fork_filter_controls_findings_artifact(
     monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any,
     tmp_path: Path,
+    make_config: MakeConfig,
 ) -> None:
     """A load-items fork controls the canonical findings export surface."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
@@ -169,14 +179,7 @@ async def test_fork_filter_controls_findings_artifact(
     merged_items = multi_stack_target / ".daydream" / "deep" / "merged-items.json"
 
     rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            pr_number=7,
-            findings_out=str(findings_out),
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
+        make_config(multi_stack_target, pr_number=7, findings_out=str(findings_out))
     )
     artifact = findings_out.read_text()
     canonical = merged_items.read_text()
@@ -191,21 +194,13 @@ async def test_fork_filter_controls_pr_post_payload(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any,
+    make_config: MakeConfig,
 ) -> None:
     """A load-items fork controls the canonical PR review payload."""
     _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            pr_number=7,
-            assume="yes",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
     # A finding reaches the PR either in the review payload or as its own
     # file-level comment; the fork's filter must govern both surfaces.
     posted = json.dumps(
@@ -229,6 +224,7 @@ async def test_fork_filter_controls_fix_prompts(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     fake_gh: Any,
+    make_config: MakeConfig,
 ) -> None:
     """A load-items fork controls the findings that reach the fix phase."""
     from tests.test_deep_orchestrator import _fix_prompts
@@ -236,16 +232,7 @@ async def test_fork_filter_controls_fix_prompts(
     backend = _install_filtered_surface(ext_dir, multi_stack_target, monkeypatch)
     _serve_pr_view(fake_gh, multi_stack_target)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            pr_number=7,
-            assume="yes",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, pr_number=7, assume="yes"))
     fix_prompts = "\n".join(_fix_prompts(backend))
 
     assert rc == 0
@@ -366,7 +353,10 @@ class DeferredWriteBackend:
 
 
 async def test_fork_disables_respond_step(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """A daydream_ext removal of ``respond-feedback`` skips only that step.
 
@@ -379,11 +369,9 @@ async def test_fork_disables_respond_step(
         "    r.remove('pr-feedback', 'respond-feedback')\n"
     )
     backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    install_backend(backend)
 
-    rc = await runner.run_feedback(
-        RunConfig(target=str(multi_stack_target), bot="x[bot]", non_interactive=True), pr=1
-    )
+    rc = await runner.run_feedback(make_config(multi_stack_target, bot="x[bot]"), pr=1)
 
     assert rc == 0
     assert any("fetch" in p.lower() for p in backend.prompts)  # flow still ran
@@ -391,7 +379,10 @@ async def test_fork_disables_respond_step(
 
 
 async def test_fork_inserts_custom_phase_into_review_flow(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """A daydream_ext phase inserted after ``review-alternatives`` runs in ``--review``.
 
@@ -410,19 +401,10 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
         "    r.insert_after('review', anchor='review-alternatives', step='ro_audit')\n"
     )
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            output_mode="review",
-            non_interactive=True,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, output_mode="review"))
 
     idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
     assert idx, "custom phase never reached the backend"
@@ -459,7 +441,10 @@ class ShallowRecordingBackend(PhaseDispatchBackend):
 
 
 async def test_fork_inserts_phase_before_summary_in_shallow(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """A daydream_ext phase inserted before ``summary`` runs in ``--shallow``.
 
@@ -482,20 +467,9 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     backend = ShallowRecordingBackend(
         parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
     )
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            shallow=True,
-            skill="python",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, shallow=True, skill="python"))
 
     assert "RO-SHALLOW-PROMPT" in backend.prompts, "fork phase never reached the backend"
     assert rc == 0
@@ -507,7 +481,10 @@ ALTERNATIVES_MARKER = "Given this intent, explore the codebase and evaluate the 
 
 
 async def test_fork_disables_alternatives_in_deep(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """A daydream_ext removal of ``alternatives`` skips only that step in deep.
 
@@ -532,14 +509,7 @@ async def test_fork_disables_alternatives_in_deep(
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target))
 
     prompts = [call["prompt"] for call in backend.calls]
     assert rc == 0
@@ -601,7 +571,8 @@ def _step_for_tool(trajectory: dict[str, Any], tool_name: str) -> dict[str, Any]
 async def _run_tool_case(
     ext_dir: ExtDir,
     target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
     *,
     register_supervisor: bool,
     supervisor_raises: bool = False,
@@ -644,19 +615,10 @@ async def _run_tool_case(
     backend = DeferredWriteBackend(written)
     if backend_capture is not None:
         backend_capture.append(backend)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    install_backend(backend)
 
     rc = await runner.run(
-        RunConfig(
-            target=str(target),
-            flow_name="ro-audit",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-            trajectory_path=trajectory,
-        )
+        make_config(target, flow_name="ro-audit", trajectory_path=trajectory)
     )
     return written, trajectory, rc
 
@@ -664,7 +626,7 @@ async def _run_tool_case(
 async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
     ext_dir: ExtDir,
     multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Config-enabled built-in and fork supervisors cannot silently compose."""
@@ -679,16 +641,9 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
         "    r.register_tool_supervisor(_fork_supervisor)\n"
     )
     (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "rules"\n')
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
 
     rc = await runner.run(
-        runner.RunConfig(
-            target=str(multi_stack_target),
-            non_interactive=True,
-            cleanup=False,
-            file_config=load_file_config(multi_stack_target),
-        )
+        make_config(multi_stack_target, file_config=load_file_config(multi_stack_target))
     )
 
     assert rc == 1
@@ -699,11 +654,14 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
 
 
 async def test_fork_tool_supervisor_vetoes_write(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """A registered supervisor veto closes the deferred backend before its write."""
     denied, traj, rc = await _run_tool_case(
-        ext_dir, multi_stack_target, monkeypatch, register_supervisor=True
+        ext_dir, multi_stack_target, install_backend, make_config, register_supervisor=True
     )
 
     assert rc == 0
@@ -714,11 +672,14 @@ async def test_fork_tool_supervisor_vetoes_write(
 
 
 async def test_no_tool_supervisor_allows_write(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """Without registration, the same deferred backend resumes and writes."""
     written, traj, rc = await _run_tool_case(
-        ext_dir, multi_stack_target, monkeypatch, register_supervisor=False
+        ext_dir, multi_stack_target, install_backend, make_config, register_supervisor=False
     )
 
     assert rc == 0
@@ -727,7 +688,10 @@ async def test_no_tool_supervisor_allows_write(
 
 
 async def test_retryable_tool_supervisor_failure_propagates_without_retry(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """A retryable supervisor error propagates without entering backend retry."""
     backends: list[DeferredWriteBackend] = []
@@ -736,7 +700,8 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
         await _run_tool_case(
             ext_dir,
             multi_stack_target,
-            monkeypatch,
+            install_backend,
+            make_config,
             register_supervisor=True,
             supervisor_raises=True,
             backend_capture=backends,
@@ -748,26 +713,19 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
 
 
 async def test_custom_flow_dispatches_and_dumps_artifacts(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path, tmp_path: Path,
+    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend,
+    make_config: MakeConfig, archive_dir: Path, tmp_path: Path,
 ) -> None:
     """A fork-registered custom flow selected via flow_name runs end-to-end and
     --dump-artifacts writes the bundle (must-haves 1 + 2)."""
     ext_dir.write_module(CUSTOM_FLOW_EXT)
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    install_backend(backend)
 
     dump_dir = tmp_path / "uploaded-artifacts"
     rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="ro-audit",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-            dump_artifacts=str(dump_dir),
+        make_config(
+            multi_stack_target, flow_name="ro-audit", dump_artifacts=str(dump_dir)
         )
     )
 
@@ -778,51 +736,34 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
 
 
 async def test_unknown_flow_name_errors(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend,
+    make_config: MakeConfig,
 ) -> None:
     """An unregistered flow name fails with exit 1 (Extension Error panel; must-have 3)."""
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="does-not-exist",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, flow_name="does-not-exist"))
 
     assert rc == 1
     assert not any("CUSTOM-FLOW-PROMPT" in p for p in backend.prompts)
 
 
 async def test_pr_feedback_not_selectable_via_flow(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow pr-feedback errors (needs PR number + bot; must-have 5)."""
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    install_backend(ScriptedBackend(events=_EMPTY_TURN, model="mock-model"))
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="pr-feedback",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, flow_name="pr-feedback"))
     assert rc == 1
 
 
 async def test_custom_phase_full_stack(
-    ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """Seam acceptance (Task 17): custom phase end-to-end through ``runner.run``.
 
@@ -845,7 +786,7 @@ async def test_custom_phase_full_stack(
     backend = _StubBackend(multi_stack_target)
     created: list[tuple[str, str | None]] = []
 
-    def fake_create(name: str, model: str | None = None) -> _StubBackend:
+    def fake_create(name: str, model: str | None = None, **kwargs: object) -> _StubBackend:
         created.append((name, model))
         return backend
 
@@ -861,13 +802,7 @@ async def test_custom_phase_full_stack(
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
     rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-            file_config=load_file_config(multi_stack_target),
-        )
+        make_config(multi_stack_target, file_config=load_file_config(multi_stack_target))
     )
 
     prompts = [call["prompt"] for call in backend.calls]
@@ -878,7 +813,7 @@ async def test_custom_phase_full_stack(
 
 
 async def test_flow_deep_routes_to_deep_helper(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """--flow deep runs the real deep pipeline (must-have 4): the intent prompt
     reaches the backend via the deep flow, exit 0."""
@@ -891,15 +826,7 @@ async def test_flow_deep_routes_to_deep_helper(
         return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="deep",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, flow_name="deep"))
 
     prompts = [call["prompt"] for call in backend.calls]
     assert rc == 0
@@ -907,51 +834,30 @@ async def test_flow_deep_routes_to_deep_helper(
 
 
 async def test_flow_review_routes_to_review_helper(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow review runs the real review pipeline: the alternatives prompt
     reaches the backend via the review flow, exit 0."""
-    backend = RecordingBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="review",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, flow_name="review"))
 
     assert rc == 0
     assert any(ALTERNATIVES_MARKER in p for p in backend.prompts)  # review pipeline ran
 
 
 async def test_flow_shallow_routes_to_shallow_helper(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow shallow runs the real shallow pipeline: the parse phase fires,
     exit 0."""
     backend = ShallowRecordingBackend(
         parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
     )
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    install_backend(backend)
 
-    rc = await runner.run(
-        RunConfig(
-            target=str(multi_stack_target),
-            flow_name="shallow",
-            skill="python",
-            non_interactive=True,
-            cleanup=False,
-            archive=False,
-        )
-    )
+    rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", skill="python"))
 
     assert rc == 0
     assert backend.parse_calls >= 1  # shallow pipeline ran

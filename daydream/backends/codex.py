@@ -13,7 +13,7 @@ import logging
 import re
 import tempfile
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,12 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.backends._subprocess import (
+    cancel_processes,
+    readline_with_idle_timeout,
+    stream_idle_timeout_s,
+    terminate_process,
+)
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
 
 _SHELL_WRAPPER_RE = re.compile(r"/bin/(?:zsh|bash|sh)\s+-lc\s+(.+)$", re.DOTALL)
@@ -87,7 +92,8 @@ class CodexBackend:
         agents: dict[str, Any] | None = None,
         max_turns: int | None = None,
         read_only: bool = False,
-    ) -> AsyncIterator[AgentEvent]:
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
         """Execute a prompt via Codex CLI and yield unified events.
 
         Args:
@@ -99,9 +105,15 @@ class CodexBackend:
                 spike): ``--sandbox read-only`` does not block ``git commit``;
                 the working tree — the failure-handoff incident's danger — is
                 fully protected. Default False keeps ``danger-full-access``.
+            persist_session: Accepted for backend protocol parity. Codex does
+                not expose persisted CLI sessions here, so this is ignored.
 
         Raises:
             CodexError: If the Codex turn fails.
+            StreamStalledError: If the ``codex`` subprocess emits nothing on
+                stdout for the idle window (see
+                :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
+                Retryable — ``run_agent`` re-arms a fresh subprocess and retries.
             NotImplementedError: If ``agents`` is non-empty (Codex backend
                 does not support exploration subagents).
         """
@@ -196,10 +208,13 @@ class CodexBackend:
                 proc.stdin.write(prompt.encode())
                 proc.stdin.close()
 
+            idle_timeout_s = stream_idle_timeout_s()
             while True:
                 if proc.stdout is None:
                     break
-                line = await proc.stdout.readline()
+                line = await readline_with_idle_timeout(
+                    proc.stdout, cli="codex", timeout_s=idle_timeout_s
+                )
                 if not line:
                     break
 
@@ -453,7 +468,7 @@ class CodexBackend:
                 Path(schema_path).unlink(missing_ok=True)
 
     async def cancel(self) -> None:
-        """Cancel the running Codex process.
+        """Cancel all running Codex processes.
 
         Sends SIGTERM, waits briefly, then SIGKILL if still running.
         """

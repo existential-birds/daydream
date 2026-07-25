@@ -25,7 +25,7 @@ It implements the 3-method ``Backend`` interface (``execute``/``cancel``/
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
@@ -95,7 +95,7 @@ class PhaseDispatchBackend:
         agents=None,
         max_turns=None,
         read_only=False,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent, None]:
         self.last_prompt = prompt
         self.call_count += 1
 

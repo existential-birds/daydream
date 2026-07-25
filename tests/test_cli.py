@@ -436,7 +436,7 @@ def test_no_per_phase_model_flag_leaves_field_none(tmp_path):
 )
 def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, capsys):
     with pytest.raises(SystemExit):
-        _parse_args([flag, "claude-opus-4-8", str(tmp_path)])
+        _parse_args([flag, "claude-opus-5", str(tmp_path)])
     err = capsys.readouterr().err
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
@@ -451,22 +451,22 @@ def test_per_phase_flag_rejected_with_config_pointer(flag, phase, tmp_path, caps
 )
 def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
     with pytest.raises(SystemExit):
-        _parse_args([f"{flag}=claude-opus-4-8", str(tmp_path)])
+        _parse_args([f"{flag}=claude-opus-5", str(tmp_path)])
     err = capsys.readouterr().err
     assert flag in err
     assert f"[tool.daydream.phases.{phase}]" in err
 
 
 def test_global_model_still_works(tmp_path):
-    assert _parse_args(["--model", "claude-opus-4-8", str(tmp_path)]).model == "claude-opus-4-8"
+    assert _parse_args(["--model", "claude-opus-5", str(tmp_path)]).model == "claude-opus-5"
 
 
 # Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 
 
 def test_global_model_flag_populates_runconfig(tmp_path):
-    config = _parse_args(["--model", "claude-opus-4-8", str(tmp_path)])
-    assert config.model == "claude-opus-4-8"
+    config = _parse_args(["--model", "claude-opus-5", str(tmp_path)])
+    assert config.model == "claude-opus-5"
 
 
 def test_runconfig_has_model_field():

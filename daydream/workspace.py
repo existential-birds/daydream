@@ -8,8 +8,7 @@ it operates on for a single run.  Two modes are supported:
   ``<source>/.daydream/worktrees/<run_id>`` and removes it on exit.
 
 The resolution rules and ordering live in :func:`open_workspace` and are
-deliberately fixed (matching the design captured in
-``docs/plans/2026-04-30-worktree-isolation-and-mode-consolidation.md``).
+deliberately fixed.
 
 The module shells out via :mod:`daydream.git_ops` only.
 """

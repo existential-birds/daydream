@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.prompts import build_merge_prompt
 from daydream.phases import phase_cross_stack_merge
+from tests.harness.backend import ScriptedBackend, Turn
 
 
 def test_merge_prompt_specifies_structured_item_list(tmp_path: Path) -> None:
@@ -77,61 +77,35 @@ def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
     )
 
 
-class _RecordingBackend:
-    """Records every execute call; verifies no `agents` kwarg was passed."""
-
-    model = "test-model"
-    fanout_concurrency = 4
-
-    def __init__(self) -> None:
-        self.agents_seen: list[Any] = []
-        self.prompts: list[str] = []
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        self.prompts.append(prompt)
-        self.agents_seen.append(agents)
-        # The merge agent returns a schema item list; the host renders the report.
-        yield TextEvent(text="merged")
-        yield ResultEvent(
-            structured_output={
-                "items": [
-                    {
-                        "id": 1,
-                        "lens": "per-stack",
-                        "file": "api.py",
-                        "line": 1,
-                        "severity": "low",
-                        "description": "issue",
-                        "confidence": "MEDIUM",
-                        "rationale": "r",
-                        "evidence": "api.py:1",
-                    }
-                ]
-            },
-            continuation=None,
-        )
-
-    async def cancel(self) -> None:
-        pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
+# The merge agent returns a schema item list; the host renders the report.
+_MERGE_TURN: Turn = [
+    TextEvent(text="merged"),
+    ResultEvent(
+        structured_output={
+            "items": [
+                {
+                    "id": 1,
+                    "lens": "per-stack",
+                    "file": "api.py",
+                    "line": 1,
+                    "severity": "low",
+                    "description": "issue",
+                    "confidence": "MEDIUM",
+                    "rationale": "r",
+                    "evidence": "api.py:1",
+                }
+            ]
+        },
+        continuation=None,
+    ),
+]
 
 
 async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_work) -> None:
     """D-24: merged report path is work.repo / REVIEW_OUTPUT_FILE."""
     from daydream.config import REVIEW_OUTPUT_FILE
 
-    backend = _RecordingBackend()
+    backend = ScriptedBackend(events=_MERGE_TURN)
     result = await phase_cross_stack_merge(
         backend,
         make_work(tmp_path),
@@ -145,7 +119,7 @@ async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_
 
 async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work) -> None:
     """D-38: no agents= kwarg (Codex compatibility)."""
-    backend = _RecordingBackend()
+    backend = ScriptedBackend(events=_MERGE_TURN)
     await phase_cross_stack_merge(
         backend,
         make_work(tmp_path),
@@ -154,4 +128,4 @@ async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work
         alternatives_path=tmp_path / "a.json",
         dedup_candidates_path=tmp_path / "d.json",
     )
-    assert all(a is None for a in backend.agents_seen)
+    assert all(c["agents"] is None for c in backend.calls)

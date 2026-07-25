@@ -11,6 +11,9 @@ from rich.console import Console
 
 from daydream.runner import RunConfig, run
 from daydream.ui import NEON_THEME, SummaryData, print_iteration_divider, print_summary
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -100,61 +103,74 @@ def mock_ui_loop(monkeypatch):
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
 
 
+_ISSUE = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
+
+
 @pytest.mark.asyncio
-async def test_loop_exits_on_zero_issues(loop_target, mock_ui_loop, monkeypatch):
-    """Issues on iteration 1, zero on iteration 2 -> exits 0."""
-    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], []])
+@pytest.mark.parametrize(
+    ("review_results", "loop", "max_iterations", "expected_exit", "parse_calls", "commit_iterations"),
+    [
+        # Issues on iteration 1, zero on iteration 2 -> exits 0.
+        ([[_ISSUE], []], True, 5, 0, 2, [1]),
+        # Always returns issues -> stops at max_iterations, exits 1.
+        ([[_ISSUE], [_ISSUE], [_ISSUE]], True, 3, 1, 3, [1, 2, 3]),
+        # Each successful iteration commits changes before the next review.
+        ([[_ISSUE], [_ISSUE], []], True, 5, 0, 3, [1, 2]),
+        # loop=False behaves identically to the existing single-pass flow.
+        ([[_ISSUE]], False, 5, 0, 1, []),
+        # No commit when the first iteration is already clean (no fixes applied).
+        ([[]], True, 5, 0, 1, []),
+    ],
+    ids=[
+        "exits_on_zero_issues",
+        "respects_max_iterations",
+        "commits_between_iterations",
+        "loop_false_single_pass",
+        "no_commit_on_clean_first_iteration",
+    ],
+)
+async def test_loop_iteration_and_commit_outcomes(
+    review_results, loop, max_iterations, expected_exit, parse_calls, commit_iterations,
+    loop_target, mock_ui_loop, install_backend, make_config,
+):
+    """Loop termination and per-iteration commits, over the review-result shapes
+    that drive each exit path.
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    Asserts the same three observables in every case: the exit code, how many
+    review/parse rounds actually ran, and one commit per successful fixing
+    iteration carrying that iteration's number in its message.
+    """
+    backend = install_backend(loop_mock_backend(review_results=review_results))
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=loop, max_iterations=max_iterations,
         shallow=True,
     )
     exit_code = await run(config)
 
-    assert exit_code == 0
-    assert backend._parse_call == 2
+    assert exit_code == expected_exit
+    assert backend._parse_call == parse_calls
+    assert len(backend.commit_calls) == len(commit_iterations), backend.commit_calls
+    for message, iteration in zip(backend.commit_calls, commit_iterations, strict=True):
+        assert f"iteration: {iteration}" in message
 
 
 @pytest.mark.asyncio
-async def test_loop_respects_max_iterations(loop_target, mock_ui_loop, monkeypatch):
-    """Always returns issues -> stops at max_iterations, exits 1."""
-    issue = {"id": 1, "description": "Persistent issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], [issue], [issue]])
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=3,
-        shallow=True,
-    )
-    exit_code = await run(config)
-
-    assert exit_code == 1
-    assert backend._parse_call == 3
-
-
-@pytest.mark.asyncio
-async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch, install_backend,
+                                          make_config):
     """Tests fail mid-loop -> reverts changes, stops immediately, exits 1."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    backend = install_backend(
+        loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
+    )
 
     reverted = []
     monkeypatch.setattr(
         "daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: (reverted.append(cwd) or True)
     )
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
 
@@ -164,13 +180,12 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch, install_backend,
+                                      make_config):
     """Stats accumulate across iterations."""
     issue1 = {"id": 1, "description": "Issue A", "file": "main.py", "line": 1}
     issue2 = {"id": 2, "description": "Issue B", "file": "main.py", "line": 2}
-    backend = loop_mock_backend(review_results=[[issue1, issue2], [issue1], []])
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    install_backend(loop_mock_backend(review_results=[[issue1, issue2], [issue1], []]))
 
     captured_summary = {}
 
@@ -186,10 +201,8 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
 
     monkeypatch.setattr("daydream.flows.shallow.print_summary", capture_summary)
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
 
@@ -201,60 +214,15 @@ async def test_loop_accumulates_stats(loop_target, mock_ui_loop, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_loop_false_single_pass(loop_target, mock_ui_loop, monkeypatch):
-    """loop=False behaves identically to existing single-pass flow."""
-    issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue]])
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=False,
-        shallow=True,
-    )
-    exit_code = await run(config)
-
-    assert exit_code == 0
-    assert backend._parse_call == 1  # single pass only
-    assert backend.commit_calls == []
-
-
-@pytest.mark.asyncio
-async def test_loop_commits_between_iterations(loop_target, mock_ui_loop, monkeypatch):
-    """Each successful iteration commits changes before the next review."""
-    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], [issue], []])
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
-    )
-    exit_code = await run(config)
-
-    assert exit_code == 0
-    # Two successful iterations with fixes -> two commits
-    assert len(backend.commit_calls) == 2
-    assert "iteration: 1" in backend.commit_calls[0]
-    assert "iteration: 2" in backend.commit_calls[1]
-
-
-@pytest.mark.asyncio
-async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeypatch,
+                                              install_backend, make_config):
     """No iteration commit when tests fail; changes are reverted."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    backend = install_backend(loop_mock_backend(review_results=[[issue]], tests_pass=False))
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
 
@@ -263,12 +231,11 @@ async def test_loop_no_commit_on_test_failure(loop_target, mock_ui_loop, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkeypatch,
+                                               install_backend, make_config):
     """Fixes from a failed iteration are not counted in the summary."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue]], tests_pass=False)
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    install_backend(loop_mock_backend(review_results=[[issue]], tests_pass=False))
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     captured_summary: dict[str, Any] = {}
@@ -294,36 +261,16 @@ async def test_loop_reverted_fixes_not_counted(loop_target, mock_ui_loop, monkey
 
 
 @pytest.mark.asyncio
-async def test_loop_no_commit_on_clean_first_iteration(loop_target, mock_ui_loop, monkeypatch):
-    """No commit when first iteration is already clean (no fixes applied)."""
-    backend = loop_mock_backend(review_results=[[]])
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
-    )
-    exit_code = await run(config)
-
-    assert exit_code == 0
-    assert backend.commit_calls == []
-
-
-@pytest.mark.asyncio
-async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, install_backend,
+                                               make_config):
     """Loop mode aborts with exit code 1 when the working tree is dirty."""
 
     (loop_target / "untracked.py").write_text("dirty")
 
-    backend = loop_mock_backend(review_results=[[]])
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    backend = install_backend(loop_mock_backend(review_results=[[]]))
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
 
@@ -333,26 +280,13 @@ async def test_loop_rejects_dirty_working_tree(loop_target, mock_ui_loop, monkey
 
 def test_revert_uncommitted_changes(tmp_path):
     """revert_uncommitted_changes restores tracked files and removes untracked."""
-    import subprocess
-
     from daydream.phases import revert_uncommitted_changes
 
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, capture_output=True, check=True,
-    )
+    _init_repo(tmp_path)
     tracked = tmp_path / "tracked.py"
     tracked.write_text("original")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"],
-        cwd=tmp_path, capture_output=True, check=True,
-    )
+    _git(tmp_path, "add", ".")
+    _commit(tmp_path, "init")
 
     tracked.write_text("modified")
     untracked = tmp_path / "new_file.py"
@@ -371,19 +305,14 @@ def test_revert_uncommitted_changes_not_a_repo(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_loop,
+                                                         install_backend, make_config):
     """Iteration 1 diffs against main; iteration 2 diffs against the SHA from iteration 1's commit."""
-    import subprocess
-
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], []])
+    backend = install_backend(loop_mock_backend(review_results=[[issue], []]))
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
     assert exit_code == 0
@@ -400,15 +329,12 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
     assert sha_match is not None, f"Expected SHA-based diff in prompt: {prompt2}"
 
     # Verify the SHA is a real commit in the repo
-    result = subprocess.run(
-        ["git", "cat-file", "-t", sha_match.group(1)],
-        capture_output=True, text=True, cwd=loop_target,
-    )
-    assert result.stdout.strip() == "commit"
+    assert _git(loop_target, "cat-file", "-t", sha_match.group(1)) == "commit"
 
 
 @pytest.mark.asyncio
-async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, monkeypatch):
+async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, install_backend,
+                                                make_config):
     """Real-path: the fix agent's backend.execute receives max_turns == FIX_MAX_TURNS (40).
 
     Drives the production entrypoint (runner.run, shallow single pass) through a
@@ -430,14 +356,9 @@ async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, monke
                 yield event
 
     issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
-    backend = TurnCapturingBackend(parse_results=[[issue]])
+    install_backend(TurnCapturingBackend(parse_results=[[issue]]))
 
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
-
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=False, shallow=True,
-    )
+    config = make_config(loop_target, skill="python", quiet=True, loop=False, shallow=True)
     exit_code = await run(config)
 
     assert exit_code == 0
@@ -446,12 +367,11 @@ async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, monke
 
 
 @pytest.mark.asyncio
-async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loop, monkeypatch):
+async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loop, monkeypatch,
+                                                        install_backend, make_config):
     """When tests fail, diff_base stays None — next iteration (if any) uses full branch diff."""
     issue = {"id": 1, "description": "Issue", "file": "main.py", "line": 1}
-    backend = loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False)
-
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None: backend)
+    install_backend(loop_mock_backend(review_results=[[issue], [issue]], tests_pass=False))
     monkeypatch.setattr("daydream.flows.shallow.revert_uncommitted_changes", lambda cwd: True)
 
     sha_calls: list[Path] = []
@@ -466,10 +386,8 @@ async def test_loop_diff_base_unchanged_on_test_failure(loop_target, mock_ui_loo
 
     monkeypatch.setattr("daydream.runner._get_head_sha", tracking_get_head_sha)
 
-    config = RunConfig(
-        target=str(loop_target), skill="python", quiet=True,
-        cleanup=False, loop=True, max_iterations=5,
-        shallow=True,
+    config = make_config(
+        loop_target, skill="python", quiet=True, loop=True, max_iterations=5, shallow=True,
     )
     exit_code = await run(config)
 

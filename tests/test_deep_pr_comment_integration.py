@@ -27,7 +27,9 @@ from typing import Any
 
 import pytest
 
+from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
 
@@ -383,17 +385,14 @@ class _FakeSDKClient:
 def deep_target(tmp_path: Path) -> Path:
     """Real git repo on a feature branch with one Python file changed."""
     repo = tmp_path / "deep_repo"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
+    _init_repo(repo)
     (repo / "foo.py").write_text("def foo():\n    return 1\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "init")
+    _commit(repo, "init")
     _git(repo, "checkout", "-b", "feature")
     (repo / "foo.py").write_text("def foo():\n    return 2\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "tweak foo")
+    _commit(repo, "tweak foo")
     return repo
 
 
@@ -408,21 +407,18 @@ def deep_target_multi(tmp_path: Path) -> Path:
     short-circuits with ``"skip"`` and never exercises the broken row.
     """
     repo = tmp_path / "deep_repo_multi"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
+    _init_repo(repo)
     # Seed five Python files on main so the tree-sitter index can resolve them.
     for name in ("foo.py", "bar.py", "baz.py", "qux.py", "quux.py"):
         (repo / name).write_text(f"def {name[:-3]}():\n    return 1\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "init")
+    _commit(repo, "init")
     _git(repo, "checkout", "-b", "feature")
     # Mutate four so count_changed_files >= 4 -> tier="parallel".
     for name in ("foo.py", "bar.py", "baz.py", "qux.py"):
         (repo / name).write_text(f"def {name[:-3]}():\n    return 2\n")
     _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "tweak four files")
+    _commit(repo, "tweak four files")
     # Assert diff count up-front so a threshold-breaking refactor trips here.
     diff_out = subprocess.run(  # noqa: S603 - controlled args
         ["git", "diff", "--name-only", "main..HEAD"],  # noqa: S607
@@ -442,30 +438,17 @@ def deep_target_multi(tmp_path: Path) -> Path:
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ClaudeBackend.execute does isinstance on."""
-    monkeypatch.setattr(
-        "daydream.backends.claude.ClaudeSDKClient", _FakeSDKClient,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.AssistantMessage", FakeAssistantMessage,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.UserMessage", FakeUserMessage,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.ResultMessage", FakeResultMessage,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.TextBlock", FakeTextBlock,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.ThinkingBlock", FakeThinkingBlock,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.ToolUseBlock", FakeToolUseBlock,
-    )
-    monkeypatch.setattr(
-        "daydream.backends.claude.ToolResultBlock", FakeToolResultBlock,
-    )
+    for symbol, fake in (
+        ("ClaudeSDKClient", _FakeSDKClient),
+        ("AssistantMessage", FakeAssistantMessage),
+        ("UserMessage", FakeUserMessage),
+        ("ResultMessage", FakeResultMessage),
+        ("TextBlock", FakeTextBlock),
+        ("ThinkingBlock", FakeThinkingBlock),
+        ("ToolUseBlock", FakeToolUseBlock),
+        ("ToolResultBlock", FakeToolResultBlock),
+    ):
+        monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
 
 
 # gh / PR plumbing patches: find_open_pr returns a fake PRInfo and _submit_review

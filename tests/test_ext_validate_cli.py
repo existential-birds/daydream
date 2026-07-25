@@ -44,7 +44,7 @@ def test_ext_validate_ok(ext_dir, capsys) -> None:
     rc = _run_main(["ext", "validate"])
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out)
-    assert "DAYDREAM_EXT_DIR" in out and "api version 2" in out.lower()
+    assert "DAYDREAM_EXT_DIR" in out and "api version 3" in out.lower()
     assert "tool supervisor: registered" in out.lower()
 
 
@@ -95,7 +95,7 @@ def test_ext_validate_reports_supported_range(ext_dir, capsys) -> None:
     ext_dir.write_module("DAYDREAM_EXT_API = 2\ndef register(r): ...\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 0
-    assert "supported: 1..2" in strip_ansi(capsys.readouterr().out).lower()
+    assert "supported: 1..3" in strip_ansi(capsys.readouterr().out).lower()
 
 
 def test_bare_ext_prints_help_exits_2(capsys) -> None:

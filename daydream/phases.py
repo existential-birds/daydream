@@ -25,7 +25,11 @@ from daydream.agent import (
     resolve_or_prompt,
     run_agent,
 )
-from daydream.backends import Backend, ContinuationToken
+from daydream.backends import (
+    Backend,
+    ContinuationToken,
+    effective_fanout_concurrency,
+)
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
@@ -1914,7 +1918,7 @@ async def phase_fix_parallel(
     work: WorkContext,
     items: list[dict[str, Any]],
     *,
-    limiter_size: int = 4,
+    limiter_size: int = 10,
     intent_path: Path | None = None,
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
@@ -1978,7 +1982,9 @@ async def phase_fix_parallel(
     recorder = get_current_recorder()
     failures: dict[str, str] = {}
     _failures_lock = anyio.Lock()
-    limiter = anyio.CapacityLimiter(limiter_size)
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(limiter_size, backend)
+    )
     _console_lock = anyio.Lock()
     total = len(items)
 
@@ -2762,7 +2768,9 @@ async def phase_per_stack_reviews(
     recorder = get_current_recorder()
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
-    limiter = anyio.CapacityLimiter(getattr(backend, "fanout_concurrency", 4))
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(10, backend)
+    )
     prior_commits = _prior_daydream_commits(work)
 
     async with anyio.create_task_group() as tg:
@@ -2833,13 +2841,13 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
-                async with maybe_fork(recorder, f"deep-{stack_name}"):
-                    try:
-                        async with limiter:
+                async with limiter:
+                    async with maybe_fork(recorder, f"deep-{stack_name}"):
+                        try:
                             await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
-                        results[stack_name] = task_output
-                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                        failures[stack_name] = f"{type(e).__name__}: {e}"
+                            results[stack_name] = task_output
+                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                            failures[stack_name] = f"{type(e).__name__}: {e}"
 
             tg.start_soon(_task)
 

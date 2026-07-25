@@ -1,13 +1,16 @@
 """Shared pytest fixtures for the daydream test suite."""
 
 import os
-import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.runner import RunConfig
 from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -47,12 +50,11 @@ os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
 #
 # Mirrors the helpers that previously lived only in tests/test_git_ops.py.
 # Lifted here so other test modules (notably tests/test_pr_review.py) can
-# build real repos instead of mocking subprocess. tests/test_workspace.py
-# still has its own helpers (it needs additional plumbing for bare-origin
-# push semantics) — left untouched on purpose. The helper bodies now live in
+# build real repos instead of mocking subprocess. The helper bodies live in
 # tests/harness/git_helpers.py; the aliased imports above keep the local
 # `_git`/`_commit`/... names (and external `from tests.conftest import _git`
-# call sites) unchanged.
+# call sites) unchanged. tests/test_workspace.py imports the same harness
+# helpers and keeps only its genuinely bare-origin-specific plumbing.
 
 
 def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
@@ -146,6 +148,121 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
 
 
 @pytest.fixture
+def improve_monorepo_target(tmp_path: Path) -> Path:
+    """Committed multi-service repository for improve-flow real-path tests."""
+    project = tmp_path / "improve_monorepo"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    web = project / "web"
+    web.mkdir()
+    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
+def improve_scaled_monorepo_target(tmp_path: Path) -> Path:
+    """Committed monorepo large enough that partition fan-out must split."""
+    project = tmp_path / "improve_scaled"
+    for index in range(12):  # 12 conventional-root services
+        root = project / "apps" / f"svc{index:02d}"
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f'[project]\nname = "svc{index:02d}"\n')
+        (root / "api.py").write_text(f'def service_name():\n    return "svc{index:02d}"\n')
+    for sub in ("alpha", "beta", "gamma"):  # uncovered react tree, no service signal
+        pkg = project / "frontend" / "src" / sub
+        pkg.mkdir(parents=True)
+        for index in range(4):
+            (pkg / f"view{index}.tsx").write_text("export const V = () => <div/>;\n")
+    (project / "README.md").write_text("# scaled\n")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "improve-scaled"\n\n[tool.daydream]\ntest-command = "uv run pytest"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    return project
+
+
+@pytest.fixture
+def improve_branch_target(tmp_path: Path) -> Path:
+    """Improve monorepo with one billing change committed on a feature branch."""
+    project = tmp_path / "improve_branch"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    web = project / "web"
+    web.mkdir()
+    (web / "App.tsx").write_text("export const App = () => <div>daydream</div>;\n")
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    _git(project, "checkout", "-b", "feature")
+    (project / "apps" / "billing" / "api.py").write_text(
+        'def service_name():\n    return "billing-v2"\n'
+    )
+    _git(project, "add", "apps/billing/api.py")
+    _commit(project, "change billing api")
+    return project
+
+
+@pytest.fixture
+def improve_branch_two_services_target(tmp_path: Path) -> Path:
+    """Improve monorepo whose feature branch changes billing AND catalog."""
+    project = tmp_path / "improve_branch_two"
+    for service in ("billing", "catalog"):
+        root = project / "apps" / service
+        root.mkdir(parents=True)
+        (root / "pyproject.toml").write_text(f"[project]\nname = \"{service}\"\n")
+        (root / "api.py").write_text(f'def service_name():\n    return "{service}"\n')
+    (project / "README.md").write_text("# Improve monorepo\n")
+    (project / "pyproject.toml").write_text(
+        "[project]\n"
+        'name = "improve-monorepo"\n'
+        "\n"
+        "[tool.daydream]\n"
+        'test-command = "uv run pytest"\n'
+        'scope-command = "git diff --exit-code"\n'
+    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "initial")
+    _git(project, "checkout", "-b", "feature")
+    for service in ("billing", "catalog"):
+        (project / "apps" / service / "api.py").write_text(
+            f'def service_name():\n    return "{service}-v2"\n'
+        )
+    _git(project, "add", "apps/billing/api.py", "apps/catalog/api.py")
+    _commit(project, "change billing and catalog api")
+    return project
+
+
+@pytest.fixture
 def multi_stack_target(tmp_path: Path) -> Path:
     """Git repo with a Python + React + Markdown diff on a feature branch.
 
@@ -159,57 +276,15 @@ def multi_stack_target(tmp_path: Path) -> Path:
     (project / "api.py").write_text("def hello():\n    return 'world'\n")
     (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
     (project / "README.md").write_text("# Project\n")
-    subprocess.run(  # noqa: S603
-        ["git", "init", "-b", "main"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.name", "Test"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "init"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "checkout", "-b", "feature"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
     (project / "api.py").write_text("def hello():\n    return 'universe'\n")
     (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
     (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "change"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _git(project, "add", ".")
+    _commit(project, "change")
     return project
 
 
@@ -226,56 +301,14 @@ def tiny_diff_target(tmp_path: Path) -> Path:
     project.mkdir()
     (project / "api.py").write_text("def hello():\n    return 'world'\n")
     (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    subprocess.run(  # noqa: S603
-        ["git", "init", "-b", "main"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.name", "Test"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "init"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "checkout", "-b", "feature"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
     (project / "api.py").write_text("def hello():\n    return 'universe'\n")
     (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "change"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _git(project, "add", ".")
+    _commit(project, "change")
     return project
 
 
@@ -311,6 +344,141 @@ def make_work() -> Callable[..., WorkContext]:
         )
 
     return _make
+
+
+@pytest.fixture
+def make_config() -> Callable[..., "RunConfig"]:
+    """Builder for ``RunConfig`` instances with the unattended-test defaults.
+
+    248 of the suite's ``RunConfig`` constructions repeated the same three
+    fields — ``non_interactive=True`` (135 sites vs 4 that want False),
+    ``cleanup=False`` (106 vs 0), ``archive=False`` (100 vs 3) — spread over
+    five to nine lines. Those three are this builder's defaults; every other
+    field keeps its production default so a test that cares still states it.
+    ``target`` is stringified here because ``RunConfig.target`` is a ``str``
+    while fixtures hand out ``Path``.
+
+    Tests that deliberately exercise the interactive, archiving, or cleanup
+    paths pass the field explicitly — it then reads as the point of the test
+    rather than as boilerplate.
+    """
+    from daydream.runner import RunConfig
+
+    def _make(target: Path | str, **overrides: object) -> RunConfig:
+        fields: dict[str, object] = {
+            "target": str(target),
+            "non_interactive": True,
+            "cleanup": False,
+            "archive": False,
+        }
+        fields.update(overrides)
+        return RunConfig(**fields)  # type: ignore[arg-type]
+
+    return _make
+
+
+@pytest.fixture
+def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], object]:
+    """Inject a fake backend at the ``daydream.runner.create_backend`` seam.
+
+    The single mock seam the testing standard permits, copy-pasted at 28 sites
+    as ``lambda name, model=None, **kwargs: backend``. Returns the backend it
+    installed so a call site stays one line:
+    ``backend = install_backend(ScriptedBackend(...))``.
+    """
+
+    def _install(backend: object) -> object:
+        monkeypatch.setattr(
+            "daydream.runner.create_backend", lambda *_args, **_kwargs: backend
+        )
+        return backend
+
+    return _install
+
+
+@pytest.fixture
+def silence_console(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """No-op every ``print_*`` UI helper bound into a module, plus its ``console``.
+
+    Real-path tests silence terminal output so assertions read against state
+    rather than scraped rendering. Done by hand this is a 7-line
+    ``for name in (...)`` loop, re-inlined at 41 sites with a different subset of
+    names each time — and a subset that goes stale whenever a phase starts
+    calling one more helper.
+
+    Discovers the names off the module instead of hardcoding them, so it cannot
+    drift. Tests that *assert* on a specific helper's output pass it in
+    ``keep`` (or spy on it after calling this) — silencing the thing under
+    observation would hide the assertion.
+
+    Args:
+        module: Dotted module path whose bound UI names to silence, e.g.
+            ``"daydream.phases"``.
+        keep: Names to leave untouched, for helpers a test spies on.
+    """
+
+    def _silence(module: str, *, keep: tuple[str, ...] = ()) -> None:
+        import importlib
+
+        mod = importlib.import_module(module)
+        for name in dir(mod):
+            if not name.startswith("print_") or name in keep:
+                continue
+            if callable(getattr(mod, name, None)):
+                monkeypatch.setattr(f"{module}.{name}", lambda *a, **kw: None)
+        if "console" not in keep and hasattr(mod, "console"):
+            monkeypatch.setattr(
+                f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})()
+            )
+
+    return _silence
+
+
+@pytest.fixture
+def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Stub the outward-facing tail phases so a flow test cannot post or push.
+
+    ``post_review_to_pr_from_report`` was stubbed by a hand-written 4-line
+    ``async def _no_post`` at 35 sites; ``phase_test_and_heal`` (39 sites) and
+    ``phase_commit_push`` (43 sites) followed it. A flow test that forgets one
+    reaches a real ``gh`` call or a real commit.
+
+    Every stub is opt-out rather than opt-in, because the safe default for a
+    test is "cannot touch the outside world". A test that asserts a post *was*
+    attempted passes ``post=False`` and installs its own recording stub — the
+    attempt is then the visible subject of the test.
+
+    Args:
+        module: Flow module owning the ``phase_*`` bindings —
+            ``"daydream.deep.orchestrator"`` or ``"daydream.flows.shallow"``.
+        post: Stub ``daydream.pr_review.post_review_to_pr_from_report``.
+        heal: Stub ``<module>.phase_test_and_heal`` to report success, 0 retries.
+        commit: Stub ``<module>.phase_commit_push``.
+    """
+
+    def _mute(
+        module: str = "daydream.deep.orchestrator",
+        *,
+        post: bool = True,
+        heal: bool = True,
+        commit: bool = True,
+    ) -> None:
+        async def _no_post(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def _ok(*_args: object, **_kwargs: object) -> tuple[bool, int]:
+            return True, 0
+
+        if post:
+            monkeypatch.setattr(
+                "daydream.pr_review.post_review_to_pr_from_report", _no_post
+            )
+        if heal:
+            monkeypatch.setattr(f"{module}.phase_test_and_heal", _ok)
+        if commit:
+            monkeypatch.setattr(f"{module}.phase_commit_push", _no_post)
+
+    return _mute
 
 
 @pytest.fixture(autouse=True)
@@ -362,6 +530,39 @@ def _isolate_github_app_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_skill_availability(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No test may read the developer's ``~/.claude`` for skill availability.
+
+    ``get_installed_skills()`` reads ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json``
+    (default ``~/.claude``). Left unpinned, the detected stacks — and so the
+    improve partition-group count and any count that follows from it — silently
+    track which Beagle plugins the machine happens to have installed. That is
+    why plan-count assertions passed locally (dev box with no stack plugins →
+    one generic group) and failed on CI (absent registry → optimistic split).
+
+    Default = generalist: a readable registry with zero plugins makes
+    ``get_installed_skills()`` return an empty set, so every stack falls back to
+    generic routing. This is the "works for everyone" baseline the fallback
+    exists to guarantee. Tests that set ``CLAUDE_CONFIG_DIR`` themselves run
+    after this autouse fixture and win, opting into other conditions (e.g.
+    ``_pin_stack_availability`` points at an absent dir → optimistic).
+
+    The env seam is deliberate over monkeypatching the function name:
+    ``get_installed_skills`` is imported by value into
+    ``daydream.improve.orchestrator``, so patching
+    ``daydream.deep.orchestrator.get_installed_skills`` would not touch improve's
+    bound name. ``CLAUDE_CONFIG_DIR`` controls the data the function reads at
+    call time and covers both flows regardless of import binding.
+    """
+    cfg = tmp_path_factory.mktemp("claude-config")
+    (cfg / "plugins").mkdir()
+    (cfg / "plugins" / "installed_plugins.json").write_text('{"plugins": {}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
 
 
 @pytest.fixture(autouse=True)
@@ -443,32 +644,12 @@ def ext_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExtDir:
 
 @pytest.fixture
 def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
-    """Install the subprocess ``gh`` shim and shrink the ``gh`` timeout budget.
+    """Route ``gh`` invocations to the in-process fake (tests/harness/fake_gh.py).
 
-    Every test using this fixture spawns a real ``gh`` subprocess (the fake
-    shim), so it is auto-marked ``integration`` by
-    :func:`pytest_collection_modifyitems` and excluded from the pre-push gate.
-
-    The shim replies in milliseconds, so the production 60s / 2-retry budget
-    only serves to turn a CPU-starved interpreter cold start into a 3 x 60s =
-    180s stall (the original fake-gh flake). Cap each attempt at 15s with a
-    single retry: the typical run stays sub-second, the worst case is 30s.
+    No subprocess is spawned: ``gh`` argv is answered synchronously at the
+    ``subprocess.run`` boundary inside ``git_ops`` (everything else — real
+    ``git`` against temp worktrees included — runs for real). No fork and no
+    wall clock means these tests cannot flake under host load, so they run
+    everywhere, pre-push gate included.
     """
-    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", "15")
-    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", "1")
-    return install_fake_gh(tmp_path / "fake-gh-bin", monkeypatch)
-
-
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    """Auto-mark every test that drives the subprocess ``gh`` shim ``integration``.
-
-    These tests spawn a real ``gh`` subprocess and so carry process cold-start
-    cost that flakes under host CPU saturation. Marking them keeps the pre-push
-    gate (``-m "not integration"``) fast and deterministic; CI runs the full
-    suite, preserving their coverage.
-    """
-    for item in items:
-        if "fake_gh" in getattr(item, "fixturenames", ()):
-            item.add_marker("integration")
+    return install_fake_gh(tmp_path / "fake-gh-state", monkeypatch)

@@ -5,6 +5,13 @@ This module contains constants for skill mappings, file paths, and regex pattern
 used by the review and fix loop system.
 
 Exports:
+    AUDIT_CATEGORIES: tuple[str, ...] - Improve audit categories.
+    AUDIT_SKILL_MAP: dict[str, dict[str, str]] - Audit skill names by category
+        and detected stack.
+    EffortTier: Frozen improve audit effort-tier configuration.
+    EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
+    PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
+    VET_BATCH_MAX_FINDINGS: int - Candidate findings per improve vetting batch.
     ReviewSkillChoice: Enum for review skill menu choices.
     REVIEW_SKILLS: dict[ReviewSkillChoice, str] - Mapping of review type identifiers to skill names.
     REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
@@ -28,12 +35,13 @@ Exports:
         structural meta-stack assignment.
 """
 
+from dataclasses import dataclass
 from enum import Enum
 
 # Default model ids — single source of truth. Resolved by ``create_backend`` only
 # when no explicit override is supplied. Every other layer takes ``model: str``
 # as required and does no fallback of its own.
-DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_PI_MODEL = "glm-5.2"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
@@ -58,24 +66,37 @@ DEFAULT_TOOL_CALL_BUDGET = 50
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 
+# Plan writers are long, expensive turns and hit Pi's provider rate limit when
+# they inherit the standard/deep audit fanout of ten. Keep plan generation at
+# the prior stable Pi fanout while audit retains its independent tier ceiling.
+PLAN_WRITE_MAX_CONCURRENCY = 2
+
+# Vetting prompts inline their candidate findings as JSON, so the batch size is
+# what keeps one vet turn readable at monorepo audit volume.
+VET_BATCH_MAX_FINDINGS: int = 20
+
 # Per-backend per-phase default model table. The phase resolver in
 # ``daydream.runner._resolve_backend`` looks up
 # ``PHASE_DEFAULT_MODELS[backend_name][phase_name]`` when no explicit per-phase
 # flag is supplied. Phase names are lowercase and match the strings passed by
 # every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
 # ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
-# ``"pr_feedback"``).
+# ``"pr_feedback"``, ``"recon"``, ``"audit"``, ``"vet"``,
+# ``"plan_write"``).
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
-#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT, SUPPRESSION
-#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT,
+#                      SUPPRESSION, RECON, AUDIT
+#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#                      PLAN_WRITE
 #
 # Codex tiering mirrors it across the GPT-5.6 lineup:
 #   - cheap (gpt-5.6-luna):   PARSE
 #   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
-#                             INTENT, SUPPRESSION, SUPERVISE
-#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER
+#                             INTENT, SUPPRESSION, SUPERVISE, RECON, AUDIT
+#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#                             PLAN_WRITE
 #
 # ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
 # borderline uncontested findings; it runs on the cheap mid tier by design (never
@@ -103,14 +124,18 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "verify": "claude-sonnet-5",
         "exploration": "claude-sonnet-5",
         "per_stack_review": "claude-sonnet-5",
-        "review": "claude-opus-4-8",
-        "arbiter": "claude-opus-4-8",
+        "review": "claude-opus-5",
+        "arbiter": "claude-opus-5",
         "suppression": "claude-sonnet-5",
         "supervise": "claude-sonnet-5",
-        "wonder": "claude-opus-4-8",
-        "merge": "claude-opus-4-8",
+        "wonder": "claude-opus-5",
+        "merge": "claude-opus-5",
         "intent": "claude-sonnet-5",
-        "pr_feedback": "claude-opus-4-8",
+        "pr_feedback": "claude-opus-5",
+        "recon": "claude-sonnet-5",
+        "audit": "claude-sonnet-5",
+        "vet": "claude-opus-5",
+        "plan_write": "claude-opus-5",
     },
     "codex": {
         "parse": "gpt-5.6-luna",
@@ -127,6 +152,10 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "merge": "gpt-5.6-sol",
         "intent": "gpt-5.6-terra",
         "pr_feedback": "gpt-5.6-sol",
+        "recon": "gpt-5.6-terra",
+        "audit": "gpt-5.6-terra",
+        "vet": "gpt-5.6-sol",
+        "plan_write": "gpt-5.6-sol",
     },
 }
 
@@ -136,14 +165,32 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # from this table, or a phase absent from its sub-table, resolves to ``None`` —
 # the backend then applies its own ambient default.
 #
-# Only Codex consumes the resolved value. GPT-5.6 accepts ``none``, ``low``,
-# ``medium``, ``high``, ``xhigh``, and ``max``, defaulting to ``medium``.
+# All three backends consume the resolved value through their own native knob:
+# Claude via ``ClaudeAgentOptions.effort``, Codex via
+# ``-c model_reasoning_effort=...``, Pi via ``--thinking``. The five levels
+# below are the intersection of the three drivers' vocabularies, so any value
+# in this table is valid for any backend.
+#
+# The table is composed from two independently-owned halves so tuning one flow
+# never moves the other. Both are merged into ``PHASE_DEFAULT_EFFORT``, which
+# is what the resolver reads.
+REASONING_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+
+# Half one: the review/fix pipeline (deep, shallow, review, pr-feedback).
+#
+# Codex-only, and deliberately so — this is the historical table and its values
+# are tuned against Codex's own ambient default. Claude and Pi have no entry
+# here, so those phases resolve to ``None`` and each driver keeps applying the
+# default it already had. Adding a backend here changes deep-review behavior
+# for every existing user of that backend; do that as its own change, on its
+# own evidence, not as a side effect of improve work.
+#
 # Tiering follows OpenAI's guidance: ``low`` for latency-sensitive mechanical
 # work, ``medium`` as the balanced baseline, ``high``/``xhigh`` where more
 # reasoning buys measured quality. ``arbiter`` gets ``xhigh`` because it is the
 # scoped quality-first pass over only high-severity/contested findings, so the
 # extra reasoning is bounded to a small input.
-PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
         "fix": "medium",
@@ -162,6 +209,34 @@ PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     },
 }
 
+# Half two: the improve advisor (recon, audit, vet, plan_write).
+#
+# All three backends, because the improve flow runs unattended on a cadence and
+# nothing about its output is reviewed in the moment.
+#
+# ``plan_write`` is pinned to ``max`` everywhere. It covers plan authoring and
+# plan repair; those plans are executed later by much
+# weaker agents with no context beyond the plan file, so it is the one place
+# where spending the most reasoning available is unconditionally correct — a
+# handful of calls per run, and every ambiguity left in a plan is paid for by
+# the executor.
+IMPROVE_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    backend: {
+        "recon": "low",
+        "audit": "high",
+        "vet": "xhigh",
+        "plan_write": "max",
+    }
+    for backend in ("claude", "codex", "pi")
+}
+
+PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
+    backend: {
+        **DEEP_PHASE_DEFAULT_EFFORT.get(backend, {}),
+        **IMPROVE_PHASE_DEFAULT_EFFORT.get(backend, {}),
+    }
+    for backend in {*DEEP_PHASE_DEFAULT_EFFORT, *IMPROVE_PHASE_DEFAULT_EFFORT}
+}
 
 class ReviewSkillChoice(Enum):
     """Enum for review skill menu choices."""
@@ -182,6 +257,88 @@ REVIEW_SKILLS: dict[ReviewSkillChoice, str] = {
     ReviewSkillChoice.GO: "beagle-go:review-go",
     ReviewSkillChoice.RUST: "beagle-rust:review-rust",
     ReviewSkillChoice.IOS: "beagle-ios:review-ios",
+}
+
+AUDIT_CATEGORIES: tuple[str, ...] = (
+    "correctness",
+    "security",
+    "performance",
+    "tests",
+    "tech-debt",
+    "dependencies",
+    "dx",
+    "docs",
+    "direction",
+)
+
+
+@dataclass(frozen=True)
+class EffortTier:
+    """Configuration for one improve audit effort tier."""
+
+    categories: tuple[str, ...] | None
+    max_concurrency: int
+    high_confidence_only: bool
+    max_findings: int | None
+    include_investigate: bool
+    max_partition_groups: int | None
+
+
+EFFORT_TIERS: dict[str, EffortTier] = {
+    "quick": EffortTier(
+        categories=("correctness", "security", "tests"),
+        max_concurrency=1,
+        high_confidence_only=True,
+        max_findings=6,
+        include_investigate=False,
+        max_partition_groups=None,  # quick audits the whole repo as one group
+    ),
+    "standard": EffortTier(
+        categories=None,
+        max_concurrency=10,
+        high_confidence_only=False,
+        max_findings=None,
+        include_investigate=False,
+        max_partition_groups=8,
+    ),
+    "deep": EffortTier(
+        categories=None,
+        max_concurrency=10,
+        high_confidence_only=False,
+        max_findings=None,
+        include_investigate=True,
+        max_partition_groups=None,
+    ),
+}
+
+AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
+    "correctness": {
+        "python": REVIEW_SKILLS[ReviewSkillChoice.PYTHON],
+        "react": REVIEW_SKILLS[ReviewSkillChoice.REACT],
+        "elixir": REVIEW_SKILLS[ReviewSkillChoice.ELIXIR],
+        "go": REVIEW_SKILLS[ReviewSkillChoice.GO],
+        "rust": REVIEW_SKILLS[ReviewSkillChoice.RUST],
+        "ios": REVIEW_SKILLS[ReviewSkillChoice.IOS],
+    },
+    "security": {
+        "elixir": "beagle-elixir:elixir-security-review",
+    },
+    "performance": {
+        "elixir": "beagle-elixir:elixir-performance-review",
+    },
+    "tests": {
+        "python": "beagle-python:pytest-code-review",
+        "go": "beagle-go:go-testing-code-review",
+        "rust": "beagle-rust:rust-testing-code-review",
+        "elixir": "beagle-elixir:exunit-code-review",
+    },
+    "tech-debt": {
+        "*": "beagle-core:review-structure",
+    },
+    "dependencies": {},
+    "dx": {},
+    "docs": {},
+    "direction": {},
 }
 
 # CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)

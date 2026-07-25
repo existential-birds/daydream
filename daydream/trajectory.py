@@ -91,8 +91,12 @@ _PEM_KEY_PATTERN = re.compile(
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
 # matching keeps the secret list precise without false positives.
+# The separator whitespace is horizontal-only. With plain ``\s*`` an empty
+# assignment (``API_KEY=`` at end of line) consumed the newline and swallowed
+# the whole next line as its "value", deleting real content from redacted text.
+# An assignment with no value on its own line carries no secret.
 _ENV_VAR_PATTERN = re.compile(
-    r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)\s*=\s*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
+    r"\b((?:[A-Z][A-Z0-9]*_)*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|CREDENTIALS|API_?KEY|APIKEY|AUTH)(?:_[A-Z0-9]+)*)[^\S\n\r]*=[^\S\n\r]*([^\s\n\r;]+)"  # noqa: E501 - secret-segment alternation
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
@@ -102,6 +106,16 @@ _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     (_JWT_PATTERN, "[REDACTED_JWT]"),
     (_USERNAME_PATH_PATTERN, r"\1[REDACTED_USER]"),
 )
+
+
+def redact_text(value: str) -> str:
+    """Return redacted text, replacing the whole field if redaction fails."""
+    try:
+        for pattern, replacement in _REDACTION_RULES:
+            value = pattern.sub(replacement, value)
+    except Exception:  # noqa: BLE001 - fail closed at every host boundary
+        return "[REDACTION_FAILED]"
+    return value
 
 
 def _safe_descriptor(raw: str) -> str:
@@ -177,6 +191,10 @@ class DaydreamPhase(str, Enum):
     DEEP = "deep"
     EXPLORATION = "exploration"
     VERIFY = "verify"
+    RECON = "recon"
+    AUDIT = "audit"
+    VET = "vet"
+    PLAN_WRITE = "plan_write"
 
 
 class DaydreamRunFlow(str, Enum):
@@ -190,6 +208,7 @@ class DaydreamRunFlow(str, Enum):
     PR = "pr"
     DEEP = "deep"
     CUSTOM = "custom"
+    IMPROVE = "improve"
 
 
 class Redactor:
@@ -206,18 +225,13 @@ class Redactor:
 
     def _redact_text(self, s: str) -> str:
         """Apply every redaction rule to *s* and return the result."""
-        for pattern, replacement in _REDACTION_RULES:
-            s = pattern.sub(replacement, s)
-        return s
+        return redact_text(s)
 
     def _redact_optional_text(self, value: str | None) -> str | None:
         """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
         if value is None:
             return None
-        try:
-            return self._redact_text(value)
-        except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
-            return "[REDACTION_FAILED]"
+        return redact_text(value)
 
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Redact every value inside a ToolCall.arguments dict.
@@ -302,7 +316,7 @@ class Redactor:
                 return step
             return step.model_copy(update=updates)
         except Exception as exc:  # noqa: BLE001 - REDA-05 redact-or-omit (top-level fallback)
-            print_warning(_console, f"Redactor failure: {type(exc).__name__}: {exc}")
+            print_warning(_console, f"Redactor failure: {type(exc).__name__}")
             # Wipe every text-bearing surface — partial wipes leak secrets
             # if redaction failed mid-arguments / mid-observation.
             safe_updates: dict[str, Any] = {"message": "[REDACTION_FAILED]"}
@@ -460,8 +474,9 @@ class Invocation:
 
         The reason is stamped onto the closing Step's ``extra["stop_reason"]``
         when the open step is finalized (mirrors the ``extra["partial_step"]``
-        mechanism). ATIF's Step model has no dedicated status field, so the
-        ``extra`` dict is the established extension point.
+        mechanism), and the trajectory and its ancestors are marked partial.
+        ATIF's Step model has no dedicated status field, so the ``extra`` dict
+        is the established extension point.
 
         If the budget fires before any event is received, no step is open yet,
         so we open one here to ensure ``_close_open_step`` (called from
@@ -469,6 +484,10 @@ class Invocation:
         """
         self._stop_reason = reason
         self._ensure_open_step()
+        recorder: TrajectoryRecorder | None = self.recorder
+        while recorder is not None:
+            recorder._aborted = True
+            recorder = recorder.parent
 
     def mark_errored(self, subtype: str) -> None:
         """Record that this invocation ended in a fatal error.
@@ -1012,6 +1031,29 @@ class TrajectoryRecorder:
     ) -> None:
         """Record a tool-supervisor veto in the firing phase."""
         self._emit_phase_event(phase, "tool_veto", tool_name=tool_name, reason=reason)
+
+    def emit_command_validation_summary(
+        self,
+        *,
+        total_candidates: int,
+        accepted: int,
+        rejected: int,
+        reasons: dict[str, int],
+    ) -> None:
+        """Record a redacted repository-command validation summary."""
+        metadata: dict[str, Any] = {
+            "counts": {
+                "total_candidates": total_candidates,
+                "accepted": accepted,
+                "rejected": rejected,
+            },
+            "reasons": dict(sorted(reasons.items())),
+        }
+        self._emit_phase_event(
+            DaydreamPhase.RECON,
+            "command_validation",
+            **metadata,
+        )
 
     def _register_subtrajectory(self, inv: Invocation) -> None:
         """Register a per-Invocation timing summary (issue #203).

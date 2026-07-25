@@ -34,6 +34,7 @@ from daydream.archive.manifest import Manifest, build_manifest
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
 from daydream.trajectory import TrajectoryRecorder
+from tests.harness.trajectory import make_manifest
 
 
 @dataclass
@@ -78,20 +79,17 @@ class _MockConfig:
     findings_out: str | None = None
 
 
-def test_parse_repo_slug_ssh():
-    assert _parse_repo_slug("git@github.com:org/repo.git") == "org/repo"
-
-
-def test_parse_repo_slug_https():
-    assert _parse_repo_slug("https://github.com/org/repo.git") == "org/repo"
-
-
-def test_parse_repo_slug_https_no_dot_git():
-    assert _parse_repo_slug("https://github.com/org/repo") == "org/repo"
-
-
-def test_parse_repo_slug_invalid():
-    assert _parse_repo_slug("not-a-url") is None
+@pytest.mark.parametrize(
+    ("remote_url", "expected"),
+    [
+        pytest.param("git@github.com:org/repo.git", "org/repo", id="ssh"),
+        pytest.param("https://github.com/org/repo.git", "org/repo", id="https"),
+        pytest.param("https://github.com/org/repo", "org/repo", id="https_no_dot_git"),
+        pytest.param("not-a-url", None, id="invalid"),
+    ],
+)
+def test_parse_repo_slug(remote_url: str, expected: str | None):
+    assert _parse_repo_slug(remote_url) == expected
 
 
 def test_capture_git_context_real_repo(tmp_path: Path):
@@ -154,26 +152,37 @@ def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path
     assert sorted(ctx.changed_files) == ["a.py", "b.py"]
 
 
-def test_build_manifest_basic(tmp_path: Path):
-    recorder = _MockRecorder()
-    config = _MockConfig()
-    git_ctx = GitContext(
-        remote_url="git@github.com:org/repo.git",
-        repo_slug="org/repo",
-        branch="main",
-        base_branch="main",
-        head_sha="a" * 40,
-    )
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
+def _build(
+    tmp_path: Path,
+    *,
+    git_ctx: GitContext | None = None,
+    recorder: _MockRecorder | None = None,
+    **kw: Any,
+) -> Manifest:
+    """Build a manifest from the mock recorder/config pair."""
+    return build_manifest(
+        recorder=cast(TrajectoryRecorder, recorder or _MockRecorder()),
+        config=cast(RunConfig, _MockConfig()),
+        git_ctx=git_ctx if git_ctx is not None else GitContext(),
         status="complete",
         archive_path=tmp_path,
+        **kw,
     )
 
-    assert m.session_id == recorder.session_id
+
+def test_build_manifest_basic(tmp_path: Path):
+    m = _build(
+        tmp_path,
+        git_ctx=GitContext(
+            remote_url="git@github.com:org/repo.git",
+            repo_slug="org/repo",
+            branch="main",
+            base_branch="main",
+            head_sha="a" * 40,
+        ),
+    )
+
+    assert m.session_id == _MockRecorder().session_id
     assert m.run_flow == "normal"
     assert m.skill == "python"
     # Per-phase models replaced config.model; build_manifest stamps model as None.
@@ -188,21 +197,11 @@ def test_build_manifest_basic(tmp_path: Path):
 
 
 def test_manifest_to_dict_structure(tmp_path: Path):
-    recorder = _MockRecorder()
-    config = _MockConfig()
-    git_ctx = GitContext()
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
-    )
+    m = _build(tmp_path)
 
     d = m.to_dict()
     assert d["schema_version"] == "1.0"
-    assert d["session_id"] == recorder.session_id
+    assert d["session_id"] == _MockRecorder().session_id
     assert "run" in d and d["run"]["flow"] == "normal"
     assert "git" in d
     assert "pr" in d
@@ -219,22 +218,15 @@ def test_manifest_to_dict_structure(tmp_path: Path):
 
 
 def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
-    recorder = _MockRecorder()
-    config = _MockConfig()
-    git_ctx = GitContext(
-        branch="feat/x",
-        base_branch="main",
-        head_sha="b" * 40,
-        base_sha="c" * 40,
-        changed_files=["a.py", "b.py"],
-    )
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
+    m = _build(
+        tmp_path,
+        git_ctx=GitContext(
+            branch="feat/x",
+            base_branch="main",
+            head_sha="b" * 40,
+            base_sha="c" * 40,
+            changed_files=["a.py", "b.py"],
+        ),
     )
 
     d = m.to_dict()
@@ -248,24 +240,15 @@ def test_manifest_to_dict_code_context_carries_git_ctx_fields(tmp_path: Path):
 
 
 def test_build_manifest_with_evaluation(tmp_path: Path):
-    recorder = _MockRecorder()
-    config = _MockConfig()
-    git_ctx = GitContext()
-    evaluation = {
-        "timing": {"total_wall_clock_seconds": 42.5},
-        "findings": {"total": 7},
-        "grounding": {"grounding_rate": 0.85},
-        "coverage": {"coverage_ratio": 0.6},
-        "derived": {"cost_per_finding_usd": 0.007},
-    }
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
-        evaluation=evaluation,
+    m = _build(
+        tmp_path,
+        evaluation={
+            "timing": {"total_wall_clock_seconds": 42.5},
+            "findings": {"total": 7},
+            "grounding": {"grounding_rate": 0.85},
+            "coverage": {"coverage_ratio": 0.6},
+            "derived": {"cost_per_finding_usd": 0.007},
+        },
     )
 
     assert m.wall_clock_seconds == 42.5
@@ -276,17 +259,7 @@ def test_build_manifest_with_evaluation(tmp_path: Path):
 
 
 def test_build_manifest_without_evaluation(tmp_path: Path):
-    recorder = _MockRecorder()
-    config = _MockConfig()
-    git_ctx = GitContext()
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
-    )
+    m = _build(tmp_path)
 
     assert m.total_findings is None
     assert m.grounding_rate is None
@@ -296,17 +269,7 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
     """Wall-clock is derived from step timestamps even when --eval did not run."""
-    recorder = _MockRecorder(_wall_clock_seconds=12.3)
-    config = _MockConfig()
-    git_ctx = GitContext()
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
-    )
+    m = _build(tmp_path, recorder=_MockRecorder(_wall_clock_seconds=12.3))
 
     assert m.wall_clock_seconds == 12.3
     assert m.total_findings is None
@@ -314,46 +277,23 @@ def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):
 
 def test_build_manifest_eval_wall_clock_overrides_recorder(tmp_path: Path):
     """When --eval runs, its fork-inclusive timing takes precedence over the recorder span."""
-    recorder = _MockRecorder(_wall_clock_seconds=12.3)
-    config = _MockConfig()
-    git_ctx = GitContext()
-    evaluation = {"timing": {"total_wall_clock_seconds": 42.5}}
-
-    m = build_manifest(
-        recorder=cast(TrajectoryRecorder, recorder),
-        config=cast(RunConfig, config),
-        git_ctx=git_ctx,
-        status="complete",
-        archive_path=tmp_path,
-        evaluation=evaluation,
+    m = _build(
+        tmp_path,
+        recorder=_MockRecorder(_wall_clock_seconds=12.3),
+        evaluation={"timing": {"total_wall_clock_seconds": 42.5}},
     )
 
     assert m.wall_clock_seconds == 42.5
 
 
-def _make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
-    defaults: dict[str, Any] = {
-        "session_id": session_id,
-        "archived_at": "2026-04-29T00:00:00+00:00",
-        "status": "complete",
-        "run_flow": "normal",
-        "skill": "python",
-        "model": "opus",
-        "backend": "claude",
-        "archive_path": "/tmp/archive/runs/sess-0001",
-    }
-    defaults.update(overrides)
-    return Manifest(**defaults)
-
-
 def test_upsert_run_creates_db(tmp_path: Path):
-    m = _make_manifest()
+    m = make_manifest()
     upsert_run(tmp_path, m)
     assert (tmp_path / "index.db").exists()
 
 
 def test_upsert_and_query_round_trip(tmp_path: Path):
-    m = _make_manifest()
+    m = make_manifest()
     upsert_run(tmp_path, m)
 
     rows = query_runs(tmp_path)
@@ -364,7 +304,7 @@ def test_upsert_and_query_round_trip(tmp_path: Path):
 
 
 def test_update_labels_exact(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest())
+    upsert_run(tmp_path, make_manifest())
 
     ok = update_labels(tmp_path, "sess-0001", ["good", "fast"])
     assert ok is True
@@ -375,7 +315,7 @@ def test_update_labels_exact(tmp_path: Path):
 
 
 def test_update_labels_prefix(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="abcd1234-full-uuid"))
+    upsert_run(tmp_path, make_manifest(session_id="abcd1234-full-uuid"))
 
     ok = update_labels(tmp_path, "abcd1234", ["label-a"])
     assert ok is True
@@ -385,31 +325,31 @@ def test_update_labels_prefix(tmp_path: Path):
 
 
 def test_update_labels_nonexistent(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest())
+    upsert_run(tmp_path, make_manifest())
 
     ok = update_labels(tmp_path, "no-such-session", [])
     assert ok is False
 
 
 def test_update_labels_ambiguous_prefix(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="abc-001"))
-    upsert_run(tmp_path, _make_manifest(session_id="abc-002", archive_path="/tmp/x"))
+    upsert_run(tmp_path, make_manifest(session_id="abc-001"))
+    upsert_run(tmp_path, make_manifest(session_id="abc-002", archive_path="/tmp/x"))
 
     with pytest.raises(ValueError, match="matches 2 sessions"):
         update_labels(tmp_path, "abc", ["x"])
 
 
 def test_set_run_pr_link_backfills_pr_columns(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
+    upsert_run(tmp_path, make_manifest(session_id="s-orphan", pr_number=None, pr_repo=None))
     set_run_pr_link(tmp_path, "s-orphan", 7, "org/repo")
     row = query_runs(tmp_path, where="session_id = ?", params=("s-orphan",))[0]
     assert (row["pr_number"], row["pr_repo"]) == (7, "org/repo")
 
 
 def test_query_runs_with_where(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s1", repo_slug="org/a"))
-    upsert_run(tmp_path, _make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"))
-    upsert_run(tmp_path, _make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"))
+    upsert_run(tmp_path, make_manifest(session_id="s1", repo_slug="org/a"))
+    upsert_run(tmp_path, make_manifest(session_id="s2", repo_slug="org/b", archive_path="/tmp/s2"))
+    upsert_run(tmp_path, make_manifest(session_id="s3", repo_slug="org/a", archive_path="/tmp/s3"))
 
     rows = query_runs(tmp_path, where="repo_slug = ?", params=("org/a",))
     assert len(rows) == 2
@@ -650,7 +590,7 @@ def _seed_one_run(archive_dir: Path, session_id: str) -> None:
 
 
 def test_label_observations_has_bitemporal_reward_columns(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest())  # forces _get_connection to build schema
+    upsert_run(tmp_path, make_manifest())  # forces _get_connection to build schema
     conn = sqlite3.connect(str(tmp_path / "index.db"))
     lo_cols = {r[1] for r in conn.execute("PRAGMA table_info(label_observations)")}
     runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)")}
@@ -706,12 +646,12 @@ def _seed_legacy_label_observation(archive_dir: Path, session_id: str) -> None:
 
 def test_label_observations_source_column_migrates(tmp_path: Path):
     # Build schema, then replace the table with the OLD DDL (no `source`) + a legacy row.
-    upsert_run(tmp_path, _make_manifest(session_id="s-mig"))
+    upsert_run(tmp_path, make_manifest(session_id="s-mig"))
     _seed_legacy_label_observation(tmp_path, "s-mig")
     assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
 
     # The production connection path must ALTER-ADD `source`.
-    upsert_run(tmp_path, _make_manifest(session_id="s-mig2"))
+    upsert_run(tmp_path, make_manifest(session_id="s-mig2"))
 
     cols = _label_obs_columns(tmp_path)
     assert "source" in cols
@@ -720,7 +660,7 @@ def test_label_observations_source_column_migrates(tmp_path: Path):
 
 
 def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s-prec"))
+    upsert_run(tmp_path, make_manifest(session_id="s-prec"))
     append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
     append_label_observation(tmp_path, "s-prec", labels=["accepted"], pr_state=None,
@@ -736,7 +676,7 @@ def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path):
 
 
 def test_append_cache_reflects_winning_human_label(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s-cache"))
+    upsert_run(tmp_path, make_manifest(session_id="s-cache"))
     append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
     append_label_observation(tmp_path, "s-cache", labels=["accepted"], pr_state=None,
@@ -749,7 +689,7 @@ def test_append_cache_reflects_winning_human_label(tmp_path: Path):
 
 
 def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s-dedup"))
+    upsert_run(tmp_path, make_manifest(session_id="s-dedup"))
     first = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
                                      labeler_version="rv1", evidence_sha="shaA", source="auto")
     second = append_label_observation(tmp_path, "s-dedup", labels=["accepted"], pr_state="merged",
@@ -772,7 +712,7 @@ def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path):
     idempotency key ignored it, a re-harvest that demotes such a row would
     silently no-op and leave the stale population flag in place.
     """
-    upsert_run(tmp_path, _make_manifest(session_id="s-pop"))
+    upsert_run(tmp_path, make_manifest(session_id="s-pop"))
     first = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
                                      labeler_version="rv1", evidence_sha="shaA",
                                      reward_version="rv1", has_posterior=True, source="auto")
@@ -791,7 +731,7 @@ def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path):
 
 
 def test_human_append_never_dedups(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s-h"))
+    upsert_run(tmp_path, make_manifest(session_id="s-h"))
     append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
                              labeler_version="human", evidence_sha=None, source="human")
     append_label_observation(tmp_path, "s-h", labels=["accepted"], pr_state=None,
@@ -800,7 +740,7 @@ def test_human_append_never_dedups(tmp_path: Path):
 
 
 def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s1"))
+    upsert_run(tmp_path, make_manifest(session_id="s1"))
     append_label_observation(
         tmp_path, "s1", labels=["accepted"], pr_state="merged",
         labeler_version="v1", evidence_sha=None,
@@ -815,7 +755,7 @@ def test_append_observation_persists_valid_at_and_reward(tmp_path: Path):
 
 
 def test_append_observation_defaults_valid_at_to_observed_at(tmp_path: Path):
-    upsert_run(tmp_path, _make_manifest(session_id="s2"))
+    upsert_run(tmp_path, make_manifest(session_id="s2"))
     append_label_observation(tmp_path, "s2", labels=[], pr_state=None,
                              labeler_version="v1", evidence_sha=None, valid_at=None)
     obs = latest_label_observation(tmp_path, "s2")

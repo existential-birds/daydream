@@ -18,7 +18,7 @@ class _SpyBackend:
 
     async def execute(
         self, cwd, prompt, output_schema=None, continuation=None, agents=None,
-        max_turns=None, read_only=False,
+        max_turns=None, read_only=False, persist_session: bool = True,
     ):
         from daydream.backends import ResultEvent, TextEvent
         self.last_prompt = prompt

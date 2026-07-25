@@ -119,7 +119,7 @@ def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> MockBackend:
     """Patch ``create_backend`` so every backend instantiation returns the same mock."""
     backend = MockBackend()
     monkeypatch.setattr(
-        "daydream.runner.create_backend", lambda name, model=None: backend
+        "daydream.runner.create_backend", lambda name, model=None, **kwargs: backend
     )
     return backend
 

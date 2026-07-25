@@ -21,6 +21,7 @@ fork), and fork-registered stacks carry their ``StackRule.skill`` directly.
 from __future__ import annotations
 
 import fnmatch
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -144,7 +145,7 @@ def _match_stack_rule(path: str, rules: tuple[StackRule, ...]) -> StackRule | No
 
 def detect_stacks(
     changed_files: list[str],
-    skill_availability: set[str] | None = None,
+    skill_availability: AbstractSet[str] | None = None,
     *,
     registry: Registry | None = None,
 ) -> list[StackAssignment]:
