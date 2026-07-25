@@ -292,7 +292,13 @@ def build_per_stack_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path, intent_authoritative=intent_authoritative))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction(stack_name, files))
@@ -348,7 +354,13 @@ def build_structural_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path, intent_authoritative=intent_authoritative))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(
         f"You are the structural reviewer. The full change spans: {joined}. "
         f"The structural rubric applies repo-wide -- read any file in the "
@@ -399,7 +411,13 @@ def build_arbiter_prompt(
     if pointer:
         parts.append(pointer)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path, intent_authoritative=intent_authoritative))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_full_diff_pointer(diff_path))
     parts.append(
         "You are the arbiter. The cheaper per-stack reviewers flagged the "
@@ -805,7 +823,13 @@ def build_generic_fallback_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path, intent_authoritative=intent_authoritative))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction("generic-fallback", files))

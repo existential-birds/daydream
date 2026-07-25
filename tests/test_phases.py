@@ -731,8 +731,8 @@ def test_git_diff_no_exclude_still_works(tmp_path):
 
 
 def test_build_intent_prompt_includes_pr_description_with_precedence_framing():
-    from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
     from daydream.phases import build_intent_prompt
+    from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 
     body = "Task 4 keeps ratio≈1.0 as a deliberate pass-through; do not 'complete' it."
     prompt = build_intent_prompt(diff_path="/tmp/d.diff", branch="b", log="l", pr_description=body)

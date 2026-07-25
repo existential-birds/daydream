@@ -1,7 +1,8 @@
 """Deep-mode prompt builder tests (D-09, D-10, D-19, D-20)."""
-import pytest
 from pathlib import Path
 from typing import TypedDict
+
+import pytest
 
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,

@@ -12,8 +12,6 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from rich.text import Text
 
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
-
 import daydream
 from daydream import git_ops
 from daydream.agent import (
@@ -37,6 +35,7 @@ from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
