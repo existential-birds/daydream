@@ -415,10 +415,14 @@ every other key is internal and may change without a version bump:
 | `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description with non-whitespace content grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
 
 This keyword-only addition to the five in-scope prompt builders does not bump
-`EXTENSION_API_VERSION` or its support floor. It is an additive kwarg per the
-versioning policy above; an exact-signature override that cannot accept it must
-raise the floor to `3`. Read `ctx.data["intent_authoritative"]` with `.get(…,
-False)` to handle the absent-on-resume case correctly.
+`EXTENSION_API_VERSION` or its support floor — it is an additive kwarg per the
+versioning policy above. The host passes `intent_authoritative` on every call
+to `per-stack`, `structural`, `generic-fallback`, `arbiter`, and `merge`, so an
+exact-signature override of one of those five prompts must add
+`intent_authoritative: bool = False` (or an equivalent `**kwargs` catch-all) to
+its own signature; an override that omits it raises `TypeError` and aborts that
+phase's fan-out. Read `ctx.data["intent_authoritative"]` with `.get(…, False)`
+to handle the absent-on-resume case correctly.
 
 ## Recipes
 
