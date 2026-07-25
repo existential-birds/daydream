@@ -1,13 +1,16 @@
 """Shared pytest fixtures for the daydream test suite."""
 
 import os
-import subprocess
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from daydream.workspace import WorkContext
+
+if TYPE_CHECKING:
+    from daydream.runner import RunConfig
 from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -47,12 +50,11 @@ os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
 #
 # Mirrors the helpers that previously lived only in tests/test_git_ops.py.
 # Lifted here so other test modules (notably tests/test_pr_review.py) can
-# build real repos instead of mocking subprocess. tests/test_workspace.py
-# still has its own helpers (it needs additional plumbing for bare-origin
-# push semantics) — left untouched on purpose. The helper bodies now live in
+# build real repos instead of mocking subprocess. The helper bodies live in
 # tests/harness/git_helpers.py; the aliased imports above keep the local
 # `_git`/`_commit`/... names (and external `from tests.conftest import _git`
-# call sites) unchanged.
+# call sites) unchanged. tests/test_workspace.py imports the same harness
+# helpers and keeps only its genuinely bare-origin-specific plumbing.
 
 
 def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
@@ -274,57 +276,15 @@ def multi_stack_target(tmp_path: Path) -> Path:
     (project / "api.py").write_text("def hello():\n    return 'world'\n")
     (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
     (project / "README.md").write_text("# Project\n")
-    subprocess.run(  # noqa: S603
-        ["git", "init", "-b", "main"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.name", "Test"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "init"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "checkout", "-b", "feature"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
     (project / "api.py").write_text("def hello():\n    return 'universe'\n")
     (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
     (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "change"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _git(project, "add", ".")
+    _commit(project, "change")
     return project
 
 
@@ -341,56 +301,14 @@ def tiny_diff_target(tmp_path: Path) -> Path:
     project.mkdir()
     (project / "api.py").write_text("def hello():\n    return 'world'\n")
     (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    subprocess.run(  # noqa: S603
-        ["git", "init", "-b", "main"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.email", "test@test.com"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "config", "user.name", "Test"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "init"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "checkout", "-b", "feature"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
     (project / "api.py").write_text("def hello():\n    return 'universe'\n")
     (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    subprocess.run(  # noqa: S603
-        ["git", "add", "."],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "commit", "-m", "change"],  # noqa: S607
-        cwd=project,
-        capture_output=True,
-        check=True,
-    )
+    _git(project, "add", ".")
+    _commit(project, "change")
     return project
 
 
@@ -426,6 +344,141 @@ def make_work() -> Callable[..., WorkContext]:
         )
 
     return _make
+
+
+@pytest.fixture
+def make_config() -> Callable[..., "RunConfig"]:
+    """Builder for ``RunConfig`` instances with the unattended-test defaults.
+
+    248 of the suite's ``RunConfig`` constructions repeated the same three
+    fields — ``non_interactive=True`` (135 sites vs 4 that want False),
+    ``cleanup=False`` (106 vs 0), ``archive=False`` (100 vs 3) — spread over
+    five to nine lines. Those three are this builder's defaults; every other
+    field keeps its production default so a test that cares still states it.
+    ``target`` is stringified here because ``RunConfig.target`` is a ``str``
+    while fixtures hand out ``Path``.
+
+    Tests that deliberately exercise the interactive, archiving, or cleanup
+    paths pass the field explicitly — it then reads as the point of the test
+    rather than as boilerplate.
+    """
+    from daydream.runner import RunConfig
+
+    def _make(target: Path | str, **overrides: object) -> RunConfig:
+        fields: dict[str, object] = {
+            "target": str(target),
+            "non_interactive": True,
+            "cleanup": False,
+            "archive": False,
+        }
+        fields.update(overrides)
+        return RunConfig(**fields)  # type: ignore[arg-type]
+
+    return _make
+
+
+@pytest.fixture
+def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], object]:
+    """Inject a fake backend at the ``daydream.runner.create_backend`` seam.
+
+    The single mock seam the testing standard permits, copy-pasted at 28 sites
+    as ``lambda name, model=None, **kwargs: backend``. Returns the backend it
+    installed so a call site stays one line:
+    ``backend = install_backend(ScriptedBackend(...))``.
+    """
+
+    def _install(backend: object) -> object:
+        monkeypatch.setattr(
+            "daydream.runner.create_backend", lambda *_args, **_kwargs: backend
+        )
+        return backend
+
+    return _install
+
+
+@pytest.fixture
+def silence_console(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """No-op every ``print_*`` UI helper bound into a module, plus its ``console``.
+
+    Real-path tests silence terminal output so assertions read against state
+    rather than scraped rendering. Done by hand this is a 7-line
+    ``for name in (...)`` loop, re-inlined at 41 sites with a different subset of
+    names each time — and a subset that goes stale whenever a phase starts
+    calling one more helper.
+
+    Discovers the names off the module instead of hardcoding them, so it cannot
+    drift. Tests that *assert* on a specific helper's output pass it in
+    ``keep`` (or spy on it after calling this) — silencing the thing under
+    observation would hide the assertion.
+
+    Args:
+        module: Dotted module path whose bound UI names to silence, e.g.
+            ``"daydream.phases"``.
+        keep: Names to leave untouched, for helpers a test spies on.
+    """
+
+    def _silence(module: str, *, keep: tuple[str, ...] = ()) -> None:
+        import importlib
+
+        mod = importlib.import_module(module)
+        for name in dir(mod):
+            if not name.startswith("print_") or name in keep:
+                continue
+            if callable(getattr(mod, name, None)):
+                monkeypatch.setattr(f"{module}.{name}", lambda *a, **kw: None)
+        if "console" not in keep and hasattr(mod, "console"):
+            monkeypatch.setattr(
+                f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})()
+            )
+
+    return _silence
+
+
+@pytest.fixture
+def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
+    """Stub the outward-facing tail phases so a flow test cannot post or push.
+
+    ``post_review_to_pr_from_report`` was stubbed by a hand-written 4-line
+    ``async def _no_post`` at 35 sites; ``phase_test_and_heal`` (39 sites) and
+    ``phase_commit_push`` (43 sites) followed it. A flow test that forgets one
+    reaches a real ``gh`` call or a real commit.
+
+    Every stub is opt-out rather than opt-in, because the safe default for a
+    test is "cannot touch the outside world". A test that asserts a post *was*
+    attempted passes ``post=False`` and installs its own recording stub — the
+    attempt is then the visible subject of the test.
+
+    Args:
+        module: Flow module owning the ``phase_*`` bindings —
+            ``"daydream.deep.orchestrator"`` or ``"daydream.flows.shallow"``.
+        post: Stub ``daydream.pr_review.post_review_to_pr_from_report``.
+        heal: Stub ``<module>.phase_test_and_heal`` to report success, 0 retries.
+        commit: Stub ``<module>.phase_commit_push``.
+    """
+
+    def _mute(
+        module: str = "daydream.deep.orchestrator",
+        *,
+        post: bool = True,
+        heal: bool = True,
+        commit: bool = True,
+    ) -> None:
+        async def _no_post(*_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def _ok(*_args: object, **_kwargs: object) -> tuple[bool, int]:
+            return True, 0
+
+        if post:
+            monkeypatch.setattr(
+                "daydream.pr_review.post_review_to_pr_from_report", _no_post
+            )
+        if heal:
+            monkeypatch.setattr(f"{module}.phase_test_and_heal", _ok)
+        if commit:
+            monkeypatch.setattr(f"{module}.phase_commit_push", _no_post)
+
+    return _mute
 
 
 @pytest.fixture(autouse=True)

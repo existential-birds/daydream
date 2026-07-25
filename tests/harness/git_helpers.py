@@ -2,8 +2,8 @@
 
 Consolidates the ``_git`` helper (and its repo-building family) that was
 previously duplicated across tests/conftest.py and several test modules.
-tests/test_workspace.py intentionally keeps its own copies (it needs extra
-plumbing for bare-origin push semantics).
+tests/test_workspace.py builds on these too, keeping only the extra plumbing
+its bare-origin push semantics genuinely need.
 """
 
 from __future__ import annotations
