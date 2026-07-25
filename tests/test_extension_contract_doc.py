@@ -26,6 +26,7 @@ def test_contract_doc_names_every_registered_surface() -> None:
         "Sequence[str]",
         "AUTHOR_SCHEMA_INVALID",
         "host-owned",
+        "intent_authoritative",
     ):
         assert fragment in doc, f"contract detail {fragment!r} undocumented"
     for symbol in extension_api.__all__:

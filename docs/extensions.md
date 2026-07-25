@@ -346,13 +346,13 @@ noted.
 | `intent` | `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description` |
 | `alternatives` | `intent_summary`, `diff_path`, `exploration_dir` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
-| `per-stack` | `skill_invocation`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff` |
-| `structural` | `skill_invocation`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits` |
-| `generic-fallback` | `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff` |
-| `arbiter` | `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
+| `per-stack` | `skill_invocation`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative` |
+| `structural` | `skill_invocation`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative` |
+| `generic-fallback` | `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `is_docs_only`, `prior_commits`, `inline_diff`, `intent_authoritative` |
+| `arbiter` | `arbiter_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir`, `intent_authoritative` |
 | `supervise` | `supervise_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
-| `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path` |
+| `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative` |
 | `verify` | `items`, `cwd`, `output_path` |
 | `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `findings`, `cwd` |
@@ -412,6 +412,13 @@ every other key is internal and may change without a version bump:
 | `alts_path` | Path to the alternatives-review output |
 | `items_file` | `Path` published after `load-items`; it contains canonical `{"items": [...]}` JSON and may include top-level `held`. An extension may read this file and rewrite its `items` before downstream consumers run. |
 | `items` | Parsed finding items, populated by `fix-gate` from the (potentially rewritten) `items_file`. Not present before `fix-gate` runs; rewriting `items_file` before that step is sufficient to affect all consumers. |
+| `intent_authoritative` | `bool` — `True` when a fresh, head-matched PR description grounded the intent phase; absent (hence read with `.get("intent_authoritative", False)`) on a `--start-at` resume because `_step_intent` is skipped in that case. Controls whether the deep review prompts carry the author-intent precedence rule. |
+
+This keyword-only addition to the five in-scope prompt builders does not bump
+`EXTENSION_API_VERSION` or its support floor. It is an additive kwarg per the
+versioning policy above; an exact-signature override that cannot accept it must
+raise the floor to `3`. Read `ctx.data["intent_authoritative"]` with `.get(…,
+False)` to handle the absent-on-resume case correctly.
 
 ## Recipes
 
