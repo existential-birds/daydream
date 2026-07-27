@@ -20,8 +20,61 @@ from typing import Any
 CANNED_REPLY = "No findings."
 
 
+def _chat_completion(model: str, reply: str) -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-stub",
+        "object": "chat.completion",
+        "created": 0,
+        "model": model,
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": reply}, "finish_reason": "stop"}
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+def _response(model: str, reply: str) -> dict[str, Any]:
+    return {
+        "id": "resp-stub",
+        "object": "response",
+        "created_at": 0,
+        "model": model,
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "id": "msg-stub",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": reply, "annotations": []}],
+            }
+        ],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    }
+
+
+def _anthropic_message(model: str, reply: str) -> dict[str, Any]:
+    return {
+        "id": "msg-stub",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{"type": "text", "text": reply}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }
+
+
 class StubUpstreamHandler(BaseHTTPRequestHandler):
-    """Answer any completion POST in a shape all three dialects can parse."""
+    """Answer a completion POST in the shape its own dialect requires.
+
+    One canned payload for all three would not do: each dialect parses the
+    upstream response with its own strict model, so a merged blob fails
+    validation and the rollout exercises an error branch while still looking
+    like it completed. Routing on the upstream path is what makes the smoke run
+    prove the dialect rather than the retry logic.
+    """
 
     reply: str = CANNED_REPLY
 
@@ -30,35 +83,20 @@ class StubUpstreamHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib signature
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
-        body = json.dumps(
-            {
-                # Chat Completions / Responses
-                "id": "stub-1",
-                "object": "chat.completion",
-                "created": 0,
-                "model": "stub/canned",
-                "choices": [
-                    {
-                        "index": 0,
-                        "message": {"role": "assistant", "content": self.reply},
-                        "finish_reason": "stop",
-                    }
-                ],
-                # Anthropic Messages
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": self.reply}],
-                "stop_reason": "end_turn",
-                "usage": {
-                    "prompt_tokens": 1,
-                    "completion_tokens": 1,
-                    "total_tokens": 2,
-                    "input_tokens": 1,
-                    "output_tokens": 1,
-                },
-            }
-        ).encode()
+        raw = self.rfile.read(length)
+        try:
+            model = json.loads(raw).get("model") or "stub/canned"
+        except (ValueError, TypeError):
+            model = "stub/canned"
+
+        if self.path.endswith("/messages"):
+            payload = _anthropic_message(model, self.reply)
+        elif self.path.endswith("/responses"):
+            payload = _response(model, self.reply)
+        else:
+            payload = _chat_completion(model, self.reply)
+
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
