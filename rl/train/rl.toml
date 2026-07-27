@@ -1,0 +1,111 @@
+# GRPO over the daydream-review-v1 environment. prime-rl v0.7.0.
+#
+# Run from inside a prime-rl workspace checkout (see README.md — a `prime-rl @
+# git+...` dependency does not resolve, because prime-rl takes verifiers from an
+# editable path source pointing at its own submodule):
+#
+#   uv run rl @ <abs path>/rl/train/rl.toml --dry-run
+#   uv run rl @ <abs path>/rl/train/rl.toml --model.name <base model id>
+#
+# GRPO is prime-rl's default algorithm at this tag, so there is deliberately no
+# [orchestrator.algo] block. Valid types are grpo|echo|max_rl|opd|opsd|sft; there
+# is no `custom` algorithm — a custom LOSS is [trainer.loss] type = "custom".
+
+max_steps = 500
+seq_len = 32768
+
+[model]
+# PLACEHOLDER. The real base model is chosen by criteria, not pinned in a config
+# (SPEC C1), and is passed at launch: `--model.name <id>`. prime-rl requires the
+# key to exist, so this value is present only to satisfy the schema — do not read
+# it as the training recipe's model.
+name = "Qwen/Qwen3-0.6B"
+
+[ckpt]
+interval = 50
+
+# ---------------------------------------------------------------- trainer ----
+
+[trainer.model]
+# bf16 throughout. The default is float32 and must be overridden explicitly:
+# rollout precision and training precision have to match, and 4-bit rollouts
+# break the GRPO trust region (SPEC C2, QaRL arXiv:2604.07853).
+optimization_dtype = "bfloat16"
+reduce_dtype = "bfloat16"
+
+[trainer.model.lora]
+# SPEC C2's staged-RL band is rank 16-32 at 2:1 alpha:rank. These are also
+# prime-rl's own defaults, stated here so the recipe is legible rather than
+# implied. `target_modules` is deliberately absent: C2 requires prime-rl's
+# default list, which at this tag additionally names `experts`,
+# `fc1_latent_proj` and `fc2_latent_proj` — unknown module names are silently
+# ignored, so on a dense model the effective set is exactly the seven
+# q/k/v/o/gate/up/down projections C2 asks for.
+rank = 16
+alpha = 32.0
+
+[trainer.ckpt.weights]
+# LoRA forces filesystem weight broadcast; save the adapter on its own so a
+# checkpoint is an adapter, not a full-model copy.
+save_adapter_separately = true
+
+[trainer.optim]
+lr = 1e-5
+
+# ----------------------------------------------------------- orchestrator ----
+
+[orchestrator]
+# batch_size must divide by group_size. group_size defaults to 1, which would
+# leave GRPO with nothing to compare, so it is always set explicitly.
+batch_size = 128
+group_size = 16
+
+[orchestrator.renderer]
+# Not "auto": auto hard-errors at config time on a model it has no mapping for,
+# which is every fine-tune of ours, and the stock qwen3 renderer injects an empty
+# <think></think> block (SPEC C10).
+name = "default"
+
+[orchestrator.train.sampling]
+temperature = 1.0
+max_completion_tokens = 8192
+
+[[orchestrator.train.env]]
+name = "daydream-review-train"
+# Generic taskset/harness configs are narrowed to our own subclasses by id before
+# validation, so the plugin keys below validate.
+taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml" }
+# `backend` is the whole backend-swap surface: claude today, codex or pi by
+# changing this one word, osprey when daydream ships it.
+harness = { id = "daydream-review-v1", backend = "claude", runtime = { type = "docker" }, fanout_concurrency = 4 }
+# A deep rollout is minutes, not seconds: setup pulls an image, the harness runs
+# the whole review-fix-test loop, and scoring re-runs the repository's suite.
+timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
+# Effective upstream concurrency is roughly max_workers x fanout_concurrency —
+# each rollout runs its own parallel exploration and per-stack fan-out.
+pool = { type = "elastic", max_workers = 8 }
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 8192
+
+[[orchestrator.eval.env]]
+name = "daydream-review-eval"
+# A SEPARATE corpus directory, never a split of the training one, and never the
+# five held-out benchmark repositories — the taskset refuses those outright
+# (SPEC C5). Train and eval differ by corpus, not by flag.
+taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-eval", manifest_path = "/data/daydream-rl/manifest.toml" }
+harness = { id = "daydream-review-v1", backend = "claude", runtime = { type = "docker" }, fanout_concurrency = 4 }
+timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
+pool = { type = "elastic", max_workers = 8 }
+num_examples = 32
+group_size = 4
+
+# ------------------------------------------------------------- inference ----
+
+[inference]
+
+[inference.model]
+max_model_len = 32768
