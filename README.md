@@ -324,11 +324,11 @@ standard and deep workflows; quick improve remains serial. Set
 Pi hint. Each workflow still applies its own ceiling, so this setting is not a
 process-global Pi limit.
 
-Claude's hint defaults to four and is overridden the same way, with
+Claude and Codex share a hint of four, overridden the same way with
 `DAYDREAM_FANOUT_CONCURRENCY`. A non-integer or non-positive value warns and
-falls back to four. The two variables are separate because the right value is a
-property of the endpoint serving the turns, not of daydream. Codex's hint of
-four is fixed.
+falls back to four. Pi keeps its own variable because its default differs; the
+value is a property of the endpoint serving the turns, not of daydream, so
+swapping `--backend` must not silently change how many turns it asks for.
 
 ### Cost Pricing
 

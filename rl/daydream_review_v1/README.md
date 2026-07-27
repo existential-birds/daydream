@@ -74,9 +74,9 @@ backend.
    `fix_tests_pass` would otherwise be rewarding noise.
 
    ```bash
-   python images/build_images.py --corpus ./corpus-train
-   python images/build_images.py --only OWNER/REPO          # one repo
-   python images/build_images.py --red                      # prove the gate fails
+   uv run python images/build_images.py --corpus ./corpus-train
+   uv run python images/build_images.py --only OWNER/REPO      # one repo
+   uv run python images/build_images.py --red                  # prove the gate fails
    ```
 
 ## Running an eval
@@ -85,17 +85,17 @@ Local smoke — real daydream, real interception, canned upstream, meaningless
 rewards, about ten seconds:
 
 ```bash
-python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
+uv run python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
 mkdir -p /tmp/daydream-rl-smoke/archive /tmp/daydream-rl-smoke/home
-python -m daydream_review_v1.stub_upstream --port 8399 &
+uv run python -m daydream_review_v1.stub_upstream --port 8399 &
 uv run eval @ configs/eval-stub.toml
 ```
 
 Docker runtime, the real rollout shape:
 
 ```bash
-python images/build_images.py --only existential-birds/daydream-rl-fixture
-uv run eval @ configs/eval-docker.toml --client.base-url <your endpoint>
+uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
+uv run eval @ configs/eval-docker.toml -m <your policy model id> --client.base-url <your endpoint>
 ```
 
 **Two flags are not optional offline.** `uv run eval` defaults to `push = true`

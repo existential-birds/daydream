@@ -70,6 +70,35 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
     return {**manifest, **metrics}
 
 
+async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
+    """Whether the rollout actually changed the code under review.
+
+    Answered from the TRACKED tree — modified files, or a ``HEAD`` that has moved
+    past the snapshot the image baked — and never from
+    ``.daydream/recommended.patch``. That file is not a fix signal:
+    ``capture_recommended_patch`` appends a creation hunk for every untracked
+    non-ignored file (``daydream/git_ops.py:842-846``), and daydream writes its
+    own ``.daydream/`` directory inside the repository under review. On any
+    repository that does not gitignore that directory — which is every repository
+    except our own fixture — the patch is non-empty after a rollout that changed
+    nothing, and the still-green baseline would hand out a free ``w_tests``.
+
+    Deliberately biased toward false negatives: a fix consisting ONLY of new,
+    never-committed files reads as "no fix" and scores ``no_fix_reward``. That
+    direction costs a gradient; the other direction corrupts one.
+    """
+    quoted = shlex.quote(repo)
+    dirty = await runtime.run(
+        ["sh", "-c", f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no)"'], {}
+    )
+    if dirty.exit_code == 0:
+        return True
+    # The deep flow commits and pushes once the suite is green, so a clean tree
+    # at a moved HEAD is the successful-fix case, not the untouched one.
+    head = await runtime.run(["sh", "-c", f"cd {quoted} && git rev-parse HEAD"], {})
+    return head.exit_code == 0 and head.stdout.strip() != head_sha
+
+
 async def _claimed_test_verdict(runtime: vf.Runtime, archive_root: str) -> bool | None:
     """daydream's own ``deep/test-verdict.json`` claim, or ``None`` if absent."""
     with tempfile.TemporaryDirectory(prefix="daydream-verdict-") as staging:
@@ -198,8 +227,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
         than a free 1.0 for leaving the tree alone.
         """
         repo = _repo_path(trace)
-        applied = await runtime.run(["sh", "-c", f"test -s {shlex.quote(repo)}/.daydream/recommended.patch"], {})
-        if applied.exit_code != 0:
+        if not await _fixes_applied(runtime, repo, self.data.head_sha):
             trace.record_metric("fixes_applied", 0.0)
             return self.config.no_fix_reward
 

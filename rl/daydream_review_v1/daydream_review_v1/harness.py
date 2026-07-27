@@ -18,7 +18,14 @@ from typing import Any
 import verifiers.v1 as vf
 from pydantic import field_validator
 
-from daydream_review_v1.backends import ROLLOUT_HOME, STRATEGIES, BackendStrategy
+from daydream_review_v1.backends import (
+    DEFAULT_PI_CONTEXT_WINDOW,
+    DEFAULT_PI_MAX_TOKENS,
+    ROLLOUT_HOME,
+    STRATEGIES,
+    BackendStrategy,
+    PiStrategy,
+)
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed
 from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
 
@@ -46,6 +53,15 @@ class DaydreamReviewHarnessConfig(vf.HarnessConfig):
     extra_args: list[str] = []
     """Escape hatch, e.g. ``["--reasoning-effort", "high"]`` for codex."""
 
+    pi_context_window: int = DEFAULT_PI_CONTEXT_WINDOW
+    pi_max_tokens: int = DEFAULT_PI_MAX_TOKENS
+    """pi only: the catalogue entry it needs for the policy model.
+
+    Capabilities of the endpoint, which nothing here can infer, so they are
+    config (SPEC C1). Match them to the run's ``seq_len`` and
+    ``max_completion_tokens``; a window declared larger than the endpoint serves
+    fails at rollout time."""
+
     @field_validator("backend")
     @classmethod
     def _known_backend(cls, value: str) -> str:
@@ -61,6 +77,12 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
 
     @property
     def strategy(self) -> BackendStrategy:
+        if self.config.backend == PiStrategy.name:
+            return PiStrategy(
+                self.config.home,
+                context_window=self.config.pi_context_window,
+                max_tokens=self.config.pi_max_tokens,
+            )
         return STRATEGIES[self.config.backend](self.config.home)
 
     async def setup(self, runtime: vf.Runtime) -> None:

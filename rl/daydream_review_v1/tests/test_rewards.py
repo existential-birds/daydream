@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -77,11 +78,31 @@ def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:
     return {**manifest, **(manifest.get("metrics") or {})}
 
 
-def _stage_repo(repo_path: Path, *, patch: str | None, red: bool = False) -> Path:
-    """Build the fixture repo at *repo_path*, optionally red, with a fix marker."""
+def _stage_repo(
+    repo_path: Path,
+    head_sha: str,
+    *,
+    edit: str | None = None,
+    patch: str | None = None,
+    commit: bool = False,
+) -> Path:
+    """Build the fixture repo detached at *head_sha*, as the rollout image does.
+
+    Args:
+        edit: New ``calc.py`` contents, standing in for a fix the agent applied.
+        patch: Contents to plant at ``.daydream/recommended.patch``. Planting one
+            WITHOUT an edit is the contamination case: daydream writes that file
+            into the repository under review and its own untracked artifacts leak
+            into it, so it must never be read as "a fix landed".
+        commit: Commit the edit, moving HEAD past the baked snapshot — what the
+            deep flow does once the suite goes green.
+    """
     build_fixture_repo(repo_path)
-    if red:
-        (repo_path / "calc.py").write_text(_CALC_BROKEN, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_path), "checkout", "--quiet", "--detach", head_sha], check=True)
+    if edit is not None:
+        (repo_path / "calc.py").write_text(edit, encoding="utf-8")
+        if commit:
+            subprocess.run(["git", "-C", str(repo_path), "commit", "--quiet", "-am", "fix"], check=True)
     if patch is not None:
         daydream_dir = repo_path / ".daydream"
         daydream_dir.mkdir(parents=True, exist_ok=True)
@@ -90,6 +111,8 @@ def _stage_repo(repo_path: Path, *, patch: str | None, red: bool = False) -> Pat
 
 
 _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+_CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
 
 async def test_intrinsic_composite_parity(
@@ -155,8 +178,8 @@ async def test_fix_tests_pass_green(
 ) -> None:
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
-    repo = _stage_repo(tmp_path / "repo", patch=_REAL_PATCH)
     task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, patch=_REAL_PATCH)
     assert task.data.test_command == "python -m unittest discover -q"
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -171,8 +194,8 @@ async def test_fix_tests_pass_red(
 ) -> None:
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
-    repo = _stage_repo(tmp_path / "repo", patch=_REAL_PATCH, red=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_BROKEN, patch=_REAL_PATCH)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -181,16 +204,27 @@ async def test_fix_tests_pass_red(
     assert trace.rewards["fix_tests_pass"] == 0.0
 
 
-@pytest.mark.parametrize("patch", [None, ""], ids=["absent", "empty"])
+@pytest.mark.parametrize(
+    "patch",
+    [None, "", _REAL_PATCH],
+    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree"],
+)
 async def test_no_fixes_returns_no_fix_reward(
     patch: str | None, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
-    """daydream writes an EMPTY recommended.patch when no fix landed; a green tree
-    it never touched is not evidence the suite was fixed."""
+    """An untouched tree earns no_fix_reward however recommended.patch looks.
+
+    The third case is the one that matters. daydream writes `.daydream/` INTO the
+    repository under review, and `capture_recommended_patch` appends a creation
+    hunk for every untracked non-ignored file — so on any repository that does not
+    gitignore that directory (i.e. every real repository), the patch is non-empty
+    after a rollout that changed nothing. Reading it as "a fix landed" would hand
+    out the full w_tests off the still-green baseline, for free, forever.
+    """
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
-    repo = _stage_repo(tmp_path / "repo", patch=patch)
     task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -216,8 +250,13 @@ async def test_metric_claim_mismatch_fires(
     claim = json.loads((run_dir / "deep" / "test-verdict.json").read_text(encoding="utf-8"))
     assert claim == {"passed": True, "retries": 0}
 
-    repo = _stage_repo(tmp_path / "repo", patch=_REAL_PATCH, red=red)
     task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(
+        tmp_path / "repo",
+        task.data.head_sha,
+        edit=_CALC_BROKEN if red else _CALC_FIXED,
+        patch=_REAL_PATCH,
+    )
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -262,3 +301,50 @@ async def test_review_shape_metrics(
 
     assert hit_trace.metrics["n_findings"] == 2.0
     assert hit_trace.metrics["golden_overlap"] == 1.0
+
+
+async def test_committed_fix_counts_even_with_a_clean_tree(
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """The deep flow commits once the suite is green, leaving nothing to `git diff`.
+
+    A fix-detection rule that only looked at working-tree changes would score
+    every successful rollout as "no fix" — the exact inverse mistake.
+    """
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.rewards["fix_tests_pass"] == 1.0
+
+
+async def test_reward_version_is_pinned(
+    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """AC-3: pin the scorer version the parity test cannot see move.
+
+    `test_intrinsic_composite_parity` runs the same `score_trajectory` on both
+    sides, so a REWARD_VERSION bump moves expectation and actual together and the
+    parity assertion stays green through a semantic change. This is the assertion
+    that actually fails when the offline scorer changes under us.
+    """
+    from daydream.training.reward import REWARD_VERSION
+
+    assert REWARD_VERSION == "2026.05.28-2", (
+        f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
+        "rollout reward's expected values before trusting any run scored across the boundary."
+    )
+
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    assert trace.info["reward_breakdown"]["reward_version"] == REWARD_VERSION

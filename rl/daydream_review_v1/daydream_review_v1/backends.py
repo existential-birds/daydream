@@ -33,6 +33,13 @@ ROLLOUT_HOME = "/rollout"
 #: Provider name the codex and pi strategies register for the interception endpoint.
 INTERCEPT_PROVIDER = "vf-intercept"
 
+#: Conservative defaults for pi's required model-catalogue entries. Deliberately
+#: modest: over-declaring a context window fails at rollout time, under-declaring
+#: only truncates. Override per run via the harness's `pi_context_window` /
+#: `pi_max_tokens`.
+DEFAULT_PI_CONTEXT_WINDOW = 32768
+DEFAULT_PI_MAX_TOKENS = 8192
+
 
 @runtime_checkable
 class BackendStrategy(Protocol):
@@ -152,7 +159,8 @@ def pi_extension_ts(endpoint: str, model: str, *, context_window: int, max_token
 
     pi resolves a model id against the provider's declared catalogue, so the
     policy model is declared here per rollout. No id is hardcoded (C1) — it
-    arrives as ``ctx.model``.
+    arrives as ``ctx.model``, and the two size numbers are harness config rather
+    than constants, because they are claims about a model this code cannot know.
     """
     provider = {
         "name": INTERCEPT_PROVIDER,
@@ -199,12 +207,16 @@ class PiStrategy:
         self,
         home: str = ROLLOUT_HOME,
         *,
-        context_window: int = 131072,
-        max_tokens: int = 32768,
+        context_window: int = DEFAULT_PI_CONTEXT_WINDOW,
+        max_tokens: int = DEFAULT_PI_MAX_TOKENS,
     ) -> None:
         self.home = home
-        # pi's model catalogue wants both. They bound the request, not the policy:
-        # no model id or parameter count is implied (SPEC C1).
+        # pi's catalogue requires both. They are declared CAPABILITIES of the
+        # policy endpoint, which this code cannot know, so they are harness
+        # config (`pi_context_window` / `pi_max_tokens`) with a conservative
+        # default rather than a baked-in assumption (SPEC C1). Set them to match
+        # whatever the run's `seq_len` / `max_completion_tokens` actually allow —
+        # a window declared larger than the endpoint serves fails at rollout time.
         self.context_window = context_window
         self.max_tokens = max_tokens
 

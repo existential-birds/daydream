@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import logging
-import os
 import re
 import shlex
 from collections.abc import AsyncGenerator
@@ -36,6 +34,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    resolve_fanout_concurrency,
 )
 
 # Read-only Bash allowlist (failure summarizer): permitted only if the command
@@ -292,39 +291,6 @@ def _make_skill_guard(allowed_skills: frozenset[str]) -> HookCallback:
     return _skill_guard
 
 
-logger = logging.getLogger(__name__)
-
-_CLAUDE_DEFAULT_FANOUT_CONCURRENCY = 4
-
-
-def _claude_fanout_concurrency() -> int:
-    """Resolve the parallel-``execute()`` hint, overridable per run.
-
-    RL rollout throughput is bounded by how many concurrent turns the policy
-    endpoint will serve, which is a property of the deployment rather than of
-    this backend. Mirrors ``DAYDREAM_PI_FANOUT_CONCURRENCY``
-    (``daydream/backends/pi.py:178``).
-    """
-    raw = os.environ.get("DAYDREAM_FANOUT_CONCURRENCY")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            logger.warning(
-                "DAYDREAM_FANOUT_CONCURRENCY is not a valid integer; using default %d",
-                _CLAUDE_DEFAULT_FANOUT_CONCURRENCY,
-            )
-        else:
-            if value <= 0:
-                logger.warning(
-                    "DAYDREAM_FANOUT_CONCURRENCY must be positive; using default %d",
-                    _CLAUDE_DEFAULT_FANOUT_CONCURRENCY,
-                )
-            else:
-                return value
-    return _CLAUDE_DEFAULT_FANOUT_CONCURRENCY
-
-
 _CLAUDE_EFFORT_LEVELS: frozenset[str] = frozenset(("low", "medium", "high", "xhigh", "max"))
 
 
@@ -355,7 +321,7 @@ class ClaudeBackend:
     def __init__(self, model: str, *, reasoning_effort: str | None = None):
         self.model = model
         self.reasoning_effort = _claude_effort(reasoning_effort)
-        self.fanout_concurrency = _claude_fanout_concurrency()
+        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 4)
         self._active_clients: set[ClaudeSDKClient] = set()
 
     async def execute(
