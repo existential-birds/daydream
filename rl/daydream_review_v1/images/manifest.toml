@@ -1,0 +1,20 @@
+# Per-repo container image inputs for the daydream-review-v1 environment.
+#
+# One entry per repository slug, keyed exactly as the corpus reports it
+# (`owner/name`). Every repo slug appearing in a corpus MUST have an entry —
+# the taskset raises rather than silently skipping a PR.
+#
+# `image` is a docker repository name WITHOUT a tag. The tag is the task's
+# 12-char head SHA, so one image == one PR snapshot: `daydream-rl/fixture:0cfd97ece2d3`.
+# That is what makes the green-baseline gate meaningful — the suite is proven
+# green at the exact commit the rollout reviews.
+#
+# `clone_url` is what `images/repo.Dockerfile` mirror-clones. The sentinel
+# `fixture://daydream-rl-fixture` tells `build_images.py` to materialize the
+# deterministic fixture repository from `tests/conftest.py` instead of cloning.
+
+[repos."existential-birds/daydream-rl-fixture"]
+clone_url = "fixture://daydream-rl-fixture"
+image = "daydream-rl/fixture"
+test_command = "python -m unittest discover -q"
+setup_cmds = []
