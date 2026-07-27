@@ -35,6 +35,7 @@ from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1167,14 +1168,8 @@ def build_intent_prompt(
             "</pr_description>", "&lt;/pr_description>"
         )
         parts.append(
-            "The author supplied the following pull-request description. Treat this "
-            "author-stated intent as AUTHORITATIVE: where the description and the "
-            "intent you would infer from the diff conflict, the description outranks "
-            "the diff. Crucially, when the description says something is deliberate but "
-            "the diff appears to contradict it — a near-1.0 ratio that looks inert, a "
-            "guard that looks like a no-op, a pass-through that looks unfinished — that "
-            "is a deliberate design decision to preserve, NOT a defect to surface or "
-            "'complete'.\n\n"
+            f"The author supplied the following pull-request description. "
+            f"{AUTHORITATIVE_INTENT_RULE}\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
             f"{safe_body}\n"
@@ -2727,6 +2722,7 @@ async def phase_per_stack_reviews(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     diff_text: str | None = None,
+    intent_authoritative: bool = False,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -2748,6 +2744,10 @@ async def phase_per_stack_reviews(
             ``Read it directly`` instruction. ``None`` falls back to the
             diff_path pointer. The structural prompt is never inlined
             (it roams repo-wide by design).
+        intent_authoritative: Issue #279. When True, the per-stack / structural /
+            generic-fallback prompts include the ``AUTHORITATIVE_INTENT_RULE``
+            precedence rule, because the intent phase was grounded by a fresh,
+            head-matched PR description.
 
     Returns:
         Tuple of ``(successes, failures)``:
@@ -2795,6 +2795,7 @@ async def phase_per_stack_reviews(
                     cwd=work.repo,
                     exploration_dir=exploration_dir,
                     prior_commits=prior_commits,
+                    intent_authoritative=intent_authoritative,
                 )
             else:
                 # Issue #172 Fix B: inline the relevant diff hunks for this
@@ -2817,6 +2818,7 @@ async def phase_per_stack_reviews(
                         is_docs_only=stack.is_docs_only,
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
+                        intent_authoritative=intent_authoritative,
                     )
                 else:
                     # Route the raw Beagle stack key through the backend
@@ -2833,6 +2835,7 @@ async def phase_per_stack_reviews(
                         exploration_dir=exploration_dir,
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
+                        intent_authoritative=intent_authoritative,
                     )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
@@ -3022,6 +3025,7 @@ async def phase_arbiter_review(
     intent_path: Path,
     alternatives_path: Path,
     exploration_dir: Path | None = None,
+    intent_authoritative: bool = False,
 ) -> dict[int, dict[str, Any]]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
 
@@ -3043,6 +3047,9 @@ async def phase_arbiter_review(
         intent_path: Path to TTT intent.md.
         alternatives_path: Path to TTT alternatives.json.
         exploration_dir: Optional pre-scan exploration directory.
+        intent_authoritative: Issue #279. When True, the arbiter prompt includes
+            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because the intent
+            phase was grounded by a fresh, head-matched PR description.
 
     Returns:
         Mapping of ``arb_id`` -> adjudicated finding dict with keys ``keep``,
@@ -3070,6 +3077,7 @@ async def phase_arbiter_review(
         alternatives_path=alternatives_path,
         cwd=work.repo,
         exploration_dir=exploration_dir,
+        intent_authoritative=intent_authoritative,
     )
     result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
 
@@ -3379,6 +3387,7 @@ async def phase_cross_stack_merge(
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
+    intent_authoritative: bool = False,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
@@ -3414,6 +3423,10 @@ async def phase_cross_stack_merge(
             by construction -- the structural lens carries different convictions
             and is not deduplicated against the language stacks). ``None`` when
             the structural reviewer did not run (docs-only diff, empty diff).
+        intent_authoritative: Issue #279. When True, the merge prompt includes
+            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
+            the TTT intent summary line, because the intent phase was grounded
+            by a fresh, head-matched PR description.
 
     Returns:
         Path to the rendered merged report at ``work.repo / REVIEW_OUTPUT_FILE``.
@@ -3448,6 +3461,7 @@ async def phase_cross_stack_merge(
         exploration_dir=exploration_dir,
         failed_stacks=failed_stacks,
         structural_records_path=structural_records_path,
+        intent_authoritative=intent_authoritative,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")

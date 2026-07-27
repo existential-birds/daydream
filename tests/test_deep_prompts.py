@@ -2,12 +2,17 @@
 from pathlib import Path
 from typing import TypedDict
 
+import pytest
+
 from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
+    build_arbiter_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
     build_per_stack_prompt,
+    build_structural_prompt,
 )
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 
 
 class _PromptPaths(TypedDict):
@@ -649,3 +654,66 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
             assert token not in prompt, (
                 f"{backend_name} protocol invocation token {token!r} leaked into prompt"
             )
+
+
+# =============================================================================
+# Issue #279 — Authoritative-intent rule gate in the deep prompt builders
+# =============================================================================
+
+
+def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> str:
+    """Dispatch to the named builder with minimal valid kwargs.
+
+    Note the signature differences: ``arbiter`` has no ``output_path`` and needs
+    ``arbiter_input_path``; ``merge`` has no ``cwd``/``diff_path`` and needs
+    ``per_stack_records_paths`` and ``dedup_candidates_path``.
+    """
+    p = _paths(tmp_path)
+    if name == "per-stack":
+        return build_per_stack_prompt(
+            skill_invocation="/beagle-python:review-python",
+            stack_name="python",
+            files=["api.py"],
+            intent_authoritative=intent_authoritative,
+            **p,
+        )
+    if name == "structural":
+        return build_structural_prompt(
+            skill_invocation="/beagle-core:review-structure",
+            files=["api.py"],
+            intent_authoritative=intent_authoritative,
+            **p,
+        )
+    if name == "generic-fallback":
+        return build_generic_fallback_prompt(
+            files=["config.yaml"],
+            intent_authoritative=intent_authoritative,
+            **p,
+        )
+    if name == "arbiter":
+        return build_arbiter_prompt(
+            arbiter_input_path=tmp_path / "arbiter-input.json",
+            diff_path=p["diff_path"],
+            intent_path=p["intent_path"],
+            alternatives_path=p["alternatives_path"],
+            cwd=p["cwd"],
+            intent_authoritative=intent_authoritative,
+        )
+    if name == "merge":
+        return build_merge_prompt(
+            per_stack_records_paths=[tmp_path / "python.json", tmp_path / "react.json"],
+            intent_path=tmp_path / "intent.md",
+            alternatives_path=tmp_path / "alternatives.json",
+            dedup_candidates_path=tmp_path / "dedup.json",
+            output_path=tmp_path / "report.md",
+            intent_authoritative=intent_authoritative,
+        )
+    msg = f"unknown builder name: {name!r}"
+    raise ValueError(msg)
+
+
+@pytest.mark.parametrize("name", ["per-stack", "structural", "generic-fallback", "arbiter", "merge"])
+def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
+    """#279: the precedence rule appears only when a fresh PR body was ingested."""
+    assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
+    assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)

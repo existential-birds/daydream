@@ -710,7 +710,13 @@ async def _step_exploration(ctx: FlowContext) -> None:
 
 
 async def _step_intent(ctx: FlowContext) -> None:
-    """TTT intent analysis, grounded by the PR description when it is fresh."""
+    """TTT intent analysis, grounded by the PR description when it is fresh.
+
+    On exit, ``ctx.data["intent_authoritative"]`` is set to True when a fresh,
+    head-matched PR description with non-whitespace content grounded the intent
+    phase (issue #279). Downstream reviewers read this key to determine whether
+    to include the authoritative-intent precedence rule in their prompts.
+    """
     from daydream import git_ops
 
     config = ctx.config
@@ -740,6 +746,10 @@ async def _step_intent(ctx: FlowContext) -> None:
                 )
             else:
                 pr_description = pr_view.get("body") or None
+    # Issue #279: publish whether a fresh, head-matched PR description grounded
+    # the intent phase, so downstream reviewers can include the precedence rule.
+    # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
+    ctx.data["intent_authoritative"] = bool(pr_description and pr_description.strip())
     async with phase_scope(DaydreamPhase.INTENT):
         ctx.data["intent_summary"] = await phase_understand_intent(
             ctx.backend_for("intent"),
@@ -794,6 +804,7 @@ async def _step_per_stack_reviews(ctx: FlowContext) -> None:
                 alternatives_path=ctx.data["alts_path"],
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=ctx.data["diff"],
+                intent_authoritative=ctx.data.get("intent_authoritative", False),
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -966,6 +977,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     intent_path=ctx.data["intent_path"],
                     alternatives_path=ctx.data["alts_path"],
                     exploration_dir=ctx.data["exploration_dir"],
+                    intent_authoritative=ctx.data.get("intent_authoritative", False),
                 )
             all_records, record_sources = _apply_adjudication_verdicts(
                 all_records, record_sources, arbiter_targets, verdicts,
@@ -1053,6 +1065,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> None:
         exploration_dir=ctx.data["exploration_dir"],
         failed_stacks=failed_stacks or None,
         structural_records_path=ctx.data["structural_records_path"],
+        intent_authoritative=ctx.data.get("intent_authoritative", False),
     )
 
 

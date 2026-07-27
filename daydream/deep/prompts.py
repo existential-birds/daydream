@@ -27,6 +27,7 @@ from daydream.phases import (
     _exploration_pointer,
     _settled_decisions_block,
 )
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
 DOC_REVIEW_NOTICE = (
@@ -68,14 +69,32 @@ def _context_pointers(
     *,
     intent_path: Path,
     alternatives_path: Path,
+    intent_authoritative: bool = False,
 ) -> str:
-    """Reference pointers for TTT stage outputs (D-09/D-19 context bus)."""
-    return (
-        f"TTT intent summary is at {intent_path}. Read it before starting your review "
-        f"so your findings align with the author's stated intent.\n"
+    """Reference pointers for TTT stage outputs (D-09/D-19 context bus).
+
+    When ``intent_authoritative`` is True, the intent pointer is upgraded: the
+    pointer to ``intent_path`` is accompanied by a provenance sentence and the
+    ``AUTHORITATIVE_INTENT_RULE`` precedence rule, since the intent was grounded
+    by a fresh, head-matched PR description (issue #279).
+    """
+    alternatives_paragraph = (
         f"TTT alternative-review findings are at {alternatives_path}. Use them as a "
         f"starting point -- you may deepen, confirm, or dismiss each finding with "
         f"language-specific evidence."
+    )
+    if intent_authoritative:
+        return (
+            f"TTT intent summary is at {intent_path}. Read it before starting your "
+            f"review -- it records the author's stated intent from the pull-request "
+            f"description."  # provenance sentence
+            f"\n{AUTHORITATIVE_INTENT_RULE}"
+            f"\n{alternatives_paragraph}"
+        )
+    return (
+        f"TTT intent summary is at {intent_path}. Read it before starting your review "
+        f"so your findings align with the author's stated intent.\n"
+        f"{alternatives_paragraph}"
     )
 
 
@@ -243,6 +262,7 @@ def build_per_stack_prompt(
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
     inline_diff: str | None = None,
+    intent_authoritative: bool = False,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -260,6 +280,9 @@ def build_per_stack_prompt(
         inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
             to inline (skips the ``Read it directly`` instruction). ``None``
             falls back to the diff_path pointer.
+        intent_authoritative: Issue #279. When True, the context pointers
+            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
+            the intent phase was grounded by a fresh, head-matched PR description.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -269,7 +292,13 @@ def build_per_stack_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction(stack_name, files))
@@ -290,6 +319,7 @@ def build_structural_prompt(
     cwd: Path,
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
+    intent_authoritative: bool = False,
 ) -> str:
     """Assemble the structural-maintainability meta-stack prompt.
 
@@ -313,6 +343,9 @@ def build_structural_prompt(
             body because the structural reviewer discovers context via tool
             calls, not pre-injected pointers.
         prior_commits: Oneline log of prior daydream commits on this branch.
+        intent_authoritative: Issue #279. When True, the context pointers
+            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
+            the intent phase was grounded by a fresh, head-matched PR description.
     """
     del exploration_dir  # accepted for signature symmetry; intentionally unused.
     joined = ", ".join(files)
@@ -321,7 +354,13 @@ def build_structural_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(
         f"You are the structural reviewer. The full change spans: {joined}. "
         f"The structural rubric applies repo-wide -- read any file in the "
@@ -344,6 +383,7 @@ def build_arbiter_prompt(
     alternatives_path: Path,
     cwd: Path,
     exploration_dir: Path | None = None,
+    intent_authoritative: bool = False,
 ) -> str:
     """Assemble the scoped Opus arbiter prompt (issue #168).
 
@@ -362,13 +402,22 @@ def build_arbiter_prompt(
         alternatives_path: Path to TTT alternatives.json.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
         exploration_dir: Pre-scan exploration directory (if available).
+        intent_authoritative: Issue #279. When True, the context pointers
+            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
+            the intent phase was grounded by a fresh, head-matched PR description.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_full_diff_pointer(diff_path))
     parts.append(
         "You are the arbiter. The cheaper per-stack reviewers flagged the "
@@ -506,6 +555,7 @@ def build_merge_prompt(
     exploration_dir: Path | None = None,
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
+    intent_authoritative: bool = False,
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
 
@@ -541,6 +591,10 @@ def build_merge_prompt(
             records JSON. Retained for call-site compatibility; structural
             findings are appended by ``phase_cross_stack_merge`` in Python (not
             via this prompt), so the agent is never pointed at this file.
+        intent_authoritative: Issue #279. When True, the context lines include
+            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
+            the TTT intent summary line, because the intent phase was grounded
+            by a fresh, head-matched PR description.
     """
     del output_path, structural_records_path  # appended/rendered by the host, not the prompt
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
@@ -548,11 +602,13 @@ def build_merge_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
-    context_lines = [
+    context_lines: list[str] = [
         f"TTT intent summary: {intent_path}",
         f"TTT alternative-review findings: {alternatives_path}",
         f"Dedup pre-filter candidate pairs: {dedup_candidates_path}",
     ]
+    if intent_authoritative:
+        context_lines.insert(1, AUTHORITATIVE_INTENT_RULE)  # right after the intent line
     context_lines.append(f"Per-stack parsed records:\n{records_block}")
     parts.append("\n".join(context_lines))
     if failed_stacks:
@@ -734,6 +790,7 @@ def build_generic_fallback_prompt(
     is_docs_only: bool = False,
     prior_commits: str | None = None,
     inline_diff: str | None = None,
+    intent_authoritative: bool = False,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -752,6 +809,9 @@ def build_generic_fallback_prompt(
         inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
             to inline (skips the ``Read it directly`` instruction). ``None``
             falls back to the diff_path pointer.
+        intent_authoritative: Issue #279. When True, the context pointers
+            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
+            the intent phase was grounded by a fresh, head-matched PR description.
     """
     parts: list[str] = []
     if is_docs_only:
@@ -763,7 +823,13 @@ def build_generic_fallback_prompt(
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
-    parts.append(_context_pointers(intent_path=intent_path, alternatives_path=alternatives_path))
+    parts.append(
+        _context_pointers(
+            intent_path=intent_path,
+            alternatives_path=alternatives_path,
+            intent_authoritative=intent_authoritative,
+        )
+    )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction("generic-fallback", files))
