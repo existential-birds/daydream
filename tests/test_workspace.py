@@ -84,9 +84,7 @@ async def test_in_place_no_branch_no_force(tmp_path: Path) -> None:
     # Push a new commit to origin from a sidecar so we can prove no fetch ran.
     new_sha = _push_origin_commit_via_sidecar(tmp_path, bare)
 
-    async with open_workspace(
-        repo, branch=None, base=None, force_ephemeral=False, skip_tests=False
-    ) as ctx:
+    async with open_workspace(repo, branch=None, base=None, force_ephemeral=False, skip_tests=False) as ctx:
         assert isinstance(ctx, WorkContext)
         assert ctx.repo == repo
         assert ctx.source == repo
@@ -116,14 +114,14 @@ async def test_ephemeral_with_no_branch_uses_head(tmp_path: Path) -> None:
     expected_head = git_ops.head_sha(repo)
 
     captured_path: Path | None = None
-    async with open_workspace(
-        repo, branch=None, base=None, force_ephemeral=True, skip_tests=False
-    ) as ctx:
+    async with open_workspace(repo, branch=None, base=None, force_ephemeral=True, skip_tests=False) as ctx:
         assert ctx.is_ephemeral is True
         assert ctx.repo != repo
         assert ctx.repo.is_dir()
+        assert git_ops.is_inside_worktree(ctx.repo) is True
         assert ctx.head_sha == expected_head
         assert ctx.head_branch is None  # detached
+        assert ctx.is_in_place is False
         captured_path = ctx.repo
 
     assert captured_path is not None
@@ -204,9 +202,7 @@ async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
     _git(repo, "add", "next.txt")
     _git(repo, "commit", "-m", "advance head")
 
-    async with open_workspace(
-        repo, branch=None, base=base_sha, force_ephemeral=False, skip_tests=False
-    ) as ctx:
+    async with open_workspace(repo, branch=None, base=base_sha, force_ephemeral=False, skip_tests=False) as ctx:
         assert isinstance(ctx, WorkContext)
         assert ctx.base_branch == base_sha
         assert ctx.base_sha == base_sha  # merge-base of HEAD and its parent
@@ -215,9 +211,7 @@ async def test_base_accepts_raw_sha(tmp_path: Path) -> None:
 async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     with pytest.raises(BranchNotFoundError, match="base ref 'deadbeef' not found"):
-        async with open_workspace(
-            repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False
-        ):
+        async with open_workspace(repo, branch=None, base="deadbeef", force_ephemeral=False, skip_tests=False):
             pass
 
 
@@ -271,9 +265,7 @@ def test_copy_pyproject_override(tmp_path: Path) -> None:
     _git(repo, "add", ".gitignore")
     _commit(repo, "ignore env+local")
 
-    (repo / "pyproject.toml").write_text(
-        '[tool.daydream.workspace]\ncopy = ["custom.cfg", "local/secrets.toml"]\n'
-    )
+    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["custom.cfg", "local/secrets.toml"]\n')
     (repo / "custom.cfg").write_text("k=v\n")
     (repo / "local").mkdir()
     (repo / "local" / "secrets.toml").write_text("token = 'x'\n")
@@ -352,9 +344,7 @@ def test_copy_skip_returns_empty(tmp_path: Path) -> None:
     dest = tmp_path / "ephemeral"
     dest.mkdir()
 
-    copied = copy_files_into_ephemeral(
-        repo, dest, extra=[Path("anything.cfg")], skip=True
-    )
+    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("anything.cfg")], skip=True)
     assert copied == []
     assert not (dest / ".env").exists()
 
@@ -367,9 +357,7 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
     captured_path: Path | None = None
 
     with pytest.raises(RuntimeError, match="boom"):
-        async with open_workspace(
-            repo, branch=None, base=None, force_ephemeral=True, skip_tests=False
-        ) as ctx:
+        async with open_workspace(repo, branch=None, base=None, force_ephemeral=True, skip_tests=False) as ctx:
             captured_path = ctx.repo
             assert captured_path.exists()
             raise RuntimeError("boom")
@@ -378,52 +366,10 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
     assert not captured_path.exists()
 
 
-# --- 11. is_inside_worktree on the ephemeral path ---------------------------
-
-
-async def test_ephemeral_is_a_real_worktree(tmp_path: Path) -> None:
-    repo, _ = _make_repo_with_origin(tmp_path)
-    async with open_workspace(
-        repo, branch=None, base=None, force_ephemeral=True, skip_tests=False
-    ) as ctx:
-        assert git_ops.is_inside_worktree(ctx.repo) is True
-
-
-# --- 12. is_in_place property ----------------------------------------------
-
-
-def test_is_in_place_property_inverse_of_ephemeral() -> None:
-    in_place = WorkContext(
-        repo=Path("/tmp/x"),
-        source=Path("/tmp/x"),
-        base_branch="main",
-        base_sha="0" * 40,
-        head_branch="main",
-        head_sha="0" * 40,
-        is_ephemeral=False,
-        run_id="20260101000000-deadbeef",
-    )
-    assert in_place.is_in_place is True
-
-    ephemeral = WorkContext(
-        repo=Path("/tmp/y"),
-        source=Path("/tmp/x"),
-        base_branch="main",
-        base_sha="0" * 40,
-        head_branch=None,
-        head_sha="0" * 40,
-        is_ephemeral=True,
-        run_id="20260101000000-cafef00d",
-    )
-    assert ephemeral.is_in_place is False
-
-
 # --- 13. Stale-local warning fires ------------------------------------------
 
 
-async def test_stale_local_warning_fires(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo, bare = _make_repo_with_origin(tmp_path)
     # Create + push the feature branch, then add commits on origin so the
     # local copy is behind.
@@ -443,9 +389,7 @@ async def test_stale_local_warning_fires(
     rec = Console(record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.agent.console", rec)
 
-    async with open_workspace(
-        repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False
-    ) as ctx:
+    async with open_workspace(repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False) as ctx:
         assert ctx.is_ephemeral is True
 
     out = rec.export_text()

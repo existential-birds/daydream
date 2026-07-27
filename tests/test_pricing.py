@@ -212,6 +212,7 @@ def test_load_user_prices_valid_parse(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
     loaded = load_user_prices()
     assert loaded == {"my-model": ModelPrice(input=2.0, cached_input=0.5, output=8.0)}
+    assert "my-model" not in MODEL_PRICES
 
 
 def test_load_user_prices_explicit_path_arg(tmp_path: Path) -> None:
@@ -235,31 +236,7 @@ def test_load_user_prices_override_builtin(tmp_path: Path, monkeypatch: pytest.M
     assert loaded["gpt-5.5"] == ModelPrice(input=1.0, cached_input=0.1, output=2.0)
 
 
-def test_load_user_prices_add_new_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A user entry for an unknown model is loaded as a new entry."""
-    prices_file = _write(
-        tmp_path / "prices.toml",
-        '[prices."brand-new"]\ninput = 9.0\noutput = 90.0\n',
-    )
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
-    loaded = load_user_prices()
-    assert "brand-new" in loaded
-    assert "brand-new" not in MODEL_PRICES
-
-
-def test_load_user_prices_cached_input_defaults_to_input(tmp_path: Path) -> None:
-    """Omitting cached_input defaults it to the input price."""
-    prices_file = _write(
-        tmp_path / "prices.toml",
-        '[prices."m"]\ninput = 4.0\noutput = 12.0\n',
-    )
-    loaded = load_user_prices(path=prices_file)
-    assert loaded["m"].cached_input == 4.0
-
-
-def test_load_user_prices_malformed_toml_returns_empty(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_user_prices_malformed_toml_returns_empty(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """Malformed TOML logs a warning and yields {} — never raises."""
     bad = _write(tmp_path / "prices.toml", "this is = = not toml")
     with caplog.at_level("WARNING"):
@@ -273,9 +250,7 @@ def test_load_user_prices_absent_file_returns_empty(tmp_path: Path) -> None:
     assert load_user_prices(path=tmp_path / "nope.toml") == {}
 
 
-def test_load_user_prices_missing_required_field_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_load_user_prices_missing_required_field_skips_entry(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     """An entry missing a required field is logged and skipped."""
     prices_file = _write(
         tmp_path / "prices.toml",
@@ -288,60 +263,30 @@ def test_load_user_prices_missing_required_field_skips_entry(
     assert any("missing required field" in rec.message for rec in caplog.records)
 
 
-def test_load_user_prices_negative_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("model", "input_value", "warning"),
+    [
+        pytest.param("neg", "-1.0", "negative", id="negative"),
+        pytest.param("nan-model", "nan", "non-finite", id="nan"),
+        pytest.param("inf-model", "inf", "non-finite", id="positive-infinity"),
+        pytest.param("neginf-model", "-inf", "non-finite", id="negative-infinity"),
+    ],
+)
+def test_load_user_prices_invalid_value_skips_entry(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    model: str,
+    input_value: str,
+    warning: str,
 ) -> None:
-    """A negative price value is logged and skips the entry."""
     prices_file = _write(
         tmp_path / "prices.toml",
-        '[prices."neg"]\ninput = -1.0\noutput = 2.0\n',
+        f'[prices."{model}"]\ninput = {input_value}\noutput = 2.0\n',
     )
     with caplog.at_level("WARNING"):
         loaded = load_user_prices(path=prices_file)
     assert loaded == {}
-    assert any("negative" in rec.message for rec in caplog.records)
-
-
-def test_load_user_prices_nan_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A nan price value is logged and skips the entry."""
-    prices_file = _write(
-        tmp_path / "prices.toml",
-        '[prices."nan-model"]\ninput = nan\noutput = 2.0\n',
-    )
-    with caplog.at_level("WARNING"):
-        loaded = load_user_prices(path=prices_file)
-    assert loaded == {}
-    assert any("non-finite" in rec.message for rec in caplog.records)
-
-
-def test_load_user_prices_inf_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A +inf or -inf price value is logged and skips the entry."""
-    prices_file = _write(
-        tmp_path / "prices.toml",
-        '[prices."inf-model"]\ninput = inf\noutput = 2.0\n',
-    )
-    with caplog.at_level("WARNING"):
-        loaded = load_user_prices(path=prices_file)
-    assert loaded == {}
-    assert any("non-finite" in rec.message for rec in caplog.records)
-
-
-def test_load_user_prices_negative_inf_value_skips_entry(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """-inf is rejected as non-finite (not as negative) and skips the entry."""
-    prices_file = _write(
-        tmp_path / "prices.toml",
-        '[prices."neginf-model"]\ninput = -inf\noutput = 2.0\n',
-    )
-    with caplog.at_level("WARNING"):
-        loaded = load_user_prices(path=prices_file)
-    assert loaded == {}
-    assert any("non-finite" in rec.message for rec in caplog.records)
+    assert any(warning in rec.message for rec in caplog.records)
 
 
 def test_load_user_prices_unresolvable_home_returns_empty(

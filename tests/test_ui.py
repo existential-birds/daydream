@@ -192,18 +192,6 @@ def test_bash_panel_shows_command_drops_mechanical_keys():
     assert "block" not in out and "timeout" not in out
 
 
-def test_registry_harvests_task_label_from_originating_result():
-    from rich.console import Console
-
-    from daydream.ui import LiveToolPanelRegistry
-
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
-    reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
-    reg.observe_result("c1", "Command running in background with ID: a066168. Output ...")
-    assert reg.resolve_label("Bash", "a066168") == "Run tests"
-    assert reg.resolve_label("Bash", "unknown") is None
-
-
 def _render_panel_text(reg, tool_use_id):
     from rich.console import Console
 
@@ -257,9 +245,7 @@ def test_taskupdate_resolves_subject_and_shows_status():
     reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
     reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
     reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
-    c = Console(record=True)
-    c.print(reg.get("c2")._render_panel())
-    out = c.export_text()
+    out = _render_panel_text(reg, "c2")
     assert "Fix auth bug" in out and "completed" in out
 
 
@@ -286,9 +272,7 @@ def test_taskoutput_result_shows_output_snippet():
     reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
     result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
     reg.get("c2").set_result(result, is_error=False)
-    c = Console(record=True)
-    c.print(reg.get("c2")._render_panel())
-    out = c.export_text()
+    out = _render_panel_text(reg, "c2")
     assert "done-with-bg-work" in out  # the <output> snippet surfaces
     assert "<retrieval_status>" not in out  # tag plumbing is stripped
 
@@ -307,26 +291,27 @@ def test_task_prompt_truncation_uses_named_limit():
     assert "l39" not in out
 
 
-async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
-    from rich.console import Console
-
-    import daydream.agent as agent_mod
-    from daydream.agent import run_agent
+def _taskoutput_backend():
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from daydream.trajectory import DaydreamPhase
-    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
+    from tests.test_agent_recorder_integration import MockBackend
 
-    rec = Console(record=True, width=120)
-    monkeypatch.setattr(agent_mod, "console", rec)
-    backend = MockBackend(
+    return MockBackend(
         [
             ToolStartEvent(
                 id="c1",
                 name="Bash",
                 input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
             ),
-            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
-            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
+            ToolResultEvent(
+                id="c1",
+                output="Command running in background with ID: a066168. ...",
+                is_error=False,
+            ),
+            ToolStartEvent(
+                id="c2",
+                name="TaskOutput",
+                input={"task_id": "a066168", "block": True, "timeout": 120000},
+            ),
             ToolResultEvent(
                 id="c2",
                 output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
@@ -335,6 +320,18 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
             ResultEvent(structured_output=None, continuation=None),
         ]
     )
+
+
+async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
+    from rich.console import Console
+
+    import daydream.agent as agent_mod
+    from daydream.agent import run_agent
+    from daydream.trajectory import DaydreamPhase
+
+    rec = Console(record=True, width=120)
+    monkeypatch.setattr(agent_mod, "console", rec)
+    backend = _taskoutput_backend()
     await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)
     out = rec.export_text()
     assert "Run tests" in out and "a066168" in out
@@ -343,30 +340,12 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
 
 
 async def test_run_agent_callback_path_labels_taskoutput(tmp_path):
-    from daydream.agent import run_agent
-    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
-    from daydream.trajectory import DaydreamPhase
-    from tests.test_agent_recorder_integration import MockBackend  # existing event-replay mock
-
-    backend = MockBackend(
-        [
-            ToolStartEvent(
-                id="c1",
-                name="Bash",
-                input={"command": "pytest", "run_in_background": True, "description": "Run tests"},
-            ),
-            ToolResultEvent(id="c1", output="Command running in background with ID: a066168. ...", is_error=False),
-            ToolStartEvent(id="c2", name="TaskOutput", input={"task_id": "a066168", "block": True, "timeout": 120000}),
-            ToolResultEvent(
-                id="c2",
-                output="<task_id>a066168</task_id>\n<output>\ndone-with-bg-work\n</output>",
-                is_error=False,
-            ),
-            ResultEvent(structured_output=None, continuation=None),
-        ]
-    )
     from rich.text import Text
 
+    from daydream.agent import run_agent
+    from daydream.trajectory import DaydreamPhase
+
+    backend = _taskoutput_backend()
     lines: list[Text] = []
     await run_agent(
         backend,

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from daydream.backends import (
+    AgentEvent,
     CostEvent,
     MetricsEvent,
     ResultEvent,
@@ -52,6 +53,7 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
     try:
         # Run the actual runner.run function
         import anyio
+
         exit_code = anyio.run(run, config)
         assert exit_code == 0, "Expected successful run"
     finally:
@@ -60,249 +62,123 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
     return captured_output.getvalue()
 
 
-def test_log_mode_produces_plain_text(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode produces plain text output without ANSI escape sequences."""
-    install_backend(ScriptedBackend(events=[TextEvent("hello world")], retryable=False))
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    # Capture output
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify plain text output
-    assert "hello world" in output
-
-    # Verify no ANSI escape sequences (Rich markup patterns)
-    assert "\x1b[" not in output  # No ANSI color codes
-    assert "[bold]" not in output  # No Rich markup
-    assert "[dim]" not in output   # No Rich styling
-
-
-def test_log_mode_dumps_tool_events(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode dumps tool events with proper markers."""
-    install_backend(
-        ScriptedBackend(
-            events=[
+@pytest.mark.parametrize(
+    ("events", "config_overrides", "required", "forbidden"),
+    [
+        pytest.param(
+            [TextEvent("hello world")],
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("hello world",),
+            ("\x1b[", "[bold]", "[dim]"),
+            id="plain-text",
+        ),
+        pytest.param(
+            [
                 ToolStartEvent(
                     id="test-id",
                     name="bash",
-                    input={"command": "echo hello", "description": "test command"}
+                    input={"command": "echo hello", "description": "test command"},
                 ),
-                ToolResultEvent(
-                    id="test-id",
-                    output="hello\nworld",
-                    is_error=False
-                ),
+                ToolResultEvent(id="test-id", output="hello\nworld", is_error=False),
             ],
-            retryable=False,
-        )
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify tool start marker
-    assert "[tool:bash] echo hello" in output
-
-    # Verify tool result marker
-    assert "[tool:bash result] hello" in output
-
-
-def test_log_mode_dumps_cost(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode dumps cost events with proper formatting."""
-    install_backend(
-        ScriptedBackend(
-            events=[CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
-            retryable=False,
-        )
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify cost formatting
-    assert "[cost] $0.0042" in output
-
-
-def test_log_mode_dumps_metrics(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode dumps metrics events."""
-    install_backend(
-        ScriptedBackend(
-            events=[
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[tool:bash] echo hello", "[tool:bash result] hello"),
+            (),
+            id="tool-events",
+        ),
+        pytest.param(
+            [CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[cost] $0.0042",),
+            (),
+            id="cost",
+        ),
+        pytest.param(
+            [
                 MetricsEvent(
                     message_id="test-msg",
                     prompt_tokens=100,
                     completion_tokens=50,
                     cached_tokens=None,
-                    cost_usd=None
-                ),
+                    cost_usd=None,
+                )
             ],
-            retryable=False,
-        )
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify metrics formatting
-    assert "[metrics] prompt=100 completion=50" in output
-
-
-def test_log_mode_dumps_thinking(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode dumps thinking events."""
-    install_backend(
-        ScriptedBackend(events=[ThinkingEvent("I need to analyze this code")], retryable=False)
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify thinking marker
-    assert "[thinking] I need to analyze this code" in output
-
-
-def test_log_mode_dumps_result_event(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode dumps structured result events."""
-    install_backend(
-        ScriptedBackend(
-            events=[
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[metrics] prompt=100 completion=50",),
+            (),
+            id="metrics",
+        ),
+        pytest.param(
+            [ThinkingEvent("I need to analyze this code")],
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[thinking] I need to analyze this code",),
+            (),
+            id="thinking",
+        ),
+        pytest.param(
+            [
                 ResultEvent(
                     structured_output={"status": "complete", "findings": ["issue1", "issue2"]},
-                    continuation=None
-                ),
+                    continuation=None,
+                )
             ],
-            retryable=False,
-        )
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify result formatting (truncated to 500 chars)
-    assert "[result]" in output
-    assert '"status": "complete"' in output
-    assert '"findings"' in output
-
-
-def test_log_mode_tool_error_handling(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log mode handles tool errors with ERROR prefix."""
-    install_backend(
-        ScriptedBackend(
-            events=[
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[result]", '"status": "complete"', '"findings"'),
+            (),
+            id="result-event",
+        ),
+        pytest.param(
+            [
                 ToolStartEvent(
                     id="test-id",
                     name="bash",
-                    input={"command": "false", "description": "failing command"}
+                    input={"command": "false", "description": "failing command"},
                 ),
                 ToolResultEvent(
                     id="test-id",
                     output="command failed with exit code 1",
-                    is_error=True
+                    is_error=True,
                 ),
             ],
-            retryable=False,
-        )
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify error prefix
-    assert "[tool:bash ERROR] command failed with exit code 1" in output
-
-
-def test_log_mode_with_non_interactive(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that --log works with --non-interactive (orthogonal flags)."""
-    install_backend(
-        ScriptedBackend(events=[TextEvent("processing in non-interactive mode")], retryable=False)
-    )
-
-    config = make_config(multi_stack_target, log_mode=True, quiet=True, output_mode="review")
-
-    output = _capture_stdout_and_run(config, monkeypatch)
-
-    # Verify the flags work together
-    assert "processing in non-interactive mode" in output
-    assert "\x1b[" not in output  # Still no ANSI codes
-
-
-def test_log_mode_default_off(
-    multi_stack_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Test that default behavior (no --log) still uses Rich UI."""
-    # This test is more challenging since we can't easily capture Rich output
-    # but we can verify the backend was called and no plain text markers appear
-    install_backend(
-        ScriptedBackend(
-            events=[
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[tool:bash ERROR] command failed with exit code 1",),
+            (),
+            id="tool-error",
+        ),
+        pytest.param(
+            [
                 TextEvent("hello world"),
                 CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50),
             ],
-            retryable=False,
-        )
-    )
-
+            {"log_mode": False, "quiet": False, "output_mode": "review"},
+            (),
+            ("[cost] $0.0042",),
+            id="default-off",
+        ),
+    ],
+)
+def test_log_mode_rendering(
+    multi_stack_target: Path,
+    make_config: MakeConfig,
+    install_backend: InstallBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[AgentEvent],
+    config_overrides: dict[str, object],
+    required: tuple[str, ...],
+    forbidden: tuple[str, ...],
+) -> None:
+    install_backend(ScriptedBackend(events=events, retryable=False))
     config = make_config(
         multi_stack_target,
-        log_mode=False,  # Default off
-        quiet=False,  # Allow Rich UI
-        output_mode="review",
+        non_interactive=True,
+        **config_overrides,
     )
-
     output = _capture_stdout_and_run(config, monkeypatch)
 
-    # In Rich mode, we should not see the raw log markers
-    # (The Rich UI would format these differently)
-    assert "[cost] $0.0042" not in output  # Raw log format should not appear
+    for substring in required:
+        assert substring in output
+    for substring in forbidden:
+        assert substring not in output
 
 
 def test_log_mode_trajectory_still_written(
@@ -313,9 +189,7 @@ def test_log_mode_trajectory_still_written(
     tmp_path: Path,
 ) -> None:
     """Test that --log mode still writes trajectory file (recorder unaffected)."""
-    install_backend(
-        ScriptedBackend(events=[TextEvent("generating trajectory")], retryable=False)
-    )
+    install_backend(ScriptedBackend(events=[TextEvent("generating trajectory")], retryable=False))
 
     trajectory_path = tmp_path / "trajectory.json"
 

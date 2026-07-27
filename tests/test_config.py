@@ -16,8 +16,24 @@ from daydream.config import (
 )
 
 PHASE_NAMES = {
-    "review", "per_stack_review", "arbiter", "suppression", "supervise", "parse", "fix", "test", "verify",
-    "exploration", "intent", "wonder", "merge", "pr_feedback", "recon", "audit", "vet", "plan_write",
+    "review",
+    "per_stack_review",
+    "arbiter",
+    "suppression",
+    "supervise",
+    "parse",
+    "fix",
+    "test",
+    "verify",
+    "exploration",
+    "intent",
+    "wonder",
+    "merge",
+    "pr_feedback",
+    "recon",
+    "audit",
+    "vet",
+    "plan_write",
 }
 IMPROVE_PHASE_NAMES = {"recon", "audit", "vet", "plan_write"}
 
@@ -88,10 +104,9 @@ def test_per_stack_review_and_arbiter_split():
 
 def test_suppression_uses_cheap_tier():
     """#232: the precision-mode suppression pass defaults to the cheap mid tier
-    (never per-finding Opus). Pi keeps its single backend fallback."""
+    (never per-finding Opus)."""
     assert PHASE_DEFAULT_MODELS["claude"]["suppression"] == "claude-sonnet-5"
     assert PHASE_DEFAULT_MODELS["codex"]["suppression"] == "gpt-5.6-terra"
-    assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
 def test_phase_default_models_codex_tier_assignments():
@@ -99,7 +114,15 @@ def test_phase_default_models_codex_tier_assignments():
     codex = PHASE_DEFAULT_MODELS["codex"]
     assert codex["parse"] == "gpt-5.6-luna"
     for phase in (
-        "fix", "test", "verify", "exploration", "per_stack_review", "suppression", "supervise", "intent", "recon",
+        "fix",
+        "test",
+        "verify",
+        "exploration",
+        "per_stack_review",
+        "suppression",
+        "supervise",
+        "intent",
+        "recon",
         "audit",
     ):
         assert codex[phase] == "gpt-5.6-terra", f"codex phase {phase} should default to the mid tier"
@@ -174,12 +197,6 @@ def test_plan_write_is_pinned_to_the_top_model_tier(backend):
     """plan_write shares the top tier with the heaviest review phases."""
     models = PHASE_DEFAULT_MODELS[backend]
     assert models["plan_write"] == models["review"] == models["arbiter"]
-
-
-def test_pi_model_is_a_backend_fallback_not_a_phase_override():
-    """Pi uses one backend fallback instead of phase-specific defaults."""
-    assert "pi" not in PHASE_DEFAULT_MODELS
-    assert DEFAULT_PI_MODEL == "glm-5.2"
 
 
 def test_default_pi_model_is_glm_5_2():

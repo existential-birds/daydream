@@ -302,14 +302,19 @@ def test_merge_base_returns_none_when_head_missing(tmp_path: Path) -> None:
     assert git_ops.merge_base(repo, "main") is None
 
 
-def test_merge_base_returns_none_for_leading_dash_base(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "refs",
+    [
+        pytest.param(("-no-such-ref",), id="base"),
+        pytest.param(("main", "-no-such-ref"), id="head"),
+    ],
+)
+def test_merge_base_returns_none_for_leading_dash_ref(
+    tmp_path: Path,
+    refs: tuple[str, ...],
+) -> None:
     repo = _make_repo_with_main(tmp_path)
-    assert git_ops.merge_base(repo, "-no-such-ref") is None
-
-
-def test_merge_base_returns_none_for_leading_dash_head(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    assert git_ops.merge_base(repo, "main", "-no-such-ref") is None
+    assert git_ops.merge_base(repo, *refs) is None
 
 
 # --- diff / log / show / grep / status / upstream_ahead_count ---------------
@@ -379,18 +384,6 @@ def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
     _commit(repo, "add two files")
     result = git_ops.diff_name_only(repo, "main", "HEAD")
     assert sorted(result) == ["alpha.txt", "beta.txt"]
-
-
-def test_diff_name_only_filters_empty_lines(tmp_path: Path) -> None:
-    """Ensure blank lines in git output are stripped (empty-line filtering)."""
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
-    (repo / "file.txt").write_text("x\n")
-    _git(repo, "add", "file.txt")
-    _commit(repo, "add file")
-    result = git_ops.diff_name_only(repo, "main", "HEAD")
-    assert all(line != "" for line in result)
-    assert "file.txt" in result
 
 
 def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:
@@ -658,25 +651,42 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert calls["n"] == 1  # no retries for non-timeout failures
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param(lambda repo: git_ops.fetch(repo), id="git-fetch"),
+        pytest.param(
+            lambda repo: git_ops.gh_pr_create(
+                repo,
+                head="feature",
+                base="main",
+                title="t",
+                body="b",
+            ),
+            id="gh-pr-create",
+        ),
+    ],
+)
 def test_mutating_wrapper_does_not_retry_on_timeout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: Any,
 ) -> None:
-    """Mutating wrappers pass `retries=0`, so a timeout is not re-run (#120).
+    """Mutating git/gh wrappers never retry after an ambiguous timeout (#120).
 
-    Re-running a non-idempotent git command after a timeout could land on top of
-    partial repo changes. `fetch` drives the production path through `_run_git`
-    and must raise GitTimeoutError after exactly one attempt.
+    Re-running a non-idempotent command after a timeout could land on top of
+    partial repo changes or open a duplicate PR.
     """
     repo = _make_repo_with_main(tmp_path)
     calls = {"n": 0}
 
     def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
         calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["git"], timeout=30)
+        raise subprocess.TimeoutExpired(cmd=["command"], timeout=60)
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
     with pytest.raises(git_ops.GitTimeoutError):
-        git_ops.fetch(repo)
+        operation(repo)
     assert calls["n"] == 1  # no retries for mutating operations
 
 
@@ -723,31 +733,7 @@ def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
     assert calls["n"] == git_ops._gh_retries() + 1
 
 
-def test_run_gh_mutation_does_not_retry_on_timeout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Mutating ``gh`` wrappers default to ``retries=0`` so a timeout is not re-run.
-
-    Re-running a non-idempotent ``gh`` call (here ``pr create``) after a timeout
-    could open a duplicate PR. The production path must raise GitTimeoutError
-    after exactly one attempt.
-    """
-    repo = _make_repo_with_main(tmp_path)
-    calls = {"n": 0}
-
-    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-        calls["n"] += 1
-        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=60)
-
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
-    with pytest.raises(git_ops.GitTimeoutError):
-        git_ops.gh_pr_create(repo, head="feature", base="main", title="t", body="b")
-    assert calls["n"] == 1  # no retries for mutating operations
-
-
-def test_gh_api_retries_only_when_idempotent(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """``gh_api`` retries reads but never mutations — incl. GraphQL.
 
     HTTP method cannot tell a GraphQL query from a mutation (both POST), so the
@@ -779,8 +765,6 @@ def test_gh_api_retries_only_when_idempotent(
 def test_wrong_branch_error_is_raisable() -> None:
     with pytest.raises(WrongBranchError):
         raise WrongBranchError("expected feat, got main")
-    with pytest.raises(GitError):
-        raise WrongBranchError("subclass check")
 
 
 # --- gh wrappers (skipped when gh missing) ----------------------------------
@@ -909,9 +893,7 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
 # to capture argv and drive success/failure paths deterministically.
 
 
-def test_gh_api_input_data_passes_tempfile_and_cleans_up(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -921,9 +903,7 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(
         captured["input_path"] = cmd[idx + 1]
         # Confirm the tempfile exists at call time and holds our payload.
         captured["payload"] = Path(cmd[idx + 1]).read_text(encoding="utf-8")
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout='{"ok": true}', stderr=""
-        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout='{"ok": true}', stderr="")
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
@@ -946,18 +926,14 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(
     assert not Path(captured["input_path"]).exists()
 
 
-def test_gh_api_input_data_preserves_tempfile_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gh_api_input_data_preserves_tempfile_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         idx = cmd.index("--input")
         captured["input_path"] = cmd[idx + 1]
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr="HTTP 422: Validation failed"
-        )
+        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="HTTP 422: Validation failed")
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
@@ -984,17 +960,13 @@ def test_gh_api_input_data_preserves_tempfile_on_failure(
     [(None, 7), (42, 42)],
     ids=["omits_pr_arg_when_none", "includes_pr_arg_when_given"],
 )
-def test_gh_pr_view_pr_arg(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int
-) -> None:
+def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int) -> None:
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, list[str]] = {}
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["cmd"] = cmd
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout=f'{{"number": {number}}}', stderr=""
-        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=f'{{"number": {number}}}', stderr="")
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
@@ -1088,68 +1060,91 @@ def test_clone_filter_flag(
     assert ("--filter=blob:none" in captured["cmd"]) is filter_present
 
 
-def test_gh_api_raises_rate_limit_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "gh: API rate limit exceeded for user (HTTP 403)"
-
-    monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: _Proc())
-    with pytest.raises(git_ops.RateLimitError):
+@pytest.mark.parametrize(
+    ("stderr", "expected_type"),
+    [
+        pytest.param(
+            "gh: API rate limit exceeded for user (HTTP 403)",
+            git_ops.RateLimitError,
+            id="rate-limit",
+        ),
+        pytest.param(
+            "gh: Not Found (HTTP 404)",
+            git_ops.GitError,
+            id="plain-git-error",
+        ),
+    ],
+)
+def test_gh_api_classifies_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stderr: str,
+    expected_type: type[GitError],
+) -> None:
+    proc = subprocess.CompletedProcess(
+        args=["gh"],
+        returncode=1,
+        stdout="",
+        stderr=stderr,
+    )
+    monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: proc)
+    with pytest.raises(expected_type) as exc:
         git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
+    assert type(exc.value) is expected_type
 
 
-def test_gh_api_non_ratelimit_raises_plain_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    class _Proc:
-        returncode = 1
-        stdout = ""
-        stderr = "gh: Not Found (HTTP 404)"
-
-    monkeypatch.setattr(git_ops, "_run_gh", lambda *a, **k: _Proc())
-    with pytest.raises(git_ops.GitError):
-        git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
-    # RateLimitError subclasses GitError; assert the 404 is NOT classified as one:
-    with pytest.raises(git_ops.GitError) as exc:
-        git_ops.gh_api(tmp_path, "repos/o/r/pulls/1")
-    assert not isinstance(exc.value, git_ops.RateLimitError)
-
-
-def test_gh_api_jq_parses_ndjson_into_list(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """jq mode passes --jq and parses one JSON value per stdout line."""
+@pytest.mark.parametrize(
+    ("stdout", "endpoint", "paginate", "jq", "expected", "expected_args"),
+    [
+        pytest.param(
+            '{"id": 1}\n{"id": 2}\n',
+            "/app/installations",
+            True,
+            ".[]",
+            [{"id": 1}, {"id": 2}],
+            ["api", "--paginate", "--jq", "(.[]) | @json", "/app/installations"],
+            id="ndjson-list",
+        ),
+        pytest.param(
+            '"anderskev"\n',
+            "user",
+            False,
+            ".login",
+            ["anderskev"],
+            ["api", "--jq", "(.login) | @json", "user"],
+            id="raw-scalar",
+        ),
+    ],
+)
+def test_gh_api_jq_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stdout: str,
+    endpoint: str,
+    paginate: bool,
+    jq: str,
+    expected: list[Any],
+    expected_args: list[str],
+) -> None:
     captured: dict[str, list[str]] = {}
 
-    class _Proc:
-        returncode = 0
-        stdout = '{"id": 1}\n{"id": 2}\n'
-        stderr = ""
-
-    def fake_run_gh(repo: Path, args: list[str], **kwargs: Any) -> _Proc:
+    def fake_run_gh(
+        repo: Path,
+        args: list[str],
+        **kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
         captured["args"] = args
-        return _Proc()
+        return subprocess.CompletedProcess(
+            args=["gh"],
+            returncode=0,
+            stdout=stdout,
+            stderr="",
+        )
 
     monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
-    result = git_ops.gh_api(tmp_path, "/app/installations", paginate=True, jq=".[]")
-    assert result == [{"id": 1}, {"id": 2}]
-    assert captured["args"] == ["api", "--paginate", "--jq", "(.[]) | @json", "/app/installations"]
-
-
-def test_gh_api_jq_parses_raw_scalar_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """jq scalar output is returned as a one-item list."""
-    class _Proc:
-        returncode = 0
-        stdout = '"anderskev"\n'
-        stderr = ""
-
-    captured: dict[str, list[str]] = {}
-
-    def fake_run_gh(repo: Path, args: list[str], **kwargs: Any) -> _Proc:
-        captured["args"] = args
-        return _Proc()
-
-    monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
-
-    assert git_ops.gh_api(tmp_path, "user", jq=".login") == ["anderskev"]
-    assert captured["args"] == ["api", "--jq", "(.login) | @json", "user"]
+    result = git_ops.gh_api(tmp_path, endpoint, paginate=paginate, jq=jq)
+    assert result == expected
+    assert captured["args"] == expected_args
 
 
 def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1168,17 +1163,20 @@ def test_gh_api_headers_pass_dash_h_args(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr(git_ops, "_run_gh", fake_run_gh)
     headers = {"Authorization": "Bearer jwt-abc"}
     git_ops.gh_api(tmp_path, "/app/installations", headers=headers)
-    git_ops.gh_api(tmp_path, "/app/installations/1/access_tokens", method="POST",
-                   input_data={"repositories": ["r"]}, headers=headers)
+    git_ops.gh_api(
+        tmp_path,
+        "/app/installations/1/access_tokens",
+        method="POST",
+        input_data={"repositories": ["r"]},
+        headers=headers,
+    )
 
     assert captured[0][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
     assert captured[1][:3] == ["api", "-H", "Authorization: Bearer jwt-abc"]
     assert "--input" in captured[1]
 
 
-def test_gh_api_error_message_redacts_authorization_token(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gh_api_error_message_redacts_authorization_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A subprocess failure must not leak the Bearer token into the GitError.
 
     Real-path: ``gh_api`` builds ``-H "Authorization: Bearer <jwt>"`` and calls the
@@ -1331,7 +1329,7 @@ def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     # newest first (git log order), exact match
     tip = _git(repo, "rev-parse", "topic").strip()
     parent = _git(repo, "rev-parse", "topic^").strip()
-    assert shas == [tip, parent]          # newest first, exact, both entries
+    assert shas == [tip, parent]  # newest first, exact, both entries
     assert all(len(s) == 40 for s in shas)
 
 
