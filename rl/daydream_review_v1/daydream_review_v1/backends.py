@@ -107,7 +107,16 @@ class CodexStrategy:
 
     daydream's codex backend passes no ``env=`` to ``create_subprocess_exec``
     (``daydream/backends/codex.py:198``), so the child inherits the harness's
-    environment and reads ``$HOME/.codex/config.toml``.
+    environment and reads ``$CODEX_HOME/config.toml``.
+
+    ``CODEX_HOME`` is set explicitly rather than left to fall out of ``HOME``.
+    A live rollout proved why: with only ``HOME`` moved, codex resolved its own
+    config directory some other way, never saw the provider block, and talked to
+    the provider directly — 531k tokens billed and ZERO calls recorded in the
+    trace. A silently-uncaptured rollout is worse than a failed one, so the
+    variable codex documents as authoritative is the one this sets. It also
+    scopes codex's credential lookup to the same directory, so the rollout cannot
+    fall back to a developer's stored login.
     """
 
     name = "codex"
@@ -117,11 +126,15 @@ class CodexStrategy:
         self.home = home
 
     @property
+    def codex_home(self) -> str:
+        return f"{self.home}/.codex"
+
+    @property
     def config_path(self) -> str:
-        return f"{self.home}/.codex/config.toml"
+        return f"{self.codex_home}/config.toml"
 
     def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
-        return {"CODEX_INTERCEPT_KEY": secret}
+        return {"CODEX_HOME": self.codex_home, "CODEX_INTERCEPT_KEY": secret}
 
     async def provision(self, runtime: vf.Runtime, endpoint: str, secret: str, model: str) -> None:
         await runtime.write(self.config_path, codex_provider_toml(endpoint).encode())

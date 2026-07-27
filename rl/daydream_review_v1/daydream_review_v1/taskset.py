@@ -154,6 +154,17 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
     is ``TaskConfig.judges`` (or an additional ``@vf.reward``); until it passes
     #91's offline ranking gate, golden-comment agreement is exposed only as the
     non-summed ``golden_overlap`` metric.
+
+    KNOWN DEGENERATE OPTIMUM — input for #91, not a bug in this file. A rollout
+    that reports ZERO findings scores ``intrinsic_composite`` 1.0: the grounding
+    axis is vacuously perfect over an empty finding set, correctness is absent,
+    and the length penalty is nil. Observed on a live codex rollout (27 captured
+    turns, 0 findings, composite 1.0). ``score_trajectory`` is reused verbatim on
+    purpose — an online reward and an offline label must not disagree about the
+    same run — so the fix belongs in the rubric #91 owns, not here. Until then,
+    watch the ``n_findings`` metric alongside the reward: a training curve where
+    reward climbs while ``n_findings`` falls is the policy learning to say
+    nothing.
     """
 
     @vf.reward(weight=1.0)

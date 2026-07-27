@@ -47,7 +47,10 @@ async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=4)
     await strategy.provision(runtime, ENDPOINT, SECRET, MODEL)
 
-    assert env == {"CODEX_INTERCEPT_KEY": SECRET}
+    # CODEX_HOME, not HOME: a live rollout with only HOME moved had codex resolve
+    # its config elsewhere, miss the provider block, and reach the provider
+    # directly — real tokens billed, zero calls captured in the trace.
+    assert env == {"CODEX_HOME": "/rollout/.codex", "CODEX_INTERCEPT_KEY": SECRET}
     written = runtime.writes["/rollout/.codex/config.toml"]
     config = tomllib.loads(written.decode())
     assert config["model_provider"] == INTERCEPT_PROVIDER
