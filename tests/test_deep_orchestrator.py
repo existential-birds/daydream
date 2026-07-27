@@ -1565,7 +1565,7 @@ async def test_confirmed_intent_reaches_fix_prompt(
 
 
 async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-07: Stage order = TTT intent -> alternatives -> per-stack -> parse -> merge."""
+    """Default deep flow preserves stage order, isolation, artifacts, prompts, and report."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -1592,6 +1592,76 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert first["alternatives"] < first["per-stack"]
     assert first["per-stack"] < first["parse"]
     assert first["parse"] < first["merge"]
+
+    # At minimum: intent + alternatives + 3 per-stack + 3 parse + 1 merge = 9 distinct calls.
+    assert len(stub.calls) >= 9
+    # Each stage fires a distinct execute call -- prompts must be unique.
+    prompts = [c["prompt"] for c in stub.calls]
+    assert len(set(prompts)) == len(prompts)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert (deep / "intent.md").exists()
+    assert (deep / "alternatives.json").exists()
+    review_files = list(deep.glob("stack-*-review.md"))
+    records_files = list(deep.glob("stack-*-records.json"))
+    assert review_files, "expected at least one stack-*-review.md"
+    assert records_files, "expected at least one stack-*-records.json"
+    assert (deep / "dedup-candidates.json").exists()
+
+    per_stack_prompts = [
+        c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()
+    ]
+    assert per_stack_prompts, "expected per-stack prompts"
+    # Each prompt should mention its own stack's file but NOT foreign files.
+    python_prompt = next(
+        (p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()),
+        None,
+    )
+    react_prompt = next(
+        (p for p in per_stack_prompts if "app.tsx" in p.lower() and "the react stack" in p.lower()),
+        None,
+    )
+    assert python_prompt is not None
+    assert react_prompt is not None
+    # The scope instruction's file-list line (right after the "Focus ONLY on these files:" header)
+    # must not embed React files in the Python stack prompt.
+    python_scope_files_line = python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
+    assert "App.tsx" not in python_scope_files_line
+
+    # Every execute call must have agents=None per D-38.
+    assert all(c["agents"] is None for c in stub.calls)
+
+    assert per_stack_prompts
+    for p in per_stack_prompts:
+        assert "intent.md" in p
+        assert "alternatives.json" in p
+
+    # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
+    # notice). Contract: a generic-fallback prompt is emitted for README.md.
+    fallback_prompts = [
+        c["prompt"] for c in stub.calls if "you are reviewing the generic-fallback stack" in c["prompt"].lower()
+    ]
+    assert fallback_prompts
+    assert any("README.md" in p for p in fallback_prompts)
+
+    parse_calls = [
+        c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()
+    ]
+    per_stack_outputs = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-review.md"))
+    assert len(parse_calls) >= len(per_stack_outputs)
+    records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
+    assert len(records) == len(per_stack_outputs)
+
+    from daydream.config import REVIEW_OUTPUT_FILE
+
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
+    text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "## Issues" in text
+    assert "## Cross-Stack Issues" in text
+    # Numbering continues: 1., 2. in ## Issues then 3. in ## Cross-Stack Issues.
+    assert "3." in text.split("## Cross-Stack Issues", 1)[1]
+    cross_section = text.split("## Cross-Stack Issues", 1)[1]
+    assert "[cross-stack]" in cross_section
 
 
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
@@ -1794,171 +1864,6 @@ async def test_non_open_pr_state_suppresses_pr_body(
         assert "pull request description" not in intent.lower(), (
             f"PR section header must be absent when state={state!r}"
         )
-
-
-async def test_fresh_context_per_stage(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-08: Each stage = a distinct Backend.execute call (no continuation reuse)."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    # At minimum: intent + alternatives + 3 per-stack + 3 parse + 1 merge = 9 distinct calls.
-    assert len(stub.calls) >= 9
-    # Each stage fires a distinct execute call -- prompts must be unique.
-    prompts = [c["prompt"] for c in stub.calls]
-    assert len(set(prompts)) == len(prompts)
-
-
-async def test_artifacts_on_disk(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-09: intent.md, alternatives.json, stack-*-review.md, stack-*-records.json exist."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    deep = multi_stack_target / ".daydream" / "deep"
-    assert (deep / "intent.md").exists()
-    assert (deep / "alternatives.json").exists()
-    review_files = list(deep.glob("stack-*-review.md"))
-    records_files = list(deep.glob("stack-*-records.json"))
-    assert review_files, "expected at least one stack-*-review.md"
-    assert records_files, "expected at least one stack-*-records.json"
-    assert (deep / "dedup-candidates.json").exists()
-
-
-async def test_per_stack_context_isolation(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-10: per-stack prompts don't embed other stacks' file lists."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    per_stack_prompts = [
-        c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()
-    ]
-    assert per_stack_prompts, "expected per-stack prompts"
-    # Each prompt should mention its own stack's file but NOT foreign files.
-    python_prompt = next(
-        (p for p in per_stack_prompts if "api.py" in p and "the python stack" in p.lower()),
-        None,
-    )
-    react_prompt = next(
-        (p for p in per_stack_prompts if "app.tsx" in p.lower() and "the react stack" in p.lower()),
-        None,
-    )
-    assert python_prompt is not None
-    assert react_prompt is not None
-    # The scope instruction's file-list line (right after the "Focus ONLY on these files:" header)
-    # must not embed React files in the Python stack prompt.
-    python_scope_files_line = python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
-    assert "App.tsx" not in python_scope_files_line
-
-
-async def test_parallel_fan_out(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-17: per-stack fan-out uses anyio task group. No ``agents`` kwarg passed to execute."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    # Every execute call must have agents=None per D-38.
-    assert all(c["agents"] is None for c in stub.calls)
-
-
-async def test_per_stack_prompt_context(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-19: per-stack prompts reference intent and alternatives paths."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    per_stack_prompts = [
-        c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()
-    ]
-    assert per_stack_prompts
-    for p in per_stack_prompts:
-        assert "intent.md" in p
-        assert "alternatives.json" in p
-
-
-async def test_doc_review_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-20: generic fallback gets build_generic_fallback_prompt (may include doc notice when docs-only)."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
-    # notice). Contract: a generic-fallback prompt is emitted for README.md.
-    fallback_prompts = [
-        c["prompt"] for c in stub.calls if "you are reviewing the generic-fallback stack" in c["prompt"].lower()
-    ]
-    assert fallback_prompts
-    assert any("README.md" in p for p in fallback_prompts)
-
-
-async def test_pre_merge_parse_per_stack(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-21, D-22: phase_parse_feedback invoked once per per-stack output; records written."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-
-    parse_calls = [
-        c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()
-    ]
-    per_stack_outputs = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-review.md"))
-    assert len(parse_calls) >= len(per_stack_outputs)
-    records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
-    assert len(records) == len(per_stack_outputs)
-
-
-async def test_merged_report_path(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-24: final report written at REVIEW_OUTPUT_FILE path."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists()
-
-
-async def test_report_format_flat_numbered(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-25: flat globally-numbered ## Issues + continuing ## Cross-Stack Issues subsection."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    assert "## Issues" in text
-    assert "## Cross-Stack Issues" in text
-    # Numbering continues: 1., 2. in ## Issues then 3. in ## Cross-Stack Issues.
-    assert "3." in text.split("## Cross-Stack Issues", 1)[1]
-
-
-async def test_cross_stack_prefix(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """D-26: every cross-stack title starts with [cross-stack]."""
-    _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    text = (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
-    cross_section = text.split("## Cross-Stack Issues", 1)[1]
-    assert "[cross-stack]" in cross_section
 
 
 async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4502,34 +4407,6 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge(
     assert _count_merge_prompts(multi_calls) == 1, "merge agent missing on multi_stack"
 
 
-async def test_ac3_multi_stack_fanout_unchanged_by_short_circuit(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
-) -> None:
-    """AC3 (regression guard): the ≥3-file fan-out is byte-for-byte unchanged.
-
-    The tiny-diff short-circuit is scoped to ≤threshold files. The 3-file
-    ``multi_stack_target`` (python + react + generic + structure = 4 stacks)
-    MUST still perform the full fan-out AND invoke the merge agent. This test
-    pairs with AC2 to prove the gate is scoped correctly.
-
-    This also documents that ``test_preflight_notice`` (which asserts
-    ``agent_count == 12`` for this fixture) stays green: 4 stacks → 12 agents,
-    unchanged because no collapse fires above the threshold.
-    """
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    shared_calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-    mute_side_effects()
-    rc = await run(make_config(multi_stack_target))
-    assert rc == 0
-
-    # 4 stacks → 4 review prompts (python + react + generic + structure).
-    assert _count_review_prompts(shared_calls) == 4
-    # Merge agent still runs (NOT collapsed).
-    assert _count_merge_prompts(shared_calls) == 1
-
-
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
@@ -4566,8 +4443,15 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     assert per_stack_review_prompts, "expected at least one per-stack review prompt"
     prompt = per_stack_review_prompts[0]
 
-    # Hunks are inlined: the actual changed content reaches the prompt.
-    assert "return 'universe'" in prompt, "expected inlined hunk content in per-stack prompt"
+    # The complete api.py hunk reaches the real per-stack prompt, including
+    # its enclosing function context and the exact removed/added return lines.
+    expected_api_hunk = (
+        "@@ -1,2 +1,2 @@\n"
+        " def hello():\n"
+        "-    return 'world'\n"
+        "+    return 'universe'\n"
+    )
+    assert expected_api_hunk in prompt, "expected complete api.py diff hunk in per-stack prompt"
     # The Read instruction is absent (the agent is never told to Read diff.patch).
     assert "Read it directly" not in prompt
     # And diff_path is not embedded as an instruction (it remains a required
