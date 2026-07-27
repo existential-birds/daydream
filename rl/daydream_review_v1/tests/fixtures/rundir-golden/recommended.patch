@@ -1,0 +1,24 @@
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+index 3346a12..022f4b9 100644
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -13,6 +13,9 @@ class TestCalc(unittest.TestCase):
+     def test_mean(self) -> None:
+         self.assertEqual(mean([1, 2, 3]), 2.0)
+ 
++    def test_mean_non_integer(self) -> None:
++        self.assertEqual(mean([1, 2]), 1.5)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/.review-output.md b/.review-output.md
+new file mode 100644
+index 0000000..114c0b8
+--- /dev/null
++++ b/.review-output.md
+@@ -0,0 +1,4 @@
++# Review
++
++## Issues
++1. [tests/test_calc.py:13] `test_mean` cannot distinguish correct float division from a floor-division regression because the test input [1, 2, 3] produces an evenly-divisible mean (2.0), which would pass identically with floor division (//). Recommend adding a test case with non-integer mean, e.g. mean([1, 2]) == 1.5

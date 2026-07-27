@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -23,9 +25,61 @@ from typing import Any
 import verifiers.v1 as vf
 from daydream.benchmark.corpus import harvested_corpus
 from daydream.training.exclusion import load_exclusion_list
+from daydream.training.harvest import assemble_scoring_inputs
+from daydream.training.reward import score_trajectory
 from pydantic import BaseModel
 
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
+
 logger = logging.getLogger(__name__)
+
+DEFAULT_REPO_PATH = "/work/repo"
+
+
+def _archive_root(trace: vf.Trace) -> str:
+    """Archive root the harness told daydream to use, for this rollout."""
+    return str(trace.info.get("daydream_archive_root") or DEFAULT_ARCHIVE_ROOT)
+
+
+def _repo_path(trace: vf.Trace) -> str:
+    """Path of the repository under review inside the sandbox."""
+    return str(trace.info.get("daydream_repo_path") or DEFAULT_REPO_PATH)
+
+
+def _read_json(path: Path, *, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _manifest_row(run_dir: Path) -> dict[str, Any]:
+    """Flatten ``manifest.json`` into the flat row shape the scorer expects.
+
+    ``assemble_scoring_inputs(run_dir, row)`` reads ``row["grounding_rate"]``
+    (``daydream/training/harvest.py:223``). In the archive that value is nested
+    under ``metrics`` (``daydream/archive/manifest.py:213``); it only becomes a
+    top-level column when the run is indexed into SQLite
+    (``daydream/archive/_schema.py:128``). Reading the manifest verbatim would
+    silently null the grounding axis on every rollout.
+    """
+    manifest = _read_json(run_dir / "manifest.json", default={})
+    if not isinstance(manifest, dict):
+        return {}
+    metrics = manifest.get("metrics") or {}
+    return {**manifest, **metrics}
+
+
+async def _claimed_test_verdict(runtime: vf.Runtime, archive_root: str) -> bool | None:
+    """daydream's own ``deep/test-verdict.json`` claim, or ``None`` if absent."""
+    with tempfile.TemporaryDirectory(prefix="daydream-verdict-") as staging:
+        run_dir = await fetch_run_dir(runtime, Path(staging), archive_root)
+        if run_dir is None:
+            return None
+        verdict = _read_json(run_dir / "deep" / "test-verdict.json", default=None)
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("passed"), bool):
+        return None
+    return bool(verdict["passed"])
 
 #: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
 #: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
@@ -77,7 +131,110 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
 
 
 class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTaskConfig]):
-    """Rewards and metrics land here in Phase 3."""
+    """Two reward axes: daydream's own intrinsic composite, and the test suite.
+
+    ``intrinsic_composite`` replays the archived run through
+    :func:`daydream.training.reward.score_trajectory` — the exact scorer the
+    offline training pipeline uses, imported rather than reimplemented, so an
+    online reward and an offline label can never disagree about the same run.
+
+    ``fix_tests_pass`` is the ground truth the intrinsic composite cannot supply:
+    the repository's own suite, re-run inside the still-live sandbox. daydream's
+    own test verdict is a regex over agent prose
+    (``daydream/agent.py:252-300``), so it is recorded as a claim and compared
+    against the re-run — never trusted as reward.
+
+    Important: ``verifier_verdicts`` exist only when the fix gate was accepted
+    (``deep/recommendation-verdicts.json`` is written at
+    ``daydream/deep/orchestrator.py:1213-1229``). A review-only rollout therefore
+    scores on grounding and format alone. That is the designed behaviour, and
+    ``trace.info["reward_breakdown"]["axes_present"]`` records it per rollout.
+
+    The #91 Stage-0 preference rubric is deliberately NOT a reward here. Its seam
+    is ``TaskConfig.judges`` (or an additional ``@vf.reward``); until it passes
+    #91's offline ranking gate, golden-comment agreement is exposed only as the
+    non-summed ``golden_overlap`` metric.
+    """
+
+    @vf.reward(weight=1.0)
+    async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
+        """daydream's own trajectory composite over the archived run."""
+        with tempfile.TemporaryDirectory(prefix="daydream-rundir-") as staging:
+            run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+            if run_dir is None:
+                trace.info["reward_breakdown"] = {"error": "no archived run dir"}
+                return 0.0
+            breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
+
+        trace.info["reward_breakdown"] = {
+            "correctness_per_finding": breakdown.correctness_per_finding,
+            "grounding": breakdown.grounding,
+            "format_valid": breakdown.format_valid,
+            "length_penalty": breakdown.length_penalty,
+            "composite": breakdown.composite,
+            "axes_present": breakdown.axes_present,
+            "reward_version": breakdown.reward_version,
+        }
+        return self.config.w_composite * (breakdown.composite or 0.0)
+
+    @vf.reward(weight=1.0)
+    async def fix_tests_pass(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
+        """Re-run the repository's pinned suite against the fixed tree.
+
+        Deterministic because the image build proved the same command green at
+        the same commit before any agent touched it (D6). A rollout that applied
+        no fix is not evidence either way, so it takes ``no_fix_reward`` rather
+        than a free 1.0 for leaving the tree alone.
+        """
+        repo = _repo_path(trace)
+        applied = await runtime.run(["sh", "-c", f"test -s {shlex.quote(repo)}/.daydream/recommended.patch"], {})
+        if applied.exit_code != 0:
+            trace.record_metric("fixes_applied", 0.0)
+            return self.config.no_fix_reward
+
+        trace.record_metric("fixes_applied", 1.0)
+        result = await runtime.run(
+            ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
+        )
+        passed = result.exit_code == 0
+
+        # Reward-hack tripwire: daydream's own prose-derived verdict versus what
+        # the suite actually does. Recorded here rather than as a @vf.metric
+        # because metrics run BEFORE rewards (verifiers task.py:299-306), so a
+        # metric cannot see this re-run without paying for a second one.
+        claimed = await _claimed_test_verdict(runtime, _archive_root(trace))
+        if claimed is not None:
+            trace.record_metric("test_claim_mismatch", float(claimed != passed))
+
+        return self.config.w_tests * float(passed)
+
+    @vf.metric
+    async def review_shape(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
+        """Observability only — never summed into the reward.
+
+        ``golden_overlap`` is an explicitly crude localisation proxy: the share of
+        the bot's golden comments whose file appears among daydream's merged
+        findings. It exists to inform #91's rubric design, not to grade a rollout.
+        """
+        with tempfile.TemporaryDirectory(prefix="daydream-shape-") as staging:
+            run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+            items: list[dict[str, Any]] = []
+            if run_dir is not None:
+                items = _read_json(run_dir / "deep" / "merged-items.json", default={}).get("items") or []
+
+        found_files = {item.get("file") for item in items if isinstance(item, dict)}
+        golden_paths = [c.path for c in self.data.golden_comments if c.path]
+        overlap = (
+            sum(1 for path in golden_paths if path in found_files) / len(golden_paths)
+            if golden_paths
+            else 0.0
+        )
+        return {
+            "n_findings": float(len(items)),
+            "golden_overlap": overlap,
+            "n_golden_comments": float(len(golden_paths)),
+            "daydream_exit_code": float(trace.info.get("daydream_exit_code", -1)),
+        }
 
 
 class DaydreamReviewConfig(vf.TasksetConfig):

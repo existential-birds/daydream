@@ -1,0 +1,35 @@
+diff --git a/calc.py b/calc.py
+index 02ddbd3..319252d 100644
+--- a/calc.py
++++ b/calc.py
+@@ -9,3 +9,8 @@ def add(a: int, b: int) -> int:
+ def divide(a: int, b: int) -> float:
+     """Return *a* divided by *b*."""
+     return a / b
++
++
++def mean(values: list[int]) -> float:
++    """Return the arithmetic mean of *values*."""
++    return sum(values) / len(values)
+diff --git a/tests/test_calc.py b/tests/test_calc.py
+index 1bb8181..3346a12 100644
+--- a/tests/test_calc.py
++++ b/tests/test_calc.py
+@@ -1,6 +1,6 @@
+ import unittest
+ 
+-from calc import add, divide
++from calc import add, divide, mean
+ 
+ 
+ class TestCalc(unittest.TestCase):
+@@ -10,6 +10,9 @@ class TestCalc(unittest.TestCase):
+     def test_divide(self) -> None:
+         self.assertEqual(divide(6, 3), 2.0)
+ 
++    def test_mean(self) -> None:
++        self.assertEqual(mean([1, 2, 3]), 2.0)
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
