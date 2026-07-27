@@ -7,9 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-26
+
+### Added
+
+- **improve:** Advisor flow for repository audit and plan generation ([#291](https://github.com/existential-birds/daydream/pull/291))
+
+  `daydream improve <path>` runs a read-only reconnaissance pass over a
+  repository, producing category-audited findings and prioritized plan
+  artifacts. `daydream improve plan "<request>" <path>` investigates a single
+  improvement request and renders a host-side plan. The flow registers as a
+  first-class step sequence in the flow engine alongside deep, shallow, and
+  review.
+
 ### Changed
 
-- **config:** Update default models and add per-phase reasoning-effort defaults
+- **config:** Move defaults to Sonnet 5 and the GPT-5.6 lineup ([#288](https://github.com/existential-birds/daydream/pull/288))
 
   `DEFAULT_CODEX_MODEL` moves to `gpt-5.6-sol` and the Claude mid tier to
   `claude-sonnet-5`. `PHASE_DEFAULT_MODELS["codex"]` is now tiered across the
@@ -19,6 +32,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `runner._resolved_reasoning_effort` as the lowest precedence tier below
   `--reasoning-effort` and both config-file tiers. Pricing entries are added for
   the new ids; existing entries are retained so archived runs still price.
+
+### Fixed
+
+- **deep:** Propagate authoritative PR-intent framing to the review phases ([#293](https://github.com/existential-birds/daydream/pull/293))
+
+  The intent phase produces an authoritative framing of what the PR does and
+  why. This framing was not being propagated to the downstream per-stack review
+  phases, causing reviewers to occasionally flag intended behavior as defects.
+  The framing is now threaded through to all review prompts.
+
+- **git_ops:** Drop invalid `--body-file` flag from `gh secret set` ([#292](https://github.com/existential-birds/daydream/pull/292))
+
+  `daydream setup` passed `--body-file` to `gh secret set`, which does not
+  accept that flag. The tests that asserted the flag's presence guarded an
+  invalid command shape rather than verifying real behavior.
+
+- **training:** Make corpus labels evidenced, and make the evidence capturable ([#285](https://github.com/existential-birds/daydream/pull/285))
+
+  Corpus harvest labels now require an evidence trace linking each label to
+  the trajectory content that justifies it. The evidence is captured during
+  harvest and projected alongside the label, so downstream training data
+  consumers can audit label provenance.
+
+- **benchmark:** Keep leaf precision consistent with tp/fp ([#283](https://github.com/existential-birds/daydream/pull/283))
+
+  The benchmark scorer computed leaf-node precision from a denominator that
+  diverged from the tp/fp counts used at parent nodes, producing impossible
+  precision values at the leaves. Leaf precision now derives from the same
+  tp/fp pair as the rest of the tree.
+
+- **agent:** Capture structured output under `--log` mode ([#277](https://github.com/existential-birds/daydream/pull/277))
+
+  `--log` mode bypassed the Rich UI but dropped the final structured-output
+  result. The agent's structured response is now emitted as a `[result]` line
+  in the raw log stream, matching what the UI path captures.
 
 ## [0.24.0] - 2026-07-15
 
@@ -866,7 +914,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.24.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/existential-birds/daydream/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/existential-birds/daydream/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/existential-birds/daydream/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/existential-birds/daydream/compare/v0.22.0...v0.23.0
