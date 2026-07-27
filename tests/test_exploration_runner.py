@@ -31,56 +31,38 @@ FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 # Subagent prompt sanity checks (Plan 03)
 def test_pattern_scanner_prompt_includes_guideline_files():
     files = [FileInfo("daydream/foo.py", "modified")]
-    dynamic = build_pattern_scanner_prompt(files, "main...HEAD", cwd=Path("/repo"))
+    cwd = Path("/repo")
+    dynamic = build_pattern_scanner_prompt(files, "main...HEAD", cwd=cwd)
     assert "CLAUDE.md" in dynamic
     assert "main...HEAD" in dynamic
     assert "daydream/foo.py" in dynamic
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in dynamic
     # Regression guard: raw diff text must never be embedded.
     assert "<diff>" not in dynamic
 
 
 def test_dependency_tracer_prompt_mentions_affected_files():
     files = [FileInfo("daydream/a.py", "modified"), FileInfo("daydream/b.py", "modified")]
-    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=Path("/repo"))
+    cwd = Path("/repo")
+    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=cwd)
     assert "daydream/a.py" in prompt
     assert "daydream/b.py" in prompt
     assert "main...HEAD" in prompt
     assert "```json" in prompt
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
 
 
 def test_test_mapper_prompt_instructs_mapping():
     files = [FileInfo("daydream/x.py", "modified")]
-    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=Path("/repo"))
+    cwd = Path("/repo")
+    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=cwd)
     assert "test" in prompt.lower()
     assert "daydream/x.py" in prompt
     assert "main...HEAD" in prompt
     assert "```json" in prompt
+    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
-
-
-def test_pattern_scanner_prompt_contains_cwd_grounding():
-    cwd = Path("/tmp/linked/worktree")
-    files = [FileInfo("daydream/foo.py", "modified")]
-    prompt = build_pattern_scanner_prompt(files, "main...HEAD", cwd=cwd)
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
-    assert str(cwd) in prompt
-
-
-def test_dependency_tracer_prompt_contains_cwd_grounding():
-    cwd = Path("/tmp/linked/worktree")
-    files = [FileInfo("daydream/a.py", "modified")]
-    prompt = build_dependency_tracer_prompt(files, "main...HEAD", cwd=cwd)
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
-    assert str(cwd) in prompt
-
-
-def test_test_mapper_prompt_contains_cwd_grounding():
-    cwd = Path("/tmp/linked/worktree")
-    files = [FileInfo("daydream/x.py", "modified")]
-    prompt = build_test_mapper_prompt(files, "main...HEAD", cwd=cwd)
-    assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
-    assert str(cwd) in prompt
 
 
 def test_schemas_are_valid_objects():
