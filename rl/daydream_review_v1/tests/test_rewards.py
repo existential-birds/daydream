@@ -157,6 +157,52 @@ async def test_intrinsic_composite_carries_the_grounding_axis(
     assert breakdown["grounding"] == expected_grounding
 
 
+async def test_zero_finding_rollout_scores_no_intrinsic_reward(
+    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """Saying nothing must not be the cheapest path to a perfect reward.
+
+    A review that reports ZERO findings has an UNDEFINED grounding rate — the
+    ratio has no denominator — and no verified recommendations, so it has no
+    credit axis at all. Scoring the empty ratio as a vacuous 1.0 handed such a
+    rollout the maximum ``intrinsic_composite``, making silence the degenerate
+    optimum the policy would learn first. With ``grounding_rate`` undefined the
+    whole credit side must be absent, ``composite`` must be ``None``, and the
+    reward the trainer sums must be 0.0.
+    """
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+
+    (run_dir / "deep" / "merged-items.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+    # The correctness axis comes from deep/recommendation-verdicts.json
+    # (daydream/training/harvest.py:196-201 -> daydream/training/reward.py:369-374);
+    # the golden run ships one, and leaving it would keep the composite non-None.
+    (run_dir / "deep" / "recommendation-verdicts.json").unlink()
+
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    manifest["metrics"]["grounding_rate"] = None
+    manifest["metrics"]["total_findings"] = 0
+    (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
+    evaluation["grounding"]["grounding_rate"] = None
+    evaluation["findings"]["total"] = 0
+    (run_dir / "evaluation.json").write_text(json.dumps(evaluation), encoding="utf-8")
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    breakdown = trace.info["reward_breakdown"]
+    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert breakdown["axes_present"]["grounding"] is False
+    assert breakdown["composite"] is None
+    # Not merely "grounding went away": no credit axis survives, so the
+    # composite is uncomputable rather than carried by a stale verdict file.
+    assert breakdown["axes_present"]["correctness"] is False
+
+
 async def test_missing_run_dir_scores_zero(
     tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:

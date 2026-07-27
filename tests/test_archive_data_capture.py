@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from daydream import git_ops
+from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 
 # Reuse the deep-orchestrator stub harness (the hard-won prompt-dispatch heuristics
@@ -182,6 +183,54 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     assert metrics["coverage_ratio"] is None
     assert metrics["cost_per_finding_usd"] is None
     assert not (run_dir / "evaluation.json").exists()
+
+
+async def test_zero_finding_run_leaves_grounding_rate_undefined(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    """A DEFAULT deep run whose review produced ZERO findings records a NULL
+    grounding rate, not a perfect one.
+
+    This is emphatically NOT the ``--no-eval`` path: eval runs here (asserted via
+    ``evaluation.json`` on disk), so the null is the eval pass reporting an
+    undefined 0/0 rate, not the eval pass never having happened. Without that
+    distinction the test would pass vacuously. A perfect 1.0 for a review that
+    found nothing propagates into the manifest and becomes a top RL reward.
+    """
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = []  # empty list: the merge agent ran and returned nothing
+
+    # The manifest's total_findings comes from the per-stack records, not the
+    # merged items, so a genuinely zero-finding run also needs every per-stack
+    # parse to return no issues. Wrap the shared stub rather than adding a knob
+    # to it: only this test needs the clean-review shape.
+    _stub_execute = stub.execute
+
+    async def _no_issues_parsed(cwd, prompt, *args, **kwargs):
+        if "extract only actionable issues" in prompt.lower():
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output={"issues": []}, continuation=None)
+            return
+        async for event in _stub_execute(cwd, prompt, *args, **kwargs):
+            yield event
+
+    monkeypatch.setattr(stub, "execute", _no_issues_parsed)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    assert (run_dir / "evaluation.json").is_file()
+
+    metrics = json.loads((run_dir / "manifest.json").read_text())["metrics"]
+    assert metrics["total_findings"] == 0
+    assert metrics["grounding_rate"] is None
 
 
 # --- AC3 (shallow path): recommended.patch captured through the shallow runner ---
