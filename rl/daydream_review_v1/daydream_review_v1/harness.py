@@ -1,18 +1,82 @@
-"""Harness scaffold — implemented in Phase 4."""
+"""Harness: one rollout is one headless daydream deep run inside the sandbox.
+
+The harness starts exactly one program and returns; every model turn it makes —
+including the parallel exploration and per-stack fan-outs — flows through the
+interception server on the way out, so the whole run lands in one trace as a DAG
+of branches. Branches are training samples; nothing here flattens them.
+
+Deliberately NOT a new daydream backend. Every existing backend delegates tool
+execution to its own CLI runtime; a raw HTTP backend would mean reimplementing
+daydream's entire tool loop, which is a different project (osprey). Swapping the
+rollout agent is one config key: ``backend``.
+"""
 
 from __future__ import annotations
 
+from typing import Any
+
 import verifiers.v1 as vf
+from pydantic import field_validator
+
+from daydream_review_v1.backends import ROLLOUT_HOME, STRATEGIES, BackendStrategy
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed
+from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
 
 
 class DaydreamReviewHarnessConfig(vf.HarnessConfig):
-    """Placeholder; Phase 4 adds backend / fanout_concurrency / extra_args."""
+    backend: str = "claude"
+    """Which daydream backend drives the rollout — any key of ``STRATEGIES``."""
+
+    fanout_concurrency: int = 4
+    """Parallel-``execute()`` hint handed to the backend.
+
+    Effective upstream concurrency is roughly ``pool.max_workers ×
+    fanout_concurrency``: each rollout runs its own fan-out.
+    """
+
+    home: str = ROLLOUT_HOME
+    """``HOME`` for the daydream process; where per-backend config is planted."""
+
+    repo_path: str = DEFAULT_REPO_PATH
+    """The repository under review, baked into the image at the task's head SHA."""
+
+    archive_root: str = DEFAULT_ARCHIVE_ROOT
+    """``DAYDREAM_ARCHIVE_DIR``. The reward reads the run dir back out of it."""
+
+    extra_args: list[str] = []
+    """Escape hatch, e.g. ``["--reasoning-effort", "high"]`` for codex."""
+
+    @field_validator("backend")
+    @classmethod
+    def _known_backend(cls, value: str) -> str:
+        if value not in STRATEGIES:
+            raise ValueError(f"unknown backend {value!r}; valid: {', '.join(sorted(STRATEGIES))}")
+        return value
 
 
 class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
     APPENDS_SYSTEM_PROMPT = False
     SUPPORTS_MCP = False
     SUPPORTS_MESSAGE_PROMPT = False
+
+    @property
+    def strategy(self) -> BackendStrategy:
+        return STRATEGIES[self.config.backend](self.config.home)
+
+    async def setup(self, runtime: vf.Runtime) -> None:
+        """Fail fast with remediation text; the image bakes everything else (D6)."""
+        strategy = self.strategy
+        binaries = ("daydream", *strategy.required_binaries)
+        checks = " && ".join(f"command -v {binary} >/dev/null" for binary in binaries)
+        result = await runtime.run(
+            ["sh", "-c", f"{checks} && test -d {self.config.repo_path}"], self.config.resolved_env
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"rollout image is not usable for backend={strategy.name}: it must carry "
+                f"{', '.join(binaries)} on PATH and a repository at {self.config.repo_path}. "
+                f"Build it with images/build_images.py. {result.stdout}{result.stderr}"
+            )
 
     async def launch(
         self,
@@ -23,4 +87,49 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         secret: str,
         mcp_urls: dict[str, str],
     ) -> vf.ProgramResult:
-        raise NotImplementedError("Phase 4")
+        data: DaydreamReviewData = trace.task.data
+        strategy = self.strategy
+        await strategy.provision(runtime, endpoint, secret, ctx.model)
+
+        env: dict[str, str] = {
+            **self.config.resolved_env,
+            **strategy.env(endpoint, secret, fanout_concurrency=self.config.fanout_concurrency),
+            "HOME": self.config.home,
+            "DAYDREAM_ARCHIVE_DIR": self.config.archive_root,
+        }
+        # --yes is load-bearing: --non-interactive alone takes the fix gate's safe
+        # default and exits 0 having applied nothing (deep/orchestrator.py:1187-1196),
+        # which would make every rollout a review-only rollout. --review is never
+        # set: with --yes it is a parse error (cli.py:978-981). Deep is the default
+        # flow, so there is no --deep to pass (runner.py:812).
+        argv = [
+            "daydream",
+            "--non-interactive",
+            "--yes",
+            "--backend",
+            strategy.name,
+            "--model",
+            ctx.model,
+            "--base",
+            data.base_sha,
+            *self.config.extra_args,
+            self.config.repo_path,
+        ]
+        result = await runtime.run_program(argv, env)
+
+        info: dict[str, Any] = trace.info
+        info["daydream_exit_code"] = result.exit_code
+        info["daydream_backend"] = strategy.name
+        info["daydream_repo_path"] = self.config.repo_path
+        info["daydream_archive_root"] = self.config.archive_root
+
+        # Exit 1 with complete artifacts is a legitimate outcome, not a crash: the
+        # deep flow stops non-zero when the suite is still red after the fix pass
+        # (orchestrator.py:1389). Setting a stop condition makes the framework
+        # return quietly instead of raising HarnessError (harness.py:99-118), so the
+        # rollout SCORES — a red suite is exactly the signal fix_tests_pass wants.
+        # A non-zero exit with no artifacts is left to raise: that is infrastructure
+        # failure and belongs to the retry budget, not to the gradient.
+        if result.exit_code != 0 and await daydream_completed(runtime, self.config.archive_root):
+            trace.stop("daydream_completed_nonzero")
+        return result
