@@ -40,10 +40,43 @@ workspace glob), but an editable install is less surprising.
 uv run rl @ /abs/path/to/daydream/rl/train/rl.toml --dry-run
 ```
 
-`--dry-run` runs every pydantic validator — including renderer resolution, the
-LoRA/weight-broadcast interlock, and the batch-size/group-size divisibility check
-— and returns before it ever touches `pynvml`, so it needs no GPU. Resolved
-configs land in `<output_dir>/configs/`.
+`--dry-run` runs every pydantic validator — renderer resolution, the
+LoRA/weight-broadcast interlock, the batch-size/group-size divisibility check —
+and returns before it ever touches `pynvml`, so it needs no GPU. Resolved
+configs land in `<output_dir>/configs/`; check that `inference.toml` came back
+with `enable_lora = true` and `max_lora_rank = 16`, which prime-rl derives from
+the trainer's LoRA block rather than taking from the file.
+
+**On macOS the `uv sync` above will not work.** prime-rl v0.7.0's lockfile
+declares only `linux` x86_64/aarch64 environments (it resolves vllm, flash-attn,
+deep-gemm), and `uv sync --all-packages` refuses outright:
+
+```
+error: The current Python platform is not compatible with the lockfile's
+supported environments
+```
+
+Training runs on Linux, so that is not a problem in itself — but it does mean the
+dry-run gate has to be reached another way when validating a config change from a
+Mac. prime-rl ships `packages/prime-rl-configs`, its own "slim config schema, no
+GPU/ML deps" package, which installs anywhere:
+
+```bash
+uv venv --python 3.12 .venv-cfg
+uv pip install --python .venv-cfg/bin/python \
+    -e deps/verifiers -e deps/renderers -e deps/pydantic-config
+uv pip install --python .venv-cfg/bin/python --no-deps -e packages/prime-rl-configs -e .
+uv pip install --python .venv-cfg/bin/python pynvml tomli-w loguru psutil
+uv pip install --python .venv-cfg/bin/python -e /abs/path/to/daydream
+uv pip install --python .venv-cfg/bin/python --no-deps -e /abs/path/to/daydream/rl/daydream_review_v1
+
+.venv-cfg/bin/python -c "
+import sys; sys.argv = ['rl', '@', '/abs/path/to/daydream/rl/train/rl.toml', '--dry-run']
+from prime_rl.entrypoints.rl import main; main()"
+```
+
+That reaches the same `Dry run complete.` and writes the same resolved configs —
+every validator runs, only the GPU stack is absent.
 
 ## The verifiers skew you must check
 
