@@ -1,28 +1,238 @@
-"""Taskset scaffold — implemented in Phase 1."""
+"""Taskset: one task per harvested-corpus pull request.
+
+Tasks come from a ``daydream bench harvest``-format corpus directory — never from
+the pinned Martian-5 held-out benchmark, whose five repositories are exactly the
+SPEC C5 exclusion list. :meth:`DaydreamReviewTaskset.load` enforces that
+unconditionally: there is no bypass parameter and no split exception. Train and
+eval are two different corpus directories, not a flag.
+
+Each task also needs a container image, a test command and a clone URL, which
+come from ``images/manifest.toml`` keyed by repo slug. A corpus PR whose repo has
+no manifest entry is an error, not a silent skip: a rollout set that quietly
+shrinks is a rollout set nobody can reproduce.
+"""
 
 from __future__ import annotations
 
+import json
+import logging
+import tomllib
+from pathlib import Path
+from typing import Any
+
 import verifiers.v1 as vf
+from daydream.benchmark.corpus import harvested_corpus
+from daydream.training.exclusion import load_exclusion_list
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
+
+#: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
+#: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
+#: full re-run of the repository's test suite.
+DEFAULT_TIMEOUT = vf.TaskTimeout(setup=900, harness=5400, scoring=1800)
+
+
+class GoldenComment(BaseModel):
+    """One review comment the upstream bot actually posted on the PR.
+
+    Shape mirrors ``daydream/benchmark/harvest.py`` ``build_harvested_corpus``.
+    Used only for the non-summed ``golden_overlap`` metric — never a reward.
+    """
+
+    comment: str
+    path: str | None = None
+    line: int | None = None
+    resolved: bool | None = None
+    severity: str | None = None
 
 
 class DaydreamReviewData(vf.TaskData):
-    """Placeholder; Phase 1 adds the harvested-corpus fields."""
+    """One reviewable PR snapshot."""
+
+    repo_slug: str
+
+    clone_url: str
+    """Upstream provenance URL, straight from the corpus record.
+
+    Nothing clones at rollout time — the repository is baked into the task's
+    image (D6). The URL the image build mirror-clones is the manifest entry's
+    own ``clone_url``, which may differ (the fixture repo uses a sentinel).
+    """
+
+    pr_number: int
+    base_sha: str
+    head_sha: str
+    base_ref: str | None = None
+    test_command: str
+    golden_comments: list[GoldenComment] = []
 
 
 class DaydreamReviewTaskConfig(vf.TaskConfig):
-    """Placeholder; Phase 1 adds the reward weights."""
+    """Reward weights, overridable as ``--taskset.task.*``."""
+
+    w_composite: float = 1.0
+    w_tests: float = 1.0
+    no_fix_reward: float = 0.0
 
 
 class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTaskConfig]):
-    """Placeholder; Phase 3 adds the rewards and metrics."""
+    """Rewards and metrics land here in Phase 3."""
 
 
 class DaydreamReviewConfig(vf.TasksetConfig):
-    """Placeholder; Phase 1 adds corpus_dir / manifest_path."""
-
+    corpus_dir: Path = Path("")
+    manifest_path: Path = Path("")
     task: DaydreamReviewTaskConfig = DaydreamReviewTaskConfig()
+
+    use_images: bool = True
+    """Stamp the manifest image onto each task.
+
+    A task carrying an ``image`` may only run in a container — verifiers refuses
+    the subprocess runtime outright (``verifiers/v1/env.py:189-195``). Set this
+    false ONLY for the local subprocess smoke path (``configs/eval-stub.toml``),
+    where the repository under review is staged into the runtime workdir instead
+    of being baked into an image. Real train/eval runs leave it true; without the
+    image there is no green-baseline guarantee and the fix reward is noise.
+    """
+
+
+class _ManifestEntry(BaseModel):
+    clone_url: str
+    image: str
+    test_command: str
+    setup_cmds: list[str] = []
+
+
+def load_manifest(path: Path) -> dict[str, _ManifestEntry]:
+    """Read ``images/manifest.toml`` into ``{repo_slug: entry}``.
+
+    Raises:
+        ValueError: If an ``image`` carries an explicit tag. The tag is reserved
+            for the task's head SHA so one image is exactly one PR snapshot.
+    """
+    raw: dict[str, Any] = tomllib.loads(path.read_text(encoding="utf-8"))
+    entries = {slug: _ManifestEntry(**body) for slug, body in raw.get("repos", {}).items()}
+    # Only the final path segment can carry a tag; `registry:5000/img` is a host:port.
+    tagged = sorted(slug for slug, entry in entries.items() if ":" in entry.image.rsplit("/", 1)[-1])
+    if tagged:
+        raise ValueError(
+            f"{path}: image must be a repository name with no tag (the tag is the head SHA); "
+            f"tagged entries: {', '.join(tagged)}"
+        )
+    return entries
+
+
+def _repo_slug(clone_url: str) -> str:
+    """``https://github.com/owner/name`` -> ``owner/name``."""
+    parts = clone_url.rstrip("/").removesuffix(".git").split("/")
+    return "/".join(parts[-2:])
+
+
+def _load_golden_comments(corpus_dir: Path) -> dict[str, list[GoldenComment]]:
+    """Read ``results/benchmark_data.json``, keyed by golden URL.
+
+    Raises:
+        ValueError: If the file is absent. ``daydream bench harvest`` always
+            writes it (``daydream/benchmark/harvest.py:379``), so its absence
+            means a truncated or hand-rolled corpus — defaulting to no golden
+            comments would silently zero the ``golden_overlap`` metric instead.
+    """
+    path = corpus_dir / "results" / "benchmark_data.json"
+    if not path.exists():
+        raise ValueError(
+            f"corpus {corpus_dir} has no results/benchmark_data.json; "
+            "re-run `daydream bench harvest` to produce a complete corpus"
+        )
+    corpus: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        url: [GoldenComment(**comment) for comment in entry.get("golden_comments", [])]
+        for url, entry in corpus.items()
+    }
 
 
 class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]):
     def load(self) -> list[DaydreamReviewTask]:
-        raise NotImplementedError("Phase 1")
+        config = self.config
+        if config.corpus_dir == Path(""):
+            raise ValueError("no corpus directory: pass --taskset.corpus-dir <harvested corpus dir>")
+        if config.manifest_path == Path(""):
+            raise ValueError("no image manifest: pass --taskset.manifest-path <images/manifest.toml>")
+
+        if not config.use_images:
+            logger.warning(
+                "use_images is off: tasks carry no image, so nothing guarantees a green baseline "
+                "and fix_tests_pass is not deterministic. This is the local smoke path only."
+            )
+
+        source = harvested_corpus(config.corpus_dir)
+        prs = sorted(source.prs, key=lambda pr: (_repo_slug(pr.clone_url), pr.pr_number))
+
+        # harvested_corpus() drops records with no review_commit_id (daydream
+        # benchmark/corpus.py:73) — there is no snapshot to replay. Say so out loud
+        # rather than letting a corpus quietly shrink between harvest and rollout.
+        indexed = len(json.loads((config.corpus_dir / "index.json").read_text(encoding="utf-8")).get("prs", []))
+        if indexed > len(prs):
+            logger.warning(
+                "corpus %s indexes %d PR(s) but only %d have a review snapshot commit; "
+                "the rest have no head SHA to replay and are not rollout tasks",
+                config.corpus_dir,
+                indexed,
+                len(prs),
+            )
+
+        # C5 first and unconditionally: an excluded repo must fail the load before
+        # any manifest or per-record check can mask it. Slugs are compared
+        # case-insensitively — GitHub treats `GetSentry/Sentry` and
+        # `getsentry/sentry` as the same repository, and so must this gate.
+        excluded = {slug.casefold() for slug in load_exclusion_list()}
+        offenders = sorted({slug for pr in prs if (slug := _repo_slug(pr.clone_url)).casefold() in excluded})
+        if offenders:
+            raise ValueError(
+                f"C5 violation: excluded repo(s) in corpus {config.corpus_dir}: {', '.join(offenders)}. "
+                "These repositories are the held-out benchmark and must never appear in a training or "
+                "eval rollout set."
+            )
+
+        unbased = sorted(f"{_repo_slug(pr.clone_url)}#{pr.pr_number}" for pr in prs if not pr.base_sha)
+        if unbased:
+            raise ValueError(
+                f"corpus {config.corpus_dir} has record(s) with no base_sha: {', '.join(unbased)}. "
+                "A PR with no pinned base has no reviewable diff and no image to build; re-harvest "
+                "the corpus so base_sha is captured (daydream/benchmark/harvest.py:355)."
+            )
+
+        manifest = load_manifest(config.manifest_path)
+        missing = sorted({slug for pr in prs if (slug := _repo_slug(pr.clone_url)) not in manifest})
+        if missing:
+            raise ValueError(
+                f"repo(s) absent from image manifest {config.manifest_path}: {', '.join(missing)}. "
+                "Add an entry (or remove the PRs from the corpus) — tasks are never silently skipped."
+            )
+
+        golden = _load_golden_comments(config.corpus_dir)
+        tasks: list[DaydreamReviewTask] = []
+        for idx, pr in enumerate(prs):
+            slug = _repo_slug(pr.clone_url)
+            entry = manifest[slug]
+            assert pr.base_sha is not None  # narrowed by the `unbased` guard above
+            data = DaydreamReviewData(
+                idx=idx,
+                name=f"{slug}#{pr.pr_number}",
+                # Informational only: the daydream CLI takes no prompt. It must still be
+                # non-None or the interception server opens a user simulator instead
+                # (verifiers 0.2.1 interception/server.py:346-356).
+                prompt=f"Deep-review PR #{pr.pr_number} of {slug} @ {pr.head_sha[:12]}",
+                image=f"{entry.image}:{pr.head_sha[:12]}" if config.use_images else None,
+                timeout=DEFAULT_TIMEOUT,
+                repo_slug=slug,
+                clone_url=pr.clone_url,
+                pr_number=pr.pr_number,
+                base_sha=pr.base_sha,
+                head_sha=pr.head_sha,
+                base_ref=pr.base_ref,
+                test_command=entry.test_command,
+                golden_comments=golden.get(pr.golden_url, []),
+            )
+            tasks.append(DaydreamReviewTask(data, config.task))
+        return tasks
