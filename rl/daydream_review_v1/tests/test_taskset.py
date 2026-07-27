@@ -224,3 +224,25 @@ def test_loader_contract_resolves_package(corpus_mini_dir: Path, fixture_manifes
         )
     )
     assert len(taskset.select()) == 2
+
+
+def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path) -> None:
+    """The reference entry is real upstream history, not another synthetic repo.
+
+    pallets/itsdangerous PR #406 (BSD-3-Clause, not on the C5 exclusion list) is
+    the proof that the manifest + corpus + image pipeline works on a repository
+    nobody here authored. Its image is built from these exact SHAs, so a drift
+    between the corpus and the manifest would silently point tasks at an image
+    that does not exist.
+    """
+    corpus = Path(__file__).parent / "fixtures" / "corpus-reference"
+    taskset = DaydreamReviewTaskset(
+        DaydreamReviewConfig(id="daydream-review-v1", corpus_dir=corpus, manifest_path=fixture_manifest_path)
+    )
+    (task,) = taskset.load()
+    assert task.data.repo_slug == "pallets/itsdangerous"
+    assert task.data.pr_number == 406
+    assert task.data.head_sha == "4bb03cd6819228f30079885297299fe568a62863"
+    assert task.data.base_sha == "4dffa1963f896a0a311dec3c14f003a5f382c446"
+    assert task.data.test_command == "python -m pytest -q"
+    assert task.data.image == "daydream-rl/itsdangerous:4bb03cd68192"

@@ -1,0 +1,20 @@
+{
+  "repo": "pallets/itsdangerous",
+  "bot": "none",
+  "n_prs_with_bot_activity": 1,
+  "prs": [
+    {
+      "pr_number": 406,
+      "title": "remove previously deprecated code",
+      "state": "closed",
+      "merged": true,
+      "base_ref": "main",
+      "base_sha": "4dffa1963f896a0a311dec3c14f003a5f382c446",
+      "review_commit_id": "4bb03cd6819228f30079885297299fe568a62863",
+      "n_inline_comments": 0,
+      "n_review_summaries": 0,
+      "n_resolved_threads": 0,
+      "threads_complete": true
+    }
+  ]
+}
