@@ -1,5 +1,7 @@
 """Tests for deterministic merged-items → review_comments mapping."""
 
+import pytest
+
 from daydream.benchmark.mapping import merged_items_to_review_comments
 
 TS = "2026-06-03T00:00:00Z"
@@ -78,23 +80,19 @@ def test_mapping_skips_items_that_would_produce_empty_body():
     assert all(c["body"].strip() for c in out)           # no harvested comment is ever empty
 
 
-def test_min_confidence_high_excludes_medium_and_unrated():
+@pytest.mark.parametrize(
+    ("field", "high", "medium", "threshold"),
+    [("confidence", "HIGH", "MEDIUM", "HIGH"), ("severity", "high", "medium", "high")],
+    ids=["confidence", "severity"],
+)
+def test_minimum_threshold_excludes_medium_and_unrated(field, high, medium, threshold):
+    """Apply confidence and severity thresholds to exclude lower or missing ratings."""
     doc = {"items": [
-        _item("high.py", 1, id=1, confidence="HIGH"),
-        _item("med.py", 2, id=2, confidence="MEDIUM"),
-        _item("none.py", 3, id=3, confidence=""),  # normalises to None
+        _item("high.py", 1, id=1, **{field: high}),
+        _item("med.py", 2, id=2, **{field: medium}),
+        _item("none.py", 3, id=3, **{field: ""}),
     ]}
-    out = merged_items_to_review_comments(doc, created_at=TS, min_confidence="HIGH")
-    assert [c["path"] for c in out] == ["high.py"]
-
-
-def test_min_severity_high_excludes_medium_and_unrated():
-    doc = {"items": [
-        _item("high.py", 1, id=1, severity="high"),
-        _item("med.py", 2, id=2, severity="medium"),
-        _item("none.py", 3, id=3, severity=""),  # normalises to None
-    ]}
-    out = merged_items_to_review_comments(doc, created_at=TS, min_severity="high")
+    out = merged_items_to_review_comments(doc, created_at=TS, **{f"min_{field}": threshold})
     assert [c["path"] for c in out] == ["high.py"]
 
 

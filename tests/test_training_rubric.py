@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -43,110 +45,91 @@ def test_rubric_serializes_with_local_source() -> None:
     assert rub.to_dict()["local_commit_applied"] == {"verdict": "applied"}
 
 
-def test_outcome_label_accepted_when_pr_merged_and_no_unresolved() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-        fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
-        comment_resolution=CommentResolutionSignal(2, 2, 0),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "accepted"
-
-
-def test_outcome_label_unknown_when_merged_but_no_comments_tracked() -> None:
-    """A merged PR with zero tracked daydream comments is NOT evidence of accept.
-
-    ``unresolved == 0`` is vacuously true at ``total == 0``, which made every
-    merged PR where daydream produced no tracked comment score identically to
-    one where every finding was addressed. Such a run must be ``"unknown"``.
-    """
-    rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "unknown"
-
-
-def test_outcome_label_accepted_requires_real_comments_all_resolved() -> None:
-    """The evidenced accept still works: three comments, none unresolved."""
-    rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-        fix_applied=FixAppliedSignal("applied", 3, 3, ["c1"]),
-        comment_resolution=CommentResolutionSignal(3, 3, 0),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "accepted"
-
-
-def test_outcome_label_contested_when_merged_with_one_unresolved_of_three() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-        fix_applied=FixAppliedSignal("applied", 2, 3, ["c1"]),
-        comment_resolution=CommentResolutionSignal(3, 2, 1),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "contested"
-
-
-def test_outcome_label_contested_when_merged_but_unresolved() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
-        fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
-        comment_resolution=CommentResolutionSignal(3, 1, 2),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "contested"
-
-
-def test_outcome_label_rejected_when_pr_closed_unmerged() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("not_applied", 0, 1, []),
-        comment_resolution=CommentResolutionSignal(1, 0, 1),
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    assert derive_outcome_label(rub) == "rejected"
-
-
-def test_outcome_label_accepted_via_local_branch() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("applied"),
-        posterior_source="local_branch",
-    )
-    assert derive_outcome_label(rub) == "accepted"
-
-
-def test_outcome_label_rejected_via_local_branch() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("rejected"),
-        posterior_source="local_branch",
-    )
-    assert derive_outcome_label(rub) == "rejected"
-
-
-def test_outcome_label_unknown_when_no_signal_at_all() -> None:
-    rub = Rubric(
-        pr_merge=PRMergeSignal(False, None),
-        fix_applied=FixAppliedSignal("unknown", 0, 0, []),
-        comment_resolution=CommentResolutionSignal(0, 0, 0),
-        local_commit_applied=LocalCommitAppliedSignal("unknown"),
-        posterior_source="none",
-    )
-    assert derive_outcome_label(rub) == "unknown"
+@pytest.mark.parametrize(
+    ("rubric", "expected"),
+    [
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+                fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
+                comment_resolution=CommentResolutionSignal(2, 2, 0),
+                local_commit_applied=None,
+                posterior_source="pr_review",
+            ),
+            "accepted",
+            id="pr-merged-all-resolved",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+                comment_resolution=CommentResolutionSignal(0, 0, 0),
+                local_commit_applied=None,
+                posterior_source="pr_review",
+            ),
+            "unknown",
+            id="pr-merged-no-comments",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(True, "2026-01-01T00:00:00Z"),
+                fix_applied=FixAppliedSignal("applied", 1, 1, ["c1"]),
+                comment_resolution=CommentResolutionSignal(3, 1, 2),
+                local_commit_applied=None,
+                posterior_source="pr_review",
+            ),
+            "contested",
+            id="pr-merged-unresolved",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(False, None),
+                fix_applied=FixAppliedSignal("not_applied", 0, 1, []),
+                comment_resolution=CommentResolutionSignal(1, 0, 1),
+                local_commit_applied=None,
+                posterior_source="pr_review",
+            ),
+            "rejected",
+            id="pr-closed-unmerged",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(False, None),
+                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+                comment_resolution=CommentResolutionSignal(0, 0, 0),
+                local_commit_applied=LocalCommitAppliedSignal("applied"),
+                posterior_source="local_branch",
+            ),
+            "accepted",
+            id="local-branch-applied",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(False, None),
+                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+                comment_resolution=CommentResolutionSignal(0, 0, 0),
+                local_commit_applied=LocalCommitAppliedSignal("rejected"),
+                posterior_source="local_branch",
+            ),
+            "rejected",
+            id="local-branch-rejected",
+        ),
+        pytest.param(
+            Rubric(
+                pr_merge=PRMergeSignal(False, None),
+                fix_applied=FixAppliedSignal("unknown", 0, 0, []),
+                comment_resolution=CommentResolutionSignal(0, 0, 0),
+                local_commit_applied=LocalCommitAppliedSignal("unknown"),
+                posterior_source="none",
+            ),
+            "unknown",
+            id="no-signal",
+        ),
+    ],
+)
+def test_derive_outcome_label(rubric: Rubric, expected: str) -> None:
+    """Derive accepted, rejected, unknown, and local labels from rubric evidence."""
+    assert derive_outcome_label(rubric) == expected
 
 
 def _pr_rubric(*, merged: bool, source: PosteriorSource = "pr_review") -> Rubric:

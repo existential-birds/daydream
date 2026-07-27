@@ -24,19 +24,60 @@ from pathlib import Path
 import pytest
 
 from daydream import git_ops
+from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
+from tests.harness.git_helpers import bare_remote, git
 
-# Reuse the deep-orchestrator stub harness (the hard-won prompt-dispatch heuristics
-# live there; re-rolling them would be fragile). tests/ is a namespace package, so
-# a sibling test module imports cleanly.
-from tests.test_deep_orchestrator import (
-    _force_interactive,
-    _install_stub_backend,
-    _merge_item,
-    _noop_commit,
-    _ok,
-    _silence,
+# The prompt-dispatching stub backend and its install helpers are the canonical
+# shared stub (tests/harness/stub_backend.py); re-rolling the dispatch
+# heuristics would be fragile. tests/ is a namespace package, so the harness
+# imports cleanly.
+from tests.harness.stub_backend import (
+    StubBackend,
+    force_interactive,
+    install_stub_backend,
+    silence,
 )
+from tests.harness.trajectory import diff_adding
+from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
+
+
+class _ArchiveCaptureBackend(StubBackend):
+    async def execute(
+        self,
+        cwd,
+        prompt,
+        output_schema=None,
+        continuation=None,
+        agents=None,
+        max_turns=None,
+        read_only=False,
+    ):
+        if prompt.startswith("Stage all changes and commit"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            git(cwd, "add", "--all")
+            git(
+                cwd,
+                "commit",
+                "-m",
+                (f"fix: apply daydream recommendation\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}"),
+            )
+            git(cwd, "push", "-u", "archive", git(cwd, "branch", "--show-current"))
+            yield TextEvent(text="Committed and pushed the recommendation.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
 
 
 def _only_archived_run(archive_dir: Path) -> Path:
@@ -44,6 +85,32 @@ def _only_archived_run(archive_dir: Path) -> Path:
     run_dirs = list((archive_dir / "runs").iterdir())
     assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
     return run_dirs[0]
+
+
+def _install_deep_capture_backend(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    real_internal_phases: bool = False,
+):
+    """Install the shared deep-run backend and optional focused phase seams."""
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    if real_internal_phases:
+        stub = _ArchiveCaptureBackend(multi_stack_target)
+        monkeypatch.setattr(
+            "daydream.runner.create_backend",
+            lambda name, model=None, **kwargs: stub,
+        )
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    if not real_internal_phases:
+        monkeypatch.setattr(
+            "daydream.deep.orchestrator.phase_test_and_heal",
+            lambda *a, **k: _ok(),
+        )
+        monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    return stub
 
 
 # --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
@@ -56,23 +123,35 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     metrics AND writes a recommended.patch distinct from diff.patch.
 
     The fix stage edits a TRACKED file (api.py), so the pre-fix → post-fix diff
-    is non-empty; commit is a no-op so the edit stays in the worktree for capture.
+    is non-empty and the real test/heal and commit phases run before archiving.
     """
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(
+        multi_stack_target,
+        monkeypatch,
+        real_internal_phases=True,
+    )
     stub.fix_edit_line = "# daydream recommended change\n"
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
         RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
     )
     assert exit_code == 0
+    head_after = git_ops.head_sha(multi_stack_target)
+    assert head_after != head_before
+    assert git(remote, "rev-parse", "refs/heads/feature") == head_after
+    commit_message = git_ops.head_commit_message(multi_stack_target)
+    assert "Daydream-Run:" in commit_message
+    assert "Daydream-Version:" in commit_message
 
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    trajectory = json.loads((run_dir / "trajectory.json").read_text())
+    test_steps = [step for step in trajectory["steps"] if step.get("extra", {}).get("daydream_phase") == "test"]
+    assert any("Run the project's test suite" in step["message"] for step in test_steps)
+    assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
     # AC1: eval ran by default -> all four metrics non-null.
     metrics = manifest["metrics"]
@@ -101,13 +180,8 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     """``--dump-artifacts DIR`` copies the fully-assembled run bundle into DIR so CI
     can upload it — trajectory, deep artifacts, diffs, manifest, and evaluation all
     land in the user-specified directory, mirroring the archived run."""
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
     dump_dir = tmp_path / "uploaded-artifacts"
 
@@ -135,12 +209,7 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
 ) -> None:
     """Without ``--dump-artifacts`` no bundle copy is made outside the archive."""
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    _install_deep_capture_backend(multi_stack_target, monkeypatch)
 
     dump_dir = tmp_path / "uploaded-artifacts"
 
@@ -155,13 +224,8 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
 ) -> None:
     """AC1b: --no-eval (run_eval=False) skips the eval pass, leaving its metrics null."""
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
     exit_code = await run(
         RunConfig(
@@ -342,27 +406,14 @@ def test_capture_recommended_patch_no_change_writes_empty_marker(tmp_path: Path)
 # --- AC4: applied-signal cascades read recommended.patch (fallback to diff.patch) ---
 
 
-def _diff_adding(line: str, *, file: str = "app.py") -> str:
-    """One-hunk unified diff that adds ``line`` to ``file``."""
-    return (
-        f"diff --git a/{file} b/{file}\n"
-        "index 1111111..2222222 100644\n"
-        f"--- a/{file}\n"
-        f"+++ b/{file}\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        f"+{line}\n"
-    )
-
-
 def test_fix_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:
     """AC4: with both patches present, the signal parses recommended.patch hunks,
     not diff.patch hunks — a run whose RECOMMENDATION landed labels 'applied' even
     though the reviewed line is absent post-window."""
     from daydream.training.labeler_signals import fix_applied_signal
 
-    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(_diff_adding("recommended = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+    (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -388,7 +439,7 @@ def test_fix_applied_signal_falls_back_to_diff_patch(tmp_path: Path) -> None:
     the diff.patch hunks."""
     from daydream.training.labeler_signals import fix_applied_signal
 
-    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -415,7 +466,7 @@ def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(tmp_pat
     post-window — otherwise such runs are mislabeled 'applied'."""
     from daydream.training.labeler_signals import fix_applied_signal
 
-    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
     (tmp_path / "manifest.json").write_text(
         json.dumps({"schema_version": "1.0", "recommended_patch_supported": True})
     )
@@ -439,12 +490,22 @@ def test_fix_applied_signal_new_archive_no_recommendation_skips_fallback(tmp_pat
     assert sig.verdict == "not_applied"
 
 
-def test_local_commit_applied_signal_prefers_recommended_patch(tmp_path: Path) -> None:
-    """AC4: local-commit signal parses recommended.patch when present."""
+@pytest.mark.parametrize(
+    ("file_contents", "expected_verdict"),
+    [
+        pytest.param("existing\nrecommended = 1\n", "applied", id="recommended-line-present"),
+        pytest.param("existing\nreviewed = 2\n", "rejected", id="recommended-line-absent"),
+    ],
+)
+def test_local_commit_applied_signal_uses_recommended_patch(
+    tmp_path: Path,
+    file_contents: str,
+    expected_verdict: str,
+) -> None:
     from daydream.training.labeler_signals import local_commit_applied_signal
 
-    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(_diff_adding("recommended = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("reviewed = 2"))
+    (tmp_path / "recommended.patch").write_text(diff_adding("recommended = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -455,30 +516,6 @@ def test_local_commit_applied_signal_prefers_recommended_patch(tmp_path: Path) -
         row,
         repo_clone=tmp_path,
         commits_since_fetcher=lambda repo, branch, since: ["c1"],
-        # The later commit carries the recommended line, not the reviewed line.
-        file_at_fetcher=lambda repo, path, sha: "existing\nrecommended = 1\n",
+        file_at_fetcher=lambda repo, path, sha: file_contents,
     )
-    assert sig.verdict == "applied"
-
-
-def test_local_commit_applied_signal_recommended_line_absent_is_rejected(tmp_path: Path) -> None:
-    """AC4: when recommended.patch is present but its line never lands, the reviewed
-    line (in diff.patch) must NOT rescue it — proving diff.patch is not consulted."""
-    from daydream.training.labeler_signals import local_commit_applied_signal
-
-    (tmp_path / "diff.patch").write_text(_diff_adding("reviewed = 2"))
-    (tmp_path / "recommended.patch").write_text(_diff_adding("recommended = 1"))
-    row = {
-        "repo_slug": "org/repo",
-        "head_sha": "abc",
-        "branch": "feature",
-        "archive_path": str(tmp_path),
-    }
-    sig = local_commit_applied_signal(
-        row,
-        repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since: ["c1"],
-        # Commit carries only the REVIEWED line; recommended line absent.
-        file_at_fetcher=lambda repo, path, sha: "existing\nreviewed = 2\n",
-    )
-    assert sig.verdict == "rejected"
+    assert sig.verdict == expected_verdict

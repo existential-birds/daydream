@@ -99,26 +99,24 @@ async def test_direct_extraction_writes_martian_candidates(tmp_path):
     assert all(c["source"] == "extracted" and c["path"] is None and c["line"] is None for c in leaf)
 
 
+@pytest.mark.parametrize(
+    ("texts", "response", "expected"),
+    [
+        (["same bug", "same issue"], {"groups": [[0, 1]]}, [[0, 1]]),
+        (["a", "b"], {"groups": [[0, 0]]}, [[0], [1]]),
+    ],
+    ids=["valid-groups", "invalid-groups-singletons"],
+)
 @pytest.mark.asyncio
-async def test_direct_dedup_writes_groups_and_falls_back_to_singletons(tmp_path):
-    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["same bug", "same issue"])
-    client = FakeAnthropicJson([{"groups": [[0, 1]]}])
+async def test_direct_dedup_writes_groups_or_singletons(tmp_path, texts, response, expected):
+    """Persist model-supplied dedup groups or fallback singleton groups."""
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=texts)
+    client = FakeAnthropicJson([response])
 
     await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
 
     groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
-    assert groups[URL]["daydream"] == [[0, 1]]
-
-
-@pytest.mark.asyncio
-async def test_direct_dedup_invalid_response_uses_singletons(tmp_path):
-    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["a", "b"])
-    client = FakeAnthropicJson([{"groups": [[0, 0]]}])
-
-    await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
-
-    groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
-    assert groups[URL]["daydream"] == [[0], [1]]
+    assert groups[URL]["daydream"] == expected
 
 
 @pytest.mark.asyncio

@@ -374,21 +374,14 @@ def test_run_scoring_invokes_three_steps_in_order(tmp_path, monkeypatch):
                     "code_review_benchmark.step2_5_dedup_candidates",
                     "code_review_benchmark.step3_judge_comments"]
     assert all(c[c.index("--tool") + 1] == "daydream" for c in calls)
+    assert "--limit" not in _step3_cmd(calls)
 
 
-@pytest.mark.parametrize(
-    ("golden_urls", "expect_limit"),
-    [(["u1", "u2", "u3"], "3"), (None, None)],
-    ids=["selection-given", "selection-omitted"],
-)
-def test_run_scoring_limit_passthrough_to_step3(tmp_path, monkeypatch, golden_urls, expect_limit):
-    """step3 gets --limit exactly when a selection is supplied, sized to it."""
-    step3_cmd = _step3_cmd(_record_run_scoring_calls(tmp_path, monkeypatch, golden_urls=golden_urls))
-    if expect_limit is None:
-        assert "--limit" not in step3_cmd
-    else:
-        assert "--limit" in step3_cmd
-        assert step3_cmd[step3_cmd.index("--limit") + 1] == expect_limit
+def test_run_scoring_selected_urls_set_step3_limit(tmp_path, monkeypatch):
+    """step3 gets --limit sized to an explicitly supplied selection."""
+    step3_cmd = _step3_cmd(_record_run_scoring_calls(tmp_path, monkeypatch, golden_urls=["u1", "u2", "u3"]))
+    assert "--limit" in step3_cmd
+    assert step3_cmd[step3_cmd.index("--limit") + 1] == "3"
 
 
 def _emulating_fake_run(model_dir_name: str):

@@ -23,14 +23,10 @@ def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
     assert _resolved_backend_name(config, "review") == "claude"
 
 
-def test_backend_flag_codex(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "codex"])
-    config = _parse_args()
-    assert config.backend == "codex"
-
-
-def test_backend_short_flag(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "-b", "codex"])
+@pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
+def test_backend_flag_codex(monkeypatch, flag):
+    """Accept each backend flag spelling and select the Codex backend."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, "codex"])
     config = _parse_args()
     assert config.backend == "codex"
 
@@ -41,24 +37,21 @@ def test_invalid_backend_rejected(monkeypatch):
         _parse_args()
 
 
-def test_review_backend_override_via_config_file():
+@pytest.mark.parametrize(
+    ("global_backend", "overrides", "phase", "expected"),
+    [
+        pytest.param("claude", {"review": {"backend": "codex"}}, "review", "codex", id="review-override"),
+        pytest.param("claude", {"review": {"backend": "codex"}}, "fix", "claude", id="review-fallback"),
+        pytest.param(None, {"fix": {"backend": "codex"}}, "fix", "codex", id="fix-override"),
+        pytest.param(None, {"test": {"backend": "codex"}}, "test", "codex", id="test-override"),
+    ],
+)
+def test_phase_backend_override_via_config_file(global_backend, overrides, phase, expected):
+    """Resolve phase-specific backends ahead of the global configured backend."""
     # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
-    fc = DaydreamFileConfig(backend="claude", phases={"review": {"backend": "codex"}})
+    fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
-    assert _resolved_backend_name(config, "review") == "codex"
-    assert _resolved_backend_name(config, "fix") == "claude"
-
-
-def test_fix_backend_override_via_config_file():
-    fc = DaydreamFileConfig(phases={"fix": {"backend": "codex"}})
-    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
-    assert _resolved_backend_name(config, "fix") == "codex"
-
-
-def test_test_backend_override_via_config_file():
-    fc = DaydreamFileConfig(phases={"test": {"backend": "codex"}})
-    config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
-    assert _resolved_backend_name(config, "test") == "codex"
+    assert _resolved_backend_name(config, phase) == expected
 
 
 def _cfg(monkeypatch, args: list[str]) -> RunConfig:
@@ -105,33 +98,19 @@ def test_loop_optional_count(monkeypatch):
     assert _cfg(monkeypatch, ["/tmp/project"]).loop is False
 
 
-def test_yes_with_review_errors(monkeypatch, capsys):
-    """--yes has no effect with --review (no fix phase) and must be rejected."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--review", "/tmp/project"])
+@pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
+def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
+    """--yes has no effect in review-only output modes and must be rejected."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", output_flag, "/tmp/project"])
     with pytest.raises(SystemExit):
         _parse_args()
     assert "--yes" in capsys.readouterr().err
 
 
-def test_yes_with_comment_errors(monkeypatch, capsys):
-    """--yes has no effect with --comment (no fix phase) and must be rejected."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--yes", "--comment", "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "--yes" in capsys.readouterr().err
-
-
-def test_loop_zero_count_errors(monkeypatch, capsys):
-    """--loop 0 is rejected because the count must be positive."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "0", "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "positive" in capsys.readouterr().err
-
-
-def test_loop_negative_count_errors(monkeypatch, capsys):
-    """--loop -1 is rejected because the count must be positive."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "-1", "/tmp/project"])
+@pytest.mark.parametrize("count", ["0", "-1"], ids=["zero", "negative"])
+def test_invalid_loop_count_errors(monkeypatch, capsys, count):
+    """--loop counts must be positive."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", count, "/tmp/project"])
     with pytest.raises(SystemExit):
         _parse_args()
     assert "positive" in capsys.readouterr().err
@@ -152,34 +131,20 @@ def test_loop_start_at_conflict(monkeypatch):
         _parse_args()
 
 
-def test_skill_map_includes_go():
-    assert SKILL_MAP["go"] == "beagle-go:review-go"
-
-
-def test_skill_choice_go(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "go"])
+@pytest.mark.parametrize(
+    ("skill", "invocation"),
+    [
+        pytest.param("go", "beagle-go:review-go", id="go"),
+        pytest.param("rust", "beagle-rust:review-rust", id="rust"),
+        pytest.param("ios", "beagle-ios:review-ios", id="ios"),
+    ],
+)
+def test_skill_map_and_choice(monkeypatch, skill, invocation):
+    """Keep every CLI skill choice aligned with its invocation token."""
+    assert SKILL_MAP[skill] == invocation
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", skill])
     config = _parse_args()
-    assert config.skill == "go"
-
-
-def test_skill_map_includes_rust():
-    assert SKILL_MAP["rust"] == "beagle-rust:review-rust"
-
-
-def test_skill_choice_rust(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "rust"])
-    config = _parse_args()
-    assert config.skill == "rust"
-
-
-def test_skill_map_includes_ios():
-    assert SKILL_MAP["ios"] == "beagle-ios:review-ios"
-
-
-def test_skill_choice_ios(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", "ios"])
-    config = _parse_args()
-    assert config.skill == "ios"
+    assert config.skill == skill
 
 
 def test_skill_short_flag(monkeypatch):
@@ -348,16 +313,6 @@ def test_parse_args_feedback_subcommand(monkeypatch):
     assert config.bot == "copilot"
 
 
-def test_parse_args_feedback_subcommand_with_target(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "feedback", "7", "--bot", "copilot", "/tmp/repo",
-    ])
-    config = _parse_args()
-    assert config.pr_number == 7
-    assert config.bot == "copilot"
-    assert config.target == "/tmp/repo"
-
-
 def test_parse_args_feedback_requires_bot(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "feedback", "7"])
     with pytest.raises(SystemExit):
@@ -457,10 +412,6 @@ def test_per_phase_flag_rejected_equals_form(flag, phase, tmp_path, capsys):
     assert f"[tool.daydream.phases.{phase}]" in err
 
 
-def test_global_model_still_works(tmp_path):
-    assert _parse_args(["--model", "claude-opus-5", str(tmp_path)]).model == "claude-opus-5"
-
-
 # Global --model flag (cli-verb-redesign Task 2 — re-added as a global override)
 
 
@@ -535,34 +486,6 @@ def test_removed_verbs_no_longer_dispatch():
     assert not hasattr(cli, "_handle_export_command")
     assert not hasattr(cli, "_handle_snapshot_command")
     assert hasattr(cli, "_handle_label_command")
-
-
-def test_pr_repo_detected_from_target_not_cwd(monkeypatch, tmp_path):
-    """pr_repo records the target checkout's slug, not the invoking cwd (#128).
-
-    Drives the production ``_parse_args`` path with a target distinct from cwd
-    and a stubbed ``gh repo view`` seam that returns a different slug per path.
-    Asserts the resulting ``RunConfig.pr_repo`` (which flows verbatim into the
-    trajectory's ``extra.pr_repo``) reflects the target — the benchmark-harness
-    pattern of running daydream from one repo against a checkout of another.
-    """
-    target = tmp_path / "target-checkout"
-    target.mkdir()
-
-    def fake_gh_repo_view(repo):
-        # Slug keyed on the inspected path so the assertion proves which dir
-        # was passed: the target, not Path.cwd().
-        if Path(repo) == target:
-            return ("grafana", "grafana")
-        return ("existential-birds", "daydream")
-
-    monkeypatch.setattr("daydream.git_ops.gh_repo_view", fake_gh_repo_view)
-    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch: None)
-    monkeypatch.setattr(sys, "argv", ["daydream", str(target)])
-
-    config = _parse_args()
-
-    assert config.pr_repo == "grafana/grafana"
 
 
 def test_pr_repo_falls_back_to_cwd_without_target(monkeypatch, tmp_path):

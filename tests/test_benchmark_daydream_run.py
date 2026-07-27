@@ -210,9 +210,7 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     checkout = tmp_path / "co"
     checkout.mkdir()
     with pytest.raises(DaydreamRunError) as e:
-        run_daydream_review(
-            checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append
-        )
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
     assert lines == ["a\n", "boom\n"]  # streamed live
     assert "boom" in str(e.value)  # tail retained in the error
 
@@ -260,9 +258,7 @@ def test_streamed_timeout_kills_quiet_child_holding_stdout_open(tmp_path, monkey
 
     start = time.monotonic()
     with pytest.raises(DaydreamRunError, match="timed out after 0.2s"):
-        run_daydream_review(
-            checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lambda _: None
-        )
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lambda _: None)
     elapsed = time.monotonic() - start
     assert proc.killed  # the deadline killed the child
     assert elapsed < 5  # bounded by the (patched) timeout, not hung
@@ -279,30 +275,20 @@ def test_raises_when_artifact_missing(tmp_path, monkeypatch):
         run_daydream_review(checkout, base_sha="x", trajectory_path=tmp_path / "t.json")
 
 
-def test_pierror_terminated_is_transient():
-    # Regression guard: the stream-drop that motivated this fix MUST retry.
-    assert _is_transient(PIERROR_TERMINATED_STDOUT)
-
-
-def test_econnreset_is_transient():
-    assert _is_transient(ECONNRESET_STDOUT)
-
-
-def test_socket_hang_up_is_transient():
-    assert _is_transient(SOCKET_HANG_UP_STDOUT)
-
-
-def test_429_overload_is_transient():
-    assert _is_transient(OVERLOADED_429_STDOUT)
-
-
-def test_clean_success_is_not_transient():
-    # Mentions "error"/"ECONNRESET"/"terminated" in prose but did NOT error.
-    assert not _is_transient(CLEAN_SUCCESS_STDOUT)
-
-
-def test_empty_is_not_transient():
-    assert not _is_transient("")
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        pytest.param(PIERROR_TERMINATED_STDOUT, True, id="pierror-terminated"),
+        pytest.param(ECONNRESET_STDOUT, True, id="econnreset"),
+        pytest.param(SOCKET_HANG_UP_STDOUT, True, id="socket-hang-up"),
+        pytest.param(OVERLOADED_429_STDOUT, True, id="429-overload"),
+        pytest.param(CLEAN_SUCCESS_STDOUT, False, id="clean-success"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_transient_output_classifier(output, expected):
+    """Distinguish retryable transport output from successful subprocess output."""
+    assert _is_transient(output) is expected
 
 
 def test_review_complete_when_artifact_and_metrics_present(tmp_path):

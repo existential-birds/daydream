@@ -116,24 +116,26 @@ def _make_branched_upstream(tmp_path: Path) -> _BranchedUpstream:
     return _BranchedUpstream(url=str(bare), m1=m1, m2=m2, c0=c0, c1=c1, c2=c2)
 
 
-def test_acquire_checks_out_pr_head_and_keeps_base_resolvable(tmp_path):
+def test_acquire_checks_out_pr_head_and_reuses_clone_cache(tmp_path):
+    """Check out the requested snapshot while reusing its cached clone."""
     up = _make_upstream_with_pr(tmp_path)
-    acquired = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "cache")
+    acquired = acquire_checkout(
+        up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "initial-cache"
+    )
     assert _git(acquired.path, "rev-parse", "HEAD") == up.head_sha
     assert acquired.base_sha == up.base_sha
     assert git_ops.ref_exists(acquired.path, up.base_sha)  # usable as daydream --base
 
-
-def test_second_acquire_reuses_clone_cache(tmp_path):
-    up = _make_upstream_with_pr(tmp_path)
-    a = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "c")
-    b = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "c")
+    reuse_cache = tmp_path / "reuse-cache"
+    a = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=reuse_cache)
+    b = acquire_checkout(up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=reuse_cache)
     assert a.path == b.path
 
 
-def test_acquire_derives_merge_base_for_bot_commit_not_pr_head(tmp_path):
+def test_acquire_branched_snapshot_base_resolution_and_argument_guards(tmp_path):
+    """Exercise merge-base derivation and exclusive base argument validation."""
     up = _make_branched_upstream(tmp_path)
-    acquired = acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "cache")
+    acquired = acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "derived-cache")
 
     # The 3-dot base GitHub's compare view (and the bot) saw — not the base
     # branch tip, and not the snapshot's first parent.
@@ -145,11 +147,17 @@ def test_acquire_derives_merge_base_for_bot_commit_not_pr_head(tmp_path):
     assert _git(acquired.path, "rev-parse", "HEAD") == up.c1
     assert _git(acquired.path, "rev-parse", "HEAD") != up.c2
 
-
-def test_acquire_raises_giterror_when_no_merge_base(tmp_path):
-    up = _make_branched_upstream(tmp_path)
     with pytest.raises(git_ops.GitError, match="no merge-base"):
-        acquire_checkout(up.url, 7, up.c1, base_ref="unrelated", cache_dir=tmp_path / "cache")
+        acquire_checkout(
+            up.url, 7, up.c1, base_ref="unrelated", cache_dir=tmp_path / "no-merge-base-cache"
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        acquire_checkout(
+            up.url, 7, up.c1, base_sha=up.m1, base_ref="main",
+            cache_dir=tmp_path / "both-arguments-cache",
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        acquire_checkout(up.url, 7, up.c1, cache_dir=tmp_path / "neither-argument-cache")
 
 
 def _make_merged_upstream(tmp_path: Path) -> _BranchedUpstream:
@@ -166,25 +174,19 @@ def _make_merged_upstream(tmp_path: Path) -> _BranchedUpstream:
     return up
 
 
-def test_acquire_rejects_derived_base_equal_to_head(tmp_path):
+def test_acquire_merged_snapshot_rejects_derived_base_and_accepts_pinned_base(tmp_path):
+    """Require a pinned historical base when a merged snapshot would yield an empty diff."""
     # Once the snapshot is an ancestor of the base tip, merge-base returns the
     # snapshot itself: an empty diff, which must fail loudly rather than score 0.
     up = _make_merged_upstream(tmp_path)
     with pytest.raises(git_ops.GitError, match="derived base equals head"):
-        acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "cache")
+        acquire_checkout(
+            up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "derived-rejection-cache"
+        )
 
-
-def test_acquire_uses_pinned_base_for_merged_snapshot(tmp_path):
     # The pinned historic base keeps the same merged PR reviewable.
-    up = _make_merged_upstream(tmp_path)
-    acquired = acquire_checkout(up.url, 7, up.c1, base_sha=up.m1, cache_dir=tmp_path / "cache")
+    acquired = acquire_checkout(
+        up.url, 7, up.c1, base_sha=up.m1, cache_dir=tmp_path / "pinned-success-cache"
+    )
     assert acquired.base_sha == up.m1
     assert _git(acquired.path, "rev-parse", "HEAD") == up.c1
-
-
-def test_acquire_rejects_both_or_neither_base_arguments(tmp_path):
-    up = _make_branched_upstream(tmp_path)
-    with pytest.raises(ValueError, match="exactly one"):
-        acquire_checkout(up.url, 7, up.c1, base_sha=up.m1, base_ref="main", cache_dir=tmp_path / "cache")
-    with pytest.raises(ValueError, match="exactly one"):
-        acquire_checkout(up.url, 7, up.c1, cache_dir=tmp_path / "cache")

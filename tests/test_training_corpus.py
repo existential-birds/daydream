@@ -192,18 +192,6 @@ def test_export_emits_valid_jsonl(tmp_path: Path) -> None:
         jsonschema.validate(record, schema)
 
 
-def test_export_record_fields_present(tmp_path: Path) -> None:
-    """Every required schema field appears on the first emitted record."""
-    build_fixture_archive(tmp_path)
-    run_build_corpus(_cfg(tmp_path))
-
-    schema = _load_schema()
-    first_line = (tmp_path / "out.jsonl").read_text(encoding="utf-8").splitlines()[0]
-    record = json.loads(first_line)
-    for field in schema["required"]:
-        assert field in record, f"missing required field: {field}"
-
-
 def test_export_deterministic_output(tmp_path: Path) -> None:
     """Two runs against the same archive produce byte-identical JSONL."""
     build_fixture_archive(tmp_path)

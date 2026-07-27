@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import jsonschema
+import pytest
 
 from daydream.training.corpus import _build_record, _build_spans
 
@@ -144,34 +145,29 @@ def test_record_validates_against_v1_schema() -> None:
     jsonschema.validate(record, schema)
 
 
-def test_record_fix_diff_ref_reflects_archive_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("ref_name", "archive_relative_path"),
+    [
+        pytest.param("fix_diff_ref", "diff.patch", id="diff-patch"),
+        pytest.param("recommended_diff_ref", "recommended.patch", id="recommended-patch"),
+    ],
+)
+def test_record_diff_ref_reflects_archive_state(
+    tmp_path: Path,
+    ref_name: str,
+    archive_relative_path: str,
+) -> None:
+    """Reflect diff availability from the corresponding archived file."""
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
     trajectory: dict[str, Any] = {"steps": []}
 
-    # No diff.patch on disk yet.
     record = _build_record(manifest_row, trajectory, stack="python")
-    assert record["fix_diff_ref"]["available"] is False
-    assert record["fix_diff_ref"]["archive_relative_path"] == "diff.patch"
+    assert record[ref_name]["available"] is False
+    assert record[ref_name]["archive_relative_path"] == archive_relative_path
 
-    # Write the diff and confirm the next call sees it.
-    (tmp_path / "diff.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    (tmp_path / archive_relative_path).write_text("diff --git a/x b/x\n", encoding="utf-8")
     record = _build_record(manifest_row, trajectory, stack="python")
-    assert record["fix_diff_ref"]["available"] is True
-
-
-def test_record_recommended_diff_ref_reflects_archive_state(tmp_path: Path) -> None:
-    manifest_row = _make_manifest_row(archive_path=str(tmp_path))
-    trajectory: dict[str, Any] = {"steps": []}
-
-    # No recommended.patch on disk yet (no-fix / legacy archive).
-    record = _build_record(manifest_row, trajectory, stack="python")
-    assert record["recommended_diff_ref"]["available"] is False
-    assert record["recommended_diff_ref"]["archive_relative_path"] == "recommended.patch"
-
-    # Write daydream's outcome diff and confirm the next call sees it.
-    (tmp_path / "recommended.patch").write_text("diff --git a/x b/x\n", encoding="utf-8")
-    record = _build_record(manifest_row, trajectory, stack="python")
-    assert record["recommended_diff_ref"]["available"] is True
+    assert record[ref_name]["available"] is True
 
 
 def test_record_code_context_sourced_from_manifest_dict(tmp_path: Path) -> None:

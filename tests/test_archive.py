@@ -455,11 +455,19 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path):
     assert json.loads((run_dir / "trajectory.json.partial").read_text())["partial"] is True
 
 
-def test_copy_bundle_review_output(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("relative_path", "expected"),
+    [
+        pytest.param("review-output.md", "review findings", id="review-output"),
+        pytest.param("diff.patch", "diff content", id="diff-patch"),
+    ],
+)
+def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str):
+    """Verify bundle copying preserves parameterized file contents and paths."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
-    assert (run_dir / "review-output.md").read_text() == "review findings"
+    assert (run_dir / relative_path).read_text() == expected
 
 
 def test_copy_bundle_deep_directory(tmp_path: Path):
@@ -467,13 +475,6 @@ def test_copy_bundle_deep_directory(tmp_path: Path):
     _copy_bundle(target, run_dir, recorder, RunConfig())
 
     assert (run_dir / "deep" / "intent.md").read_text() == "intent"
-
-
-def test_copy_bundle_diff_patch(tmp_path: Path):
-    target, run_dir, recorder = _setup_bundle(tmp_path)
-    _copy_bundle(target, run_dir, recorder, RunConfig())
-
-    assert (run_dir / "diff.patch").read_text() == "diff content"
 
 
 def test_copy_bundle_sub_trajectories_copied(tmp_path: Path):

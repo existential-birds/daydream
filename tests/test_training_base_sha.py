@@ -16,22 +16,34 @@ import pytest
 from daydream.training.base_sha import materialize_base_sha
 
 
-def test_materialize_writes_sha_into_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manifest_path = tmp_path / "manifest.json"
+def _write_manifest(
+    manifest_path: Path,
+    *,
+    base_sha: str | None,
+    head_sha: str,
+    branch: str,
+) -> None:
+    """Write the minimal manifest needed for base-SHA materialization tests."""
     manifest_path.write_text(
         json.dumps(
             {
                 "code_context": {
-                    "base_sha": None,
+                    "base_sha": base_sha,
                     "base_branch": "main",
-                    "head_sha": "abc123",
-                    "branch": "feat/x",
+                    "head_sha": head_sha,
+                    "branch": branch,
                     "changed_files": [],
                 },
-                "git": {"base_branch": "main", "head_sha": "abc123"},
+                "git": {"base_branch": "main", "head_sha": head_sha},
             }
         )
     )
+
+
+def test_materialize_writes_sha_into_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve a missing merge base and persist it into the archive manifest."""
+    manifest_path = tmp_path / "manifest.json"
+    _write_manifest(manifest_path, base_sha=None, head_sha="abc123", branch="feat/x")
     monkeypatch.setattr(
         "daydream.git_ops.merge_base",
         lambda repo, base, head: "deadbeefcafef00d" if (base, head) == ("main", "abc123") else None,
@@ -46,20 +58,7 @@ def test_materialize_returns_none_when_merge_base_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "code_context": {
-                    "base_sha": None,
-                    "base_branch": "main",
-                    "head_sha": "abc",
-                    "branch": "x",
-                    "changed_files": [],
-                },
-                "git": {"base_branch": "main", "head_sha": "abc"},
-            }
-        )
-    )
+    _write_manifest(manifest_path, base_sha=None, head_sha="abc", branch="x")
     monkeypatch.setattr("daydream.git_ops.merge_base", lambda *a, **k: None)
     result = materialize_base_sha(manifest_path, repo_clone=tmp_path / "fake-clone")
     assert result is None
@@ -70,20 +69,7 @@ def test_materialize_is_noop_when_base_sha_already_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "code_context": {
-                    "base_sha": "existing-sha",
-                    "base_branch": "main",
-                    "head_sha": "abc",
-                    "branch": "x",
-                    "changed_files": [],
-                },
-                "git": {"base_branch": "main", "head_sha": "abc"},
-            }
-        )
-    )
+    _write_manifest(manifest_path, base_sha="existing-sha", head_sha="abc", branch="x")
     called: list[bool] = []
 
     def _record_merge_base(*a: Any, **k: Any) -> str:

@@ -136,29 +136,21 @@ def test_reviewer_preset_resolves_and_derives_label(tmp_path, monkeypatch):
     assert cfg2.reviewer_model == "x"  # explicit flag overrides preset
 
 
-def test_unknown_reviewer_preset_errors(tmp_path, monkeypatch):
-    (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo="/b"\n')
+@pytest.mark.parametrize(
+    ("config_text", "reviewer"),
+    [
+        ('[tool.daydream.bench]\nbenchmark-repo="/b"\n', "nope"),
+        ('[tool.daydream.bench]\nbenchmark-repo="/b"\n[tool.daydream.bench.reviewers]\nglm="not-a-table"\n', "glm"),
+        ('[tool.daydream.bench]\nbenchmark-repo="/b"\nreviewers="oops"\n', "glm"),
+    ],
+    ids=["unknown-preset", "malformed-preset", "non-table-reviewers"],
+)
+def test_reviewer_preset_errors(tmp_path, monkeypatch, config_text, reviewer):
+    """Terminate configuration parsing for missing or malformed reviewer presets."""
+    (tmp_path / "pyproject.toml").write_text(config_text)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit):
-        _bench_config_from_argv(["--reviewer", "nope", "--no-score"])
-
-
-def test_malformed_reviewer_preset_errors(tmp_path, monkeypatch):
-    (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream.bench]\nbenchmark-repo="/b"\n[tool.daydream.bench.reviewers]\nglm="not-a-table"\n'
-    )
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(SystemExit):
-        _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
-
-
-def test_non_table_reviewers_section_errors(tmp_path, monkeypatch):
-    (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream.bench]\nbenchmark-repo="/b"\nreviewers="oops"\n'
-    )
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(SystemExit):
-        _bench_config_from_argv(["--reviewer", "glm", "--no-score"])
+        _bench_config_from_argv(["--reviewer", reviewer, "--no-score"])
 
 
 def test_malformed_reviewer_preset_fails_through_compiled_entrypoint(tmp_path):
@@ -238,26 +230,18 @@ def test_trials_flag_overrides_config_file(tmp_path, monkeypatch):
     assert cfg.trials == 2
 
 
-@pytest.mark.parametrize("toml_value", ["2.5", '"3"'])
-def test_trials_config_file_rejects_non_int(tmp_path, monkeypatch, toml_value):
-    # The config-file fallback reaches the isinstance(trials, int) branch at
-    # cli.py: load_file_config stores TOML values verbatim (no coercion), so a
-    # float or string trials value must be rejected there.
-    (tmp_path / "pyproject.toml").write_text(
-        f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n'
-    )
-    monkeypatch.chdir(tmp_path)
-    with pytest.raises(SystemExit):
-        _bench_config_from_argv(["--no-score"])
-
-
-@pytest.mark.parametrize("toml_value", ["0", "-1"])
-def test_trials_config_file_rejects_non_positive(tmp_path, monkeypatch, toml_value):
-    # Non-positive trials via config-file fallback reaches the trials <= 0
-    # branch at cli.py (the CLI-flag path is caught earlier by argparse).
-    (tmp_path / "pyproject.toml").write_text(
-        f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n'
-    )
+@pytest.mark.parametrize(
+    "toml_value",
+    [
+        pytest.param("2.5", id="float"),
+        pytest.param('"3"', id="string"),
+        pytest.param("0", id="zero"),
+        pytest.param("-1", id="negative"),
+    ],
+)
+def test_trials_config_file_rejects_invalid_value(tmp_path, monkeypatch, toml_value):
+    """Reject non-positive or non-integer trial counts from project configuration."""
+    (tmp_path / "pyproject.toml").write_text(f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n')
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit):
         _bench_config_from_argv(["--no-score"])
@@ -283,38 +267,26 @@ def test_bench_non_positive_limit_fails_through_compiled_entrypoint(tmp_path):
     assert r.returncode != 0 and "--limit must be a positive integer" in (r.stdout + r.stderr)
 
 
-def test_bench_subcommand_preflights_through_compiled_entrypoint(tmp_path):
-    env = {**os.environ}
-    env.pop("MARTIAN_API_KEY", None)
+@pytest.mark.parametrize(
+    ("route_args", "env_overrides", "credential"),
+    [
+        ([], {}, "MARTIAN_API_KEY"),
+        (["--judge-route", "anthropic-direct"], {"MARTIAN_MODEL": "claude-opus-4-5-20251101"}, "ANTHROPIC_API_KEY"),
+    ],
+    ids=["martian", "anthropic-direct"],
+)
+def test_compiled_entrypoint_preflights_credentials(tmp_path, route_args, env_overrides, credential):
+    """Fail before scoring when the selected judge route lacks credentials."""
+    env = {**os.environ, **env_overrides}
+    env.pop(credential, None)
     r = subprocess.run(  # noqa: S603 - args are not user-controlled
-        ["daydream", "bench", "--benchmark-repo", str(tmp_path), "--score"],  # noqa: S607 - daydream is a trusted command
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=tmp_path,  # isolate from any developer .env auto-loaded at bench entry
-    )
-    assert r.returncode != 0 and "MARTIAN_API_KEY" in (r.stdout + r.stderr)
-
-
-def test_direct_anthropic_preflight_fails_through_compiled_entrypoint(tmp_path):
-    env = {**os.environ, "MARTIAN_MODEL": "claude-opus-4-5-20251101"}
-    env.pop("ANTHROPIC_API_KEY", None)
-    r = subprocess.run(  # noqa: S603 - args are not user-controlled
-        [  # noqa: S607 - daydream is a trusted command
-            "daydream",
-            "bench",
-            "--benchmark-repo",
-            str(tmp_path),
-            "--judge-route",
-            "anthropic-direct",
-            "--score",
-        ],
+        ["daydream", "bench", "--benchmark-repo", str(tmp_path), *route_args, "--score"],  # noqa: S607
         capture_output=True,
         text=True,
         env=env,
         cwd=tmp_path,
     )
-    assert r.returncode != 0 and "ANTHROPIC_API_KEY" in (r.stdout + r.stderr)
+    assert r.returncode != 0 and credential in (r.stdout + r.stderr)
 
 
 def test_benchmark_docs_name_direct_anthropic_judge_route():

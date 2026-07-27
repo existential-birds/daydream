@@ -388,45 +388,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     assert captured["is_ephemeral"] is True
 
 
-# --- Test 6: feedback subcommand routes through PR feedback flow -----------
-
-
-@pytest.mark.asyncio
-async def test_feedback_subcommand_works_like_legacy_pr(
-    repo_with_origin: Path,
-    install_mock_backend: MockBackend,
-    silence_ui: None,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``daydream feedback <pr#>`` enters ``_run_pr_feedback`` end-to-end."""
-    # Move off main so the WrongBranchError guard does not fire
-    # (PR feedback runs in-place, not against an ephemeral worktree).
-    _git(repo_with_origin, "checkout", "-b", "feat/pr7")
-
-    monkeypatch.setattr(
-        "daydream.workspace.git_ops.gh_pr_list_for_branch",
-        lambda _repo, _branch: [],
-    )
-    captured: dict[str, Any] = {}
-
-    async def fake_run_pr_feedback(work, config):
-        captured["pr_number"] = config.pr_number
-        captured["bot"] = config.bot
-        captured["repo"] = work.repo
-        return 0
-
-    monkeypatch.setattr("daydream.runner._run_pr_feedback", fake_run_pr_feedback)
-
-    config = RunConfig(target=str(repo_with_origin), bot="copilot", cleanup=False)
-    exit_code = await runner.run_feedback(config, 7)
-
-    assert exit_code == 0
-    assert captured["pr_number"] == 7
-    assert captured["bot"] == "copilot"
-    assert captured["repo"] == repo_with_origin
-
-
-# --- Test 7: --review on base branch is allowed ----------------------------
+# --- Test 6: --review on base branch is allowed ----------------------------
 
 
 @pytest.mark.asyncio

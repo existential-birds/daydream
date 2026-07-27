@@ -163,18 +163,18 @@ def test_redactor_preserves_non_secret_env_vars() -> None:
     assert "[REDACTED" not in out.message
 
 
-def test_redactor_preserves_clean_paths() -> None:
-    """Negative: relative paths without /Users//home/ prefix pass through."""
-    out = Redactor().redact_step(_user_step("./src/app.py"))
+@pytest.mark.parametrize(
+    "clean_text",
+    [
+        pytest.param("./src/app.py", id="relative-path"),
+        pytest.param("https://github.com/user/repo", id="url"),
+    ],
+)
+def test_redactor_preserves_clean_strings(clean_text: str) -> None:
+    """Leave non-secret prose, commands, URLs, and identifiers unchanged."""
+    out = Redactor().redact_step(_user_step(clean_text))
     assert isinstance(out.message, str)
-    assert out.message == "./src/app.py"
-
-
-def test_redactor_preserves_clean_urls() -> None:
-    """Negative: URLs without embedded credentials pass through unchanged."""
-    out = Redactor().redact_step(_user_step("https://github.com/user/repo"))
-    assert isinstance(out.message, str)
-    assert out.message == "https://github.com/user/repo"
+    assert out.message == clean_text
 
 
 # ---- Surface coverage (REDA-04) ----

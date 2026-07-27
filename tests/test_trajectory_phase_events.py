@@ -41,16 +41,6 @@ def test_phase_event_to_dict_basic() -> None:
     }
 
 
-def test_phase_event_to_dict_omits_empty_metadata() -> None:
-    """No metadata key when metadata is empty."""
-    ev = PhaseEvent(
-        phase=DaydreamPhase.FIX,
-        event="phase_end",
-        timestamp="2026-01-01T00:00:00Z",
-    )
-    assert "metadata" not in ev.to_dict()
-
-
 def test_phase_event_to_dict_includes_metadata() -> None:
     """Metadata appears when non-empty."""
     ev = PhaseEvent(

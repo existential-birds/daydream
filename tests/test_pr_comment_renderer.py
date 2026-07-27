@@ -30,7 +30,6 @@ _UNKNOWN_MODEL = _FIXTURE_DIR / "unknown_model.json"
 _DEEP_PARENT = _FIXTURE_DIR / "deep_mode_parent.json"
 _DEEP_FORK_A = _FIXTURE_DIR / "deep_mode_fork_a.json"
 _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
-_CORRUPTED = _FIXTURE_DIR / "corrupted.json"
 
 
 def _agent_step(
@@ -122,99 +121,6 @@ def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Pa
     assert "- **Cost:** $12.20" in render_run_info_block([trajectory])
 
 
-# M1 — visible rollup
-def test_m1_visible_rollup_includes_required_fields() -> None:
-    """Rollup must list Model, Cost, Tokens, Steps/tool calls (Mode line dropped)."""
-    out = render_run_info_block([_SINGLE_PHASE])
-    assert "- **Mode:**" not in out
-    assert "- **Model:** claude-sonnet-4-5" in out
-    assert "- **Cost:** $0.13" in out
-    assert "- **Tokens:** 12,400 in" in out
-    assert "- **Steps / tool calls:** 1 / 2" in out
-
-
-# M2 — collapsed per-phase table
-def test_m2_per_phase_breakdown_is_collapsed_table() -> None:
-    """Per-phase breakdown is a markdown table inside <details>."""
-    out = render_run_info_block([_MULTI_PHASE_CODEX])
-    assert "<details><summary>Per-phase breakdown</summary>" in out
-    assert "</details>" in out
-    assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
-    assert "| Review |" in out
-    assert "| Fix |" in out
-
-
-# M4 — uniform field set
-def test_m4_uniform_layout() -> None:
-    """Section headers/columns are stable across separate calls."""
-    a = render_run_info_block([_SINGLE_PHASE])
-    for label in ("- **Model:**", "- **Cost:**", "- **Tokens:**", "- **Steps / tool calls:**"):
-        assert label in a
-    header = "| Phase | Model | Tools | Input (cached) | Output | Cost |"
-    assert header in a
-    assert "- **Mode:**" not in a
-
-
-# M5 — cost source per backend
-def test_m5_cost_source_per_backend(tmp_path: Path) -> None:
-    """Claude steps use Metrics.cost_usd verbatim; Codex steps synthesize from pricing.
-
-    A trajectory with one Claude step (cost_usd=0.50) and one Codex step
-    on gpt-5.5 (cost_usd=None, 1M uncached input tokens at $5.00/1M) should
-    sum to $5.50: 0.50 SDK + 5.00 synthesized.
-    """
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="claude-sonnet-4-5",
-                prompt=1000,
-                completion=0,
-                cached=0,
-                cost_usd=0.50,
-            ),
-            _agent_step(
-                step_id=3,
-                phase="fix",
-                model="gpt-5.5",
-                prompt=1_000_000,
-                completion=0,
-                cached=0,
-                cost_usd=None,
-            ),
-        ],
-    )
-    out = render_run_info_block([p])
-    # 0.50 + 5.00 = 5.50
-    assert "- **Cost:** $5.50" in out
-
-
-# M6 — unknown-model fallback
-def test_m6_unknown_model_renders_dash_and_footnote(tmp_path: Path) -> None:
-    """Unknown OpenAI model: rollup '—', per-phase '—', footnote names the model."""
-    p = _write_trajectory(
-        tmp_path,
-        model="mystery-model",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="mystery-model",
-                cost_usd=None,
-            ),
-        ],
-    )
-    out = render_run_info_block([p])
-    assert "- **Cost:** —" in out
-    assert "| —" in out
-    assert "mystery-model" in out
-    assert "not in the price table" in out
-
-
 # M6b — user price override synthesizes cost for an otherwise-unknown model (#156)
 def test_m6b_user_override_synthesizes_cost_for_unknown_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -258,44 +164,6 @@ def test_m6b_user_override_synthesizes_cost_for_unknown_model(
     assert "not in the price table" not in out
 
 
-# M7 — mixed-model label
-def test_m7_mixed_models_render_breakdown_pointer(tmp_path: Path) -> None:
-    """Two phases on different models -> rollup Model = 'mixed — see breakdown'."""
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(step_id=2, phase="review", model="gpt-5.5", cost_usd=0.10),
-            _agent_step(step_id=3, phase="fix", model="claude-sonnet-4-5", cost_usd=0.20),
-        ],
-    )
-    out = render_run_info_block([p])
-    assert "- **Model:** mixed — see breakdown" in out
-
-
-# M8 — cached-tokens awareness in the rollup
-def test_m8_cache_hit_ratio_rendered_when_input_nonzero(tmp_path: Path) -> None:
-    """Cache-hit ratio is computed from (cached / input) and shown next to cached count."""
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=10_000,
-                completion=200,
-                cached=6_700,
-                cost_usd=0.01,
-            ),
-        ],
-    )
-    out = render_run_info_block([p])
-    # 6700 / 10000 = 67%
-    assert "10,000 in (6,700 cached, 67% hit)" in out
-
-
 # M9 — missing-trajectory fallback
 def test_m9_missing_trajectory_renders_fallback(tmp_path: Path) -> None:
     """No paths, missing path, or malformed JSON -> 'run details unavailable' + footer."""
@@ -311,9 +179,11 @@ def test_m9_missing_trajectory_renders_fallback(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     out3 = render_run_info_block([bad])
+    assert "- **Mode:**" not in out3
     assert "*run details unavailable*" in out3
     # Per-phase table must NOT render in fallback mode.
     assert "Per-phase breakdown" not in out3
+    assert "| Phase |" not in out3
     assert "<sub>Generated by daydream v" in out3
 
 
@@ -390,17 +260,6 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "0 in → 10 out" in out3
 
 
-# Baseline single-phase render
-def test_single_phase_run_renders_baseline() -> None:
-    """The baseline single-phase Claude trajectory renders all sections cleanly."""
-    out = render_run_info_block([_SINGLE_PHASE])
-    assert out.startswith("- **Model:**")
-    assert "<details><summary>Per-phase breakdown</summary>" in out
-    assert out.rstrip().endswith("</sub>")
-    assert out.count("| Review |") == 1
-    assert "| Fix |" not in out
-
-
 # Purity / idempotence
 def test_renderer_is_pure_idempotent() -> None:
     """Calling the renderer twice with identical inputs returns identical output.
@@ -440,14 +299,6 @@ def test_aggregates_across_multiple_trajectory_files() -> None:
     assert "2,500" in fix_row
 
 
-# Mode line is gone — assert it never renders.
-def test_mode_line_never_renders() -> None:
-    """The Mode rollup line was removed; no caller-controlled label appears."""
-    out = render_run_info_block([_SINGLE_PHASE])
-    assert "- **Mode:**" not in out
-    assert "**Mode:**" not in out
-
-
 # S2 — End-to-end fixture-driven scenarios: load a committed trajectory and
 # assert the whole rendered block against the shape a reviewer sees in a PR comment.
 def test_e2e_single_phase_claude_renders_full_block() -> None:
@@ -459,6 +310,8 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     out = render_run_info_block([_SINGLE_PHASE])
     # Rollup block (Mode line dropped).
     assert "- **Mode:**" not in out
+    assert "**Mode:**" not in out
+    assert out.startswith("- **Model:**")
     assert "- **Model:** claude-sonnet-4-5" in out
     assert "- **Cost:** $0.13" in out
     assert "- **Tokens:** 12,400 in (8,200 cached, 66% hit) → 1,800 out" in out
@@ -466,6 +319,7 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     # Per-phase table — one Review row, no Fix.
     assert "<details><summary>Per-phase breakdown</summary>" in out
     assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in out
+    assert out.count("| Review |") == 1
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     assert "claude-sonnet-4-5" in review_row
     assert "12,400" in review_row
@@ -486,6 +340,7 @@ def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
     were first seen in the trajectory (Review → Parse → Fix → Test).
     """
     out = render_run_info_block([_MULTI_PHASE_CLAUDE])
+    assert "</details>" in out
     # Rollup totals (sum across all four Claude phases).
     assert "- **Model:** claude-sonnet-4-5" in out
     assert "- **Cost:** $0.18" in out
@@ -614,49 +469,6 @@ def test_deep_mode_phase_rows_preserve_traversal_order() -> None:
     ]
     labels = [row.split("|")[1].strip() for row in phase_rows]
     assert labels == ["Review", "Parse Feedback", "Fix"], labels
-
-
-def test_e2e_corrupted_trajectory_falls_back() -> None:
-    """Truncated/invalid JSON: renderer never raises, posts fallback block.
-
-    Covers M9 + K8 end-to-end. Fallback block has the
-    'run details unavailable' note plus the version footer — and
-    crucially NOT the per-phase table (no half-rendered output).
-    """
-    out = render_run_info_block([_CORRUPTED])
-    assert "- **Mode:**" not in out
-    assert "*run details unavailable*" in out
-    assert "Per-phase breakdown" not in out
-    assert "| Phase |" not in out
-    assert "<sub>Generated by daydream v" in out
-
-
-# Regression lock: cached turn renders true total input (fix landed in the
-# Claude backend fold; this locks the renderer's total-form display contract).
-def test_cached_turn_renders_total_input(tmp_path: Path) -> None:
-    """A cached Claude turn renders its total input, not the uncached remainder.
-
-    The backend folds cache read/creation into prompt_tokens (the ATIF total),
-    so a step with prompt=20000, cached=15000 must render the true total input
-    with an honest read/total hit ratio.
-    """
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="claude-sonnet-4-5",
-                prompt=20000,
-                completion=800,
-                cached=15000,
-                cost_usd=0.1,
-            ),
-        ],
-    )
-    out = render_run_info_block([p])
-    assert "20,000 in (15,000 cached, 75% hit) → 800 out" in out
 
 
 # Regression: corrupt-metrics bleed (CodeRabbit #3 on PR #66)

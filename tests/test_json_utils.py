@@ -6,64 +6,79 @@ target the canonical function directly so they remain valid regardless of any
 backend-private wrapper aliases.
 """
 
+from typing import Any
+
+import pytest
+
 from daydream.json_utils import extract_json
 
 
 class TestExtractJson:
     """Verify extract_json handles clean JSON, fenced JSON, and prose-wrapped JSON."""
 
-    def test_clean_json_object(self):
-        assert extract_json('{"findings": [], "ok": true}') == {"findings": [], "ok": True}
-
-    def test_clean_json_array(self):
-        assert extract_json('[1, 2, 3]') == [1, 2, 3]
-
-    def test_markdown_fenced_json(self):
-        text = '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```'
-        result = extract_json(text)
-        assert result == {"findings": [{"arb_id": 1, "keep": True}]}
-
-    def test_markdown_fenced_bare(self):
-        text = '```\n{"x": 1}\n```'
-        assert extract_json(text) == {"x": 1}
-
-    def test_prose_wrapped_json(self):
-        text = (
-            "Based on my analysis of all findings, here are my verdicts:\n"
-            '{"findings": [{"arb_id": 1, "keep": false}]}'
-        )
-        result = extract_json(text)
-        assert result == {"findings": [{"arb_id": 1, "keep": False}]}
-
-    def test_prose_wrapped_array(self):
-        text = 'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.'
-        result = extract_json(text)
-        assert result == [{"id": 1, "severity": "high"}]
-
-    def test_empty_string(self):
-        assert extract_json("") is None
-
-    def test_whitespace_only(self):
-        assert extract_json("   \n  ") is None
-
-    def test_no_json_at_all(self):
-        assert extract_json("This is just prose with no JSON whatsoever.") is None
-
-    def test_json_with_nested_braces_in_strings(self):
-        text = '{"msg": "contains a } brace", "ok": true}'
-        result = extract_json(text)
-        assert result == {"msg": "contains a } brace", "ok": True}
-
-    def test_unparseable_array_then_valid_array(self):
-        # First balanced [...] span is unparseable; must scan forward to the
-        # next valid span of the same brace type instead of giving up.
-        assert extract_json('[1, bad] then [3,4]') == [3, 4]
-
-    def test_unparseable_object_then_valid_object(self):
-        # First balanced {...} span is unparseable; must scan forward to the
-        # next valid object of the same brace type (not fall back to the inner
-        # array, which would return the wrong type).
-        assert extract_json('{bad} then {"issues":[1,2]}') == {"issues": [1, 2]}
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            pytest.param(
+                '{"findings": [], "ok": true}',
+                {"findings": [], "ok": True},
+                id="clean-json-object",
+            ),
+            pytest.param("[1, 2, 3]", [1, 2, 3], id="clean-json-array"),
+            pytest.param(
+                '```json\n{"findings": [{"arb_id": 1, "keep": true}]}\n```',
+                {"findings": [{"arb_id": 1, "keep": True}]},
+                id="markdown-fenced-json",
+            ),
+            pytest.param('```\n{"x": 1}\n```', {"x": 1}, id="markdown-fenced-bare"),
+            pytest.param(
+                "Based on my analysis of all findings, here are my verdicts:\n"
+                '{"findings": [{"arb_id": 1, "keep": false}]}',
+                {"findings": [{"arb_id": 1, "keep": False}]},
+                id="prose-wrapped-json",
+            ),
+            pytest.param(
+                'Here are the issues:\n[{"id": 1, "severity": "high"}]\nThat concludes the review.',
+                [{"id": 1, "severity": "high"}],
+                id="prose-wrapped-array",
+            ),
+            pytest.param("", None, id="empty-string"),
+            pytest.param("   \n  ", None, id="whitespace-only"),
+            pytest.param(
+                "This is just prose with no JSON whatsoever.",
+                None,
+                id="no-json-at-all",
+            ),
+            pytest.param(
+                '{"msg": "contains a } brace", "ok": true}',
+                {"msg": "contains a } brace", "ok": True},
+                id="json-with-nested-braces-in-strings",
+            ),
+            pytest.param(
+                "[1, bad] then [3,4]",
+                [3, 4],
+                id="unparseable-array-then-valid-array",
+            ),
+            pytest.param(
+                '{bad} then {"issues":[1,2]}',
+                {"issues": [1, 2]},
+                id="unparseable-object-then-valid-object",
+            ),
+            pytest.param(
+                'prefix {bad {"findings": []}} suffix',
+                {"findings": []},
+                id="nested-valid-json-inside-balanced-invalid-span",
+            ),
+            pytest.param(
+                'note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}',
+                {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]},
+                id="largest-object-wins-over-smaller-earlier-object",
+            ),
+        ],
+    )
+    def test_extract_json(self, text: str, expected: Any) -> None:
+        """Extract supported JSON wrappers while preserving expected Python values."""
+        assert extract_json(text) == expected
 
     def test_stray_prose_bracket_does_not_beat_the_real_object(self):
         # Regression for the sentry-67876 arbiter crash. The model's prose
@@ -82,15 +97,3 @@ class TestExtractJson:
         result = extract_json(text)
         assert isinstance(result, dict)
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
-
-    def test_nested_valid_json_inside_balanced_invalid_span(self):
-        # The outer `{bad {...}}` span is balanced but invalid; the inner
-        # `{"findings": []}` is valid. A scan that jumps past the failed outer
-        # span never examines the inner payload and wrongly returns None.
-        assert extract_json('prefix {bad {"findings": []}} suffix') == {"findings": []}
-
-    def test_largest_object_wins_over_smaller_earlier_object(self):
-        # Two valid objects; the substantial answer comes second. The earlier,
-        # smaller object must not shadow it.
-        text = 'note {"k": 1} then {"findings": [{"arb_id": 1, "keep": false, "x": "y"}]}'
-        assert extract_json(text) == {"findings": [{"arb_id": 1, "keep": False, "x": "y"}]}

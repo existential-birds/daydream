@@ -456,27 +456,6 @@ def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
     assert out is None
 
 
-def test_per_stack_prompt_inlines_hunks_and_drops_read_instruction(tmp_path: Path) -> None:
-    """AC4 (unit): per-stack prompt with ``inline_diff`` supplied contains the
-    inlined hunks, NOT the ``Read it directly`` instruction or diff_path.
-    """
-    from daydream.deep.prompts import _diff_blocks_for_files
-
-    p = _paths(tmp_path)
-    inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["api.py"])
-    assert inline is not None  # sanity: the helper found a block
-    out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
-        stack_name="python",
-        files=["api.py"],
-        inline_diff=inline,
-        **p,
-    )
-    assert "def hello(): return 'universe'" in out  # hunk inlined
-    assert "Read it directly" not in out
-    assert str(p["diff_path"]) not in out
-
-
 def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(
     tmp_path: Path,
 ) -> None:

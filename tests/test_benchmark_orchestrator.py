@@ -93,21 +93,47 @@ def _config(tmp_path: Path, data_path: Path, *, score: bool, only: str) -> Bench
     )
 
 
-def test_run_bench_injects_a_daydream_review_per_selected_pr(tmp_path, monkeypatch):
+def test_single_shot_run_injects_reports_and_rerun_is_idempotent(tmp_path, monkeypatch):
+    """Inject one review per PR, emit reports, and skip review work on rerun."""
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    calls = {"n": 0}
     monkeypatch.setattr(
         "daydream.benchmark.orchestrator.acquire_checkout",
         lambda *a, **k: _fake_acquired(tmp_path),
     )
-    monkeypatch.setattr(
-        "daydream.benchmark.orchestrator.run_daydream_review",
-        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
-    )
-    rc = run_bench(_config(tmp_path, data_path, score=False, only="grafana"))  # 10 PRs
+
+    def counting_review(checkout, **k):
+        """Record review calls while returning a deterministic findings artifact."""
+        calls["n"] += 1
+        return _write_items(checkout, [_item("f.py", 1)])
+
+    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", counting_review)
+    cfg = _config(tmp_path, data_path, score=False, only="grafana")
+    rc = run_bench(cfg)  # 10 PRs
     data = json.loads(data_path.read_text())
     grafana = [u for u in data if "grafana" in u]
     assert rc == 0 and len(grafana) == 10
     assert all(any(r["tool"] == "daydream" for r in data[u]["reviews"]) for u in grafana)
+
+    report_path = tmp_path / ".daydream-bench" / "report-daydream.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1
+    assert report["corpus"] == "withmartian"
+    assert report["corpus_root"] == str(tmp_path)
+    assert report["tool_label"] == "daydream"
+    assert len(report["prs"]) == 10
+    assert all("grafana" in entry["golden_url"] for entry in report["prs"])
+    assert all(entry["injected_comments"] == 1 for entry in report["prs"])
+    # Scoring was off, so there is no aggregate and no per-PR score leaf.
+    assert report["aggregate"] is None
+    assert report["distribution"] is None
+    assert all(entry["tp"] is None for entry in report["prs"])
+    assert all(entry["trial_index"] is None for entry in report["prs"])
+
+    first = calls["n"]
+    run_bench(cfg)  # force=False
+    assert first == 10 and calls["n"] == 10  # second run added zero new reviews
 
 
 def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
@@ -417,7 +443,10 @@ def _scored_trials_config(tmp_path, data_path, trials):
     return replace(_config(tmp_path, data_path, score=True, only="grafana"), limit=1, trials=trials)
 
 
-def test_trials_3_creates_3_isolated_trial_dirs(tmp_path, monkeypatch):
+def test_trials_3_writes_isolated_dirs_summary_and_distribution_report(tmp_path, monkeypatch):
+    """Isolate three scored trials and publish their aggregate statistics."""
+    rec = Console(record=True, force_terminal=True, width=120)
+    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
@@ -437,8 +466,55 @@ def test_trials_3_creates_3_isolated_trial_dirs(tmp_path, monkeypatch):
     assert captured["tools"] == ["daydream-t00", "daydream-t01", "daydream-t02"]
     assert all(r == trials_dir / f"trial-{i:02d}" for i, r in enumerate(captured["repos"]))
 
+    summary_path = trials_dir / "trials-summary.json"
+    assert summary_path.exists()
+    summary = json.loads(summary_path.read_text())
+    assert summary["tool_label"] == "daydream"
+    assert summary["trials"] == 3
+    assert summary["judge_route"] == "martian"
+    assert summary["judge_model"] == "judge-model"
+    assert isinstance(summary["git_sha"], str) and summary["git_sha"]
+    assert summary["timestamp"]
+    assert len(summary["pr_set"]) == 1
+    assert len(summary["per_trial"]) == 3
+    # per-trial precisions are the three distinct values, in trial order.
+    assert [round(pt["precision"], 3) for pt in summary["per_trial"]] == [0.4, 0.5, 0.6]
+    # Richer per-trial fields carry the tp/fp/fn/comparison counts for post-hoc auditing.
+    assert [pt["tool_label"] for pt in summary["per_trial"]] == [
+        "daydream-t00",
+        "daydream-t01",
+        "daydream-t02",
+    ]
+    assert [pt["total_fp"] for pt in summary["per_trial"]] == [0, 1, 2]
+    assert [pt["total_fn"] for pt in summary["per_trial"]] == [1, 2, 3]
+    assert [pt["total_comparisons"] for pt in summary["per_trial"]] == [10, 11, 12]
+    for pt in summary["per_trial"]:
+        assert pt["scored_pr_count"] == 1 and pt["total_tp"] == 1 and pt["total_errors"] == 0
+    dist = summary["distribution"]
+    for metric in ("precision", "recall", "f1"):
+        assert set(dist[metric]) == {
+            "mean",
+            "median",
+            "stddev",
+            "min",
+            "max",
+            "ci_low",
+            "ci_high",
+        }
+    assert dist["precision"]["mean"] == pytest.approx(0.5)
+    assert dist["precision"]["min"] == pytest.approx(0.4)
+    assert dist["precision"]["max"] == pytest.approx(0.6)
+
+    out = rec.export_text()
+    assert "Estimated judge cost" in out and "3 trials" in out  # cost surfaced before the loop
+    assert "precision" in out and "recall" in out and "f1" in out  # distribution table
+    assert "median" in out and "stddev" in out and "ci95" in out
+    # Post-loop close on the up-front estimate: 10 + 11 + 12 comparisons across the 3 trials.
+    assert "Actual judge comparisons recorded: 33" in out
+
 
 def test_trials_injects_into_trial_corpus_not_canonical(tmp_path, monkeypatch):
+    """Keep the source corpus immutable while injecting labels into trial copies."""
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
@@ -460,62 +536,6 @@ def test_trials_injects_into_trial_corpus_not_canonical(tmp_path, monkeypatch):
     assert len(injected) == 1
 
 
-def test_trials_writes_summary_with_distribution_and_metadata(tmp_path, monkeypatch):
-    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
-    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
-    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
-    _mock_review(tmp_path, monkeypatch)
-    _scores_by_trial(tmp_path, monkeypatch)
-
-    run_bench(_scored_trials_config(tmp_path, data_path, 3))
-
-    summary_path = tmp_path / ".daydream-bench" / "trials" / "daydream" / "trials-summary.json"
-    assert summary_path.exists()
-    summary = json.loads(summary_path.read_text())
-    assert summary["tool_label"] == "daydream"
-    assert summary["trials"] == 3
-    assert summary["judge_route"] == "martian"
-    assert summary["judge_model"] == "judge-model"
-    assert isinstance(summary["git_sha"], str) and summary["git_sha"]
-    assert summary["timestamp"]
-    assert len(summary["pr_set"]) == 1
-    assert len(summary["per_trial"]) == 3
-    # per-trial precisions are the three distinct values, in trial order.
-    assert [round(pt["precision"], 3) for pt in summary["per_trial"]] == [0.4, 0.5, 0.6]
-    # Richer per-trial fields carry the tp/fp/fn/comparison counts for post-hoc auditing.
-    assert [pt["tool_label"] for pt in summary["per_trial"]] == ["daydream-t00", "daydream-t01", "daydream-t02"]
-    assert [pt["total_fp"] for pt in summary["per_trial"]] == [0, 1, 2]
-    assert [pt["total_fn"] for pt in summary["per_trial"]] == [1, 2, 3]
-    assert [pt["total_comparisons"] for pt in summary["per_trial"]] == [10, 11, 12]
-    for pt in summary["per_trial"]:
-        assert pt["scored_pr_count"] == 1 and pt["total_tp"] == 1 and pt["total_errors"] == 0
-    dist = summary["distribution"]
-    for metric in ("precision", "recall", "f1"):
-        assert set(dist[metric]) == {"mean", "median", "stddev", "min", "max", "ci_low", "ci_high"}
-    assert dist["precision"]["mean"] == pytest.approx(0.5)
-    assert dist["precision"]["min"] == pytest.approx(0.4)
-    assert dist["precision"]["max"] == pytest.approx(0.6)
-
-
-def test_trials_prints_distribution_and_cost_estimate(tmp_path, monkeypatch):
-    rec = Console(record=True, force_terminal=True, width=120)
-    monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
-    monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
-    monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
-    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
-    _mock_review(tmp_path, monkeypatch)
-    _scores_by_trial(tmp_path, monkeypatch)
-
-    run_bench(_scored_trials_config(tmp_path, data_path, 3))
-
-    out = rec.export_text()
-    assert "Estimated judge cost" in out and "3 trials" in out  # cost surfaced before the loop
-    assert "precision" in out and "recall" in out and "f1" in out  # distribution table
-    assert "median" in out and "stddev" in out and "ci95" in out
-    # Post-loop close on the up-front estimate: 10 + 11 + 12 comparisons across the 3 trials.
-    assert "Actual judge comparisons recorded: 33" in out
-
-
 def test_trials_1_is_backcompat_no_trial_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
@@ -532,57 +552,6 @@ def test_trials_1_is_backcompat_no_trial_dirs(tmp_path, monkeypatch):
     grafana_injected = [u for u in data if "grafana" in u and any(r["tool"] == "daydream" for r in data[u]["reviews"])]
     assert len(grafana_injected) == 1
     assert captured["tools"] == ["daydream"]  # scored under the base label, not a trial suffix
-
-
-def test_rerun_skips_already_injected_unless_forced(tmp_path, monkeypatch):
-    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
-    calls = {"n": 0}
-    monkeypatch.setattr(
-        "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_acquired(tmp_path),
-    )
-
-    def counting_review(checkout, **k):
-        calls["n"] += 1
-        return _write_items(checkout, [_item("f.py", 1)])
-
-    monkeypatch.setattr("daydream.benchmark.orchestrator.run_daydream_review", counting_review)
-    cfg = _config(tmp_path, data_path, score=False, only="grafana")
-    run_bench(cfg)
-    first = calls["n"]
-    run_bench(cfg)  # force=False
-    assert first == 10 and calls["n"] == 10  # second run added zero new reviews
-
-
-def test_single_shot_run_writes_json_report(tmp_path, monkeypatch):
-    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
-    monkeypatch.setattr(
-        "daydream.benchmark.orchestrator.acquire_checkout",
-        lambda *a, **k: _fake_acquired(tmp_path),
-    )
-    monkeypatch.setattr(
-        "daydream.benchmark.orchestrator.run_daydream_review",
-        lambda checkout, **k: _write_items(checkout, [_item("f.py", 1)]),
-    )
-
-    rc = run_bench(_config(tmp_path, data_path, score=False, only="grafana"))  # 10 PRs
-
-    assert rc == 0
-    report_path = tmp_path / ".daydream-bench" / "report-daydream.json"
-    assert report_path.exists()
-    report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["schema_version"] == 1
-    assert report["corpus"] == "withmartian"
-    assert report["corpus_root"] == str(tmp_path)
-    assert report["tool_label"] == "daydream"
-    assert len(report["prs"]) == 10
-    assert all("grafana" in entry["golden_url"] for entry in report["prs"])
-    assert all(entry["injected_comments"] == 1 for entry in report["prs"])
-    # Scoring was off, so there is no aggregate and no per-PR score leaf.
-    assert report["aggregate"] is None
-    assert report["distribution"] is None
-    assert all(entry["tp"] is None for entry in report["prs"])
-    assert all(entry["trial_index"] is None for entry in report["prs"])  # single-shot carries no trial identity
 
 
 def test_multi_trial_report_attributes_each_pr_entry_to_its_trial(tmp_path, monkeypatch):

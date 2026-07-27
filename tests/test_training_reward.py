@@ -52,30 +52,29 @@ def test_weights_are_overridable_and_change_composite_predictably():
     assert score_trajectory(base_len, weights=RewardWeights(w_len=0.5)).composite == 0.5
 
 
-def test_rejected_outcome_applies_posterior_penalty_golden():
+@pytest.mark.parametrize(
+    ("pr_feedback", "expected_penalty", "expected_posterior_cost"),
+    [
+        pytest.param("rejected", 1.0, 0.5, id="rejected"),
+        pytest.param("contested", 0.5, 0.0, id="contested"),
+    ],
+)
+def test_outcome_applies_posterior_penalty_golden(
+    pr_feedback: str,
+    expected_penalty: float,
+    expected_posterior_cost: float,
+) -> None:
+    """Expose posterior penalties separately from the intrinsic composite score."""
     from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
                       grounding_rate=0.5, format_valid=True, length=4000),
-        pr_feedback="rejected")
+        pr_feedback=pr_feedback)
     assert isinstance(rb, PosteriorBreakdown)
-    assert rb.false_positive_penalty == 1.0
+    assert rb.false_positive_penalty == expected_penalty
     assert rb.axes_present["false_positive"] is True
     assert rb.composite == 0.6        # pure intrinsic: 0.65 credit − 0.2·0.25 len; posterior NOT folded in
-    assert rb.posterior_cost == 0.5   # sibling field: max(0, 1.0 − 0.5 default prior)
-
-
-def test_contested_outcome_applies_intermediate_penalty_golden():
-    from daydream.training.reward import PosteriorBreakdown
-    rb = score_trajectory(
-        ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],
-                      grounding_rate=0.5, format_valid=True, length=4000),
-        pr_feedback="contested")
-    assert isinstance(rb, PosteriorBreakdown)
-    assert rb.false_positive_penalty == 0.5
-    assert rb.axes_present["false_positive"] is True
-    assert rb.composite == 0.6        # pure intrinsic, unchanged by the posterior label
-    assert rb.posterior_cost == 0.0   # sibling field: max(0, 0.5 − 0.5 default prior)
+    assert rb.posterior_cost == expected_posterior_cost
 
 
 def test_accepted_outcome_has_zero_penalty_and_all_six_fields():

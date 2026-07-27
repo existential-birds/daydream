@@ -40,22 +40,6 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
     recorder.steps.append(step)
 
 
-# on_write callback fires on normal write
-async def test_on_write_fires_on_normal_write(tmp_path: Path) -> None:
-    """on_write is called with (recorder, 'complete') when trajectory has steps."""
-    callback_calls: list[tuple[str, str]] = []
-
-    def on_write(recorder: TrajectoryRecorder, status: str) -> None:
-        callback_calls.append((recorder.session_id, status))
-
-    recorder = make_recorder(tmp_path, on_write=on_write)
-    async with recorder:
-        _add_user_step(recorder)
-
-    assert len(callback_calls) == 1
-    assert callback_calls[0] == (recorder.session_id, "complete")
-
-
 # on_write does NOT fire on empty trajectory
 async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> None:
     """Empty trajectories skip _write entirely, so on_write must not be called."""
@@ -83,70 +67,6 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
     daydream_dir = target_dir / ".daydream"
     daydream_dir.mkdir()
     (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
-
-    config = RunConfig(
-        target=str(target_dir),
-        skill="python",
-        backend="claude",
-        archive=True,
-        run_eval=False,
-    )
-
-    callback = _make_archive_callback(config, target_dir)
-    assert callback is not None
-
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=target_dir,
-        agent_model_name="opus",
-        session_id="test",
-        on_write=callback,
-    )
-
-    async with recorder:
-        _add_user_step(recorder)
-
-    assert (daydream_dir / "trajectory.json").exists()
-
-    run_dir = archive_dir / "runs" / recorder.session_id
-    assert run_dir.is_dir()
-
-    manifest_path = run_dir / "manifest.json"
-    assert manifest_path.exists()
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["session_id"] == recorder.session_id
-    assert manifest["status"] == "complete"
-    assert manifest["run"]["flow"] == "normal"
-    assert manifest["run"]["skill"] == "python"
-
-    db_path = archive_dir / "index.db"
-    assert db_path.exists()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT * FROM runs WHERE session_id = ?",
-            (recorder.session_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["status"] == "complete"
-        assert row["run_flow"] == "normal"
-    finally:
-        conn.close()
-
-
-async def test_archive_persists_findings_artifact_for_pr_run(tmp_path: Path, archive_dir: Path) -> None:
-    """Real-path: findings.json from --findings-out is archived so harvest's per-finding join is non-inert."""
-    from daydream.runner import RunConfig, _make_archive_callback
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\n")
-
-    # The review-bot workflow writes findings.json under the repo root (CWD at run time).
     findings_src = target_dir / "findings" / "findings.json"
     findings_src.parent.mkdir(parents=True)
     findings_src.write_text(
@@ -162,45 +82,11 @@ async def test_archive_persists_findings_artifact_for_pr_run(tmp_path: Path, arc
         findings_out="findings/findings.json",
     )
 
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=target_dir,
-        agent_model_name="opus",
-        session_id="findings-test",
-        on_write=_make_archive_callback(config, target_dir),
-    )
-
-    async with recorder:
-        _add_user_step(recorder)
-
-    run_dir = archive_dir / "runs" / recorder.session_id
-    archived = run_dir / "findings.json"
-    assert archived.is_file()
-    assert json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"] == "deadbeef"
-
-
-async def test_archive_populates_wall_clock_without_eval(tmp_path: Path, archive_dir: Path) -> None:
-    """Real-path: manifest.json carries wall_clock_seconds even when --eval did not run."""
-    from daydream.runner import RunConfig, _make_archive_callback
-
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    (target_dir / ".daydream").mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
-
-    config = RunConfig(
-        target=str(target_dir),
-        skill="python",
-        backend="claude",
-        archive=True,
-        run_eval=False,  # the path that was previously leaving wall_clock null
-    )
     callback = _make_archive_callback(config, target_dir)
     assert callback is not None
 
     recorder = TrajectoryRecorder(
-        path=target_dir / ".daydream" / "trajectory.json",
+        path=daydream_dir / "trajectory.json",
         run_flow=DaydreamRunFlow.NORMAL,
         target_dir=target_dir,
         agent_model_name="opus",
@@ -224,9 +110,38 @@ async def test_archive_populates_wall_clock_without_eval(tmp_path: Path, archive
                 )
             )
 
-    manifest_path = archive_dir / "runs" / recorder.session_id / "manifest.json"
+    assert (daydream_dir / "trajectory.json").exists()
+
+    run_dir = archive_dir / "runs" / recorder.session_id
+    assert run_dir.is_dir()
+
+    manifest_path = run_dir / "manifest.json"
+    assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["session_id"] == recorder.session_id
+    assert manifest["status"] == "complete"
+    assert manifest["run"]["flow"] == "normal"
+    assert manifest["run"]["skill"] == "python"
     assert manifest["metrics"]["wall_clock_seconds"] == 8.5
+
+    archived = run_dir / "findings.json"
+    assert archived.is_file()
+    assert json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"] == "deadbeef"
+
+    db_path = archive_dir / "index.db"
+    assert db_path.exists()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE session_id = ?",
+            (recorder.session_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "complete"
+        assert row["run_flow"] == "normal"
+    finally:
+        conn.close()
 
 
 # on_write failure does not raise

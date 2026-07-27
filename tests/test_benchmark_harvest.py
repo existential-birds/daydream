@@ -7,29 +7,28 @@ pure records-to-corpus projection, and a real-path harvest through
 
 import json
 
+import pytest
+
 from daydream.benchmark.cli import _handle_bench_command
 from daydream.benchmark.harvest import bot_login_matches, build_harvested_corpus
 
 
-def test_bot_login_matches_rest_suffix_form():
-    # REST user.login keeps the suffix; --bot may be given either way.
-    assert bot_login_matches("coderabbitai[bot]", "coderabbitai[bot]")
-    assert bot_login_matches("coderabbitai[bot]", "coderabbitai")
-    assert not bot_login_matches("greptileai[bot]", "coderabbitai[bot]")
-
-
-def test_bot_login_matches_graphql_stripped_form():
-    # GraphQL author.login drops the suffix; it must still match --bot "x[bot]".
-    assert bot_login_matches("coderabbitai", "coderabbitai[bot]")
-    assert not bot_login_matches(None, "coderabbitai[bot]")
-
-
-def test_bot_login_matches_is_case_insensitive():
-    # The stem comparison is case-insensitive. The literal "[bot]" suffix GitHub
-    # appends is always lowercase, so it is stripped before casefolding.
-    assert bot_login_matches("CodeRabbitAI[bot]", "coderabbitai")
-    assert bot_login_matches("coderabbitai", "CodeRabbitAI[bot]")
-    assert not bot_login_matches("coderabbitai", "coderabbit")
+@pytest.mark.parametrize(
+    ("observed_login", "configured_login", "expected"),
+    [
+        pytest.param("coderabbitai[bot]", "coderabbitai[bot]", True, id="rest-both-suffixed"),
+        pytest.param("coderabbitai[bot]", "coderabbitai", True, id="rest-observed-suffixed"),
+        pytest.param("greptileai[bot]", "coderabbitai[bot]", False, id="different-bot"),
+        pytest.param("coderabbitai", "coderabbitai[bot]", True, id="graphql-stripped"),
+        pytest.param(None, "coderabbitai[bot]", False, id="missing-observed-login"),
+        pytest.param("CodeRabbitAI[bot]", "coderabbitai", True, id="observed-case-insensitive"),
+        pytest.param("coderabbitai", "CodeRabbitAI[bot]", True, id="configured-case-insensitive"),
+        pytest.param("coderabbitai", "coderabbit", False, id="different-stem"),
+    ],
+)
+def test_bot_login_matches_cases(observed_login, configured_login, expected):
+    """Match bot logins across case and GitHub's optional app suffix."""
+    assert bot_login_matches(observed_login, configured_login) is expected
 
 
 def test_build_harvested_corpus_emits_golden_with_comment_key_and_resolved_flag():
@@ -238,9 +237,7 @@ def test_harvest_command_writes_corpus_files(tmp_path, monkeypatch, fake_gh):
     )
 
     out = tmp_path / "corpus"
-    rc = _handle_bench_command(
-        ["harvest", "--repo", "acme/widgets", "--bot", "cr[bot]", "--out", str(out)]
-    )
+    rc = _handle_bench_command(["harvest", "--repo", "acme/widgets", "--bot", "cr[bot]", "--out", str(out)])
     assert rc == 0
 
     index = json.loads((out / "index.json").read_text(encoding="utf-8"))
