@@ -1,0 +1,27 @@
+# Docker-runtime eval: the real rollout shape.
+#
+# Each task runs in its own container built from the per-PR image the manifest
+# names, so the repository is already checked out at the head SHA and its suite
+# is already proven green there — which is what makes fix_tests_pass a verdict
+# rather than noise.
+#
+#   python images/build_images.py --only existential-birds/daydream-rl-fixture
+#   uv run eval @ configs/eval-docker.toml --client.base-url <your endpoint>
+#
+# Docker is `is_local`, so no tunnel is minted; on macOS verifiers rewrites the
+# host-bound interception URL to host.docker.internal automatically.
+
+num_tasks = 1
+num_rollouts = 1
+push = false
+
+[taskset]
+id = "daydream-review-v1"
+corpus_dir = "tests/fixtures/corpus-mini"
+manifest_path = "images/manifest.toml"
+
+[harness]
+id = "daydream-review-v1"
+backend = "claude"
+runtime = { type = "docker" }
+fanout_concurrency = 4

@@ -1,0 +1,39 @@
+# Local smoke rollout: real daydream, real subprocess runtime, canned upstream.
+#
+# Proves the plumbing, not the policy: env injection reaches the CLI, the CLI
+# speaks to the interception server in the right dialect with the rollout secret,
+# artifacts land in the archive, and both reward axes score. The replies are
+# garbage by construction, so near-zero rewards are the expected outcome.
+#
+#   python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
+#   mkdir -p /tmp/daydream-rl-smoke/archive /tmp/daydream-rl-smoke/home
+#   python -m daydream_review_v1.stub_upstream --port 8399 &
+#   uv run eval @ configs/eval-stub.toml
+#
+# `push = false` and the explicit `[client] base_url` are NOT optional: the eval
+# CLI defaults to push=true and to https://api.pinference.ai/api/v1, so without
+# both an offline run phones Prime's platform.
+
+num_tasks = 1
+num_rollouts = 1
+push = false
+
+[client]
+base_url = "http://127.0.0.1:8399/v1"
+api_key_var = "DAYDREAM_RL_STUB_KEY"
+
+[taskset]
+id = "daydream-review-v1"
+corpus_dir = "tests/fixtures/corpus-mini"
+manifest_path = "images/manifest.toml"
+# Subprocess runtime only: a task carrying an image may not run there at all.
+use_images = false
+
+[harness]
+id = "daydream-review-v1"
+backend = "claude"
+runtime = { type = "subprocess" }
+home = "/tmp/daydream-rl-smoke/home"
+repo_path = "/tmp/daydream-rl-smoke/repo"
+archive_root = "/tmp/daydream-rl-smoke/archive"
+fanout_concurrency = 2
