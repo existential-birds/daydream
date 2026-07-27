@@ -82,6 +82,8 @@ class StubBackend:
         self.test_suite_calls: int = 0
         # When True, the test-suite branch fails the first call and passes after.
         self.fail_first_test_run: bool = False
+        # When True, EVERY test-suite run fails (permanently-red suite).
+        self.fail_all_test_runs: bool = False
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
         # Optional LLM supervisor verdicts keyed by canonical item id.
@@ -585,6 +587,8 @@ class StubBackend:
                         "The dev Postgres container is not running."
                     )
                 )
+            elif self.fail_all_test_runs:
+                yield TextEvent(text="1 failed, 0 passed")
             elif self.fail_first_test_run and self.test_suite_calls == 1:
                 yield TextEvent(text="1 failed, 0 passed")
             else:

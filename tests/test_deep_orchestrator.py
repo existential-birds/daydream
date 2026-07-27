@@ -4276,3 +4276,63 @@ async def test_deep_findings_out_emits_artifact_and_stops(
         assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
+
+
+async def test_test_verdict_artifact_written_on_passing_suite(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk.
+
+    Drives ``runner.run`` end to end with the scripted ``_StubBackend`` (the
+    only mocked seam) and the REAL ``phase_test_and_heal`` (``heal=False``), so
+    the verdict written by ``_step_test`` reflects an actual test-suite turn.
+    Observable outcome: exit 0 plus a parseable artifact at
+    ``<target>/.daydream/deep/test-verdict.json`` recording ``passed`` True.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    mute_side_effects(heal=False)
+
+    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
+    assert rc == 0
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    assert verdict_file.is_file(), "passing run did not write test-verdict.json"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is True, verdict
+    assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
+
+
+async def test_test_verdict_artifact_written_on_failing_suite(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``.
+
+    ``_step_test`` returns ``Stop(1)`` on failure; the verdict must be
+    persisted before that early-return, otherwise the failing outcome -- the
+    one a caller most needs -- would never reach disk. With ``--yes`` the heal
+    loop gets exactly ONE bounded auto fix-and-retry, so the red suite runs
+    twice and then aborts. Observable outcome: exit 1 AND an artifact recording
+    ``passed`` False.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    stub.fail_all_test_runs = True  # suite never goes green, even after the heal fix
+    mute_side_effects(heal=False)
+
+    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
+    assert rc == 1, "a permanently-red suite must fail the run"
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    assert verdict_file.is_file(), "failing run lost test-verdict.json to the early-return"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is False, verdict
+    assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
