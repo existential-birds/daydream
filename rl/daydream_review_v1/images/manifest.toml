@@ -18,3 +18,17 @@ clone_url = "fixture://daydream-rl-fixture"
 image = "daydream-rl/fixture"
 test_command = "python -m unittest discover -q"
 setup_cmds = []
+
+# Reference entry: real upstream history, proving the tooling on something other
+# than a synthetic repo. BSD-3-Clause, not on the C5 exclusion list, and its whole
+# suite runs in seconds. The corpus that pairs with it is
+# tests/fixtures/corpus-reference/ (PR #406, head 4bb03cd6819228f3, base
+# 4dffa1963f896a0a — the merge commit's two parents).
+#
+# This is a reference, NOT the training set. Expanding to a real training-repo set
+# is data ops, tracked as its own numbered task on issue #164.
+[repos."pallets/itsdangerous"]
+clone_url = "https://github.com/pallets/itsdangerous.git"
+image = "daydream-rl/itsdangerous"
+test_command = "python -m pytest -q"
+setup_cmds = ["pip install -e .", "pip install pytest freezegun"]
