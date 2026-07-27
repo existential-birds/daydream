@@ -1,0 +1,13 @@
+{
+  "verdicts": [
+    {
+      "issue_id": 1,
+      "verdict": "consistent",
+      "evidence": "calc.py:14-16 defines `def mean(values: list[int]) -> float: \"\"\"Return the arithmetic mean of *values*.\"\"\" return sum(values) / len(values)` \u2014 this is a standalone function, not an `impl <Trait> for` / `class X(Interface)` participant; grep for `impl \\w+ for|class \\w+\\(` in the repo shows no trait/interface/protocol declaration that `mean`, `add`, or `divide` implement, and no sibling implementations of a shared interface exist (they are just three independent helper functions in calc.py). Per the Gate-0 rule ('If absent, set verdict=consistent only if no sibling implementations exist'), this applies here. The recommendation itself \u2014 adding `mean([1, 2]) == 1.5` in tests/test_calc.py:13-14 (`def test_mean(self) -> None: self.assertEqual(mean([1, 2, 3]), 2.0)`) \u2014 correctly targets the true-division behavior documented in mean's docstring ('Return the arithmetic mean') and would catch a `//` regression that the current all-integer-mean case (2.0) cannot.",
+      "unverified_assumptions": [
+        "Assumes floor-division (`//`) is the only realistic regression risk for `mean`, i.e. no other implementation change (e.g. switching to `statistics.mean` or a different summation order) could also break correctness in ways `1.5` wouldn't catch",
+        "Assumes `sum(values) / len(values)` (true division) is and should remain the intended/spec-correct behavior for `mean`, since no separate spec/docstring beyond the one-line docstring exists to confirm this"
+      ]
+    }
+  ]
+}

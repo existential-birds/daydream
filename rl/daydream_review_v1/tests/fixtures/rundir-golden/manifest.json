@@ -1,0 +1,91 @@
+{
+  "schema_version": "1.0",
+  "recommended_patch_supported": true,
+  "session_id": "9b36227a-9f80-41e5-a419-5cfed5a34b5b",
+  "archived_at": "2026-07-27T02:27:52.995529+00:00",
+  "status": "complete",
+  "run": {
+    "flow": "deep",
+    "skill": null,
+    "model": null,
+    "backend": "claude",
+    "review_backend": "claude",
+    "fix_backend": "claude",
+    "test_backend": "claude",
+    "review_only": false,
+    "deep": true,
+    "loop": false
+  },
+  "fix_failures": null,
+  "fix_leftover_untracked": null,
+  "git": {
+    "source_path": "/private/tmp/claude-501/-Users-ka-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo",
+    "remote_url": "/private/tmp/claude-501/-Users-ka-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/mirror.git",
+    "repo_slug": null,
+    "branch": "main",
+    "base_branch": "1ba756e6743d833dc361177c2fb4946e76015985",
+    "head_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc"
+  },
+  "code_context": {
+    "head_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc",
+    "base_branch": "1ba756e6743d833dc361177c2fb4946e76015985",
+    "branch": "main",
+    "base_sha": "077aa8792a58adeafd253a717f9a8ab19d21c0cc",
+    "changed_files": []
+  },
+  "pr": {
+    "number": null,
+    "repo": null
+  },
+  "metrics": {
+    "total_cost_usd": 0.8825803000000001,
+    "total_prompt_tokens": 2420534,
+    "total_completion_tokens": 8099,
+    "total_cached_tokens": 2109883,
+    "wall_clock_seconds": 234.7,
+    "phase_timings": {
+      "exploration": {
+        "wall_clock_seconds": 17.164,
+        "occurrences": 1
+      },
+      "intent": {
+        "wall_clock_seconds": 15.254,
+        "occurrences": 1
+      },
+      "alternatives": {
+        "wall_clock_seconds": 48.057,
+        "occurrences": 1
+      },
+      "deep": {
+        "wall_clock_seconds": 74.002,
+        "occurrences": 1
+      },
+      "parse": {
+        "wall_clock_seconds": 16.56,
+        "occurrences": 2
+      },
+      "verify": {
+        "wall_clock_seconds": 22.33,
+        "occurrences": 1
+      },
+      "fix": {
+        "wall_clock_seconds": 11.863,
+        "occurrences": 1
+      },
+      "test": {
+        "wall_clock_seconds": 13.215,
+        "occurrences": 1
+      }
+    },
+    "total_findings": 1,
+    "grounding_rate": 1.0,
+    "coverage_ratio": 1.0,
+    "cost_per_finding_usd": 1.7691
+  },
+  "outcome": {
+    "labels": [],
+    "labeled_at": null,
+    "composite_reward": null
+  },
+  "archive_path": "/private/tmp/claude-501/-Users-ka-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/archive/runs/9b36227a-9f80-41e5-a419-5cfed5a34b5b"
+}

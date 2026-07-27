@@ -7,7 +7,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import (
+
+from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
     FIXTURE_PR1_HEAD_SHA,
     FIXTURE_PR2_HEAD_SHA,
@@ -15,7 +16,6 @@ from conftest import (
     FIXTURE_TEST_COMMAND,
     build_fixture_repo,
 )
-
 from daydream_review_v1.taskset import DaydreamReviewConfig, DaydreamReviewTaskset
 
 
@@ -62,7 +62,7 @@ def _write_manifest(path: Path, slugs: list[str]) -> Path:
 
 
 def test_fixture_repo_is_deterministic(tmp_path: Path) -> None:
-    """The pinned SHAs in conftest/corpus-mini/manifest describe the real repo."""
+    """The SHAs pinned in fixture.py, corpus-mini and the manifest are the real ones."""
     repo = build_fixture_repo(tmp_path / "fx")
     assert (repo.base_sha, repo.pr1_head_sha, repo.pr2_head_sha) == (
         FIXTURE_BASE_SHA,
