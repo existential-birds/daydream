@@ -26,24 +26,23 @@ import pytest
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
-
-# Reuse the deep-orchestrator stub harness (the hard-won prompt-dispatch heuristics
-# live there; re-rolling them would be fragile). tests/ is a namespace package, so
-# a sibling test module imports cleanly.
 from tests.harness.git_helpers import bare_remote, git
-from tests.harness.trajectory import diff_adding
-from tests.test_deep_orchestrator import (
-    _force_interactive,
-    _install_stub_backend,
-    _merge_item,
-    _noop_commit,
-    _ok,
-    _silence,
-    _StubBackend,
+
+# The prompt-dispatching stub backend and its install helpers are the canonical
+# shared stub (tests/harness/stub_backend.py); re-rolling the dispatch
+# heuristics would be fragile. tests/ is a namespace package, so the harness
+# imports cleanly.
+from tests.harness.stub_backend import (
+    StubBackend,
+    force_interactive,
+    install_stub_backend,
+    silence,
 )
+from tests.harness.trajectory import diff_adding
+from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 
 
-class _ArchiveCaptureBackend(_StubBackend):
+class _ArchiveCaptureBackend(StubBackend):
     async def execute(
         self,
         cwd,
@@ -95,9 +94,9 @@ def _install_deep_capture_backend(
     real_internal_phases: bool = False,
 ):
     """Install the shared deep-run backend and optional focused phase seams."""
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    silence(monkeypatch)
+    force_interactive(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
     if real_internal_phases:
         stub = _ArchiveCaptureBackend(multi_stack_target)
         monkeypatch.setattr(
