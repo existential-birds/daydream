@@ -42,21 +42,8 @@ from daydream.backends import (
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
-    TrajectoryRecorder,
-    _reset_recorder_for_tests,
 )
-
-
-@pytest.fixture(autouse=True)
-def _reset_recorder() -> Any:
-    """Reset _RECORDER_VAR before and after every test (mirrors D-17).
-
-    The autouse conftest fixture is added in Plan 07; this file-local
-    fixture mirrors the pattern from tests/test_trajectory.py for now.
-    """
-    _reset_recorder_for_tests()
-    yield
-    _reset_recorder_for_tests()
+from tests.harness.trajectory import make_recorder
 
 
 @dataclass
@@ -99,22 +86,6 @@ class MockBackend:
         return f"/{skill_key}"
 
 
-def _make_recorder(
-    tmp_path: Path,
-    *,
-    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL,
-    agent_model_name: str = "opus",
-) -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder rooted in tmp_path (test helper)."""
-    return TrajectoryRecorder(
-        path=tmp_path / ".daydream" / "trajectory.json",
-        run_flow=run_flow,
-        target_dir=tmp_path,
-        agent_model_name=agent_model_name,
-        session_id="test",
-    )
-
-
 async def _run_with_recorder(
     backend: Backend,
     tmp_path: Path,
@@ -124,7 +95,7 @@ async def _run_with_recorder(
     prompt: str = "hello",
 ) -> tuple[dict[str, Any] | None, tuple[Any, Any, Any]]:
     """Drive run_agent inside a TrajectoryRecorder. Return (trajectory_dict, return_value)."""
-    recorder = _make_recorder(tmp_path, run_flow=run_flow)
+    recorder = make_recorder(tmp_path, run_flow=run_flow)
     target_path = recorder.path
     async with recorder:
         result = await run_agent(backend, tmp_path, prompt, phase=phase)
@@ -214,7 +185,7 @@ async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
 
 async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> None:
     """MAP-07 / Roadmap success criterion 4 — FinalMetrics totals match per-step sum."""
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     target_path = recorder.path
     backend1 = MockBackend([
         TextEvent(text="first"),
@@ -297,7 +268,7 @@ async def test_extra_phase_and_run_flow_labels(tmp_path: Path) -> None:
 
 async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) -> None:
     """MAP-08 + MAP-09 — phase varies per run_agent call; run_flow per recorder."""
-    recorder = _make_recorder(tmp_path, run_flow=DaydreamRunFlow.PR)
+    recorder = make_recorder(tmp_path, run_flow=DaydreamRunFlow.PR)
     target_path = recorder.path
     backend1 = MockBackend([
         TextEvent(text="reviewing"),
@@ -421,7 +392,7 @@ async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None
           ``error_max_turns`` subtype.
     Removing the __aexit__ recording step makes (b) fail.
     """
-    recorder = _make_recorder(tmp_path)
+    recorder = make_recorder(tmp_path)
     target_path = recorder.path
     backend = MaxTurnsBackend(
         pre_events=[

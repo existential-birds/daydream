@@ -1,13 +1,14 @@
 """Tests for posterior-signal extractors.
 
 Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
-no I/O beyond fetchers. Each signal has a positive/negative test pair
-driven by ``_fake_gh_responder`` and a ``_simple_diff_adding`` helper.
+no I/O beyond fetchers.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
 from daydream.training.labeler_signals import (
@@ -24,19 +25,7 @@ from daydream.training.labeler_signals import (
     pr_merge_signal,
     reviewer_logins_signal,
 )
-
-
-def _simple_diff_adding(line: str) -> str:
-    """Return a one-hunk unified diff that adds ``line`` to ``app.py``."""
-    return (
-        "diff --git a/app.py b/app.py\n"
-        "index 1111111..2222222 100644\n"
-        "--- a/app.py\n"
-        "+++ b/app.py\n"
-        "@@ -1,1 +1,2 @@\n"
-        " existing\n"
-        f"+{line}\n"
-    )
+from tests.harness.trajectory import diff_adding
 
 
 def _fake_gh_responder(responses):
@@ -67,7 +56,7 @@ def test_pr_merge_signal_no_pr() -> None:
 def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> None:
     """Hunk content from diff.patch appears verbatim in a post-head commit
     on the default branch."""
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -89,7 +78,7 @@ def test_fix_applied_signal_layered_cascade_returns_applied(tmp_path: Path) -> N
 
 
 def test_fix_applied_signal_empty_window_returns_unknown(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -108,7 +97,7 @@ def test_fix_applied_signal_empty_window_returns_unknown(tmp_path: Path) -> None
 
 
 def test_fix_applied_signal_no_file_overlap_returns_not_applied(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -129,7 +118,7 @@ def test_fix_applied_signal_no_file_overlap_returns_not_applied(tmp_path: Path) 
 def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     """≥50% hunks applied → applied; below → not_applied."""
     (tmp_path / "diff.patch").write_text(
-        _simple_diff_adding("foo = 1") + _simple_diff_adding("bar = 2") + _simple_diff_adding("baz = 3")
+        diff_adding("foo = 1") + diff_adding("bar = 2") + diff_adding("baz = 3")
     )
     row = {
         "repo_slug": "org/repo",
@@ -151,11 +140,11 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     assert sig.hunks_total == 3
 
 
-def test_comment_resolution_signal_all_resolved() -> None:
-    row = {"pr_repo": "org/repo", "pr_number": 42}
-    gh = _fake_gh_responder(
-        {
-            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+@pytest.mark.parametrize(
+    ("comments", "expected"),
+    [
+        pytest.param(
+            [
                 {
                     "id": 1,
                     "in_reply_to_id": None,
@@ -164,16 +153,11 @@ def test_comment_resolution_signal_all_resolved() -> None:
                 },
                 {"id": 2, "in_reply_to_id": 1, "user": {"login": "human"}, "body": "ack"},
             ],
-        }
-    )
-    assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=1, replied=1, unresolved=0)
-
-
-def test_comment_resolution_counts_footer_comment_from_human_author() -> None:
-    row = {"pr_repo": "org/repo", "pr_number": 42}
-    gh = _fake_gh_responder(
-        {
-            ("org/repo", "repos/org/repo/pulls/42/comments"): [
+            CommentResolutionSignal(total=1, replied=1, unresolved=0),
+            id="all-resolved",
+        ),
+        pytest.param(
+            [
                 {
                     "id": 1,
                     "in_reply_to_id": None,
@@ -181,26 +165,39 @@ def test_comment_resolution_counts_footer_comment_from_human_author() -> None:
                     "body": f"finding\n\n{DAYDREAM_FOOTER}",
                 },
             ],
-        }
-    )
-    assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=1, replied=0, unresolved=1)
-
-
-def test_comment_resolution_ignores_non_daydream_bot_comment() -> None:
+            CommentResolutionSignal(total=1, replied=0, unresolved=1),
+            id="human-authored-footer",
+        ),
+        pytest.param(
+            [
+                {
+                    "id": 1,
+                    "in_reply_to_id": None,
+                    "user": {"login": "coderabbitai[bot]"},
+                    "body": "nit",
+                },
+            ],
+            CommentResolutionSignal(total=0, replied=0, unresolved=0),
+            id="non-daydream-bot",
+        ),
+    ],
+)
+def test_comment_resolution_signal(
+    comments: list[dict],
+    expected: CommentResolutionSignal,
+) -> None:
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder(
         {
-            ("org/repo", "repos/org/repo/pulls/42/comments"): [
-                {"id": 1, "in_reply_to_id": None, "user": {"login": "coderabbitai[bot]"}, "body": "nit"},
-            ],
+            ("org/repo", "repos/org/repo/pulls/42/comments"): comments,
         }
     )
-    assert comment_resolution_signal(row, gh_api=gh) == CommentResolutionSignal(total=0, replied=0, unresolved=0)
+    assert comment_resolution_signal(row, gh_api=gh) == expected
 
 
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
     """When the diff.patch content appears in a local commit on the branch ≥ head_sha."""
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -258,7 +255,7 @@ def test_reviewer_logins_signal_collects_humans_excludes_bots_and_daydream() -> 
 
 
 def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path: Path) -> None:
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -282,7 +279,7 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     silently becomes a negative training label. Here the change is absent from
     the base branch too, so the fallback cannot upgrade it past "unknown".
     """
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -305,7 +302,7 @@ def test_local_commit_applied_signal_unreadable_window_falls_back_to_base_branch
     The squash-merge case: the branch is gone, but the recommended line is
     present on ``main``, so the change demonstrably landed → "applied".
     """
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -338,7 +335,7 @@ def test_local_commit_applied_signal_base_branch_fallback_prefers_remote_over_st
     would report a landed change as absent, so the remote ref must win — but
     the local ref is still tried when the remote is unresolvable.
     """
-    (tmp_path / "diff.patch").write_text(_simple_diff_adding("foo = 1"))
+    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = {
         "repo_slug": "org/repo",
         "head_sha": "abc",
@@ -394,17 +391,19 @@ def _fake_commits_pulls(pulls):
     return responder
 
 
-def test_pr_link_signal_matches_pr_by_head_sha() -> None:
+@pytest.mark.parametrize(
+    "pulls",
+    [
+        pytest.param([{"number": 7, "head": {"sha": "abc123"}}], id="single-match"),
+        pytest.param(
+            [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}],
+            id="disambiguated-match",
+        ),
+    ],
+)
+def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict]) -> None:
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
-    gh = _fake_commits_pulls([{"number": 7, "head": {"sha": "abc123"}}])
-    assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
-
-
-def test_pr_link_signal_disambiguates_multiple_pulls_by_head_sha() -> None:
-    row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
-    gh = _fake_commits_pulls(
-        [{"number": 5, "head": {"sha": "other"}}, {"number": 7, "head": {"sha": "abc123"}}]
-    )
+    gh = _fake_commits_pulls(pulls)
     assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
 
 

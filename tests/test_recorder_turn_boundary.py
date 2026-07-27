@@ -2,17 +2,12 @@
 from pathlib import Path
 
 from daydream.backends import TextEvent, ThinkingEvent, ToolResultEvent, ToolStartEvent, TurnEndEvent
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
+from daydream.trajectory import DaydreamPhase
+from tests.harness.trajectory import make_recorder
 
 
 async def test_two_text_turns_produce_two_steps(tmp_path: Path) -> None:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="00000000-0000-0000-0000-000000000001",
-    )
+    recorder = make_recorder(tmp_path, agent_model_name="test-model")
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="Turn one body."))
@@ -24,13 +19,7 @@ async def test_two_text_turns_produce_two_steps(tmp_path: Path) -> None:
 
 
 async def test_reasoning_is_isolated_per_turn(tmp_path: Path) -> None:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="00000000-0000-0000-0000-000000000002",
-    )
+    recorder = make_recorder(tmp_path, agent_model_name="test-model")
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(ThinkingEvent(text="thought-1"))
@@ -45,13 +34,7 @@ async def test_reasoning_is_isolated_per_turn(tmp_path: Path) -> None:
 
 
 async def test_tool_call_spans_turn_boundary_stays_with_its_turn(tmp_path: Path) -> None:
-    recorder = TrajectoryRecorder(
-        path=tmp_path / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=tmp_path,
-        agent_model_name="test-model",
-        session_id="00000000-0000-0000-0000-000000000003",
-    )
+    recorder = make_recorder(tmp_path, agent_model_name="test-model")
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="Calling tool..."))

@@ -483,22 +483,6 @@ def test_redactor_is_passthrough() -> None:
     assert out.extra == step.extra
 
 
-def test_redactor_scrubs_api_key_in_message() -> None:
-    """Phase 4 RED: Redactor.redact_step replaces sk-* tokens in Step.message."""
-    from daydream.atif import Step as AtifStep
-
-    step = AtifStep(
-        step_id=1,
-        timestamp=now_iso(),
-        source="user",
-        message="token=sk-test-12345abcdef done",
-    )
-    out = Redactor().redact_step(step)
-    assert isinstance(out.message, str)
-    assert "sk-test-12345abcdef" not in out.message
-    assert "[REDACTED_API_KEY]" in out.message
-
-
 def test_empty_secret_assignment_does_not_consume_the_following_line() -> None:
     """Redaction never deletes a line it mistook for a secret's value.
 

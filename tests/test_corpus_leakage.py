@@ -57,9 +57,33 @@ def test_leak_guard_equal_instant_is_not_a_leak():
     assert _is_posterior_leak(_ann(AS_OF), AS_OF) is False
 
 
-def test_leak_guard_strictly_greater_is_a_leak():
-    assert _is_posterior_leak(_ann("2026-04-01T00:00:00.000001+00:00"), AS_OF) is True
-    assert _is_posterior_leak(_ann("2026-03-31T23:59:59.999999+00:00"), AS_OF) is False
+@pytest.mark.parametrize(
+    ("first_valid_at", "first_expected", "second_valid_at", "second_expected"),
+    [
+        pytest.param(
+            "2026-04-01T00:00:00.000001+00:00",
+            True,
+            "2026-03-31T23:59:59.999999+00:00",
+            False,
+            id="strict-boundary",
+        ),
+        pytest.param(
+            "2026-04-01T05:00:00+05:00",
+            False,
+            "2026-04-01T05:00:01+05:00",
+            True,
+            id="non-utc-offset",
+        ),
+    ],
+)
+def test_leak_guard_chronological_comparison(
+    first_valid_at: str,
+    first_expected: bool,
+    second_valid_at: str,
+    second_expected: bool,
+) -> None:
+    assert _is_posterior_leak(_ann(first_valid_at), AS_OF) is first_expected
+    assert _is_posterior_leak(_ann(second_valid_at), AS_OF) is second_expected
 
 
 def test_leak_guard_none_inputs_never_leak():
@@ -87,13 +111,6 @@ def test_leak_guard_subsecond_precision_compares_chronologically():
     assert _is_posterior_leak(_ann("2026-04-01T00:00:00Z"), "2026-04-01T00:00:00.500000+00:00") is False
 
 
-def test_leak_guard_non_utc_valid_at_converts_chronologically():
-    # A stored non-UTC offset is an unambiguous instant: +05:00 at 05:00 == the
-    # pin instant (not a leak); one second later leaks.
-    assert _is_posterior_leak(_ann("2026-04-01T05:00:00+05:00"), AS_OF) is False
-    assert _is_posterior_leak(_ann("2026-04-01T05:00:01+05:00"), AS_OF) is True
-
-
 # as_of entry boundary: BuildCorpusConfig validates and canonicalizes ONCE,
 # before the pin reaches the SQL cutoff or the leak guard.
 
@@ -102,24 +119,41 @@ def _cfg(tmp_path: Path, as_of: str) -> BuildCorpusConfig:
     return BuildCorpusConfig(out_path=tmp_path / "c.jsonl", filters=CorpusFilters(), as_of=as_of)
 
 
-def test_config_boundary_canonicalizes_z_spelling(tmp_path):
-    assert _cfg(tmp_path, "2026-04-01T00:00:00Z").as_of == "2026-04-01T00:00:00+00:00"
+@pytest.mark.parametrize(
+    ("as_of", "expected"),
+    [
+        pytest.param("2026-04-01T00:00:00Z", AS_OF, id="z-spelling"),
+        pytest.param(AS_OF, AS_OF, id="already-canonical"),
+    ],
+)
+def test_config_boundary_canonicalizes_timestamp(tmp_path: Path, as_of: str, expected: str) -> None:
+    assert _cfg(tmp_path, as_of).as_of == expected
 
 
-def test_config_boundary_is_idempotent_for_canonical_input(tmp_path):
-    assert _cfg(tmp_path, AS_OF).as_of == AS_OF
-
-
-def test_config_boundary_rejects_non_utc_offset(tmp_path):
-    with pytest.raises(ValueError, match="must be a UTC timestamp"):
-        _cfg(tmp_path, "2026-04-01T05:00:00+05:00")
-
-
-def test_config_boundary_rejects_naive_timestamp(tmp_path):
-    with pytest.raises(ValueError, match="must be a UTC timestamp"):
-        _cfg(tmp_path, "2026-04-01T00:00:00")
-
-
-def test_config_boundary_rejects_unparseable_timestamp(tmp_path):
-    with pytest.raises(ValueError, match="not a valid ISO-8601"):
-        _cfg(tmp_path, "yesterday-ish")
+@pytest.mark.parametrize(
+    ("as_of", "error"),
+    [
+        pytest.param(
+            "2026-04-01T05:00:00+05:00",
+            "must be a UTC timestamp",
+            id="non-utc-offset",
+        ),
+        pytest.param(
+            "2026-04-01T00:00:00",
+            "must be a UTC timestamp",
+            id="naive",
+        ),
+        pytest.param(
+            "yesterday-ish",
+            "not a valid ISO-8601",
+            id="unparseable",
+        ),
+    ],
+)
+def test_config_boundary_rejects_invalid_timestamp(
+    tmp_path: Path,
+    as_of: str,
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        _cfg(tmp_path, as_of)
