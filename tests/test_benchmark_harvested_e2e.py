@@ -223,6 +223,7 @@ def harvested_run(tmp_path, monkeypatch):
 
 
 def test_harvested_corpus_2pr_run_injects_reports_and_reruns_idempotently(harvested_run):
+    """Exercise acquisition, review injection, base selection, and idempotent reruns."""
     upstream, harvest_dir, cache_dir, calls = harvested_run
     argv = ["--harvest-dir", str(harvest_dir), "--no-score", "--cache-dir", str(cache_dir)]
 

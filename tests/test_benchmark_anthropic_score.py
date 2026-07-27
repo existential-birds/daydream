@@ -109,6 +109,7 @@ async def test_direct_extraction_writes_martian_candidates(tmp_path):
 )
 @pytest.mark.asyncio
 async def test_direct_dedup_writes_groups_or_singletons(tmp_path, texts, response, expected):
+    """Persist model-supplied dedup groups or fallback singleton groups."""
     seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=texts)
     client = FakeAnthropicJson([response])
 

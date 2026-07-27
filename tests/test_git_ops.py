@@ -313,6 +313,7 @@ def test_merge_base_returns_none_for_leading_dash_ref(
     tmp_path: Path,
     refs: tuple[str, ...],
 ) -> None:
+    """Treat leading-dash revisions as invalid refs rather than Git options."""
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.merge_base(repo, *refs) is None
 
@@ -894,6 +895,7 @@ def test_diff_paths_raises_on_invalid_ref(tmp_path: Path) -> None:
 
 
 def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serialize API input through a temporary file and remove it after success."""
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -927,6 +929,7 @@ def test_gh_api_input_data_passes_tempfile_and_cleans_up(tmp_path: Path, monkeyp
 
 
 def test_gh_api_input_data_preserves_tempfile_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Preserve failed API payloads and disclose their recovery path in the error."""
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, Any] = {}
 
@@ -961,6 +964,7 @@ def test_gh_api_input_data_preserves_tempfile_on_failure(tmp_path: Path, monkeyp
     ids=["omits_pr_arg_when_none", "includes_pr_arg_when_given"],
 )
 def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: int | None, number: int) -> None:
+    """Include an explicit PR number only when the caller supplies one."""
     repo = _make_repo_with_main(tmp_path)
     captured: dict[str, list[str]] = {}
 
@@ -1081,6 +1085,7 @@ def test_gh_api_classifies_errors(
     stderr: str,
     expected_type: type[GitError],
 ) -> None:
+    """Map authentication and rate-limit responses to specialized Git errors."""
     proc = subprocess.CompletedProcess(
         args=["gh"],
         returncode=1,
@@ -1126,6 +1131,7 @@ def test_gh_api_jq_parsing(
     expected: list[Any],
     expected_args: list[str],
 ) -> None:
+    """Pass pagination and jq arguments through while decoding varied output."""
     captured: dict[str, list[str]] = {}
 
     def fake_run_gh(
@@ -1133,6 +1139,7 @@ def test_gh_api_jq_parsing(
         args: list[str],
         **kwargs: Any,
     ) -> subprocess.CompletedProcess[str]:
+        """Capture gh arguments and return the parameterized response payload."""
         captured["args"] = args
         return subprocess.CompletedProcess(
             args=["gh"],

@@ -463,6 +463,7 @@ def test_copy_bundle_partial_trajectory(tmp_path: Path):
     ],
 )
 def test_copy_bundle_file_path(tmp_path: Path, relative_path: str, expected: str):
+    """Verify bundle copying preserves parameterized file contents and paths."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _copy_bundle(target, run_dir, recorder, RunConfig())
 

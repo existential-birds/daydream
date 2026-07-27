@@ -24,11 +24,13 @@ from pathlib import Path
 import pytest
 
 from daydream import git_ops
+from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig, run
 
 # Reuse the deep-orchestrator stub harness (the hard-won prompt-dispatch heuristics
 # live there; re-rolling them would be fragile). tests/ is a namespace package, so
 # a sibling test module imports cleanly.
+from tests.harness.git_helpers import bare_remote, git
 from tests.harness.trajectory import diff_adding
 from tests.test_deep_orchestrator import (
     _force_interactive,
@@ -37,7 +39,46 @@ from tests.test_deep_orchestrator import (
     _noop_commit,
     _ok,
     _silence,
+    _StubBackend,
 )
+
+
+class _ArchiveCaptureBackend(_StubBackend):
+    async def execute(
+        self,
+        cwd,
+        prompt,
+        output_schema=None,
+        continuation=None,
+        agents=None,
+        max_turns=None,
+        read_only=False,
+    ):
+        if prompt.startswith("Stage all changes and commit"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            git(cwd, "add", "--all")
+            git(
+                cwd,
+                "commit",
+                "-m",
+                (f"fix: apply daydream recommendation\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}"),
+            )
+            git(cwd, "push", "-u", "archive", git(cwd, "branch", "--show-current"))
+            yield TextEvent(text="Committed and pushed the recommendation.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
 
 
 def _only_archived_run(archive_dir: Path) -> Path:
@@ -50,14 +91,26 @@ def _only_archived_run(archive_dir: Path) -> Path:
 def _install_deep_capture_backend(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    real_internal_phases: bool = False,
 ):
-    """Install the shared deep-run backend and phase seams."""
+    """Install the shared deep-run backend and optional focused phase seams."""
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    if real_internal_phases:
+        stub = _ArchiveCaptureBackend(multi_stack_target)
+        monkeypatch.setattr(
+            "daydream.runner.create_backend",
+            lambda name, model=None, **kwargs: stub,
+        )
     stub.merge_items = [_merge_item(1, "api.py", "high")]
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", lambda *a, **k: _ok())
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
+    if not real_internal_phases:
+        monkeypatch.setattr(
+            "daydream.deep.orchestrator.phase_test_and_heal",
+            lambda *a, **k: _ok(),
+        )
+        monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
     return stub
 
 
@@ -71,18 +124,35 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     metrics AND writes a recommended.patch distinct from diff.patch.
 
     The fix stage edits a TRACKED file (api.py), so the pre-fix → post-fix diff
-    is non-empty; commit is a no-op so the edit stays in the worktree for capture.
+    is non-empty and the real test/heal and commit phases run before archiving.
     """
-    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(
+        multi_stack_target,
+        monkeypatch,
+        real_internal_phases=True,
+    )
     stub.fix_edit_line = "# daydream recommended change\n"
+    head_before = git_ops.head_sha(multi_stack_target)
 
     exit_code = await run(
         RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
     )
     assert exit_code == 0
+    head_after = git_ops.head_sha(multi_stack_target)
+    assert head_after != head_before
+    assert git(remote, "rev-parse", "refs/heads/feature") == head_after
+    commit_message = git_ops.head_commit_message(multi_stack_target)
+    assert "Daydream-Run:" in commit_message
+    assert "Daydream-Version:" in commit_message
 
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
+    trajectory = json.loads((run_dir / "trajectory.json").read_text())
+    test_steps = [step for step in trajectory["steps"] if step.get("extra", {}).get("daydream_phase") == "test"]
+    assert any("Run the project's test suite" in step["message"] for step in test_steps)
+    assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
     # AC1: eval ran by default -> all four metrics non-null.
     metrics = manifest["metrics"]

@@ -82,6 +82,7 @@ def test_leak_guard_chronological_comparison(
     second_valid_at: str,
     second_expected: bool,
 ) -> None:
+    """Compare posterior timestamps across offsets and subsecond precision."""
     assert _is_posterior_leak(_ann(first_valid_at), AS_OF) is first_expected
     assert _is_posterior_leak(_ann(second_valid_at), AS_OF) is second_expected
 
@@ -127,6 +128,7 @@ def _cfg(tmp_path: Path, as_of: str) -> BuildCorpusConfig:
     ],
 )
 def test_config_boundary_canonicalizes_timestamp(tmp_path: Path, as_of: str, expected: str) -> None:
+    """Normalize accepted as-of timestamps to canonical UTC spelling."""
     assert _cfg(tmp_path, as_of).as_of == expected
 
 
@@ -155,5 +157,6 @@ def test_config_boundary_rejects_invalid_timestamp(
     as_of: str,
     error: str,
 ) -> None:
+    """Reject naive, non-UTC, and malformed as-of timestamps at the config boundary."""
     with pytest.raises(ValueError, match=error):
         _cfg(tmp_path, as_of)

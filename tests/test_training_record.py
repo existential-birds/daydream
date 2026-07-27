@@ -157,6 +157,7 @@ def test_record_diff_ref_reflects_archive_state(
     ref_name: str,
     archive_relative_path: str,
 ) -> None:
+    """Reflect diff availability from the corresponding archived file."""
     manifest_row = _make_manifest_row(archive_path=str(tmp_path))
     trajectory: dict[str, Any] = {"steps": []}
 

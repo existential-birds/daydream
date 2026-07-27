@@ -370,6 +370,7 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
 
 
 async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Warn on a stale local branch and review the fresher remote snapshot."""
     repo, bare = _make_repo_with_origin(tmp_path)
     # Create + push the feature branch, then add commits on origin so the
     # local copy is behind.

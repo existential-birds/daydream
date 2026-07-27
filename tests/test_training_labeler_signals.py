@@ -186,6 +186,7 @@ def test_comment_resolution_signal(
     comments: list[dict],
     expected: CommentResolutionSignal,
 ) -> None:
+    """Classify resolution from bot, human, empty, and mixed review threads."""
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder(
         {
@@ -402,6 +403,7 @@ def _fake_commits_pulls(pulls):
     ],
 )
 def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict]) -> None:
+    """Identify the matching PR by head SHA when branch names are ambiguous."""
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
     gh = _fake_commits_pulls(pulls)
     assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")

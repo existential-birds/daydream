@@ -287,6 +287,7 @@ def test_raises_when_artifact_missing(tmp_path, monkeypatch):
     ],
 )
 def test_transient_output_classifier(output, expected):
+    """Distinguish retryable transport output from successful subprocess output."""
     assert _is_transient(output) is expected
 
 

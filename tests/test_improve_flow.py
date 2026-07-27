@@ -45,6 +45,7 @@ MakeConfig = Callable[..., RunConfig]
 
 
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
+    """Load a named improve artifact as decoded JSON."""
     return json.loads(
         improve_artifact(repo, name).read_text(encoding="utf-8")
     )

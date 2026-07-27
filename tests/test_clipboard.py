@@ -43,6 +43,7 @@ def test_copy_to_clipboard_success_and_selection(
     text: str,
     expected_argv: list[str],
 ) -> None:
+    """Select the first available clipboard command and pass text on standard input."""
     detected = {cmd: f"/usr/bin/{cmd}" for cmd in available}
     monkeypatch.setattr(clipboard.shutil, "which", detected.get)
     captured: dict[str, Any] = {}
@@ -91,9 +92,11 @@ def test_copy_to_clipboard_subprocess_failure(
     tool: str,
     error: BaseException,
 ) -> None:
+    """Return failure when the selected clipboard command cannot complete."""
     monkeypatch.setattr(clipboard.shutil, "which", {tool: f"/usr/bin/{tool}"}.get)
 
     def fake_run(argv: list[str], **kwargs: Any) -> None:
+        """Raise the parameterized failure at the subprocess boundary."""
         raise error
 
     monkeypatch.setattr(clipboard.subprocess, "run", fake_run)

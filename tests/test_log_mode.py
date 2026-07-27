@@ -167,6 +167,7 @@ def test_log_mode_rendering(
     required: tuple[str, ...],
     forbidden: tuple[str, ...],
 ) -> None:
+    """Render only the event fields appropriate to each log-mode scenario."""
     install_backend(ScriptedBackend(events=events, retryable=False))
     config = make_config(
         multi_stack_target,

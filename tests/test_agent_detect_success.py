@@ -90,4 +90,5 @@ Traceback (most recent call last):
     ],
 )
 def test_detect_test_success(output: str, expected: bool) -> None:
+    """Verify detection across clean, failed, and retried test output formats."""
     assert detect_test_success(output) is expected

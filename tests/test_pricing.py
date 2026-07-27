@@ -279,6 +279,7 @@ def test_load_user_prices_invalid_value_skips_entry(
     input_value: str,
     warning: str,
 ) -> None:
+    """Ignore invalid numeric price entries and emit a diagnostic warning."""
     prices_file = _write(
         tmp_path / "prices.toml",
         f'[prices."{model}"]\ninput = {input_value}\noutput = 2.0\n',

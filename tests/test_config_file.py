@@ -143,6 +143,7 @@ def test_supervision_config(
     content: str,
     expected: tuple[str | None, list[str], str | None, list[str]],
 ) -> None:
+    """Load supervisor identities and deny lists from supported config spellings."""
     (tmp_path / ".daydream.toml").write_text(content)
     cfg = load_file_config(tmp_path)
 

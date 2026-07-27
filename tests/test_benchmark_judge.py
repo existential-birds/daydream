@@ -39,6 +39,7 @@ async def test_anthropic_judge_parses_verdict():
 )
 @pytest.mark.asyncio
 async def test_anthropic_judge_rejects_malformed_verdict(response, error):
+    """Reject malformed, incomplete, and incorrectly typed judge verdicts."""
     judge = AnthropicFindingJudge(FakeCompleter(response))
 
     with pytest.raises(JudgeError, match=error):

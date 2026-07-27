@@ -25,6 +25,7 @@ def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
 
 @pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
 def test_backend_flag_codex(monkeypatch, flag):
+    """Accept each backend flag spelling and select the Codex backend."""
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, "codex"])
     config = _parse_args()
     assert config.backend == "codex"
@@ -46,6 +47,7 @@ def test_invalid_backend_rejected(monkeypatch):
     ],
 )
 def test_phase_backend_override_via_config_file(global_backend, overrides, phase, expected):
+    """Resolve phase-specific backends ahead of the global configured backend."""
     # Per-phase backend overrides moved to the config file (Task 8); resolver still honours them.
     fc = DaydreamFileConfig(backend=global_backend, phases=overrides)
     config = RunConfig(target="/tmp/project", backend=None, file_config=fc)
@@ -138,6 +140,7 @@ def test_loop_start_at_conflict(monkeypatch):
     ],
 )
 def test_skill_map_and_choice(monkeypatch, skill, invocation):
+    """Keep every CLI skill choice aligned with its invocation token."""
     assert SKILL_MAP[skill] == invocation
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--skill", skill])
     config = _parse_args()

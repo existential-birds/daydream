@@ -77,6 +77,7 @@ class TestExtractJson:
         ],
     )
     def test_extract_json(self, text: str, expected: Any) -> None:
+        """Extract supported JSON wrappers while preserving expected Python values."""
         assert extract_json(text) == expected
 
     def test_stray_prose_bracket_does_not_beat_the_real_object(self):

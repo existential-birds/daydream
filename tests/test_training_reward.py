@@ -64,6 +64,7 @@ def test_outcome_applies_posterior_penalty_golden(
     expected_penalty: float,
     expected_posterior_cost: float,
 ) -> None:
+    """Expose posterior penalties separately from the intrinsic composite score."""
     from daydream.training.reward import PosteriorBreakdown
     rb = score_trajectory(
         ScoringInputs(verifier_verdicts=[{"verdict": "consistent"}, {"verdict": "uncertain"}],

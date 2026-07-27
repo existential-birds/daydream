@@ -171,6 +171,7 @@ def test_redactor_preserves_non_secret_env_vars() -> None:
     ],
 )
 def test_redactor_preserves_clean_strings(clean_text: str) -> None:
+    """Leave non-secret prose, commands, URLs, and identifiers unchanged."""
     out = Redactor().redact_step(_user_step(clean_text))
     assert isinstance(out.message, str)
     assert out.message == clean_text

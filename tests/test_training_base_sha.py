@@ -23,6 +23,7 @@ def _write_manifest(
     head_sha: str,
     branch: str,
 ) -> None:
+    """Write the minimal manifest needed for base-SHA materialization tests."""
     manifest_path.write_text(
         json.dumps(
             {
@@ -40,6 +41,7 @@ def _write_manifest(
 
 
 def test_materialize_writes_sha_into_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve a missing merge base and persist it into the archive manifest."""
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path, base_sha=None, head_sha="abc123", branch="feat/x")
     monkeypatch.setattr(

@@ -86,6 +86,7 @@ def test_mapping_skips_items_that_would_produce_empty_body():
     ids=["confidence", "severity"],
 )
 def test_minimum_threshold_excludes_medium_and_unrated(field, high, medium, threshold):
+    """Apply confidence and severity thresholds to exclude lower or missing ratings."""
     doc = {"items": [
         _item("high.py", 1, id=1, **{field: high}),
         _item("med.py", 2, id=2, **{field: medium}),

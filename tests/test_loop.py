@@ -175,6 +175,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
     original_print_summary = shallow_mod.print_summary
 
     def capture_summary(console, data):
+        """Capture the fix count while preserving the real summary rendering."""
         captured_summary["fixes_applied"] = data.fixes_applied
         original_print_summary(console, data)
 
@@ -186,6 +187,7 @@ async def test_loop_stops_on_test_failure(loop_target, mock_ui_loop, monkeypatch
     original_get_head_sha = runner_mod._get_head_sha
 
     def tracking_get_head_sha(cwd: Path) -> str | None:
+        """Record head-SHA lookups while delegating to the real Git helper."""
         sha_calls.append(cwd)
         return original_get_head_sha(cwd)
 

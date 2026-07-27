@@ -94,6 +94,7 @@ def _config(tmp_path: Path, data_path: Path, *, score: bool, only: str) -> Bench
 
 
 def test_single_shot_run_injects_reports_and_rerun_is_idempotent(tmp_path, monkeypatch):
+    """Inject one review per PR, emit reports, and skip review work on rerun."""
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     calls = {"n": 0}
     monkeypatch.setattr(
@@ -102,6 +103,7 @@ def test_single_shot_run_injects_reports_and_rerun_is_idempotent(tmp_path, monke
     )
 
     def counting_review(checkout, **k):
+        """Record review calls while returning a deterministic findings artifact."""
         calls["n"] += 1
         return _write_items(checkout, [_item("f.py", 1)])
 
@@ -442,6 +444,7 @@ def _scored_trials_config(tmp_path, data_path, trials):
 
 
 def test_trials_3_writes_isolated_dirs_summary_and_distribution_report(tmp_path, monkeypatch):
+    """Isolate three scored trials and publish their aggregate statistics."""
     rec = Console(record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
@@ -511,6 +514,7 @@ def test_trials_3_writes_isolated_dirs_summary_and_distribution_report(tmp_path,
 
 
 def test_trials_injects_into_trial_corpus_not_canonical(tmp_path, monkeypatch):
+    """Keep the source corpus immutable while injecting labels into trial copies."""
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)

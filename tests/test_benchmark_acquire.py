@@ -117,6 +117,7 @@ def _make_branched_upstream(tmp_path: Path) -> _BranchedUpstream:
 
 
 def test_acquire_checks_out_pr_head_and_reuses_clone_cache(tmp_path):
+    """Check out the requested snapshot while reusing its cached clone."""
     up = _make_upstream_with_pr(tmp_path)
     acquired = acquire_checkout(
         up.url, 7, up.head_sha, base_sha=up.base_sha, cache_dir=tmp_path / "initial-cache"
@@ -132,6 +133,7 @@ def test_acquire_checks_out_pr_head_and_reuses_clone_cache(tmp_path):
 
 
 def test_acquire_branched_snapshot_base_resolution_and_argument_guards(tmp_path):
+    """Exercise merge-base derivation and exclusive base argument validation."""
     up = _make_branched_upstream(tmp_path)
     acquired = acquire_checkout(up.url, 7, up.c1, base_ref="main", cache_dir=tmp_path / "derived-cache")
 
@@ -173,6 +175,7 @@ def _make_merged_upstream(tmp_path: Path) -> _BranchedUpstream:
 
 
 def test_acquire_merged_snapshot_rejects_derived_base_and_accepts_pinned_base(tmp_path):
+    """Require a pinned historical base when a merged snapshot would yield an empty diff."""
     # Once the snapshot is an ancestor of the base tip, merge-base returns the
     # snapshot itself: an empty diff, which must fail loudly rather than score 0.
     up = _make_merged_upstream(tmp_path)

@@ -19,6 +19,7 @@ from tests.conftest import ExtDir
     ],
 )
 def test_supported_extension_loads(ext_dir: ExtDir, version: int, skill: str) -> None:
+    """Load supported extension API versions and apply their registry override."""
     ext_dir.write_module(
         f"DAYDREAM_EXT_API = {version}\n"
         "def register(registry):\n"
@@ -42,6 +43,7 @@ def test_unsupported_extension_version_is_rejected(
     declaration: str,
     message: str,
 ) -> None:
+    """Reject missing, malformed, boolean, and unsupported API declarations."""
     ext_dir.write_module(f"DAYDREAM_EXT_API = {declaration}\ndef register(registry): ...\n")
     with pytest.raises(ExtensionVersionError, match=message):
         build_registry()

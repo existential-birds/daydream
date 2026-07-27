@@ -128,6 +128,7 @@ def test_rubric_serializes_with_local_source() -> None:
     ],
 )
 def test_derive_outcome_label(rubric: Rubric, expected: str) -> None:
+    """Derive accepted, rejected, unknown, and local labels from rubric evidence."""
     assert derive_outcome_label(rubric) == expected
 
 

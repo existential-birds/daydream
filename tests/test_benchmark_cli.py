@@ -146,6 +146,7 @@ def test_reviewer_preset_resolves_and_derives_label(tmp_path, monkeypatch):
     ids=["unknown-preset", "malformed-preset", "non-table-reviewers"],
 )
 def test_reviewer_preset_errors(tmp_path, monkeypatch, config_text, reviewer):
+    """Terminate configuration parsing for missing or malformed reviewer presets."""
     (tmp_path / "pyproject.toml").write_text(config_text)
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit):
@@ -239,6 +240,7 @@ def test_trials_flag_overrides_config_file(tmp_path, monkeypatch):
     ],
 )
 def test_trials_config_file_rejects_invalid_value(tmp_path, monkeypatch, toml_value):
+    """Reject non-positive or non-integer trial counts from project configuration."""
     (tmp_path / "pyproject.toml").write_text(f'[tool.daydream.bench]\nbenchmark-repo="/b"\ntrials={toml_value}\n')
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit):
@@ -274,6 +276,7 @@ def test_bench_non_positive_limit_fails_through_compiled_entrypoint(tmp_path):
     ids=["martian", "anthropic-direct"],
 )
 def test_compiled_entrypoint_preflights_credentials(tmp_path, route_args, env_overrides, credential):
+    """Fail before scoring when the selected judge route lacks credentials."""
     env = {**os.environ, **env_overrides}
     env.pop(credential, None)
     r = subprocess.run(  # noqa: S603 - args are not user-controlled

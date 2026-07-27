@@ -27,6 +27,7 @@ from daydream.benchmark.harvest import bot_login_matches, build_harvested_corpus
     ],
 )
 def test_bot_login_matches_cases(observed_login, configured_login, expected):
+    """Match bot logins across case and GitHub's optional app suffix."""
     assert bot_login_matches(observed_login, configured_login) is expected
 
 

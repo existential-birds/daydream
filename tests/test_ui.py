@@ -292,6 +292,7 @@ def test_task_prompt_truncation_uses_named_limit():
 
 
 def _taskoutput_backend():
+    """Build a backend stream containing a background task and its final output."""
     from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
     from tests.test_agent_recorder_integration import MockBackend
 
@@ -323,6 +324,7 @@ def _taskoutput_backend():
 
 
 async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
+    """Render TaskOutput with its task label while hiding mechanical arguments."""
     from rich.console import Console
 
     import daydream.agent as agent_mod
