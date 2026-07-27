@@ -117,6 +117,20 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         ]
         result = await runtime.run_program(argv, env)
 
+        # A deep run always talks to a model. Zero captured calls means the CLI
+        # reached a provider directly and the whole rollout is untrainable — and
+        # it would otherwise SCORE, because the reward reads daydream's artifacts
+        # and those look perfectly normal. A live codex rollout did exactly this:
+        # real tokens billed, zero calls in the trace, reward 1.0. Silent capture
+        # loss is the one failure mode this harness must never absorb.
+        if not trace.calls:
+            raise RuntimeError(
+                f"backend={strategy.name} made no model calls through the interception server at "
+                f"{endpoint}: the rollout produced no trainable turns. The CLI is reaching a "
+                "provider directly — check this backend's endpoint injection before trusting any "
+                "reward from it."
+            )
+
         info: dict[str, Any] = trace.info
         info["daydream_exit_code"] = result.exit_code
         info["daydream_backend"] = strategy.name

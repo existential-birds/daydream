@@ -32,8 +32,16 @@ def _task(corpus_mini_dir, fixture_manifest_path):
     return list(taskset.load())[0]
 
 
-def _trace(task) -> vf.Trace:
-    return vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+def _trace(task, *, calls: int = 1) -> vf.Trace:
+    """A trace with *calls* recorded model calls.
+
+    The harness refuses a rollout that captured none, so the default is one:
+    a real rollout always makes model calls, and a zero-call one is the
+    capture-loss failure the harness exists to catch.
+    """
+    trace: vf.Trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace.calls = [vf.ModelCall(model=MODEL, endpoint="/v1/messages") for _ in range(calls)]
+    return trace
 
 
 def _ctx() -> vf.ModelContext:
@@ -159,3 +167,18 @@ async def test_setup_names_the_missing_binaries(corpus_mini_dir, fixture_manifes
     message = str(excinfo.value)
     assert "daydream" in message and "pi" in message
     assert "build_images.py" in message, "the error must say how to fix it"
+
+
+async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
+    corpus_mini_dir, fixture_manifest_path
+) -> None:
+    """Capture loss must be loud: a bypassed interception server would otherwise
+    produce a normal-looking archive and a positive reward."""
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, calls=0)
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {})
+    assert "no model calls" in str(excinfo.value)
+    assert ENDPOINT in str(excinfo.value)
