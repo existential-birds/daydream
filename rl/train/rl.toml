@@ -72,6 +72,10 @@ max_completion_tokens = 8192
 
 [[orchestrator.train.env]]
 name = "daydream-review-train"
+# The two corpus paths below and the manifest path are PLACEHOLDERS naming a
+# layout, not a shipped dataset: harvest your own corpora (README) and point at
+# them, or override on the CLI. Expanding the training-repo set is tracked as a
+# numbered task on issue #164.
 # Generic taskset/harness configs are narrowed to our own subclasses by id before
 # validation, so the plugin keys below validate.
 taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml" }
