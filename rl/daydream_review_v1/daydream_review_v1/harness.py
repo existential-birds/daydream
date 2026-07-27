@@ -117,13 +117,18 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         ]
         result = await runtime.run_program(argv, env)
 
-        # A deep run always talks to a model. Zero captured calls means the CLI
+        # A deep run always talks to a model. Zero captured turns means the CLI
         # reached a provider directly and the whole rollout is untrainable — and
         # it would otherwise SCORE, because the reward reads daydream's artifacts
         # and those look perfectly normal. A live codex rollout did exactly this:
-        # real tokens billed, zero calls in the trace, reward 1.0. Silent capture
+        # real tokens billed, zero turns in the trace, reward 1.0. Silent capture
         # loss is the one failure mode this harness must never absorb.
-        if not trace.calls:
+        #
+        # `num_turns`, not `trace.calls`: the per-call list is a 0.2.1 field that
+        # prime-rl's vendored verifiers submodule does not have, while the turn
+        # count is derived from the node graph and exists in both. The guard has
+        # to survive the version this actually trains under.
+        if not trace.num_turns:
             raise RuntimeError(
                 f"backend={strategy.name} made no model calls through the interception server at "
                 f"{endpoint}: the rollout produced no trainable turns. The CLI is reaching a "

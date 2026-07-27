@@ -11,6 +11,7 @@ import json
 import pytest
 import verifiers.v1 as vf
 from conftest import FakeRuntime
+from verifiers.v1.graph import MessageNode
 
 from daydream_review_v1.backends import STRATEGIES
 from daydream_review_v1.harness import DaydreamReviewHarness, DaydreamReviewHarnessConfig
@@ -32,15 +33,22 @@ def _task(corpus_mini_dir, fixture_manifest_path):
     return list(taskset.load())[0]
 
 
-def _trace(task, *, calls: int = 1) -> vf.Trace:
-    """A trace with *calls* recorded model calls.
+def _trace(task, *, turns: int = 1) -> vf.Trace:
+    """A trace carrying *turns* captured model turns.
 
-    The harness refuses a rollout that captured none, so the default is one:
-    a real rollout always makes model calls, and a zero-call one is the
-    capture-loss failure the harness exists to catch.
+    The harness refuses a rollout that captured none, so the default is one: a
+    real rollout always makes model calls, and a zero-turn one is the capture
+    loss the harness exists to catch. Nodes rather than `trace.calls`, so the
+    helper works under prime-rl's vendored verifiers too, which has no per-call
+    list.
     """
     trace: vf.Trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
-    trace.calls = [vf.ModelCall(model=MODEL, endpoint="/v1/messages") for _ in range(calls)]
+    for index in range(turns):
+        parent = None if index == 0 else len(trace.nodes) - 1
+        trace.nodes.append(MessageNode(parent=parent, message={"role": "user", "content": "go"}, sampled=False))
+        trace.nodes.append(
+            MessageNode(parent=len(trace.nodes) - 1, message={"role": "assistant", "content": "ok"}, sampled=True)
+        )
     return trace
 
 
@@ -175,7 +183,7 @@ async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
     """Capture loss must be loud: a bypassed interception server would otherwise
     produce a normal-looking archive and a positive reward."""
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    trace = _trace(task, calls=0)
+    trace = _trace(task, turns=0)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
 
     with pytest.raises(RuntimeError) as excinfo:
