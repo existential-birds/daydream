@@ -223,7 +223,9 @@ def test_loader_contract_resolves_package(corpus_mini_dir: Path, fixture_manifes
             manifest_path=fixture_manifest_path,
         )
     )
-    assert len(taskset.select()) == 2
+    # load(), not select(): select() is a 0.2.1 convenience the verifiers
+    # submodule prime-rl trains against does not have, and load() is the payload.
+    assert len(list(taskset.load())) == 2
 
 
 def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path) -> None:

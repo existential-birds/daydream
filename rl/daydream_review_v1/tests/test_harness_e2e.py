@@ -79,15 +79,13 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     trace = _sole_trace(paths)
     assert trace["stop_condition"] == "agent_completed"
     assert trace["errors"] == []
-    # Every model turn went through the interception server; a harness that
-    # reached a provider directly would record nothing here.
-    assert len(trace["calls"]) >= 1, "no model calls captured — endpoint injection did not reach the CLI"
-    # Sampled assistant nodes exist only when the dialect PARSED the upstream
-    # reply. Without this, a stub whose payload fails the dialect's validation
-    # still yields calls and a completed rollout — the run would be exercising
-    # the retry path while claiming to prove the dialect.
+    # Sampled assistant nodes exist only when a model turn went through the
+    # interception server AND the dialect parsed the reply. A harness that
+    # reached a provider directly records nothing; a stub whose payload fails the
+    # dialect's strict model records calls but no sampled turns, which would let
+    # the run exercise the retry path while claiming to prove the dialect.
     sampled = [node for node in trace["nodes"] if node.get("sampled")]
-    assert sampled, "no sampled assistant turns — the Anthropic dialect never parsed a reply"
+    assert sampled, "no sampled assistant turns — endpoint injection or the dialect did not work"
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
     assert trace["info"]["daydream_backend"] == "claude"
     assert trace["info"]["daydream_exit_code"] == 0

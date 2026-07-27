@@ -13,6 +13,16 @@ is a prime-rl workspace checkout that you install our environment package into.
 git clone --recurse-submodules https://github.com/PrimeIntellect-ai/prime-rl
 cd prime-rl
 git checkout v0.7.0
+
+# Three of the four submodules are declared with `git@github.com:` URLs, so on a
+# machine with no SSH key to GitHub the recursive clone above silently leaves
+# deps/verifiers empty — and a `uv sync` against an empty path source fails in a
+# way that does not mention submodules. They are public repositories, so point
+# them at HTTPS for this checkout. (A `url.<base>.insteadOf` rewrite is NOT
+# enough here; set the submodule URLs themselves.)
+for m in verifiers renderers research-environments; do
+  git config "submodule.$m.url" "https://github.com/PrimeIntellect-ai/$m.git"
+done
 git submodule update --init --recursive
 
 uv sync --all-packages
