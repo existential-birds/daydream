@@ -328,7 +328,7 @@ name inventories, module shape, supervision seam, and bump policy — is
 | `PI_PROVIDER` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`--provider` / `--thinking`; `PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
 | `PI_API_KEY` | Pi backend | Copied into the child process's provider-native credential env var (e.g. `ZAI_API_KEY`), never onto argv/CLI flags (security); ignored with a warning if the provider has no mapped native var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
-| `DAYDREAM_FANOUT_CONCURRENCY` | Claude backend | Parallel `execute()` hint for orchestrator fan-outs (default `4`; non-integer or non-positive warns and falls back). Pi has its own `DAYDREAM_PI_FANOUT_CONCURRENCY`. |
+| `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex backends | Parallel `execute()` hint for orchestrator fan-outs (default `4`; non-integer or non-positive warns and falls back). Pi keeps its own `DAYDREAM_PI_FANOUT_CONCURRENCY` (default `10`). |
 | `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is not retryable: the idle window is a terminal bound on a subprocess invocation, so `run_agent` does not re-arm a fresh subprocess and a stalled stream cannot consume the retry budget. |
 | `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
 | `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |

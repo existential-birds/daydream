@@ -46,3 +46,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers"
+markers = [
+    "slow: builds real container images; skipped automatically when docker is absent.",
+]

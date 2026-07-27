@@ -5,12 +5,15 @@
 # is already proven green there — which is what makes fix_tests_pass a verdict
 # rather than noise.
 #
-#   python images/build_images.py --only existential-birds/daydream-rl-fixture
+#   uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
 #   uv run eval @ configs/eval-docker.toml --client.base-url <your endpoint>
 #
 # Docker is `is_local`, so no tunnel is minted; on macOS verifiers rewrites the
 # host-bound interception URL to host.docker.internal automatically.
 
+# The eval CLI has its own default model id; naming one here keeps the config
+# self-describing. Override with -m for a real run.
+model = "stub/canned"
 num_tasks = 1
 num_rollouts = 1
 push = false

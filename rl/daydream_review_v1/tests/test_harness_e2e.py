@@ -96,7 +96,7 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
 
 @pytest.mark.skipif(
     not os.environ.get("DAYDREAM_RL_LIVE_E2E"),
-    reason="set DAYDREAM_RL_LIVE_E2E=1 (plus a real upstream in DAYDREAM_RL_LIVE_BASE_URL) to run",
+    reason="set DAYDREAM_RL_LIVE_E2E=1, DAYDREAM_RL_LIVE_MODEL and DAYDREAM_RL_LIVE_BASE_URL to run",
 )
 def test_live_rollout(tmp_path: Path) -> None:
     """One full deep rollout against a real model. Never runs in CI.
@@ -106,7 +106,9 @@ def test_live_rollout(tmp_path: Path) -> None:
     upstream the interception server forwards to.
     """
     paths = _stage(tmp_path)
-    model = os.environ.get("DAYDREAM_RL_LIVE_MODEL", "claude-sonnet-5")
+    # No default: a model id baked into this repo would be exactly the hardcoding
+    # SPEC C1 forbids, and a wrong one silently bills the wrong endpoint.
+    model = os.environ["DAYDREAM_RL_LIVE_MODEL"]
     base_url = os.environ.get("DAYDREAM_RL_LIVE_BASE_URL")
     backend = os.environ.get("DAYDREAM_RL_LIVE_BACKEND", "claude")
 

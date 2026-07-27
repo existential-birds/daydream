@@ -701,3 +701,26 @@ def test_text_extraction_top_level_wins_over_content_blocks() -> None:
         "content": [{"type": "text", "text": "BLOCK"}, {"type": "output_text", "text": "OUTPUT"}],
     }
     assert CodexBackend._extract_text(item) == "TOP-LEVEL"
+
+
+# DAYDREAM_FANOUT_CONCURRENCY (#164) — codex shares the knob with claude, so a
+# training run that swaps `--backend` does not silently change how many turns it
+# asks the endpoint for.
+
+
+@pytest.mark.parametrize(
+    ("raw", "ceiling", "expected"),
+    [(None, 10, 4), ("8", 10, 8), ("8", 2, 2), ("0", 10, 4), ("-1", 10, 4), ("notanint", 10, 4)],
+)
+def test_codex_fanout_concurrency_honours_the_shared_env_override(
+    monkeypatch: pytest.MonkeyPatch, raw: str | None, ceiling: int, expected: int
+) -> None:
+    from daydream.backends import effective_fanout_concurrency
+    from daydream.backends.codex import CodexBackend
+
+    if raw is None:
+        monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
+    else:
+        monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", raw)
+
+    assert effective_fanout_concurrency(ceiling, CodexBackend("gpt-test")) == expected

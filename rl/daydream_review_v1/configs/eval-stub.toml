@@ -5,15 +5,18 @@
 # artifacts land in the archive, and both reward axes score. The replies are
 # garbage by construction, so near-zero rewards are the expected outcome.
 #
-#   python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
+#   uv run python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
 #   mkdir -p /tmp/daydream-rl-smoke/archive /tmp/daydream-rl-smoke/home
-#   python -m daydream_review_v1.stub_upstream --port 8399 &
+#   uv run python -m daydream_review_v1.stub_upstream --port 8399 &
 #   uv run eval @ configs/eval-stub.toml
 #
 # `push = false` and the explicit `[client] base_url` are NOT optional: the eval
 # CLI defaults to push=true and to https://api.pinference.ai/api/v1, so without
 # both an offline run phones Prime's platform.
 
+# Without this the eval CLI stamps its own default model id onto every request
+# and onto `daydream --model`. Override with -m for a real run.
+model = "stub/canned"
 num_tasks = 1
 num_rollouts = 1
 push = false
