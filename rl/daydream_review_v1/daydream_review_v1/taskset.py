@@ -184,16 +184,20 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
     #91's offline ranking gate, golden-comment agreement is exposed only as the
     non-summed ``golden_overlap`` metric.
 
-    KNOWN DEGENERATE OPTIMUM — input for #91, not a bug in this file. A rollout
-    that reports ZERO findings scores ``intrinsic_composite`` 1.0: the grounding
-    axis is vacuously perfect over an empty finding set, correctness is absent,
-    and the length penalty is nil. Observed on a live codex rollout (27 captured
-    turns, 0 findings, composite 1.0). ``score_trajectory`` is reused verbatim on
-    purpose — an online reward and an offline label must not disagree about the
-    same run — so the fix belongs in the rubric #91 owns, not here. Until then,
-    watch the ``n_findings`` metric alongside the reward: a training curve where
-    reward climbs while ``n_findings`` falls is the policy learning to say
-    nothing.
+    A rollout that reports ZERO findings scores ``intrinsic_composite`` 0.0, not
+    1.0. ``analyze_grounding`` returns ``grounding_rate = None`` over an empty
+    finding set (undefined, not perfect), so no credit axis is present and
+    ``score_trajectory`` returns ``composite = None``, mapped to 0.0 below. This
+    was a live defect — a codex rollout with 27 captured turns and 0 findings
+    scored 1.0 — fixed at the write chokepoint in ``daydream/eval/analyzer.py``
+    so the offline corpus and this reward agree. Archived runs scored before that
+    fix keep their 1.0 and were not migrated.
+
+    A correct "nothing wrong here" therefore scores the same as a broken run.
+    Any positive floor for a genuinely clean review is reward design and belongs
+    to the #91 Stage-0 rubric, not here. Keep watching ``n_findings`` alongside
+    the reward regardless: reward climbing while ``n_findings`` falls is still
+    the signal that the policy is learning to say nothing.
     """
 
     @vf.reward(weight=1.0)
