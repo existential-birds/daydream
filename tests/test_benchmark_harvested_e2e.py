@@ -84,9 +84,7 @@ def _build_upstream(tmp_path: Path) -> HarvestedUpstream:
     _git(bare, "update-ref", "refs/pull/1/head", a2)
     _git(bare, "update-ref", "refs/pull/2/head", b1)
 
-    return HarvestedUpstream(
-        url=str(bare), m1=m1, m2=m2, pr1_review_sha=a1, pr1_head_sha=a2, pr2_review_sha=b1
-    )
+    return HarvestedUpstream(url=str(bare), m1=m1, m2=m2, pr1_review_sha=a1, pr1_head_sha=a2, pr2_review_sha=b1)
 
 
 def _golden_url(pr_number: int) -> str:
@@ -224,12 +222,11 @@ def harvested_run(tmp_path, monkeypatch):
     return upstream, harvest_dir, cache_dir, calls
 
 
-def test_harvested_corpus_2pr_run_through_cli_injects_reviews(harvested_run):
+def test_harvested_corpus_2pr_run_injects_reports_and_reruns_idempotently(harvested_run):
     upstream, harvest_dir, cache_dir, calls = harvested_run
+    argv = ["--harvest-dir", str(harvest_dir), "--no-score", "--cache-dir", str(cache_dir)]
 
-    rc = _handle_bench_command(
-        ["--harvest-dir", str(harvest_dir), "--no-score", "--cache-dir", str(cache_dir)]
-    )
+    rc = _handle_bench_command(argv)
 
     assert rc == 0
 
@@ -258,9 +255,7 @@ def test_harvested_corpus_2pr_run_through_cli_injects_reviews(harvested_run):
     assert by_head[upstream.pr2_review_sha] == upstream.m2
 
     # Every run emits the unified JSON report, same shape as a withmartian run.
-    report = json.loads(
-        (harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8")
-    )
+    report = json.loads((harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8"))
     assert report["schema_version"] == 1
     assert report["corpus"] == "harvested"
     assert report["corpus_root"] == str(harvest_dir)
@@ -268,6 +263,12 @@ def test_harvested_corpus_2pr_run_through_cli_injects_reviews(harvested_run):
     assert [entry["golden_url"] for entry in report["prs"]] == [_golden_url(1), _golden_url(2)]
     assert all(entry["injected_comments"] == 1 for entry in report["prs"])
     assert report["aggregate"] is None  # --no-score
+
+    first = corpus
+    assert _handle_bench_command(argv) == 0
+    second = json.loads((harvest_dir / "results" / "benchmark_data.json").read_text(encoding="utf-8"))
+    assert second == first
+    assert len(calls) == 2  # already-injected PRs are skipped, not re-reviewed
 
 
 def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeypatch):
@@ -312,9 +313,7 @@ def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeyp
     assert rc == 0
     assert len(calls) == 2  # both PRs were reviewed before scoring
 
-    evals = json.loads(
-        (model_results_dir(harvest_dir, "judge-x") / "evaluations.json").read_text(encoding="utf-8")
-    )
+    evals = json.loads((model_results_dir(harvest_dir, "judge-x") / "evaluations.json").read_text(encoding="utf-8"))
     for pr_number in (1, 2):
         leaf = evals[_golden_url(pr_number)]["daydream"]
         assert leaf["judge_route"] == "anthropic-direct"
@@ -324,9 +323,7 @@ def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeyp
         assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
 
     # The emitted report carries the aggregate the canned judge produced.
-    report = json.loads(
-        (harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8")
-    )
+    report = json.loads((harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8"))
     assert report["schema_version"] == 1 and report["corpus"] == "harvested"
     assert len(report["prs"]) == 2
     assert report["judge_route"] == "anthropic-direct" and report["judge_model"] == "judge-x"
@@ -346,18 +343,3 @@ def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeyp
     for pr_number, prompt in zip((1, 2), judged_pairs, strict=True):
         assert f"bot finding on PR {pr_number}" in prompt
         assert "daydream finding" in prompt
-
-
-def test_harvested_rerun_is_idempotent(harvested_run):
-    _upstream, harvest_dir, cache_dir, calls = harvested_run
-    argv = ["--harvest-dir", str(harvest_dir), "--no-score", "--cache-dir", str(cache_dir)]
-
-    assert _handle_bench_command(argv) == 0
-    first = json.loads((harvest_dir / "results" / "benchmark_data.json").read_text(encoding="utf-8"))
-    assert len(calls) == 2
-
-    assert _handle_bench_command(argv) == 0
-    second = json.loads((harvest_dir / "results" / "benchmark_data.json").read_text(encoding="utf-8"))
-
-    assert second == first
-    assert len(calls) == 2  # already-injected PRs are skipped, not re-reviewed
