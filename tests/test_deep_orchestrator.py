@@ -19,6 +19,7 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -490,7 +491,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
 
     _silence(monkeypatch)
     mute_side_effects()
-    rec = Console(record=True, force_terminal=True, width=120)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
     _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
 

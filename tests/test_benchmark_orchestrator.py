@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -137,7 +138,7 @@ def test_single_shot_run_injects_reports_and_rerun_is_idempotent(tmp_path, monke
 
 
 def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
@@ -156,7 +157,7 @@ def test_run_bench_announces_and_reports_each_pr(tmp_path, monkeypatch):
 
 
 def test_verbose_streams_child_output(tmp_path, monkeypatch):
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
     monkeypatch.setattr(
@@ -328,7 +329,7 @@ def test_scoring_ignores_unselected_prs_left_in_evaluations(tmp_path, monkeypatc
     Only the judge subprocesses are faked; selection, scoring dispatch, artifact
     read, and parse run for real.
     """
-    rec = Console(record=True, force_terminal=True, width=200)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")
@@ -445,7 +446,7 @@ def _scored_trials_config(tmp_path, data_path, trials):
 
 def test_trials_3_writes_isolated_dirs_summary_and_distribution_report(tmp_path, monkeypatch):
     """Isolate three scored trials and publish their aggregate statistics."""
-    rec = Console(record=True, force_terminal=True, width=120)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.benchmark.orchestrator.console", rec)
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-x")
     monkeypatch.setenv("MARTIAN_MODEL", "judge-model")

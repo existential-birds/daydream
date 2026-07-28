@@ -8,6 +8,7 @@ mocking — every code path runs against actual git.
 from __future__ import annotations
 
 import subprocess
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -387,7 +388,7 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
     # Pin a wide recording console so the warning text is captured intact,
     # independent of terminal width (the warning renders through the lazily
     # imported ``daydream.agent.console``).
-    rec = Console(record=True, force_terminal=True, width=200, height=25)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.agent.console", rec)
 
     async with open_workspace(repo, branch="topic", base="main", force_ephemeral=False, skip_tests=False) as ctx:

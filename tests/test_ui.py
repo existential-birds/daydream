@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ def test_format_verdict_join_renders_table_counts():
     from daydream.ui import format_verdict_join  # type: ignore[attr-defined]
 
     table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
-    console = Console(record=True, force_terminal=True, width=100)
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(table)
     out = console.export_text()
     assert "2" in out and "matched" in out.lower()
@@ -73,7 +74,7 @@ def test_render_exploration_summary_shows_content_not_json():
         ],
         dependencies=[Dependency(source="router.go", target="gen/server.go", relationship="imports")],
     )
-    console = Console(record=True, force_terminal=True, width=100)
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ctx))
     out = console.export_text()
     assert "OpenAPI First" in out
@@ -87,7 +88,7 @@ def test_render_exploration_summary_empty_is_quiet():
     from daydream.exploration import ExplorationContext
     from daydream.ui import render_exploration_summary  # type: ignore[attr-defined]
 
-    console = Console(record=True, force_terminal=True, width=100)
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(render_exploration_summary(ExplorationContext()))
     out = console.export_text()
     assert "{" not in out and "[" not in out  # never dumps a structure; one dim line at most
@@ -104,7 +105,7 @@ def test_prompt_user_returns_default_on_eof(monkeypatch):
     reset_state()
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
     # Issue #126 exact repro expectation:
-    console = Console(record=True)
+    console = Console(file=StringIO(), record=True)
     assert prompt_user(console, "Apply fixes now?", default="n") == "n"
     # Operator must receive a visible signal that EOF caused the decline.
     output = console.export_text()
@@ -159,7 +160,7 @@ def test_prompt_user_destructive_defaults_decline_on_eof(monkeypatch, message):
 
     reset_state()
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
-    assert prompt_user(Console(record=True), message, default="n") == "n"
+    assert prompt_user(Console(file=StringIO(), record=True), message, default="n") == "n"
 
 
 def test_parse_background_task_id_from_launch_string():
@@ -167,7 +168,7 @@ def test_parse_background_task_id_from_launch_string():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Bash", {"command": "pytest", "run_in_background": True, "description": "Run tests"})
     launch = (Path(__file__).parent / "fixtures/task_tools/bash_bg_launch.txt").read_text()
     reg.observe_result("c1", launch)
@@ -185,7 +186,7 @@ def test_bash_panel_shows_command_drops_mechanical_keys():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=False)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
     reg.create("c1", "Bash", {"command": "pytest", "block": True, "timeout": 120000})
     out = _render_panel_text(reg, "c1")
     assert "pytest" in out
@@ -195,7 +196,7 @@ def test_bash_panel_shows_command_drops_mechanical_keys():
 def _render_panel_text(reg, tool_use_id):
     from rich.console import Console
 
-    c = Console(record=True)
+    c = Console(file=StringIO(), record=True)
     c.print(reg.get(tool_use_id)._render_panel())
     return c.export_text()
 
@@ -205,7 +206,7 @@ def test_taskoutput_header_leads_with_label_demotes_id():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Bash", {"command": "x", "run_in_background": True, "description": "Run tests"})
     reg.observe_result("c1", "Command running in background with ID: a066168. ...")
     reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 120000})
@@ -219,7 +220,7 @@ def test_taskoutput_header_unknown_id_falls_back_to_bare_id():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c2", "TaskOutput", {"task_id": "zzz999", "block": True, "timeout": 1})
     out = _render_panel_text(reg, "c2")
     assert "zzz999" in out and "block" not in out
@@ -230,7 +231,7 @@ def test_taskcreate_header_shows_subject_and_body():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "details here"})
     out = _render_panel_text(reg, "c1")
     assert "Fix auth bug" in out and "details here" in out
@@ -241,7 +242,7 @@ def test_taskupdate_resolves_subject_and_shows_status():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskCreate", {"subject": "Fix auth bug", "description": "d"})
     reg.observe_result("c1", "Task #1 created successfully: Fix auth bug")
     reg.create("c2", "TaskUpdate", {"taskId": "1", "status": "completed"})
@@ -254,7 +255,7 @@ def test_tasklist_header_omits_empty_id_suffix():
 
     from daydream.ui import LiveToolPanelRegistry
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "TaskList", {})
     out = _render_panel_text(reg, "c1")
     assert "TaskList" in out
@@ -268,7 +269,7 @@ def test_taskoutput_result_shows_output_snippet():
 
     # quiet_mode=False so the result body renders (quiet mode suppresses result
     # output entirely); R8 is about the rendered TaskOutput result snippet.
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=False)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
     reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
     result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
     reg.get("c2").set_result(result, is_error=False)
@@ -283,7 +284,7 @@ def test_task_prompt_truncation_uses_named_limit():
     from daydream.ui import LiveToolPanelRegistry
     from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 
-    reg = LiveToolPanelRegistry(Console(record=True), quiet_mode=True)
+    reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=True)
     reg.create("c1", "Task", {"description": "d", "prompt": "\n".join(f"l{i}" for i in range(40))})
     out = _render_panel_text(reg, "c1")
     assert f"({40 - _TASK_PROMPT_MAX_LINES} more lines)" in out
@@ -331,7 +332,7 @@ async def test_run_agent_renders_taskoutput_with_label(tmp_path, monkeypatch):
     from daydream.agent import run_agent
     from daydream.trajectory import DaydreamPhase
 
-    rec = Console(record=True, width=120)
+    rec = Console(file=StringIO(), record=True, width=120)
     monkeypatch.setattr(agent_mod, "console", rec)
     backend = _taskoutput_backend()
     await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)

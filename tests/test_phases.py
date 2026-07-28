@@ -2,6 +2,7 @@
 """Tests for phase functions with backend abstraction."""
 
 import json
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -980,7 +981,7 @@ async def test_phase_understand_intent_renders_summary_panel_before_gate(
     from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
-    recording = Console(record=True, force_terminal=True, width=200)
+    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.phases.console", recording)
 
     summary = "This change adds a login page with email and password authentication."
@@ -1012,7 +1013,7 @@ async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
     from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
-    recording = Console(record=True, force_terminal=True, width=200)
+    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.phases.console", recording)
 
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")

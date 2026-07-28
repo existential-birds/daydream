@@ -8,7 +8,7 @@ schema and assert the restored summaries render observable content (counts,
 a table) without dumping raw JSON.
 
 Verified harness (from Task 0): record console is
-``Console(record=True, force_terminal=True, width=100)``; tests patch the
+``Console(file=StringIO(), record=True, force_terminal=True, width=100)``; tests patch the
 importing module's binding via ``monkeypatch.setattr("daydream.phases.console", rec)``.
 ``MockBackend`` mirrors tests/test_agent_recorder_integration.py:61-96 and
 accounts for ``run_agent``'s keyword-only ``phase`` argument (passed by the
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +37,7 @@ from daydream.phases import (
 
 
 def _rec(monkeypatch: Any) -> Console:
-    rec = Console(record=True, force_terminal=True, width=100, height=25)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100, height=25)
     monkeypatch.setattr("daydream.phases.console", rec)
     return rec
 
