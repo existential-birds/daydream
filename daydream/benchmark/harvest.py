@@ -24,7 +24,8 @@ All GitHub access goes through :func:`daydream.git_ops.gh_api`, so rate-limit
 and timeout discipline is shared with the rest of daydream.
 
 Exports:
-    bot_login_matches: ``[bot]``-suffix-tolerant login comparison.
+    bot_login_matches: ``[bot]``-suffix-tolerant login comparison (re-exported
+        from :mod:`daydream.bot_identity`, the single source of truth).
     fetch_review_threads: Review-thread resolution state via GraphQL.
     harvest_pr: Collect one PR's bot activity.
     build_harvested_corpus: Project harvest records into a benchmark corpus dict.
@@ -40,6 +41,7 @@ from typing import Any
 from daydream import git_ops
 from daydream.agent import console
 from daydream.benchmark.benchmark_data import save_benchmark_data
+from daydream.bot_identity import bot_login_matches, bot_stem
 from daydream.ui import print_dim, print_info, print_warning
 
 #: GraphQL page size for review threads (GitHub's per-connection maximum).
@@ -60,21 +62,6 @@ query($owner:String!,$repo:String!,$num:Int!,$cursor:String){
   }
 }
 """ % _THREAD_PAGE_SIZE
-
-
-def bot_login_matches(login: str | None, bot: str) -> bool:
-    """Match a bot login tolerant of GitHub's REST/GraphQL ``[bot]`` mismatch.
-
-    REST ``user.login`` keeps the ``[bot]`` suffix (``coderabbitai[bot]``);
-    GraphQL ``author.login`` drops it (``coderabbitai``). Compare on the
-    stripped, lowercased stem so both forms match one ``--bot`` value.
-    """
-    return bot_stem(login) == bot_stem(bot)
-
-
-def bot_stem(login: str | None) -> str:
-    """Return a login's comparison stem: ``[bot]`` suffix dropped, lowercased."""
-    return (login or "").removesuffix("[bot]").lower()
 
 
 def fetch_review_threads(repo_slug: str, pr_number: int) -> tuple[list[dict[str, Any]], bool]:
