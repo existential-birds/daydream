@@ -79,13 +79,14 @@ name = "daydream-review-train"
 # Generic taskset/harness configs are narrowed to our own subclasses by id before
 # validation, so the plugin keys below validate.
 taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml" }
-# `backend` decides the WIRE FORMAT the policy endpoint must serve, not just which
-# CLI drives the rollout: the interception server passes the agent's dialect
-# straight through (`base_url + dialect.upstream_path`, verifiers
-# clients/eval.py:95) with no cross-dialect adapter. pi speaks Chat Completions,
-# which is the surface vLLM is guaranteed to expose. codex needs the endpoint to
-# serve /responses and claude needs /v1/messages — check the actual vLLM build
-# before switching to either.
+# `backend` is NOT free to change here. At training time verifiers renders
+# messages to token ids client-side with an HF chat template and calls vLLM's
+# /inference/v1/generate — that is how token_ids and logprobs reach the trace —
+# and its renderer client raises NotImplementedError on any dialect but Chat
+# Completions (verifiers clients/train.py:233-239). pi is the only backend that
+# speaks Chat Completions; codex (Responses) and claude (Anthropic Messages)
+# cannot train at these pins. Changing this word without changing that fact
+# breaks the run, not the throughput.
 harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 # A deep rollout is minutes, not seconds: setup pulls an image, the harness runs
 # the whole review-fix-test loop, and scoring re-runs the repository's suite.

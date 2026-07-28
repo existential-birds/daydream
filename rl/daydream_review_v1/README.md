@@ -54,20 +54,20 @@ backend only needs to learn a base URL and a key:
 base image already carries and its injection needs no provisioning file.
 `osprey` lands as one more class when daydream ships that backend.
 
-**Choosing a backend is choosing a wire format.** The interception server passes
-the agent's dialect straight through — the upstream URL is
-`base_url + dialect.upstream_path` (`clients/eval.py:95`) and there is no
-cross-dialect adapter. So the backend decides what the *policy endpoint* has to
-serve, not merely which CLI drives the rollout:
+**Only `pi` can train.** Two facts compose. The interception server passes the
+agent's dialect straight through to the upstream — the URL is
+`base_url + dialect.upstream_path` (`clients/eval.py:95`), no cross-dialect
+adapter. And at training time the upstream is verifiers' renderer client, which
+tokenizes with an HF chat template, calls vLLM's `/inference/v1/generate` (this
+is how `token_ids` and `logprobs` reach the trace), and raises
+`NotImplementedError` on any dialect but Chat Completions
+(`clients/train.py:233-239`).
 
-- **`pi` for training and for baselines.** Chat Completions is the surface vLLM
-  is guaranteed to expose, so the wire format is identical at baseline time and
-  at training time. It is also the backend proven end-to-end on a real model:
-  79 captured turns, 3 findings, a fix applied and committed, `fix_tests_pass`
-  1.0 from a genuine in-sandbox suite re-run.
-- **`codex`** needs the endpoint to serve `/responses`; **`claude`** needs
-  `/v1/messages`. Both are optional vLLM surfaces — verify against the actual
-  build before switching.
+So `codex` (Responses) and `claude` (Anthropic Messages) work for an **eval**
+against a hosted provider and cannot be used for a **training run** at these
+pins. `pi` speaks Chat Completions end to end. It is also the backend proven on a
+real model: 79 captured turns, 3 findings, a fix applied and committed,
+`fix_tests_pass` 1.0 from a genuine in-sandbox suite re-run.
 
 Measure a baseline under the **same backend you will train under**. The agent
 scaffold is part of what the number describes; comparing a codex-scaffold
