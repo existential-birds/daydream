@@ -498,7 +498,7 @@ async def test_run_populates_exploration_context(
         return []
 
     async def fake_phase_test_and_heal(backend, work, feedback_items=None):
-        return True, 0
+        return True, 0, True
 
     async def fake_phase_commit_push(backend, work):
         return None

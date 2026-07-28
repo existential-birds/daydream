@@ -466,8 +466,8 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
         async def _no_post(*_args: object, **_kwargs: object) -> None:
             return None
 
-        async def _ok(*_args: object, **_kwargs: object) -> tuple[bool, int]:
-            return True, 0
+        async def _ok(*_args: object, **_kwargs: object) -> tuple[bool, int, bool]:
+            return True, 0, True
 
         if post:
             monkeypatch.setattr(

@@ -255,12 +255,15 @@ async def _step_test(ctx: FlowContext) -> BreakLoop | None:
     if config.loop:
         items = ctx.data["items"]
         async with phase_scope(DaydreamPhase.TEST):
-            passed, retries = await phase_test_and_heal(ctx.backend_for("test"), work, feedback_items=items)
+            passed, retries, proceed = await phase_test_and_heal(
+                ctx.backend_for("test"), work, feedback_items=items
+            )
 
         ctx.data["test_retries"] += retries
         ctx.data["tests_passed"] = passed
+        ctx.data["test_proceed"] = proceed
 
-        if not passed:
+        if not proceed:
             print_warning(console, f"Tests failed on iteration {ctx.data['iteration']}, reverting changes")
             if revert_uncommitted_changes(target_dir):
                 print_info(console, "Reverted to last committed state")
@@ -282,11 +285,12 @@ async def _step_test(ctx: FlowContext) -> BreakLoop | None:
         _capture_recommended(ctx)
 
         async with phase_scope(DaydreamPhase.TEST):
-            tests_passed, test_retries = await phase_test_and_heal(
+            tests_passed, test_retries, proceed = await phase_test_and_heal(
                 ctx.backend_for("test"), work, feedback_items=ctx.data["feedback_items"]
             )
         ctx.data["tests_passed"] = tests_passed
         ctx.data["test_retries"] = test_retries
+        ctx.data["test_proceed"] = proceed
     return None
 
 
@@ -314,6 +318,7 @@ async def _step_loop_exhausted(ctx: FlowContext) -> None:
             f"{len(unique_issues)} unique issues found across all iterations",
         )
         ctx.data["tests_passed"] = False
+        ctx.data["test_proceed"] = False
 
 
 async def _step_summary(ctx: FlowContext) -> None:
@@ -346,7 +351,7 @@ async def _step_commit_gate(ctx: FlowContext) -> Stop:
     # Commit gate. Unattended auto-commits (safe_default=True) so a green run's
     # commit isn't silently dropped on non-TTY stdin; --yes auto-commits, a
     # forced --no skips, an interactive run gets the y/N prompt.
-    if ctx.data["tests_passed"]:
+    if ctx.data["test_proceed"]:
         commit_decision = resolve_gate(
             assume=get_assume(),
             interactive=not get_non_interactive(),

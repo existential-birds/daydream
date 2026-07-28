@@ -1382,14 +1382,16 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
 async def _step_test(ctx: FlowContext) -> Stop | None:
     """Post-fix test validation."""
     async with phase_scope(DaydreamPhase.TEST):
-        passed, retries = await phase_test_and_heal(
+        passed, retries, proceed = await phase_test_and_heal(
             ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
         )
     # Persisted before the failure early-return so both outcomes leave a verdict.
+    # ``passed`` is always the suite's own result: an operator who continues past
+    # a red suite records the override in ``ignored``, never as a green verdict.
     test_verdict_path(ctx.data["dd"]).write_text(
-        json.dumps({"passed": passed, "retries": retries}, indent=2)
+        json.dumps({"passed": passed, "retries": retries, "ignored": proceed and not passed}, indent=2)
     )
-    if not passed:
+    if not proceed:
         print_warning(console, "Tests failed after fix attempt.")
         return Stop(1)
     return None

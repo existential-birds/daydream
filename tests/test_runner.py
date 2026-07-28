@@ -342,7 +342,7 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
         return None
 
     async def _stub_phase_test_and_heal(*_args, **_kwargs):
-        return (True, 0)
+        return (True, 0, True)
 
     async def _stub_phase_commit_push(*_args, **_kwargs):
         return None
@@ -422,7 +422,7 @@ async def test_shallow_items_canonicalized_and_severity_ordered(
         order.append(item["severity"])
 
     async def _stub_phase_test_and_heal(*_args, **_kwargs):
-        return (True, 0)
+        return (True, 0, True)
 
     async def _stub_phase_commit_push(*_args, **_kwargs):
         return None
@@ -522,7 +522,7 @@ async def test_non_interactive_shallow_calls_phase_commit_push_auto(
         return None
 
     async def _stub_phase_test_and_heal(*_args, **_kwargs):
-        return (True, 0)
+        return (True, 0, True)
 
     auto_calls: list[bool] = []
     interactive_calls: list[bool] = []

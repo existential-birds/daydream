@@ -151,13 +151,13 @@ def _prime_merge_resume(
     return deep
 
 
-async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
+async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
     """Async stand-in for phase_test_and_heal that always passes.
 
     Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
     tests in this module use the ``mute_side_effects`` fixture instead.
     """
-    return (True, 0)
+    return (True, 0, True)
 
 
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
@@ -4336,3 +4336,55 @@ async def test_test_verdict_artifact_written_on_failing_suite(
     verdict = json.loads(verdict_file.read_text())
     assert verdict["passed"] is False, verdict
     assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
+
+
+async def test_test_verdict_records_failure_when_operator_ignores_it(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite.
+
+    Drives ``runner.run`` -> deep orchestrator -> the REAL ``phase_test_and_heal``
+    (``heal=False``) with the scripted ``_StubBackend`` as the only mocked seam. The
+    suite is permanently red and the operator answers the interactive heal menu with
+    "3" (ignore and continue). Two observable outcomes, both required: the on-disk
+    ``test-verdict.json`` records ``passed`` False (an "ignore" is an operator
+    override, never evidence the suite went green), AND the run still reaches the
+    commit step -- choice "3" keeps its continue semantics.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch, prompts=False)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+
+    # phases.prompt_user is shared: intent-confirmation needs "y"; the heal menu
+    # ("Choice") needs "3" (ignore and continue).
+    def _phases_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
+        return "3" if "Choice" in message else "y"
+
+    monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
+
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    stub.fail_all_test_runs = True
+
+    commits: list[Path] = []
+
+    async def _record_commit(_backend: Any, work: Any, *_a: Any, **_k: Any) -> None:
+        commits.append(work.repo)
+
+    mute_side_effects(heal=False, commit=False)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _record_commit)
+
+    rc = await run(make_config(tiny_diff_target, non_interactive=False))
+    assert rc == 0, "choice '3' must continue the run, not abort it"
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is False, (
+        f"an ignored failure was persisted as a green suite: {verdict}"
+    )
+    assert verdict["ignored"] is True, f"the operator override was not recorded: {verdict}"
+    assert commits == [tiny_diff_target], "choice '3' did not reach the commit step"
+    assert stub.test_suite_calls == 1, (
+        f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
+    )
