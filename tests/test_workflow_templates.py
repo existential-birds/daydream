@@ -125,6 +125,17 @@ def test_split_setup_preserves_privilege_split() -> None:
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
+def test_post_findings_step_exports_bot_login() -> None:
+    """The Post findings step must export BOT_LOGIN from the deposited
+    ``DAYDREAM_BOT_HANDLE`` variable and pass it to ``daydream post-findings``
+    via ``--bot-login`` so the author filter has a bot login to match against
+    (issue #254). Without it, the post job degrades to viewerDidAuthor-only
+    GraphQL dedup and suppresses nothing on the REST side."""
+    text = (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
+    assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text
+    assert '--bot-login "$BOT_LOGIN"' in text
+
+
 def test_single_setup_preserves_privilege_split() -> None:
     wf = load_workflow(TEMPLATES_DIR / "single" / "daydream.yml")
     text = (TEMPLATES_DIR / "single" / "daydream.yml").read_text(encoding="utf-8")

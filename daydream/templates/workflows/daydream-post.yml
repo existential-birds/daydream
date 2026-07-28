@@ -115,9 +115,10 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ steps.target.outputs.pr_number }}
           HEAD_SHA: ${{ steps.target.outputs.head_sha }}
+          BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}
         run: |
           daydream post-findings findings/findings.json \
-            --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --repo "$REPO"
+            --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --repo "$REPO" --bot-login "$BOT_LOGIN"
 
       - name: Surface failure on the PR
         if: failure() && steps.download.outcome == 'success'
