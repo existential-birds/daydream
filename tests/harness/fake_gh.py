@@ -437,25 +437,31 @@ class FakeGh:
         self._write_threads(nodes)
 
     def serve_prior_threads_from(
-        self, call: GhCall, *, viewer_did_author: bool | None = None
+        self, call: GhCall, *,
+        author: str | None = None,
+        viewer_did_author: bool | None = None,
     ) -> None:
         """Make GitHub "remember" a recorded review POST as prior findings.
 
         Each inline comment in the posted payload becomes an unresolved review
         thread, and the review body becomes a REST review (body-only markers).
+        When *author* is set, both the GraphQL thread comments and the REST
+        review carry it (``author { login }`` / ``user { login }`` respectively)
+        so the bot-author trust rule in ``fetch_prior_findings`` accepts them.
         """
         payload = call.payload or {}
         nodes = [
             self._thread_node(
                 f"RT_{i}", f"RC_{i}", i, comment.get("body", ""),
-                viewer_did_author=viewer_did_author,
+                author=author, viewer_did_author=viewer_did_author,
             )
             for i, comment in enumerate(payload.get("comments", []), start=1)
         ]
         self._write_threads(nodes)
-        self.set_response(
-            "GET", call.endpoint, [{"id": 1, "node_id": "PRR_1", "body": payload.get("body", "")}]
-        )
+        review: dict[str, Any] = {"id": 1, "node_id": "PRR_1", "body": payload.get("body", "")}
+        if author is not None:
+            review["user"] = {"login": author}
+        self.set_response("GET", call.endpoint, [review])
 
     # --- internals ------------------------------------------------------------
 

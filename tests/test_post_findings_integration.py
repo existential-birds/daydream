@@ -97,21 +97,18 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
 
 
 def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
-    argv = _post_argv(artifact_on_disk)
+    argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert parse_finding_markers(json.dumps(posts[0].payload))  # markers shipped
-    # Replay the posted markers as trusted prior threads (viewerDidAuthor
-    # simulates the bot's authorship of its own prior post). REST body-only
-    # dedup additionally requires a threaded bot_login — Task 3 — so we
-    # surface every posted marker, inline and body-only alike, via GraphQL.
-    posted_markers = parse_finding_markers(json.dumps(posts[0].payload))
-    fake_gh.serve_prior_threads(
-        fingerprints=posted_markers,
-        thread_ids=[f"RT_{i}" for i in range(len(posted_markers))],
-        viewer_did_author=True,
-    )
+    # Replay the ACTUAL posted review as prior state: inline comments become
+    # GraphQL threads, the review body becomes a REST review. Author is set to
+    # the bot login so both harvest paths trust it via the [bot]-tolerant
+    # comparator. This proves the wire-format round trip (poster emits ->
+    # harvester reads) through the real CLI, on the real posted payload —
+    # not just unit-level fabricated markers.
+    fake_gh.serve_prior_threads_from(posts[0], author="daydream[bot]")
     assert cli_main(argv) == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1  # no dup review
 
