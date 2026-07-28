@@ -25,8 +25,10 @@ from typing import TYPE_CHECKING, Any
 import anyio
 import pytest
 
+from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -4338,19 +4340,60 @@ async def test_test_verdict_artifact_written_on_failing_suite(
     assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
 
 
+class _CommittingStubBackend(_StubBackend):
+    """Stub that answers the commit prompt with a real, untrailered git commit.
+
+    ``_do_commit`` delegates the commit itself to an agent turn, so a stub that
+    only records the prompt leaves the whole implementation -- the HEAD-moved
+    check and the trailer amend that ``daydream_commits()`` depends on --
+    unexercised. Committing without the trailers the prompt asks for drives that
+    repair branch for real.
+    """
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> Any:
+        if prompt.startswith("Stage all changes and commit"):
+            _git(cwd, "add", "--all")
+            _git(cwd, "commit", "-m", "fix: align greeting copy")
+            yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
 async def test_test_verdict_records_failure_when_operator_ignores_it(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
     """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite.
 
     Drives ``runner.run`` -> deep orchestrator -> the REAL ``phase_test_and_heal``
-    (``heal=False``) with the scripted ``_StubBackend`` as the only mocked seam. The
-    suite is permanently red and the operator answers the interactive heal menu with
-    "3" (ignore and continue). Two observable outcomes, both required: the on-disk
-    ``test-verdict.json`` records ``passed`` False (an "ignore" is an operator
-    override, never evidence the suite went green), AND the run still reaches the
-    commit step -- choice "3" keeps its continue semantics.
+    (``heal=False``) and the REAL ``phase_commit_push`` (``commit=False``) with the
+    scripted stub backend as the only mocked seam. The suite is permanently red and
+    the operator answers the interactive heal menu with "3" (ignore and continue).
+    Two observable outcomes, both required: the on-disk ``test-verdict.json`` records
+    ``passed`` False (an "ignore" is an operator override, never evidence the suite
+    went green), AND the fix is really committed -- HEAD advances onto a commit that
+    carries the fix and the daydream trailers.
     """
+    import daydream
     from daydream.runner import run
 
     _silence(monkeypatch, prompts=False)
@@ -4364,16 +4407,15 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 
     monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
 
-    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    stub = _CommittingStubBackend(tiny_diff_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
 
-    commits: list[Path] = []
-
-    async def _record_commit(_backend: Any, work: Any, *_a: Any, **_k: Any) -> None:
-        commits.append(work.repo)
-
     mute_side_effects(heal=False, commit=False)
-    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _record_commit)
+
+    head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
 
     rc = await run(make_config(tiny_diff_target, non_interactive=False))
     assert rc == 0, "choice '3' must continue the run, not abort it"
@@ -4384,7 +4426,16 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
         f"an ignored failure was persisted as a green suite: {verdict}"
     )
     assert verdict["ignored"] is True, f"the operator override was not recorded: {verdict}"
-    assert commits == [tiny_diff_target], "choice '3' did not reach the commit step"
+    assert _git(tiny_diff_target, "rev-parse", "HEAD") != head_before, (
+        "choice '3' did not produce a commit"
+    )
+    committed = _git(tiny_diff_target, "show", "--name-only", "--format=", "HEAD").split()
+    assert ".fixed-api_py" in committed, f"the applied fix was not part of the commit: {committed}"
+    head_message = _git(tiny_diff_target, "log", "-1", "--format=%B")
+    assert "Daydream-Run: " in head_message, f"commit lost the run trailer: {head_message}"
+    assert f"Daydream-Version: {daydream.__version__}" in head_message, (
+        f"commit lost the version trailer: {head_message}"
+    )
     assert stub.test_suite_calls == 1, (
         f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
     )

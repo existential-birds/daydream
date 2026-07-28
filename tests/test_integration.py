@@ -24,6 +24,7 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.stub_backend import force_interactive
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -148,6 +149,92 @@ async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_c
 
     assert exit_code == 0
     assert (target_project / ".review-output.md").exists()
+
+
+class _WorktreeMutatingBackend(PhaseDispatchBackend):
+    """Phase-dispatch fake whose fix and commit turns really touch the worktree.
+
+    The backend is the only mocked seam, so the edit and the commit the real
+    prompts ask for have to happen here -- exactly what the agent would do with
+    its tools -- for the run to leave observable Git state behind.
+    """
+
+    async def execute(
+        self,
+        cwd,
+        prompt,
+        output_schema=None,
+        continuation=None,
+        agents=None,
+        max_turns=None,
+        read_only=False,
+    ):
+        if prompt.startswith("Fix this issue"):
+            (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
+        elif prompt.startswith("Stage all changes and commit"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            _git(cwd, "add", "--all")
+            _commit(
+                cwd,
+                f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}",
+            )
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_shallow_commits_when_operator_ignores_red_suite(
+    monkeypatch,
+    target_project: Path,
+    install_backend,
+    silence_console,
+    mute_side_effects,
+    make_config,
+):
+    """Heal-menu choice "3" keeps the shallow run going all the way to a real commit.
+
+    Drives the shallow flow through the REAL ``phase_test_and_heal`` and
+    ``phase_commit_push`` (``heal=False, commit=False``) against a permanently red
+    suite, with the backend as the only mocked seam. Choice "3" (ignore and
+    continue) reports ``passed`` False but ``proceed`` True, and the commit gate
+    reads ``test_proceed`` -- so the run exits 0 and the fix lands in the real
+    worktree instead of being abandoned with the failure.
+    """
+    force_interactive(monkeypatch)
+    silence_console("daydream.phases")
+    silence_console("daydream.runner")
+    install_backend(
+        _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
+    )
+    mute_side_effects(module="daydream.flows.shallow", heal=False, commit=False)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "3")  # heal menu
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")  # commit gate
+
+    head_before = _git(target_project, "rev-parse", "HEAD")
+
+    config = make_config(
+        target_project, skill="python", quiet=True, shallow=True, non_interactive=False
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 0, "choice '3' must continue the run, not abort it"
+    assert _git(target_project, "rev-parse", "HEAD") != head_before, (
+        "the ignored-red-suite run never committed"
+    )
+    assert "-> str" in _git(target_project, "show", "HEAD:main.py"), (
+        "the fix was reverted instead of committed"
+    )
+    assert "Daydream-Run:" in _git(target_project, "log", "-1", "--format=%B")
 
 
 @pytest.mark.asyncio
