@@ -792,6 +792,7 @@ def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
         ("0", 4),
         ("-1", 4),
         ("notanint", 4),
+        ("", 4),
     ],
 )
 def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value, expected):

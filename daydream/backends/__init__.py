@@ -346,7 +346,7 @@ def resolve_fanout_concurrency(env_var: str, default: int) -> int:
     the run: a malformed knob should not cost a review.
     """
     raw = os.environ.get(env_var)
-    if not raw:
+    if raw is None:
         return default
     try:
         value = int(raw)
