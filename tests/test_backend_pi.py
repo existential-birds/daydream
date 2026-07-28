@@ -31,6 +31,7 @@ from daydream.backends import (
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     _PI_DEFAULT_RETRY_BASE_DELAY,
+    _PI_DEFAULT_RETRY_MAX_DELAY,
     _PI_STDOUT_LIMIT_BYTES,
     _SKILL_TOKEN_RE,
     PiBackend,
@@ -40,6 +41,7 @@ from daydream.backends.pi import (
     _pi_error_category,
     _pi_retry_attempts,
     _pi_retry_base_delay,
+    _pi_retry_max_delay,
     _render_tool_result,
     _resolve_skill_dir,
     _schema_instruction,
@@ -1184,13 +1186,18 @@ async def test_nonzero_exit_sets_retryable_via_exit_code(returncode, output_line
 
 @pytest.mark.parametrize(
     ("env_value", "expected"),
-    [(None, _PI_DEFAULT_RETRY_ATTEMPTS), ("5", 5)],
-    ids=["default", "env-override"],
+    [(None, _PI_DEFAULT_RETRY_ATTEMPTS), ("5", 5), ("", _PI_DEFAULT_RETRY_ATTEMPTS)],
+    ids=["default", "env-override", "empty-warns-and-falls-back"],
 )
-def test_pi_retry_attempts(monkeypatch, env_value, expected):
+def test_pi_retry_attempts(monkeypatch, caplog, env_value, expected):
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", env_value)
     assert _pi_retry_attempts() == expected
+    if env_value == "":
+        assert (
+            f"is not a valid integer; using default {_PI_DEFAULT_RETRY_ATTEMPTS}"
+            in caplog.text
+        )
 
 
 @pytest.mark.parametrize(
@@ -1200,13 +1207,38 @@ def test_pi_retry_attempts(monkeypatch, env_value, expected):
         ("0.5", 0.5),
         ("nan", _PI_DEFAULT_RETRY_BASE_DELAY),
         ("inf", _PI_DEFAULT_RETRY_BASE_DELAY),
+        ("", _PI_DEFAULT_RETRY_BASE_DELAY),
     ],
-    ids=["default", "env-override", "nan-falls-back", "inf-falls-back"],
+    ids=["default", "env-override", "nan-falls-back", "inf-falls-back", "empty-warns"],
 )
-def test_pi_retry_base_delay(monkeypatch, env_value, expected):
+def test_pi_retry_base_delay(monkeypatch, caplog, env_value, expected):
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", env_value)
     assert _pi_retry_base_delay() == pytest.approx(expected)
+    if env_value == "":
+        assert (
+            f"is not a valid float; using default {_PI_DEFAULT_RETRY_BASE_DELAY:g}"
+            in caplog.text
+        )
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, _PI_DEFAULT_RETRY_MAX_DELAY),
+        ("45.5", 45.5),
+        ("not-a-float", _PI_DEFAULT_RETRY_MAX_DELAY),
+        ("-1", _PI_DEFAULT_RETRY_MAX_DELAY),
+        ("", _PI_DEFAULT_RETRY_MAX_DELAY),
+    ],
+    ids=["default", "env-override", "invalid-warns", "negative-warns", "empty-warns"],
+)
+def test_pi_retry_max_delay(monkeypatch, caplog, env_value, expected):
+    if env_value is not None:
+        monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", env_value)
+    assert _pi_retry_max_delay() == pytest.approx(expected)
+    if env_value is not None and expected == _PI_DEFAULT_RETRY_MAX_DELAY:
+        assert f"using default {_PI_DEFAULT_RETRY_MAX_DELAY:g}" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -1227,6 +1259,7 @@ def test_pi_fanout_concurrency_defaults_to_ten(monkeypatch):
         ("0", 10),
         ("-1", 10),
         ("invalid", 10),
+        ("", 10),
     ],
 )
 def test_pi_fanout_concurrency_env_validation(
