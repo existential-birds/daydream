@@ -102,13 +102,24 @@ def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert parse_finding_markers(json.dumps(posts[0].payload))  # markers shipped
-    fake_gh.serve_prior_threads_from(posts[0])  # GitHub now "remembers" run 1
+    # Replay the posted markers as trusted prior threads (viewerDidAuthor
+    # simulates the bot's authorship of its own prior post). REST body-only
+    # dedup additionally requires a threaded bot_login — Task 3 — so we
+    # surface every posted marker, inline and body-only alike, via GraphQL.
+    posted_markers = parse_finding_markers(json.dumps(posts[0].payload))
+    fake_gh.serve_prior_threads(
+        fingerprints=posted_markers,
+        thread_ids=[f"RT_{i}" for i in range(len(posted_markers))],
+        viewer_did_author=True,
+    )
     assert cli_main(argv) == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1  # no dup review
 
 
 def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2) -> None:
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
     assert cli_main(_post_argv(artifact_on_disk_v2)) == 0
     # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
     # installation token; stale findings are minimized via minimizeComment.
