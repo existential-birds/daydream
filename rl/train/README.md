@@ -51,7 +51,7 @@ the trainer's LoRA block rather than taking from the file.
 declares only `linux` x86_64/aarch64 environments (it resolves vllm, flash-attn,
 deep-gemm), and `uv sync --all-packages` refuses outright:
 
-```
+```text
 error: The current Python platform is not compatible with the lockfile's
 supported environments
 ```
