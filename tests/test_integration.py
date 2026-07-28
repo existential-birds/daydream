@@ -24,7 +24,6 @@ from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
 from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.phase_backend import PhaseDispatchBackend
-from tests.harness.stub_backend import force_interactive
 
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
@@ -174,7 +173,7 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
         elif prompt.startswith("Stage all changes and commit"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            _git(cwd, "add", "--all")
+            _git(cwd, "add", "main.py")
             _commit(
                 cwd,
                 f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}",
@@ -197,33 +196,33 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     monkeypatch,
     target_project: Path,
     install_backend,
-    silence_console,
-    mute_side_effects,
     make_config,
 ):
     """Heal-menu choice "3" keeps the shallow run going all the way to a real commit.
 
     Drives the shallow flow through the REAL ``phase_test_and_heal`` and
-    ``phase_commit_push`` (``heal=False, commit=False``) against a permanently red
-    suite, with the backend as the only mocked seam. Choice "3" (ignore and
-    continue) reports ``passed`` False but ``proceed`` True, and the commit gate
-    reads ``test_proceed`` -- so the run exits 0 and the fix lands in the real
-    worktree instead of being abandoned with the failure.
+    ``phase_commit_push`` against a permanently red suite, with the backend as
+    the only mocked seam. Choice "3" (ignore and continue) reports ``passed``
+    False but ``proceed`` True, and the commit gate reads ``test_proceed`` -- so
+    the run exits 0 and the fix lands in the real worktree instead of being
+    abandoned with the failure.
     """
-    force_interactive(monkeypatch)
-    silence_console("daydream.phases")
-    silence_console("daydream.runner")
+    monkeypatch.setattr("sys.stdin", StringIO("3\ny\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
     install_backend(
         _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
     )
-    mute_side_effects(module="daydream.flows.shallow", heal=False, commit=False)
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "3")  # heal menu
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")  # commit gate
 
     head_before = _git(target_project, "rev-parse", "HEAD")
 
     config = make_config(
-        target_project, skill="python", quiet=True, shallow=True, non_interactive=False
+        target_project,
+        skill="python",
+        quiet=True,
+        shallow=True,
+        non_interactive=False,
+        output_mode="loop",
     )
     exit_code = await run(config)
 
