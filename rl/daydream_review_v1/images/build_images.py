@@ -134,6 +134,19 @@ def build_base_image() -> list[str]:
     return tags
 
 
+def _build_base() -> int:
+    """Build the base image and report its tags. Returns a process exit code."""
+    try:
+        tags = build_base_image()
+    except subprocess.CalledProcessError as exc:
+        # The docker log above is the message; a traceback would only bury it.
+        print(f"FAILED base image: exit {exc.returncode}", file=sys.stderr)
+        return 1
+    for tag in tags:
+        print(f"built {tag}")
+    return 0
+
+
 def write_setup_script(ctx: Path, setup_cmds: list[str]) -> None:
     """Render the manifest entry's ``setup_cmds`` into ``<ctx>/setup.sh``.
 
@@ -216,13 +229,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="images/manifest.toml")
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS, help="`daydream bench harvest` corpus dir")
     parser.add_argument("--only", metavar="SLUG", help="build only this repo slug (owner/name)")
-    parser.add_argument("--no-base", action="store_true", help=f"reuse the existing {BASE_LATEST} image")
+    base = parser.add_mutually_exclusive_group()
+    base.add_argument("--no-base", action="store_true", help=f"reuse the existing {BASE_LATEST} image")
+    base.add_argument("--base-only", action="store_true", help=f"build {BASE_LATEST} and no repo image")
     parser.add_argument(
         "--red",
         action="store_true",
         help="plant a failing test in the fixture repo's head commit; the build MUST fail at the test layer",
     )
     args = parser.parse_args(argv)
+
+    if args.base_only:
+        return _build_base()
 
     manifest = load_manifest(args.manifest)
     prs = sorted(harvested_corpus(args.corpus).prs, key=lambda pr: (_repo_slug(pr.clone_url), pr.pr_number))
@@ -235,14 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_base:
         print(f"skipping base build; reusing {BASE_LATEST}")
     else:
-        try:
-            base_tags = build_base_image()
-        except subprocess.CalledProcessError as exc:
-            # The docker log above is the message; a traceback would only bury it.
-            print(f"FAILED base image: exit {exc.returncode}", file=sys.stderr)
-            return 1
-        for tag in base_tags:
-            print(f"built {tag}")
+        status = _build_base()
+        if status:
+            return status
 
     built: list[str] = []
     failed: list[str] = []

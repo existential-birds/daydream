@@ -23,8 +23,9 @@ FIXTURE_IMAGE = "daydream-rl/fixture"
 
 
 def _build(*args: str) -> subprocess.CompletedProcess[str]:
+    """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
     return subprocess.run(
-        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, *args],
+        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", *args],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -43,10 +44,10 @@ def _tags() -> set[str]:
 
 
 @pytest.mark.slow
-def test_green_baseline_gate_fails_the_build_on_a_red_suite() -> None:
+def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
     before = _tags()
-    result = _build("--no-base", "--red")
+    result = _build("--red")
     combined = result.stdout + result.stderr
 
     assert result.returncode != 0, "a red baseline built successfully — the gate is not enforcing"
@@ -62,9 +63,9 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite() -> None:
 
 
 @pytest.mark.slow
-def test_green_baseline_builds_and_bakes_the_checkout() -> None:
+def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     """The happy path, end to end: image builds, suite green, origin is local."""
-    result = _build("--no-base")
+    result = _build()
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
 
     tag = f"{FIXTURE_IMAGE}:{'9b92381663058612621b186545f91bfb3a54079c'[:12]}"
