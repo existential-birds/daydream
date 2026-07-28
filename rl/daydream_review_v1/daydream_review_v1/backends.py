@@ -141,7 +141,11 @@ class CodexStrategy:
         return f"{self.codex_home}/config.toml"
 
     def env(self, endpoint: str, secret: str, *, fanout_concurrency: int) -> dict[str, str]:
-        return {"CODEX_HOME": self.codex_home, "CODEX_INTERCEPT_KEY": secret}
+        return {
+            "CODEX_HOME": self.codex_home,
+            "CODEX_INTERCEPT_KEY": secret,
+            "DAYDREAM_FANOUT_CONCURRENCY": str(fanout_concurrency),
+        }
 
     async def provision(self, runtime: vf.Runtime, endpoint: str, secret: str, model: str) -> None:
         await runtime.write(self.config_path, codex_provider_toml(endpoint).encode())
