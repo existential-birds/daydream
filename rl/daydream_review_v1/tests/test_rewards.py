@@ -278,6 +278,43 @@ async def test_no_fixes_returns_no_fix_reward(
     assert trace.metrics["fixes_applied"] == 0.0
     assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
     assert "test_claim_mismatch" not in trace.metrics
+    # No archived run at all, so there is no claim to record either.
+    assert "test_claim_passed_without_fix" not in trace.metrics
+
+
+@pytest.mark.parametrize("claimed", [True, False], ids=["claimed-green", "claimed-red"])
+async def test_no_fixes_still_records_the_test_claim(
+    claimed: bool,
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """Changing nothing while claiming the suite is green must stay visible.
+
+    The no-fix path returns before the re-run, so `test_claim_mismatch` can never
+    fire there — and the rollout that touched nothing yet archived a green
+    `deep/test-verdict.json` is the sharpest hack shape of all. The claim is
+    recorded on its own, without buying a second suite run.
+    """
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    (run_dir / "deep" / "test-verdict.json").write_text(
+        json.dumps({"passed": claimed, "retries": 0}), encoding="utf-8"
+    )
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["test_claim_passed_without_fix"] == float(claimed)
+    # Observability only: recording the claim must not invent a verdict comparison.
+    assert "test_claim_mismatch" not in trace.metrics
 
 
 @pytest.mark.parametrize("red, expected", [(True, 1.0), (False, 0.0)], ids=["mismatch", "agrees"])
@@ -347,6 +384,22 @@ async def test_review_shape_metrics(
 
     assert hit_trace.metrics["n_findings"] == 2.0
     assert hit_trace.metrics["golden_overlap"] == 1.0
+
+
+async def test_review_shape_survives_a_non_object_merged_items(
+    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """merged-items.json is written inside the rollout, so a corrupt one must not crash scoring."""
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    (run_dir / "deep" / "merged-items.json").write_text(json.dumps([{"file": "calc.py"}]), encoding="utf-8")
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["n_findings"] == 0.0
+    assert trace.metrics["golden_overlap"] == 0.0
 
 
 async def test_committed_fix_counts_even_with_a_clean_tree(

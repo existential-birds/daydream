@@ -233,6 +233,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
         repo = _repo_path(trace)
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
             trace.record_metric("fixes_applied", 0.0)
+            # There is no re-run to compare against on this path, but a rollout
+            # that changed nothing and still wrote a green test-verdict is the
+            # sharpest hack shape there is, so record the bare claim.
+            claimed = await _claimed_test_verdict(runtime, _archive_root(trace))
+            if claimed is not None:
+                trace.record_metric("test_claim_passed_without_fix", float(claimed))
             return self.config.no_fix_reward
 
         trace.record_metric("fixes_applied", 1.0)
@@ -263,7 +269,9 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
             run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
             items: list[dict[str, Any]] = []
             if run_dir is not None:
-                items = _read_json(run_dir / "deep" / "merged-items.json", default={}).get("items") or []
+                merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
+                if isinstance(merged, dict):
+                    items = merged.get("items") or []
 
         found_files = {item.get("file") for item in items if isinstance(item, dict)}
         golden_paths = [c.path for c in self.data.golden_comments if c.path]
