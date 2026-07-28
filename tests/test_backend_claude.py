@@ -13,6 +13,7 @@ from daydream.backends import (
     ThinkingEvent,
     ToolResultEvent,
     ToolStartEvent,
+    effective_fanout_concurrency,
 )
 from daydream.backends.claude import ClaudeAgentError, ClaudeBackend
 from tests.harness.claude_sdk import (
@@ -762,3 +763,40 @@ async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk):
 def test_unsupported_reasoning_effort_fails_at_construction():
     with pytest.raises(ValueError, match="does not support reasoning effort"):
         ClaudeBackend(model="opus", reasoning_effort="minimal")
+
+
+# ---------------------------------------------------------------------------
+# fanout_concurrency
+# ---------------------------------------------------------------------------
+
+
+def test_claude_fanout_concurrency_defaults_to_four(monkeypatch):
+    monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
+    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 4
+
+
+def test_claude_fanout_concurrency_env_raises_the_hint(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
+    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
+
+
+def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
+    assert effective_fanout_concurrency(2, ClaudeBackend(model="opus")) == 2
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        ("6", 6),
+        ("0", 4),
+        ("-1", 4),
+        ("notanint", 4),
+        ("", 4),
+    ],
+)
+def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value, expected):
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
+    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
+    if expected == 4:
+        assert "using default 4" in caplog.text

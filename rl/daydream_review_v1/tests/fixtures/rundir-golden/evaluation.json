@@ -1,0 +1,263 @@
+{
+  "session_id": "9b36227a-9f80-41e5-a419-5cfed5a34b5b",
+  "agent": {
+    "name": "daydream",
+    "version": "0.25.0",
+    "model_name": "claude-sonnet-5"
+  },
+  "daydream_dir": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream",
+  "trajectory_count": 5,
+  "cost": {
+    "total_cost_usd": 1.7691,
+    "total_input_tokens": 5028657,
+    "total_prompt_tokens_raw": 5028657,
+    "total_completion_tokens": 21617,
+    "total_cached_tokens": 4363189,
+    "cache_hit_rate": 0.8677,
+    "by_agent": [
+      {
+        "agent": "main",
+        "cost_usd": 0.8825803000000001,
+        "prompt_tokens": 2420534,
+        "completion_tokens": 8099,
+        "cached_tokens": 2109883,
+        "steps": 17,
+        "model": "claude-sonnet-5"
+      },
+      {
+        "agent": "deep-generic",
+        "cost_usd": 0.3004591,
+        "prompt_tokens": 805791,
+        "completion_tokens": 6451,
+        "cached_tokens": 667031,
+        "steps": 2,
+        "model": "claude-sonnet-5"
+      },
+      {
+        "agent": "deep-structure",
+        "cost_usd": 0.2736128,
+        "prompt_tokens": 906246,
+        "completion_tokens": 4977,
+        "cached_tokens": 803797,
+        "steps": 2,
+        "model": "claude-sonnet-5"
+      },
+      {
+        "agent": "explore-dependency-tracer",
+        "cost_usd": 0.17190789999999997,
+        "prompt_tokens": 637243,
+        "completion_tokens": 1259,
+        "cached_tokens": 571516,
+        "steps": 2,
+        "model": "claude-sonnet-5"
+      },
+      {
+        "agent": "fix-tests-test-calc-py",
+        "cost_usd": 0.1405117,
+        "prompt_tokens": 258843,
+        "completion_tokens": 831,
+        "cached_tokens": 210962,
+        "steps": 2,
+        "model": "claude-sonnet-5"
+      }
+    ]
+  },
+  "timing": {
+    "total_wall_clock_seconds": 234.7,
+    "by_agent": [
+      {
+        "agent": "main",
+        "duration_seconds": 217.6
+      },
+      {
+        "agent": "deep-generic",
+        "duration_seconds": 73.8
+      },
+      {
+        "agent": "deep-structure",
+        "duration_seconds": 61.1
+      },
+      {
+        "agent": "explore-dependency-tracer",
+        "duration_seconds": 16.9
+      },
+      {
+        "agent": "fix-tests-test-calc-py",
+        "duration_seconds": 11.5
+      }
+    ]
+  },
+  "tools": {
+    "total_calls": 52,
+    "by_type": {
+      "Read": 29,
+      "Bash": 17,
+      "Write": 2,
+      "Grep": 2,
+      "ReportFindings": 1,
+      "Edit": 1
+    },
+    "by_agent": {
+      "main": {
+        "Read": 13,
+        "Bash": 10
+      },
+      "deep-generic": {
+        "Read": 8,
+        "Bash": 1,
+        "Write": 1
+      },
+      "deep-structure": {
+        "Read": 7,
+        "Bash": 1,
+        "Grep": 1,
+        "Write": 1,
+        "ReportFindings": 1
+      },
+      "explore-dependency-tracer": {
+        "Bash": 5,
+        "Grep": 1
+      },
+      "fix-tests-test-calc-py": {
+        "Read": 1,
+        "Edit": 1
+      }
+    },
+    "write_ratio": 0.0385,
+    "redundant_reads": [
+      {
+        "agent": "main",
+        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/exploration/summary.md",
+        "read_count": 2
+      },
+      {
+        "agent": "main",
+        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/diff.patch",
+        "read_count": 2
+      },
+      {
+        "agent": "main",
+        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/exploration/affected_files.md",
+        "read_count": 2
+      },
+      {
+        "agent": "main",
+        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/calc.py",
+        "read_count": 2
+      }
+    ]
+  },
+  "coverage": {
+    "files_in_diff": 2,
+    "files_read_by_reviewers": 2,
+    "coverage_ratio": 1.0,
+    "uncovered_files": []
+  },
+  "findings": {
+    "total": 1,
+    "by_confidence": {
+      "HIGH": 1
+    },
+    "stacks": [
+      {
+        "name": "generic",
+        "finding_count": 1
+      },
+      {
+        "name": "structure",
+        "finding_count": 0
+      }
+    ],
+    "dedup": {},
+    "merged_review": {
+      "merged_finding_count": 1
+    }
+  },
+  "grounding": {
+    "total_findings": 1,
+    "grounded_count": 1,
+    "ungrounded_count": 0,
+    "grounding_rate": 1.0,
+    "grounded": [
+      {
+        "id": 1,
+        "stack": "generic",
+        "file": "tests/test_calc.py",
+        "confidence": "HIGH",
+        "file_was_read": true,
+        "unread_rationale_refs": [],
+        "grounded": true
+      }
+    ],
+    "ungrounded": []
+  },
+  "exploration_utilization": {
+    "reviewers_utilizing_exploration": 1,
+    "total_reviewers": 2,
+    "utilization_rate": 0.5,
+    "by_agent": [
+      {
+        "agent": "deep-generic",
+        "total_reads": 8,
+        "exploration_reads": 4,
+        "utilized": true
+      },
+      {
+        "agent": "deep-structure",
+        "total_reads": 8,
+        "exploration_reads": 0,
+        "utilized": false
+      }
+    ]
+  },
+  "training_signals": {
+    "total_trajectories": 4,
+    "clean_for_training": 4,
+    "needs_review": 0,
+    "trajectories": [
+      {
+        "trajectory": "deep-generic",
+        "source_file": "deep-generic.json",
+        "steps": 2,
+        "has_reasoning": false,
+        "tool_calls": 10,
+        "reasoning_fraction": 0.0,
+        "noise_flags": [],
+        "training_quality": "clean"
+      },
+      {
+        "trajectory": "deep-structure",
+        "source_file": "deep-structure.json",
+        "steps": 2,
+        "has_reasoning": false,
+        "tool_calls": 11,
+        "reasoning_fraction": 0.0,
+        "noise_flags": [],
+        "training_quality": "clean"
+      },
+      {
+        "trajectory": "explore-dependency-tracer",
+        "source_file": "explore-dependency-tracer.json",
+        "steps": 2,
+        "has_reasoning": false,
+        "tool_calls": 6,
+        "reasoning_fraction": 0.0,
+        "noise_flags": [],
+        "training_quality": "clean"
+      },
+      {
+        "trajectory": "fix-tests-test-calc-py",
+        "source_file": "fix-tests-test-calc-py.json",
+        "steps": 2,
+        "has_reasoning": false,
+        "tool_calls": 2,
+        "reasoning_fraction": 0.0,
+        "noise_flags": [],
+        "training_quality": "clean"
+      }
+    ]
+  },
+  "derived": {
+    "cost_per_finding_usd": 1.7691
+  }
+}

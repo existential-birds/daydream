@@ -1,0 +1,58 @@
+{
+  "https://github.com/existential-birds/daydream-rl-fixture/pull/1": {
+    "pr_url": "https://github.com/existential-birds/daydream-rl-fixture/pull/1",
+    "repo_name": "existential-birds/daydream-rl-fixture",
+    "golden_comments": [
+      {
+        "comment": "`divide` raises ZeroDivisionError when `b` is 0. Guard the divisor or document the contract.",
+        "path": "calc.py",
+        "line": 10,
+        "resolved": true,
+        "severity": null
+      }
+    ],
+    "reviews": [
+      {
+        "tool": "daydream-review",
+        "repo_name": "existential-birds/daydream-rl-fixture",
+        "pr_url": "https://github.com/existential-birds/daydream-rl-fixture/pull/1",
+        "review_comments": [
+          {
+            "path": "calc.py",
+            "line": 10,
+            "body": "`divide` raises ZeroDivisionError when `b` is 0. Guard the divisor or document the contract.",
+            "created_at": "2026-01-02T00:00:00Z"
+          }
+        ]
+      }
+    ]
+  },
+  "https://github.com/existential-birds/daydream-rl-fixture/pull/2": {
+    "pr_url": "https://github.com/existential-birds/daydream-rl-fixture/pull/2",
+    "repo_name": "existential-birds/daydream-rl-fixture",
+    "golden_comments": [
+      {
+        "comment": "`mean([])` raises ZeroDivisionError. Return 0.0 or raise a typed error instead.",
+        "path": "calc.py",
+        "line": 16,
+        "resolved": false,
+        "severity": null
+      }
+    ],
+    "reviews": [
+      {
+        "tool": "daydream-review",
+        "repo_name": "existential-birds/daydream-rl-fixture",
+        "pr_url": "https://github.com/existential-birds/daydream-rl-fixture/pull/2",
+        "review_comments": [
+          {
+            "path": "calc.py",
+            "line": 16,
+            "body": "`mean([])` raises ZeroDivisionError. Return 0.0 or raise a typed error instead.",
+            "created_at": "2026-01-03T00:00:00Z"
+          }
+        ]
+      }
+    ]
+  }
+}

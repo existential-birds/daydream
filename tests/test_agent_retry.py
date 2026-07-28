@@ -7,6 +7,7 @@ outcomes (returned output, call count) never on internal implementation details.
 from __future__ import annotations
 
 import json
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -126,7 +127,7 @@ async def test_run_agent_surfaces_backend_error_message(monkeypatch, tmp_path: P
     """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
     from rich.console import Console
 
-    rec = Console(record=True, force_terminal=True, width=200)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.agent.console", rec)
     # A plain exception with NO ``.category`` (Claude/Codex-style): a human-readable
     # reason plus a secret-shaped substring, to prove the message surfaces AND that

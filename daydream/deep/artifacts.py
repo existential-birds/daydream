@@ -165,6 +165,19 @@ def verdicts_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "recommendation-verdicts.json"
 
 
+def test_verdict_path(deep_dir_path: Path) -> Path:
+    """Post-fix test-suite verdict (``{"passed": bool, "retries": int}``).
+
+    The verdict itself comes from ``detect_test_success``, a regex over the
+    agent's prose, so it is a *claim* rather than ground truth. It is persisted
+    anyway because otherwise the only durable trace of the test phase is the
+    process exit code, which conflates "tests failed" with every other fatal
+    exit. Written for BOTH outcomes -- a run that stops at a red suite is exactly
+    the run whose verdict a consumer needs.
+    """
+    return deep_dir_path / "test-verdict.json"
+
+
 def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
     """Validate predecessor artifacts exist for the given resume stage.
 

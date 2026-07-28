@@ -1,0 +1,33 @@
+{
+  "repo": "existential-birds/daydream-rl-fixture",
+  "bot": "daydream-review[bot]",
+  "n_prs_with_bot_activity": 2,
+  "prs": [
+    {
+      "pr_number": 2,
+      "title": "Add calc.mean",
+      "state": "closed",
+      "merged": true,
+      "base_ref": "main",
+      "base_sha": "1ba756e6743d833dc361177c2fb4946e76015985",
+      "review_commit_id": "9b92381663058612621b186545f91bfb3a54079c",
+      "n_inline_comments": 1,
+      "n_review_summaries": 1,
+      "n_resolved_threads": 0,
+      "threads_complete": true
+    },
+    {
+      "pr_number": 1,
+      "title": "Add calc.divide",
+      "state": "closed",
+      "merged": true,
+      "base_ref": "main",
+      "base_sha": "a225d61f1ada3bd03f06cdf8a3f3f2d00870f6c5",
+      "review_commit_id": "1ba756e6743d833dc361177c2fb4946e76015985",
+      "n_inline_comments": 1,
+      "n_review_summaries": 1,
+      "n_resolved_threads": 1,
+      "threads_complete": true
+    }
+  ]
+}

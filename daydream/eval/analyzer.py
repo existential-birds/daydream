@@ -364,7 +364,13 @@ def analyze_findings(daydream_dir: Path) -> dict:
 
 
 def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
-    """Tier 1 grounding: verify cited files were actually read by the agent."""
+    """Tier 1 grounding: verify cited files were actually read by the agent.
+
+    ``grounding_rate`` is ``None`` over an empty finding set: the ratio is
+    undefined, not perfect. It feeds the RL/SFT reward as a credit axis
+    (``daydream/training/reward.py``), where scoring absence of evidence as 1.0
+    made "report nothing" the cheapest path to a maximal composite.
+    """
     agent_reads: dict[str, set[str]] = {}
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
@@ -404,7 +410,7 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
         "total_findings": total,
         "grounded_count": len(grounded),
         "ungrounded_count": len(ungrounded),
-        "grounding_rate": round(len(grounded) / total, 4) if total > 0 else 1.0,
+        "grounding_rate": round(len(grounded) / total, 4) if total > 0 else None,
         "grounded": grounded,
         "ungrounded": ungrounded,
     }

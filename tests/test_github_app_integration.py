@@ -7,6 +7,7 @@ loop. Mocks only the Backend (no real AI) and the github_app network helpers
 from __future__ import annotations
 
 import subprocess
+from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -61,7 +62,7 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
 
     # Pin a wide recording console so the identity line is captured at the
     # rendered content level, independent of terminal width / TTY / Live state.
-    rec = Console(record=True, force_terminal=True, width=200, height=25)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.runner.console", rec)
 
     with patch("daydream.github_app._mint_installation_token",

@@ -150,6 +150,92 @@ async def test_full_fix_flow(mock_backend, mock_ui, target_project: Path, make_c
     assert (target_project / ".review-output.md").exists()
 
 
+class _WorktreeMutatingBackend(PhaseDispatchBackend):
+    """Phase-dispatch fake whose fix and commit turns really touch the worktree.
+
+    The backend is the only mocked seam, so the edit and the commit the real
+    prompts ask for have to happen here -- exactly what the agent would do with
+    its tools -- for the run to leave observable Git state behind.
+    """
+
+    async def execute(
+        self,
+        cwd,
+        prompt,
+        output_schema=None,
+        continuation=None,
+        agents=None,
+        max_turns=None,
+        read_only=False,
+    ):
+        if prompt.startswith("Fix this issue"):
+            (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
+        elif prompt.startswith("Stage all changes and commit"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            _git(cwd, "add", "main.py")
+            _commit(
+                cwd,
+                f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}",
+            )
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_shallow_commits_when_operator_ignores_red_suite(
+    monkeypatch,
+    target_project: Path,
+    install_backend,
+    make_config,
+):
+    """Heal-menu choice "3" keeps the shallow run going all the way to a real commit.
+
+    Drives the shallow flow through the REAL ``phase_test_and_heal`` and
+    ``phase_commit_push`` against a permanently red suite, with the backend as
+    the only mocked seam. Choice "3" (ignore and continue) reports ``passed``
+    False but ``proceed`` True, and the commit gate reads ``test_proceed`` -- so
+    the run exits 0 and the fix lands in the real worktree instead of being
+    abandoned with the failure.
+    """
+    monkeypatch.setattr("sys.stdin", StringIO("3\ny\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.delenv("CI", raising=False)
+    install_backend(
+        _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
+    )
+
+    head_before = _git(target_project, "rev-parse", "HEAD")
+
+    config = make_config(
+        target_project,
+        skill="python",
+        quiet=True,
+        shallow=True,
+        non_interactive=False,
+        output_mode="loop",
+    )
+    exit_code = await run(config)
+
+    assert exit_code == 0, "choice '3' must continue the run, not abort it"
+    assert _git(target_project, "rev-parse", "HEAD") != head_before, (
+        "the ignored-red-suite run never committed"
+    )
+    assert "-> str" in _git(target_project, "show", "HEAD:main.py"), (
+        "the fix was reverted instead of committed"
+    )
+    assert "Daydream-Run:" in _git(target_project, "log", "-1", "--format=%B")
+
+
 @pytest.mark.asyncio
 async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
     """Test the full tool panel lifecycle in normal mode shows file count and list.
@@ -498,7 +584,7 @@ async def test_run_populates_exploration_context(
         return []
 
     async def fake_phase_test_and_heal(backend, work, feedback_items=None):
-        return True, 0
+        return True, 0, True
 
     async def fake_phase_commit_push(backend, work):
         return None

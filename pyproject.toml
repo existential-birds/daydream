@@ -80,6 +80,9 @@ select = ["E", "F", "I", "W"]
 "daydream/ui/__init__.py" = ["F401"]
 
 [tool.pytest.ini_options]
+# Bare `pytest` must not descend into rl/daydream_review_v1/, a standalone uv
+# project with its own verifiers-based suite and its own lockfile.
+testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers"

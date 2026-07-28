@@ -19,14 +19,17 @@ import json
 import re
 import subprocess
 from collections.abc import Callable
+from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
 import pytest
 
+from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -151,13 +154,13 @@ def _prime_merge_resume(
     return deep
 
 
-async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int]:
+async def _ok(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
     """Async stand-in for phase_test_and_heal that always passes.
 
     Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
     tests in this module use the ``mute_side_effects`` fixture instead.
     """
-    return (True, 0)
+    return (True, 0, True)
 
 
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
@@ -488,7 +491,7 @@ async def test_run_deep_renders_prescan_summary_not_json(
 
     _silence(monkeypatch)
     mute_side_effects()
-    rec = Console(record=True, force_terminal=True, width=120)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=120)
     monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
     _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
 
@@ -4276,3 +4279,164 @@ async def test_deep_findings_out_emits_artifact_and_stops(
         assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
+
+
+async def test_test_verdict_artifact_written_on_passing_suite(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk.
+
+    Drives ``runner.run`` end to end with the scripted ``_StubBackend`` (the
+    only mocked seam) and the REAL ``phase_test_and_heal`` (``heal=False``), so
+    the verdict written by ``_step_test`` reflects an actual test-suite turn.
+    Observable outcome: exit 0 plus a parseable artifact at
+    ``<target>/.daydream/deep/test-verdict.json`` recording ``passed`` True.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+    mute_side_effects(heal=False)
+
+    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
+    assert rc == 0
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    assert verdict_file.is_file(), "passing run did not write test-verdict.json"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is True, verdict
+    assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
+
+
+async def test_test_verdict_artifact_written_on_failing_suite(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``.
+
+    ``_step_test`` returns ``Stop(1)`` on failure; the verdict must be
+    persisted before that early-return, otherwise the failing outcome -- the
+    one a caller most needs -- would never reach disk. With ``--yes`` the heal
+    loop gets exactly ONE bounded auto fix-and-retry, so the red suite runs
+    twice and then aborts. Observable outcome: exit 1 AND an artifact recording
+    ``passed`` False.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+    stub.fail_all_test_runs = True  # suite never goes green, even after the heal fix
+    mute_side_effects(heal=False)
+
+    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
+    assert rc == 1, "a permanently-red suite must fail the run"
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    assert verdict_file.is_file(), "failing run lost test-verdict.json to the early-return"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is False, verdict
+    assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
+
+
+class _CommittingStubBackend(_StubBackend):
+    """Stub that answers the commit prompt with a real, untrailered git commit.
+
+    ``_do_commit`` delegates the commit itself to an agent turn, so a stub that
+    only records the prompt leaves the whole implementation -- the HEAD-moved
+    check and the trailer amend that ``daydream_commits()`` depends on --
+    unexercised. Committing without the trailers the prompt asks for drives that
+    repair branch for real.
+    """
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> Any:
+        if prompt.startswith("Stage all changes and commit"):
+            _git(cwd, "add", "--all")
+            _git(cwd, "commit", "-m", "fix: align greeting copy")
+            yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+async def test_test_verdict_records_failure_when_operator_ignores_it(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite.
+
+    Drives ``runner.run`` -> deep orchestrator -> the REAL ``phase_test_and_heal``
+    (``heal=False``) and the REAL ``phase_commit_push`` (``commit=False``) with the
+    scripted stub backend as the only mocked seam. The suite is permanently red and
+    the operator answers the interactive heal menu with "3" (ignore and continue).
+    Two observable outcomes, both required: the on-disk ``test-verdict.json`` records
+    ``passed`` False (an "ignore" is an operator override, never evidence the suite
+    went green), AND the fix is really committed -- HEAD advances onto a commit that
+    carries the fix and the daydream trailers.
+    """
+    import daydream
+    from daydream.runner import run
+
+    _silence(monkeypatch, prompts=False)
+    _force_interactive(monkeypatch)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+
+    # phases.prompt_user is shared: intent-confirmation needs "y"; the heal menu
+    # ("Choice") needs "3" (ignore and continue).
+    def _phases_prompt(console: Any, message: str, default: str = "") -> str:  # noqa: ARG001
+        return "3" if "Choice" in message else "y"
+
+    monkeypatch.setattr("daydream.phases.prompt_user", _phases_prompt)
+
+    stub = _CommittingStubBackend(tiny_diff_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    stub.fail_all_test_runs = True
+
+    mute_side_effects(heal=False, commit=False)
+
+    head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
+
+    rc = await run(make_config(tiny_diff_target, non_interactive=False))
+    assert rc == 0, "choice '3' must continue the run, not abort it"
+
+    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    verdict = json.loads(verdict_file.read_text())
+    assert verdict["passed"] is False, (
+        f"an ignored failure was persisted as a green suite: {verdict}"
+    )
+    assert verdict["ignored"] is True, f"the operator override was not recorded: {verdict}"
+    assert _git(tiny_diff_target, "rev-parse", "HEAD") != head_before, (
+        "choice '3' did not produce a commit"
+    )
+    committed = _git(tiny_diff_target, "show", "--name-only", "--format=", "HEAD").split()
+    assert ".fixed-api_py" in committed, f"the applied fix was not part of the commit: {committed}"
+    head_message = _git(tiny_diff_target, "log", "-1", "--format=%B")
+    assert "Daydream-Run: " in head_message, f"commit lost the run trailer: {head_message}"
+    assert f"Daydream-Version: {daydream.__version__}" in head_message, (
+        f"commit lost the version trailer: {head_message}"
+    )
+    assert stub.test_suite_calls == 1, (
+        f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
+    )

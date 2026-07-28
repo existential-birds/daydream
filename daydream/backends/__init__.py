@@ -21,12 +21,16 @@ Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
 
 from __future__ import annotations
 
+import logging
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from daydream.trajectory import now_iso
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
@@ -331,6 +335,28 @@ class Backend(Protocol):
         ...
 
     def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
+
+
+def resolve_fanout_concurrency(env_var: str, default: int) -> int:
+    """Read a backend's fan-out hint from *env_var*, falling back to *default*.
+
+    The right value is a property of the endpoint serving the turns, not of the
+    backend, which is why it is an environment override rather than a constant.
+    A non-integer or non-positive value warns and falls back rather than failing
+    the run: a malformed knob should not cost a review.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("%s is not a valid integer; using default %d", env_var, default)
+        return default
+    if value <= 0:
+        logger.warning("%s must be positive; using default %d", env_var, default)
+        return default
+    return value
 
 
 def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:

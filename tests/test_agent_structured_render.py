@@ -1,7 +1,7 @@
 """Task 1 real-path tests: run_agent must not echo structured-output JSON.
 
 Verified terminal-render harness (from Task 0):
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     ... drive run_agent ...
     rec.export_text()  # captures the rendered agent text
@@ -12,6 +12,8 @@ tests.test_agent_recorder_integration (the single canonical definition).
 """
 
 from __future__ import annotations
+
+from io import StringIO
 
 from rich.console import Console
 
@@ -28,7 +30,7 @@ PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source
 
 
 async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     backend = MockBackend([TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)])
     result, _, _ = await run_agent(
@@ -41,7 +43,7 @@ async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
 
 
 async def test_plain_text_still_renders(monkeypatch, tmp_path):
-    rec = Console(record=True, force_terminal=True, width=100)
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     backend = MockBackend(
         [TextEvent(text="narration here"), ResultEvent(structured_output=None, continuation=None)]

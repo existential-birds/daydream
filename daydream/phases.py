@@ -2177,7 +2177,7 @@ async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
     feedback_items: list[dict[str, Any]] | None = None,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, bool]:
     """Phase 4: Run tests and prompt user on failure for action.
 
     Args:
@@ -2187,7 +2187,9 @@ async def phase_test_and_heal(
             used to enrich the fix prompt with file context.
 
     Returns:
-        Tuple of (success: bool, retries_used: int)
+        Tuple of (passed: bool, retries_used: int, proceed: bool). ``passed`` is
+        what the suite actually did; ``proceed`` is whether the run continues,
+        which the operator can grant to a red suite via "ignore and continue".
 
     """
     print_phase_hero(console, "AWAKEN", phase_subtitle("AWAKEN"))
@@ -2240,7 +2242,7 @@ async def phase_test_and_heal(
 
         if test_passed:
             print_success(console, "Tests passed")
-            return True, retries_used
+            return True, retries_used, True
 
         print_warning(console, "Tests may have failed or result is unclear.")
 
@@ -2252,7 +2254,7 @@ async def phase_test_and_heal(
                 "Test failure looks environmental (infrastructure unavailable); "
                 "skipping heal loop.",
             )
-            return False, retries_used
+            return False, retries_used, False
 
         # Test-heal retry gate across the two interaction axes. With no human at
         # the keyboard, the menu's default "2" (fix-and-retry) would launch an
@@ -2272,7 +2274,7 @@ async def phase_test_and_heal(
                 console, "Tests failed", "Aborting heal loop (no further auto-retries)",
             )
             await _emit_failure_handoff(backend, work, output, offer_clipboard=False)
-            return False, retries_used
+            return False, retries_used, False
         if decision is True:
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
@@ -2283,7 +2285,7 @@ async def phase_test_and_heal(
         print_menu(console, "What would you like to do?", [
             ("1", "Retry tests (run again without fixes)"),
             ("2", "Fix and retry (launch agent to fix issues)"),
-            ("3", "Ignore and continue (mark as passed)"),
+            ("3", "Ignore and continue (failure still recorded)"),
             ("4", "Abort (exit with failure)"),
         ])
 
@@ -2330,16 +2332,16 @@ async def phase_test_and_heal(
 
         elif choice == "3":
             print_warning(console, "Ignoring test failures, continuing...")
-            return True, retries_used
+            return False, retries_used, True
 
         elif choice == "4":
             print_error(console, "Aborted", "User requested abort")
             await _emit_failure_handoff(backend, work, output, offer_clipboard=True)
-            return False, retries_used
+            return False, retries_used, False
 
         else:
             print_warning(console, f"Invalid choice '{choice}', aborting")
-            return False, retries_used
+            return False, retries_used, False
 
 
 async def _do_commit(

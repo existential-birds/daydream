@@ -177,106 +177,108 @@ logger = logging.getLogger(__name__)
 
 def _pi_fanout_concurrency() -> int:
     raw = os.environ.get("DAYDREAM_PI_FANOUT_CONCURRENCY")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            logger.warning(
-                "DAYDREAM_PI_FANOUT_CONCURRENCY is not a valid integer; "
-                "using default %d",
-                _PI_DEFAULT_FANOUT_CONCURRENCY,
-            )
-        else:
-            if value <= 0:
-                logger.warning(
-                    "DAYDREAM_PI_FANOUT_CONCURRENCY must be positive; "
-                    "using default %d",
-                    _PI_DEFAULT_FANOUT_CONCURRENCY,
-                )
-            else:
-                return value
-    return _PI_DEFAULT_FANOUT_CONCURRENCY
+    if raw is None:
+        return _PI_DEFAULT_FANOUT_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "DAYDREAM_PI_FANOUT_CONCURRENCY is not a valid integer; "
+            "using default %d",
+            _PI_DEFAULT_FANOUT_CONCURRENCY,
+        )
+        return _PI_DEFAULT_FANOUT_CONCURRENCY
+    if value <= 0:
+        logger.warning(
+            "DAYDREAM_PI_FANOUT_CONCURRENCY must be positive; "
+            "using default %d",
+            _PI_DEFAULT_FANOUT_CONCURRENCY,
+        )
+        return _PI_DEFAULT_FANOUT_CONCURRENCY
+    return value
 
 
 def _pi_retry_attempts() -> int:
     raw = os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            logger.warning(
-                "DAYDREAM_PI_RETRY_ATTEMPTS=%r is not a valid integer; using default %d",
-                raw,
-                _PI_DEFAULT_RETRY_ATTEMPTS,
-            )
-        else:
-            if value < 0:
-                logger.warning(
-                    "DAYDREAM_PI_RETRY_ATTEMPTS=%r is negative; using default %d",
-                    raw,
-                    _PI_DEFAULT_RETRY_ATTEMPTS,
-                )
-            else:
-                return value
-    return _PI_DEFAULT_RETRY_ATTEMPTS
+    if raw is None:
+        return _PI_DEFAULT_RETRY_ATTEMPTS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is not a valid integer; using default %d",
+            raw,
+            _PI_DEFAULT_RETRY_ATTEMPTS,
+        )
+        return _PI_DEFAULT_RETRY_ATTEMPTS
+    if value < 0:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_ATTEMPTS=%r is negative; using default %d",
+            raw,
+            _PI_DEFAULT_RETRY_ATTEMPTS,
+        )
+        return _PI_DEFAULT_RETRY_ATTEMPTS
+    return value
 
 
 def _pi_retry_base_delay() -> float:
     raw = os.environ.get("DAYDREAM_PI_RETRY_BASE_DELAY_S")
-    if raw:
-        try:
-            value = float(raw)
-        except ValueError:
-            logger.warning(
-                "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not a valid float; using default %g",
-                raw,
-                _PI_DEFAULT_RETRY_BASE_DELAY,
-            )
-        else:
-            if not math.isfinite(value):
-                logger.warning(
-                    "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not finite; using default %g",
-                    raw,
-                    _PI_DEFAULT_RETRY_BASE_DELAY,
-                )
-            elif value < 0:
-                logger.warning(
-                    "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is negative; using default %g",
-                    raw,
-                    _PI_DEFAULT_RETRY_BASE_DELAY,
-                )
-            else:
-                return value
-    return _PI_DEFAULT_RETRY_BASE_DELAY
+    if raw is None:
+        return _PI_DEFAULT_RETRY_BASE_DELAY
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not a valid float; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_BASE_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_BASE_DELAY
+    if not math.isfinite(value):
+        logger.warning(
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is not finite; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_BASE_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_BASE_DELAY
+    if value < 0:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_BASE_DELAY_S=%r is negative; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_BASE_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_BASE_DELAY
+    return value
 
 
 def _pi_retry_max_delay() -> float:
     raw = os.environ.get("DAYDREAM_PI_RETRY_MAX_DELAY_S")
-    if raw:
-        try:
-            value = float(raw)
-        except ValueError:
-            logger.warning(
-                "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not a valid float; using default %g",
-                raw,
-                _PI_DEFAULT_RETRY_MAX_DELAY,
-            )
-        else:
-            if not math.isfinite(value):
-                logger.warning(
-                    "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not finite; using default %g",
-                    raw,
-                    _PI_DEFAULT_RETRY_MAX_DELAY,
-                )
-            elif value < 0:
-                logger.warning(
-                    "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is negative; using default %g",
-                    raw,
-                    _PI_DEFAULT_RETRY_MAX_DELAY,
-                )
-            else:
-                return value
-    return _PI_DEFAULT_RETRY_MAX_DELAY
+    if raw is None:
+        return _PI_DEFAULT_RETRY_MAX_DELAY
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not a valid float; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_MAX_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_MAX_DELAY
+    if not math.isfinite(value):
+        logger.warning(
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is not finite; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_MAX_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_MAX_DELAY
+    if value < 0:
+        logger.warning(
+            "DAYDREAM_PI_RETRY_MAX_DELAY_S=%r is negative; using default %g",
+            raw,
+            _PI_DEFAULT_RETRY_MAX_DELAY,
+        )
+        return _PI_DEFAULT_RETRY_MAX_DELAY
+    return value
 
 
 def _is_retryable_error_message(message: str) -> bool:

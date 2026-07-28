@@ -1228,6 +1228,7 @@ async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
         ctx.data["fixes_applied"] = 0
         ctx.data["test_retries"] = 0
         ctx.data["tests_passed"] = True
+        ctx.data["test_proceed"] = True
         ctx.data["iteration"] = 0
         ctx.data["diff_base"] = None
         ctx.data["exploration_dir"] = None

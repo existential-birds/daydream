@@ -1,0 +1,15 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "description": "`test_mean` cannot distinguish correct float division from a floor-division regression because the test input [1, 2, 3] produces an evenly-divisible mean (2.0), which would pass identically with floor division (//). Recommend adding a test case with non-integer mean, e.g. mean([1, 2]) == 1.5",
+      "file": "tests/test_calc.py",
+      "line": 13,
+      "severity": "low",
+      "confidence": "HIGH",
+      "rationale": "Directly verified by executing both correct and floor-division implementations against the test input and observing identical outcomes. Test input does not exercise true float division.",
+      "evidence": "mean([1, 2, 3]) == 2.0 whether using / or //; mean([1, 2]) would be 1.5 with / but 1 with //, making the distinction observable.",
+      "lens": "per-stack"
+    }
+  ]
+}

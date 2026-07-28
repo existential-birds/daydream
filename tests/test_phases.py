@@ -2,6 +2,7 @@
 """Tests for phase functions with backend abstraction."""
 
 import json
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,7 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
         {"id": 2, "description": "Missing import", "file": "src/utils.py", "line": 1},
     ]
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path), feedback_items=feedback_items)
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path), feedback_items=feedback_items)
 
     assert success is True
     assert retries == 1
@@ -107,7 +108,7 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
 
     feedback_items = [{"id": 1, "description": "Bug", "file": "src/handler.py", "line": 10}]
 
-    success, retries = await phase_test_and_heal(
+    success, retries, _ = await phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=feedback_items,
     )
 
@@ -980,7 +981,7 @@ async def test_phase_understand_intent_renders_summary_panel_before_gate(
     from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
-    recording = Console(record=True, force_terminal=True, width=200)
+    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.phases.console", recording)
 
     summary = "This change adds a login page with email and password authentication."
@@ -1012,7 +1013,7 @@ async def test_phase_understand_intent_renders_placeholder_for_empty_summary(
     from daydream.phases import phase_understand_intent
 
     silence_console("daydream.phases", keep=("console", "print_intent_summary"))
-    recording = Console(record=True, force_terminal=True, width=200)
+    recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.phases.console", recording)
 
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
@@ -1318,7 +1319,7 @@ async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is True
     assert retries == 1
@@ -1355,7 +1356,7 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is True
     assert retries == 1
@@ -1389,7 +1390,7 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_declines(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is True
     assert retries == 1
@@ -1424,7 +1425,7 @@ async def test_phase_test_and_heal_option1_investigator_failure_falls_back(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is True
     assert retries == 1
@@ -1534,7 +1535,7 @@ async def test_phase_test_and_heal_option4_writes_handoff_to_live_path(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is False
     assert retries == 0
@@ -1570,7 +1571,7 @@ async def test_phase_test_and_heal_option4_clipboard_offer_fires_on_confirm(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "4")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is False
     assert copied == ["BODY"]
@@ -1645,7 +1646,7 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
     assert success is False
 
     fallback_dir = tmp_path / ".daydream"
@@ -1680,7 +1681,7 @@ async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -1713,7 +1714,7 @@ async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
@@ -1988,7 +1989,7 @@ async def test_phase_test_and_heal_option4_inlines_body_when_write_fails(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is False
     # A warning explaining the failure was emitted.
@@ -2047,7 +2048,7 @@ async def test_phase_test_and_heal_non_interactive_writes_handoff_without_menu(
             _handoff_turn("# Handoff\n\nnon-interactive failure context"),
         ])
 
-        passed, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+        passed, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
         # Took the abort/terminate path (choice "4" semantics, no mutation).
         assert passed is False
@@ -2108,7 +2109,7 @@ async def test_phase_test_and_heal_non_interactive_fallback_has_facts_hypotheses
 
         backend = _HealBackend(script=[_FAIL_TURN, (RuntimeError("scripted summarizer failure"),)])
 
-        passed, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+        passed, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
         assert passed is False
         assert retries == 0
 
@@ -2170,7 +2171,7 @@ async def test_phase_test_and_heal_yes_bounded_loop_exactly_one_auto_attempt(
             _FAIL_TURN,
             _handoff_turn("# Handoff\nauto-mode failure"),
         ])
-        success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+        success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
         # Loop terminated after exactly one auto fix attempt.
         assert success is False
@@ -2243,7 +2244,7 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_retry_prompt(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "1")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
 
-    success, retries = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, retries, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is True
     assert retries == 1
@@ -2388,7 +2389,7 @@ async def test_option4_calls_write_partial_before_summarizer(
         "daydream.phases.prompt_user", lambda *a, **kw: next(choices, "3"),
     )
 
-    success, _ = await phase_test_and_heal(backend, make_work(tmp_path))
+    success, _, _ = await phase_test_and_heal(backend, make_work(tmp_path))
 
     assert success is False
     # write_partial fires once on abort so the trajectory is on disk while the

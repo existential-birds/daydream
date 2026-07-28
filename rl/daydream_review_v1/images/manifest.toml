@@ -1,0 +1,34 @@
+# Per-repo container image inputs for the daydream-review-v1 environment.
+#
+# One entry per repository slug, keyed exactly as the corpus reports it
+# (`owner/name`). Every repo slug appearing in a corpus MUST have an entry —
+# the taskset raises rather than silently skipping a PR.
+#
+# `image` is a docker repository name WITHOUT a tag. The tag is the task's
+# 12-char head SHA, so one image == one PR snapshot: `daydream-rl/fixture:9b9238166305`.
+# That is what makes the green-baseline gate meaningful — the suite is proven
+# green at the exact commit the rollout reviews.
+#
+# `clone_url` is what `images/repo.Dockerfile` mirror-clones. The sentinel
+# `fixture://daydream-rl-fixture` tells `build_images.py` to materialize the
+# deterministic fixture repository from `daydream_review_v1.fixture` instead of cloning.
+
+[repos."existential-birds/daydream-rl-fixture"]
+clone_url = "fixture://daydream-rl-fixture"
+image = "daydream-rl/fixture"
+test_command = "python -m unittest discover -q"
+setup_cmds = []
+
+# Reference entry: real upstream history, proving the tooling on something other
+# than a synthetic repo. BSD-3-Clause, not on the C5 exclusion list, and its whole
+# suite runs in seconds. The corpus that pairs with it is
+# tests/fixtures/corpus-reference/ (PR #406, head 4bb03cd6819228f3, base
+# 4dffa1963f896a0a — the merge commit's two parents).
+#
+# This is a reference, NOT the training set. Expanding to a real training-repo set
+# is data ops, tracked as its own numbered task on issue #164.
+[repos."pallets/itsdangerous"]
+clone_url = "https://github.com/pallets/itsdangerous.git"
+image = "daydream-rl/itsdangerous"
+test_command = "python -m pytest -q"
+setup_cmds = ["pip install -e .", "pip install pytest freezegun"]
