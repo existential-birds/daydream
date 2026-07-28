@@ -139,3 +139,51 @@ def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
     bad.write_text("{not json")
     rc = cli_main(_post_argv(bad))
     assert rc == 1 and fake_gh.calls("POST") == []
+
+
+def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
+    """``post-findings`` argv for a single-finding artifact, plus extra flags."""
+    return ["post-findings", str(artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r", *extra]
+
+
+def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
+    return _write_artifact(
+        path / "findings.json",
+        [_finding(fingerprint, path="src/app.py", line=10, placement="inline", title="Real finding")],
+    )
+
+
+def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
+    fake_gh, tmp_path
+) -> None:
+    # Prior thread carries the SAME fingerprint, but authored by a human -> forged.
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["evil-attacker"]
+    )
+    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
+    assert code == 0
+    # Not suppressed -> review still posted once.
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
+def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh, tmp_path) -> None:
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
+    )
+    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
+    assert code == 0
+    # Already on the PR -> NO review posted (idempotent).
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
+
+
+def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
+    )
+    monkeypatch.setenv("DAYDREAM_BOT_HANDLE", "daydream")  # no --bot-login flag
+    code = cli_main(_forged_marker_argv(artifact))  # env supplies the login
+    assert code == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0

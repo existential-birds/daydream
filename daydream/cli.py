@@ -1538,6 +1538,15 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         metavar="OWNER/REPO",
         help="Event-derived repository slug the artifact must declare.",
     )
+    parser.add_argument(
+        "--bot-login",
+        type=str,
+        default=None,
+        dest="bot_login",
+        metavar="LOGIN",
+        help="Bot login (App slug) for prior-finding author filtering. "
+        "Defaults to $DAYDREAM_BOT_HANDLE.",
+    )
     return parser
 
 
@@ -1567,6 +1576,7 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         head_sha=args.head_sha,
         repo=args.repo,
         console=create_console(),
+        bot_login=args.bot_login,
     )
 
 
