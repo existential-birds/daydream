@@ -125,15 +125,30 @@ def test_split_setup_preserves_privilege_split() -> None:
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
-def test_post_findings_step_exports_bot_login() -> None:
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+    ids=["template", "live"],
+)
+def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     """The Post findings step must export BOT_LOGIN from the deposited
     ``DAYDREAM_BOT_HANDLE`` variable and pass it to ``daydream post-findings``
     via ``--bot-login`` so the author filter has a bot login to match against
     (issue #254). Without it, the post job degrades to viewerDidAuthor-only
-    GraphQL dedup and suppresses nothing on the REST side."""
-    text = (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
-    assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text
-    assert '--bot-login "$BOT_LOGIN"' in text
+    GraphQL dedup and suppresses nothing on the REST side.
+
+    Pinned on BOTH the shipped template and the repo's own live workflow —
+    the two files are intentionally divergent in other fields (install-pin,
+    surface-failure guard) but this invariant must hold for both.
+    """
+    text = wf_path.read_text(encoding="utf-8")
+    assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text, (
+        f"{wf_path.name}: Post findings step must export BOT_LOGIN from "
+        f"vars.DAYDREAM_BOT_HANDLE (issue #254)"
+    )
+    assert '--bot-login "$BOT_LOGIN"' in text, (
+        f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
+    )
 
 
 def test_single_setup_preserves_privilege_split() -> None:
