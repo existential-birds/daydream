@@ -79,9 +79,14 @@ name = "daydream-review-train"
 # Generic taskset/harness configs are narrowed to our own subclasses by id before
 # validation, so the plugin keys below validate.
 taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-train", manifest_path = "/data/daydream-rl/manifest.toml" }
-# `backend` is the whole backend-swap surface: claude today, codex or pi by
-# changing this one word, osprey when daydream ships it.
-harness = { id = "daydream-review-v1", backend = "claude", runtime = { type = "docker" }, fanout_concurrency = 4 }
+# `backend` decides the WIRE FORMAT the policy endpoint must serve, not just which
+# CLI drives the rollout: the interception server passes the agent's dialect
+# straight through (`base_url + dialect.upstream_path`, verifiers
+# clients/eval.py:95) with no cross-dialect adapter. pi speaks Chat Completions,
+# which is the surface vLLM is guaranteed to expose. codex needs the endpoint to
+# serve /responses and claude needs /v1/messages — check the actual vLLM build
+# before switching to either.
+harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 # A deep rollout is minutes, not seconds: setup pulls an image, the harness runs
 # the whole review-fix-test loop, and scoring re-runs the repository's suite.
 timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
@@ -101,7 +106,7 @@ name = "daydream-review-eval"
 # five held-out benchmark repositories — the taskset refuses those outright
 # (SPEC C5). Train and eval differ by corpus, not by flag.
 taskset = { id = "daydream-review-v1", corpus_dir = "/data/daydream-rl/corpus-eval", manifest_path = "/data/daydream-rl/manifest.toml" }
-harness = { id = "daydream-review-v1", backend = "claude", runtime = { type = "docker" }, fanout_concurrency = 4 }
+harness = { id = "daydream-review-v1", backend = "pi", runtime = { type = "docker" }, fanout_concurrency = 4 }
 timeout = { setup = 900, rollout = 5400, finalize = 600, scoring = 1800 }
 pool = { type = "elastic", max_workers = 8 }
 num_examples = 32

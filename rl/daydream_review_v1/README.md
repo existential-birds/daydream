@@ -50,9 +50,28 @@ backend only needs to learn a base URL and a key:
 | `codex` | OpenAI Responses | `$CODEX_HOME/config.toml` provider block + `CODEX_INTERCEPT_KEY` |
 | `pi` | Chat Completions | an installed pi provider extension + `VF_INTERCEPT_API_KEY` |
 
-`claude` is the day-one default only because its CLI is what the base image
-already carries. `osprey` lands as one more class when daydream ships that
-backend.
+`claude` is the default for a LOCAL smoke run only, because its CLI is what the
+base image already carries and its injection needs no provisioning file.
+`osprey` lands as one more class when daydream ships that backend.
+
+**Choosing a backend is choosing a wire format.** The interception server passes
+the agent's dialect straight through — the upstream URL is
+`base_url + dialect.upstream_path` (`clients/eval.py:95`) and there is no
+cross-dialect adapter. So the backend decides what the *policy endpoint* has to
+serve, not merely which CLI drives the rollout:
+
+- **`pi` for training and for baselines.** Chat Completions is the surface vLLM
+  is guaranteed to expose, so the wire format is identical at baseline time and
+  at training time. It is also the backend proven end-to-end on a real model:
+  79 captured turns, 3 findings, a fix applied and committed, `fix_tests_pass`
+  1.0 from a genuine in-sandbox suite re-run.
+- **`codex`** needs the endpoint to serve `/responses`; **`claude`** needs
+  `/v1/messages`. Both are optional vLLM surfaces — verify against the actual
+  build before switching.
+
+Measure a baseline under the **same backend you will train under**. The agent
+scaffold is part of what the number describes; comparing a codex-scaffold
+baseline against a pi-scaffold trained run moves two variables at once.
 
 ## Adding a repository
 
