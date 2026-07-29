@@ -97,18 +97,26 @@ def artifact_on_disk_v2(tmp_path: Path) -> Path:
 
 
 def test_fresh_post_then_idempotent_repost(fake_gh, artifact_on_disk) -> None:
-    argv = _post_argv(artifact_on_disk)
+    argv = _post_argv(artifact_on_disk) + ["--bot-login", "daydream"]
     assert cli_main(argv) == 0
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
     assert len(posts) == 1
     assert parse_finding_markers(json.dumps(posts[0].payload))  # markers shipped
-    fake_gh.serve_prior_threads_from(posts[0])  # GitHub now "remembers" run 1
+    # Replay the ACTUAL posted review as prior state: inline comments become
+    # GraphQL threads, the review body becomes a REST review. Author is set to
+    # the bot login so both harvest paths trust it via the [bot]-tolerant
+    # comparator. This proves the wire-format round trip (poster emits ->
+    # harvester reads) through the real CLI, on the real posted payload —
+    # not just unit-level fabricated markers.
+    fake_gh.serve_prior_threads_from(posts[0], author="daydream[bot]")
     assert cli_main(argv) == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1  # no dup review
 
 
 def test_stale_finding_resolved_new_finding_posted(fake_gh, artifact_on_disk_v2) -> None:
-    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
     assert cli_main(_post_argv(artifact_on_disk_v2)) == 0
     # Task 0 spike: resolveReviewThread is FORBIDDEN for the least-privilege
     # installation token; stale findings are minimized via minimizeComment.
@@ -128,3 +136,51 @@ def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
     bad.write_text("{not json")
     rc = cli_main(_post_argv(bad))
     assert rc == 1 and fake_gh.calls("POST") == []
+
+
+def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
+    """``post-findings`` argv for a single-finding artifact, plus extra flags."""
+    return ["post-findings", str(artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r", *extra]
+
+
+def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
+    return _write_artifact(
+        path / "findings.json",
+        [_finding(fingerprint, path="src/app.py", line=10, placement="inline", title="Real finding")],
+    )
+
+
+def test_forged_marker_from_non_bot_commenter_does_not_suppress_finding(
+    fake_gh, tmp_path
+) -> None:
+    # Prior thread carries the SAME fingerprint, but authored by a human -> forged.
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["evil-attacker"]
+    )
+    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
+    assert code == 0
+    # Not suppressed -> review still posted once.
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
+def test_bot_authored_marker_with_bot_login_suppresses_repost(fake_gh, tmp_path) -> None:
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
+    )
+    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
+    assert code == 0
+    # Already on the PR -> NO review posted (idempotent).
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
+
+
+def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
+    )
+    monkeypatch.setenv("DAYDREAM_BOT_HANDLE", "daydream")  # no --bot-login flag
+    code = cli_main(_forged_marker_argv(artifact))  # env supplies the login
+    assert code == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0

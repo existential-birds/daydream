@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from daydream import git_ops
+from daydream.bot_identity import bot_login_matches
 from daydream.git_ops import GitError
 from daydream.pr_review import parse_finding_markers
 from daydream.ui import print_warning
@@ -80,7 +81,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
           id
           isResolved
           comments(first: 100) {
-            nodes { id databaseId body isMinimized }
+            nodes { id databaseId body isMinimized author { login } viewerDidAuthor }
           }
         }
       }
@@ -121,7 +122,23 @@ def _graphql(repo: Path, query: str, variables: dict[str, Any], *, idempotent: b
     return response
 
 
-def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> dict[str, PriorFinding]:
+def _authored_by_bot(login: str | None, viewer_did_author: bool, bot_login: str | None) -> bool:
+    """True iff GitHub proves the bot authored this node.
+
+    ``viewerDidAuthor`` is decided server-side from the installation token
+    (GraphQL only); the ``[bot]``-tolerant login match covers REST reviews
+    and acts as defense-in-depth on GraphQL. Either proof suffices. When
+    ``bot_login`` is None only ``viewerDidAuthor`` can save a node — REST
+    nodes are never trusted in that case (safe degradation).
+    """
+    if viewer_did_author:
+        return True
+    return bot_login is not None and bot_login_matches(login, bot_login)
+
+
+def fetch_prior_findings(
+    target_dir: Path, repo_slug: str, pr_number: int, *, bot_login: str | None = None
+) -> dict[str, PriorFinding]:
     """Inventory the bot's prior findings on a PR, keyed by fingerprint.
 
     Combines two sources:
@@ -131,6 +148,13 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
        ``daydream-finding`` marker.
     2. REST ``GET /repos/<owner>/<repo>/pulls/<n>/reviews`` for body-only
        findings embedded in review bodies (``thread_id=None``).
+
+    A marker is trusted **only** when GitHub proves the bot authored it:
+    ``viewerDidAuthor == true`` (GraphQL) or ``author.login`` / ``user.login``
+    matching *bot_login* via the ``[bot]``-suffix-tolerant comparator. When
+    ``bot_login`` is None, GraphQL is still protected by ``viewerDidAuthor``
+    and REST harvests nothing (a misconfigured bot double-posts rather than
+    ever suppressing a real finding).
 
     The first occurrence of a fingerprint wins on duplicates. A finding
     reads as resolved when its thread is resolved (human action) or its
@@ -152,6 +176,12 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
         threads = response["data"]["repository"]["pullRequest"]["reviewThreads"]
         for thread in threads["nodes"]:
             for comment in thread["comments"]["nodes"]:
+                if not _authored_by_bot(
+                    (comment.get("author") or {}).get("login"),
+                    bool(comment.get("viewerDidAuthor")),
+                    bot_login,
+                ):
+                    continue
                 for fingerprint in parse_finding_markers(comment.get("body") or ""):
                     if fingerprint in prior:
                         continue
@@ -170,6 +200,10 @@ def fetch_prior_findings(target_dir: Path, repo_slug: str, pr_number: int) -> di
         target_dir, f"repos/{owner}/{name}/pulls/{pr_number}/reviews", paginate=True, idempotent=True
     )
     for review in reviews:
+        if not _authored_by_bot(
+            (review.get("user") or {}).get("login"), False, bot_login
+        ):
+            continue
         for fingerprint in parse_finding_markers(review.get("body") or ""):
             if fingerprint in prior:
                 continue

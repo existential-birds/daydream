@@ -9,16 +9,30 @@ from daydream.reconcile import PriorFinding, fetch_prior_findings, partition
 # --- Canned gh_api responses for fetch_prior_findings ----------------------
 
 
-def _thread(thread_id: str, *, comment_node_id: str, database_id: int, body: str) -> dict[str, Any]:
+def _thread(
+    thread_id: str,
+    *,
+    comment_node_id: str,
+    database_id: int,
+    body: str,
+    author: str | None = None,
+    viewer_did_author: bool | None = None,
+) -> dict[str, Any]:
     """One reviewThreads node carrying a single comment."""
+    comment: dict[str, Any] = {
+        "id": comment_node_id,
+        "databaseId": database_id,
+        "body": body,
+        "isMinimized": False,
+    }
+    if author is not None:
+        comment["author"] = {"login": author}
+    if viewer_did_author is not None:
+        comment["viewerDidAuthor"] = bool(viewer_did_author)
     return {
         "id": thread_id,
         "isResolved": False,
-        "comments": {
-            "nodes": [
-                {"id": comment_node_id, "databaseId": database_id, "body": body, "isMinimized": False}
-            ]
-        },
+        "comments": {"nodes": [comment]},
     }
 
 
@@ -45,12 +59,14 @@ _GRAPHQL_PAGE_1: dict[str, Any] = _page(
 
 _GRAPHQL_PAGE_2: dict[str, Any] = _page(
     [_thread("RT_1", comment_node_id="PRRC_1", database_id=101,
-             body="Race in cache\n\n" + finding_marker("a" * 64))],
+             body="Race in cache\n\n" + finding_marker("a" * 64),
+             viewer_did_author=True)],
 )
 
 _REST_REVIEWS: list[dict[str, Any]] = [
     {"id": 900, "node_id": "PRR_900", "body": "review summary, no marker"},
-    {"id": 901, "node_id": "PRR_901", "body": "File-level note\n\n" + finding_marker("b" * 64)},
+    {"id": 901, "node_id": "PRR_901", "body": "File-level note\n\n" + finding_marker("b" * 64),
+     "user": {"login": "daydream-bot"}},
 ]
 
 
@@ -83,5 +99,65 @@ def test_partition_new_matched_stale_and_respects_human_resolution() -> None:
 
 def test_fetch_prior_findings_parses_markers_across_pages(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(git_ops, "gh_api", _fake_gh_api_two_pages)  # canned GraphQL + REST pages
-    prior = fetch_prior_findings(tmp_path, "o/r", 7)
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream-bot")
     assert prior["a" * 64].thread_id == "RT_1" and prior["b" * 64].thread_id is None
+
+
+def test_fetch_prior_findings_ignores_marker_from_non_bot_author(monkeypatch, tmp_path) -> None:
+    # A thread whose comment carries the marker but is authored by a human.
+    fp = "a" * 64
+    pages = [_page([
+        _thread("RT_1", comment_node_id="PRRC_1", database_id=101,
+                body=finding_marker(fp), author="evil-attacker"),  # no viewerDidAuthor
+    ])]
+    def _gh(repo, endpoint, **kw):
+        if endpoint == "graphql":
+            return pages.pop(0) if pages else _page([])
+        if endpoint.endswith("/pulls/7/reviews"):
+            return []
+        raise AssertionError(endpoint)
+    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
+    assert prior == {}   # forged marker ignored -> not trusted
+
+
+def test_fetch_prior_findings_ignores_review_marker_from_non_bot_user(monkeypatch, tmp_path) -> None:
+    fp = "b" * 64
+    def _gh(repo, endpoint, **kw):
+        if endpoint == "graphql":
+            return _page([])
+        if endpoint.endswith("/pulls/7/reviews"):
+            return [{"id": 9, "node_id": "PRR_9", "body": finding_marker(fp),
+                     "user": {"login": "evil-attacker"}}]
+        raise AssertionError(endpoint)
+    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
+    assert prior == {}
+
+
+def test_fetch_prior_findings_trusts_bot_login_match(monkeypatch, tmp_path) -> None:
+    fp = "c" * 64
+    def _gh(repo, endpoint, **kw):
+        if endpoint == "graphql":
+            return _page([_thread("RT_2", comment_node_id="PRRC_2", database_id=102,
+                                  body=finding_marker(fp), author="daydream[bot]")])
+        if endpoint.endswith("/pulls/7/reviews"):
+            return []
+        raise AssertionError(endpoint)
+    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login="daydream")
+    assert fp in prior and prior[fp].thread_id == "RT_2"
+
+
+def test_fetch_prior_findings_trusts_viewerDidAuthor_without_bot_login(monkeypatch, tmp_path) -> None:
+    fp = "d" * 64
+    def _gh(repo, endpoint, **kw):
+        if endpoint == "graphql":
+            return _page([_thread("RT_3", comment_node_id="PRRC_3", database_id=103,
+                                  body=finding_marker(fp), viewer_did_author=True)])
+        if endpoint.endswith("/pulls/7/reviews"):
+            return []
+        raise AssertionError(endpoint)
+    monkeypatch.setattr(git_ops, "gh_api", _gh)
+    prior = fetch_prior_findings(tmp_path, "o/r", 7, bot_login=None)  # misconfigured
+    assert fp in prior   # viewerDidAuthor still proves authorship

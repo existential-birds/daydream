@@ -404,51 +404,91 @@ class FakeGh:
         """
         self.set_response("GET", "/app/installations", value=installations)
 
-    def serve_prior_threads(self, *, fingerprints: list[str], thread_ids: list[str]) -> None:
-        """Serve a prior-thread inventory: one unresolved inline thread per fingerprint."""
+    def serve_prior_threads(
+        self,
+        *,
+        fingerprints: list[str],
+        thread_ids: list[str],
+        authors: list[str] | None = None,
+        viewer_did_author: bool | None = None,
+    ) -> None:
+        """Serve a prior-thread inventory: one unresolved inline thread per fingerprint.
+
+        When *authors* is provided it must parallel *fingerprints* and is zipped
+        into the comment nodes as ``author { login }``. When *viewer_did_author*
+        is set the comment nodes carry ``viewerDidAuthor``. Either None leaves
+        the key absent so absence remains testable.
+        """
+        if authors is not None and len(authors) != len(fingerprints):
+            raise ValueError("authors must parallel fingerprints")
         nodes = [
-            self._thread_node(thread_id, f"RC_{i}", 1000 + i, finding_marker(fingerprint))
+            self._thread_node(
+                thread_id,
+                f"RC_{i}",
+                1000 + i,
+                finding_marker(fingerprint),
+                author=authors[i - 1] if authors is not None else None,
+                viewer_did_author=viewer_did_author,
+            )
             for i, (fingerprint, thread_id) in enumerate(
                 zip(fingerprints, thread_ids, strict=True), start=1
             )
         ]
         self._write_threads(nodes)
 
-    def serve_prior_threads_from(self, call: GhCall) -> None:
+    def serve_prior_threads_from(
+        self, call: GhCall, *,
+        author: str | None = None,
+        viewer_did_author: bool | None = None,
+    ) -> None:
         """Make GitHub "remember" a recorded review POST as prior findings.
 
         Each inline comment in the posted payload becomes an unresolved review
         thread, and the review body becomes a REST review (body-only markers).
+        When *author* is set, both the GraphQL thread comments and the REST
+        review carry it (``author { login }`` / ``user { login }`` respectively)
+        so the bot-author trust rule in ``fetch_prior_findings`` accepts them.
         """
         payload = call.payload or {}
         nodes = [
-            self._thread_node(f"RT_{i}", f"RC_{i}", i, comment.get("body", ""))
+            self._thread_node(
+                f"RT_{i}", f"RC_{i}", i, comment.get("body", ""),
+                author=author, viewer_did_author=viewer_did_author,
+            )
             for i, comment in enumerate(payload.get("comments", []), start=1)
         ]
         self._write_threads(nodes)
-        self.set_response(
-            "GET", call.endpoint, [{"id": 1, "node_id": "PRR_1", "body": payload.get("body", "")}]
-        )
+        review: dict[str, Any] = {"id": 1, "node_id": "PRR_1", "body": payload.get("body", "")}
+        if author is not None:
+            review["user"] = {"login": author}
+        self.set_response("GET", call.endpoint, [review])
 
     # --- internals ------------------------------------------------------------
 
     @staticmethod
     def _thread_node(
-        thread_id: str, comment_node_id: str, database_id: int, body: str
+        thread_id: str,
+        comment_node_id: str,
+        database_id: int,
+        body: str,
+        *,
+        author: str | None = None,
+        viewer_did_author: bool | None = None,
     ) -> dict[str, Any]:
+        comment: dict[str, Any] = {
+            "id": comment_node_id,
+            "databaseId": database_id,
+            "body": body,
+            "isMinimized": False,
+        }
+        if author is not None:
+            comment["author"] = {"login": author}
+        if viewer_did_author is not None:
+            comment["viewerDidAuthor"] = bool(viewer_did_author)
         return {
             "id": thread_id,
             "isResolved": False,
-            "comments": {
-                "nodes": [
-                    {
-                        "id": comment_node_id,
-                        "databaseId": database_id,
-                        "body": body,
-                        "isMinimized": False,
-                    }
-                ]
-            },
+            "comments": {"nodes": [comment]},
         }
 
     def _write_threads(self, nodes: list[dict[str, Any]]) -> None:

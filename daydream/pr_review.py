@@ -22,6 +22,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import os
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -1112,6 +1113,7 @@ def post_findings_from_artifact(
     head_sha: str,
     repo: str,
     console: Console,
+    bot_login: str | None = None,
 ) -> int:
     """Post a Phase A findings artifact to the PR (the Phase B privileged poster).
 
@@ -1127,6 +1129,12 @@ def post_findings_from_artifact(
         pr_number: Event-derived target PR number.
         head_sha: Event-derived PR head SHA.
         repo: Event-derived ``owner/repo`` slug.
+        console: Rich console for status output.
+        bot_login: Optional bot login (App slug) for prior-finding author
+            filtering. When ``None``, falls back to ``$DAYDREAM_BOT_HANDLE``;
+            if still unresolved, dedup degrades safely (GraphQL is still
+            protected by ``viewerDidAuthor``; REST dedup is unavailable) and
+            a warning is printed. Never suppresses on an unresolved login.
 
     Returns:
         ``0`` on success (including "no new findings"); ``1`` when the
@@ -1138,6 +1146,18 @@ def post_findings_from_artifact(
     # call time — the same no-cycle pattern as ``daydream.deep.orchestrator``.
     from daydream.findings import FindingsValidationError, load_findings_artifact
     from daydream.reconcile import fetch_prior_findings, partition, resolve_threads
+
+    # Resolve the effective bot login in ONE place (here), so both the CLI
+    # and any library caller get the env fallback. Precedence: explicit param
+    # over $DAYDREAM_BOT_HANDLE. An unresolved login degrades dedup safely.
+    effective_login = bot_login or os.environ.get("DAYDREAM_BOT_HANDLE") or None
+    if effective_login is None:
+        print_warning(
+            console,
+            "BOT_LOGIN_UNRESOLVED: no --bot-login and $DAYDREAM_BOT_HANDLE is unset; "
+            "prior-finding dedup is degraded (GraphQL still protected by viewerDidAuthor; "
+            "REST dedup unavailable) — may double-post, will never suppress.",
+        )
 
     target_dir = Path.cwd()
     try:
@@ -1152,7 +1172,7 @@ def post_findings_from_artifact(
         return 1
 
     try:
-        prior = fetch_prior_findings(target_dir, repo, pr_number)
+        prior = fetch_prior_findings(target_dir, repo, pr_number, bot_login=effective_login)
     except GitError as exc:
         print_error(console, "Prior-Finding Inventory Failed", str(exc))
         return 1
