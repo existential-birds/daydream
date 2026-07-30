@@ -1016,8 +1016,9 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         arbitrated_ids = {id(all_records[i]) for i in arbiter_targets}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                verdicts = await phase_arbiter_review(
-                    ctx.backend_for("arbiter"),
+                arbiter_backend = ctx.backend_for("arbiter")
+                verdicts, arbiter_continuation = await phase_arbiter_review(
+                    arbiter_backend,
                     ctx.work,
                     selected_records=[all_records[i] for i in arbiter_targets],
                     diff_path=ctx.data["diff_path"],
@@ -1026,6 +1027,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     exploration_dir=ctx.data["exploration_dir"],
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
                 )
+                # Identity gate: only resume when merge runs on the very same
+                # backend instance. A per-phase override that resolves a
+                # different backend gets the cold path.
+                if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
+                    ctx.data["arbiter_continuation"] = arbiter_continuation
             all_records, record_sources = _apply_adjudication_verdicts(
                 all_records, record_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
@@ -1113,6 +1119,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> None:
         failed_stacks=failed_stacks or None,
         structural_records_path=ctx.data["structural_records_path"],
         intent_authoritative=ctx.data.get("intent_authoritative", False),
+        continuation=ctx.data.get("arbiter_continuation"),
     )
 
 

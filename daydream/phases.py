@@ -3134,7 +3134,7 @@ async def phase_arbiter_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
-) -> dict[int, dict[str, Any]]:
+) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
 
     Runs a single heavyweight (Opus by default) agent over only the findings the
@@ -3160,11 +3160,14 @@ async def phase_arbiter_review(
             phase was grounded by a fresh, head-matched PR description.
 
     Returns:
-        Mapping of ``arb_id`` -> adjudicated finding dict with keys ``keep``,
-        ``severity``, ``confidence``, ``description``, ``rationale``. A missing
-        ``arb_id`` (the agent dropped or truncated a row) is fail-open: the caller
-        retains the original record unchanged with a warning, since arbitration
-        targets are the high-severity / contested findings worth protecting.
+        ``(verdicts, continuation)``. ``verdicts`` maps ``arb_id`` -> adjudicated
+        finding dict with keys ``keep``, ``severity``, ``confidence``,
+        ``description``, ``rationale``. A missing ``arb_id`` (the agent dropped or
+        truncated a row) is fail-open: the caller retains the original record
+        unchanged with a warning, since arbitration targets are the high-severity
+        / contested findings worth protecting. ``continuation`` is the backend's
+        session token (``None`` when the backend mints none), so the cross-stack
+        merge can resume this conversation instead of paying for a cold prompt.
 
     """
     from daydream.deep.artifacts import arbiter_input_path, deep_dir
@@ -3187,7 +3190,7 @@ async def phase_arbiter_review(
         exploration_dir=exploration_dir,
         intent_authoritative=intent_authoritative,
     )
-    result, _, _ = await run_agent(
+    result, continuation, _ = await run_agent(
         backend,
         work.repo,
         prompt,
@@ -3200,7 +3203,7 @@ async def phase_arbiter_review(
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
 
-    return _rekey_verdicts(result["findings"], "arb_id", "Arbiter")
+    return _rekey_verdicts(result["findings"], "arb_id", "Arbiter"), continuation
 
 
 # Suppression schema (issue #232). Mirrors ARBITER_SCHEMA but the confidence enum
@@ -3510,6 +3513,7 @@ async def phase_cross_stack_merge(
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
+    continuation: ContinuationToken | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
@@ -3584,6 +3588,7 @@ async def phase_cross_stack_merge(
         failed_stacks=failed_stacks,
         structural_records_path=structural_records_path,
         intent_authoritative=intent_authoritative,
+        resumed_from_arbiter=continuation is not None,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
@@ -3593,6 +3598,7 @@ async def phase_cross_stack_merge(
         prompt,
         output_schema=MERGED_ITEMS_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        continuation=continuation,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )

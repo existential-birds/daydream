@@ -117,7 +117,7 @@ class _PiLikeBackend:
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(tmp_path: Path, make_work) -> None:
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    verdicts = await phase_arbiter_review(
+    verdicts, _ = await phase_arbiter_review(
         _PiLikeBackend(ARBITER_MESSAGE),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
@@ -237,7 +237,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, ma
     """
     set_log_mode(True)  # reset by the autouse _reset_agent_state fixture
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    verdicts = await phase_arbiter_review(
+    verdicts, _ = await phase_arbiter_review(
         _SplitTextBackend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,

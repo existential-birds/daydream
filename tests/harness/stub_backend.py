@@ -29,7 +29,13 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import (
+    ContinuationToken,
+    MaxTurnsError,
+    ResultEvent,
+    TextEvent,
+    ToolStartEvent,
+)
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -154,6 +160,9 @@ class StubBackend:
         self.runaway_test: bool = False
         # When True, the alternatives branch raises instead of answering.
         self.fail_alternatives: bool = False
+        # When set, the arbiter branch mints a ContinuationToken carrying this
+        # session id, so a test can assert the merge call resumes it.
+        self.arbiter_session_id: str | None = None
 
     def _is_runaway(self, prompt: str, pl: str) -> bool:
         """Whether this turn should emit the unbounded budget-tripping burst."""
@@ -193,6 +202,7 @@ class StubBackend:
             "output_schema": output_schema,
             "agents": agents,
             "model": self.model,
+            "continuation": continuation,
         }
         self.calls.append(call)
         if self._shared is not None:
@@ -386,7 +396,16 @@ class StubBackend:
                         }
                     )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"findings": findings}, continuation=None)
+            yield ResultEvent(
+                structured_output={"findings": findings},
+                continuation=(
+                    ContinuationToken(
+                        backend="claude", data={"session_id": self.arbiter_session_id}
+                    )
+                    if self.arbiter_session_id
+                    else None
+                ),
+            )
             return
 
         # Precision-mode suppression reviewer (#232). Reads suppression-input.json,

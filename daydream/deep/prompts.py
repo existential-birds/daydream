@@ -554,8 +554,15 @@ def build_merge_prompt(
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
+    resumed_from_arbiter: bool = False,
 ) -> str:
     """Assemble the cross-stack merge prompt (D-23..D-27).
+
+    ``resumed_from_arbiter`` appends a stale-context warning: the resumed
+    session replays pre-adjudication records, but the files on disk were
+    rewritten after that turn. Every cold path leaves it False and produces
+    today's prompt byte-identically — the prompt is fully self-sufficient
+    without a resumed session.
 
     The merge agent returns a schema-validated JSON item list
     (``MERGED_ITEMS_SCHEMA``) -- NOT markdown. Each item is one actionable
@@ -668,6 +675,19 @@ def build_merge_prompt(
         "and list the other affected files in the rationale.\n"
         "  - Do not invent findings not supported by the source records."
     )
+    if resumed_from_arbiter:
+        # Resuming the arbiter's session replays ITS context, which holds the
+        # PRE-adjudication records. The files on disk were rewritten after that
+        # turn, so the resumed context is stale for exactly the inputs that
+        # matter most.
+        parts.append(
+            "NOTE: this conversation is resumed from the arbitration turn. The "
+            "per-stack record files listed above were REWRITTEN on disk after "
+            "that turn (arbiter verdicts, and possibly suppression verdicts, "
+            "were applied). You MUST re-read every record file from disk — the "
+            "records held in the resumed context are pre-adjudication and are "
+            "no longer authoritative."
+        )
     return "\n\n".join(parts)
 
 
