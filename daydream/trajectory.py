@@ -444,6 +444,13 @@ class Invocation:
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     _stop_reason: str | None = None
     _error_subtype: str | None = None
+    # Set-once per invocation: did any MetricsEvent already carry tokens / cost?
+    # A trailing CostEvent that re-states what MetricsEvents reported must not
+    # accumulate again (codex re-states per turn, pi re-states the summed
+    # totals). Never reset — retry attempts share this Invocation and each
+    # attempt bills separately, so summing across attempts stays correct.
+    _tokens_from_metrics: bool = False
+    _cost_from_metrics: bool = False
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -617,6 +624,9 @@ class Invocation:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
             # Aggregate into recorder-level totals for FinalMetrics (MAP-07).
+            self._tokens_from_metrics = True
+            if event.cost_usd is not None:
+                self._cost_from_metrics = True
             self.recorder._accumulate_metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
@@ -662,13 +672,16 @@ class Invocation:
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
-            # Aggregate into recorder-level totals so FinalMetrics reflects
-            # per-step cost_usd from the backend.
+            # Aggregate into recorder-level totals, but only for the dimensions
+            # no MetricsEvent already reported this invocation — codex re-states
+            # each turn's tokens/cost here and pi re-states the summed totals,
+            # so unconditional accumulation double-counts. A CostEvent-only
+            # backend still accumulates fully.
             self.recorder._accumulate_metrics(
-                prompt_tokens=event.input_tokens,
-                completion_tokens=event.output_tokens,
-                cached_tokens=event.cached_tokens,
-                cost_usd=event.cost_usd,
+                prompt_tokens=None if self._tokens_from_metrics else event.input_tokens,
+                completion_tokens=None if self._tokens_from_metrics else event.output_tokens,
+                cached_tokens=None if self._tokens_from_metrics else event.cached_tokens,
+                cost_usd=None if self._cost_from_metrics else event.cost_usd,
             )
         elif isinstance(event, ResultEvent):
             self._close_open_step()

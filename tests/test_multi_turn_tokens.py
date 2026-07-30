@@ -24,6 +24,7 @@ from daydream.atif import validate as atif_validate
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
+    CostEvent,
     MetricsEvent,
     ResultEvent,
     TextEvent,
@@ -152,3 +153,190 @@ async def test_each_step_carries_correct_phase_label(tmp_path: Path) -> None:
     assert agent_steps[0]["extra"]["daydream_phase"] == "review"
     assert agent_steps[1]["extra"]["daydream_phase"] == "fix"
     assert agent_steps[2]["extra"]["daydream_phase"] == "test"
+
+
+# -- CostEvent must not re-count what MetricsEvents already reported ---------
+
+
+@dataclass
+class _MetricsAndCostBackend:
+    """Codex-shaped mock: per turn a MetricsEvent AND a CostEvent restating it.
+
+    ``cost`` is the whole-invocation cost, split evenly across the per-turn
+    CostEvents; the MetricsEvents carry no cost (codex's synth cost is the
+    same value on both events, so this pins the tokens-only re-count).
+    """
+
+    turns: int
+    in_tok: int
+    out_tok: int
+    cost: float
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        turns, in_tok, out_tok = self.turns, self.in_tok, self.out_tok
+        per_turn_cost = self.cost / turns
+
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            for i in range(turns):
+                yield TextEvent(text=f"turn {i + 1}")
+                yield MetricsEvent(
+                    message_id="",
+                    prompt_tokens=in_tok,
+                    completion_tokens=out_tok,
+                    cached_tokens=None,
+                    cost_usd=None,
+                )
+                yield CostEvent(
+                    cost_usd=per_turn_cost,
+                    input_tokens=in_tok,
+                    output_tokens=out_tok,
+                    cached_tokens=None,
+                )
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+@dataclass
+class _PiShapedBackend:
+    """Pi-shaped mock: per-turn MetricsEvents WITH cost + a final CostEvent
+    re-emitting the summed totals."""
+
+    turns: int
+    in_tok: int
+    out_tok: int
+    cost_per_turn: float
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        turns, in_tok, out_tok = self.turns, self.in_tok, self.out_tok
+        cost_per_turn = self.cost_per_turn
+
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            for i in range(turns):
+                yield TextEvent(text=f"turn {i + 1}")
+                yield MetricsEvent(
+                    message_id="",
+                    prompt_tokens=in_tok,
+                    completion_tokens=out_tok,
+                    cached_tokens=None,
+                    cost_usd=cost_per_turn,
+                )
+            yield CostEvent(
+                cost_usd=cost_per_turn * turns,
+                input_tokens=in_tok * turns,
+                output_tokens=out_tok * turns,
+                cached_tokens=None,
+            )
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def _drive_one(tmp_path: Path, backend: Any) -> dict[str, Any]:
+    """Drive a single run_agent() call through a real recorder."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        await run_agent(backend, tmp_path, "prompt", phase=DaydreamPhase.REVIEW)
+    return read_trajectory(recorder.path)
+
+
+async def test_cost_event_does_not_double_count(tmp_path: Path) -> None:
+    """Codex shape: per-turn CostEvents restate the MetricsEvent tokens."""
+    traj = await _drive_one(
+        tmp_path, _MetricsAndCostBackend(turns=2, in_tok=100, out_tok=10, cost=0.5)
+    )
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == 200  # not 400
+    assert final["total_completion_tokens"] == 20  # not 40
+    # MetricsEvents carried no cost, so the CostEvents' cost counts exactly once.
+    assert final["total_cost_usd"] == pytest.approx(0.5)
+
+
+async def test_pi_shape_final_cost_event_does_not_double_count(tmp_path: Path) -> None:
+    """Pi shape: per-turn MetricsEvents carry cost; the final CostEvent restates
+    the summed totals and must contribute nothing."""
+    traj = await _drive_one(
+        tmp_path, _PiShapedBackend(turns=3, in_tok=100, out_tok=10, cost_per_turn=0.25)
+    )
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == 300  # not 600
+    assert final["total_completion_tokens"] == 30  # not 60
+    assert final["total_cost_usd"] == pytest.approx(0.75)  # not 1.5
+
+
+async def test_cost_event_only_backend_still_accumulates(tmp_path: Path) -> None:
+    """A backend that emits no MetricsEvent at all keeps full CostEvent accumulation."""
+
+    @dataclass
+    class _CostOnlyBackend:
+        model = "mock-model"
+        fanout_concurrency = 4
+
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                yield TextEvent(text="only turn")
+                yield CostEvent(
+                    cost_usd=0.4, input_tokens=70, output_tokens=7, cached_tokens=3
+                )
+                yield ResultEvent(structured_output=None, continuation=None)
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            return None
+
+        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+            return f"/{skill_key}"
+
+    traj = await _drive_one(tmp_path, _CostOnlyBackend())
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == 70
+    assert final["total_completion_tokens"] == 7
+    assert final["total_cached_tokens"] == 3
+    assert final["total_cost_usd"] == pytest.approx(0.4)
