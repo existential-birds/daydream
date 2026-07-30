@@ -661,7 +661,8 @@ def _protect_tree_after_fix_failures(
 
 
 async def _step_exploration(ctx: FlowContext) -> None:
-    """Exploration pre-scan (D-43)."""
+    """Exploration pre-scan (D-43), reused across runs on an exact key match."""
+    from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
     from daydream.runner import _compute_diff_ref
 
     config = ctx.config
@@ -669,6 +670,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
     daydream_dir = target_dir / ".daydream"
     diff = ctx.data["diff"]
     tier = ctx.data["tier"]
+    exploration_path = daydream_dir / "exploration"
 
     exploration_dir: Path | None = None
     if not EXPLORATION_AVAILABLE:
@@ -678,6 +680,24 @@ async def _step_exploration(ctx: FlowContext) -> None:
             "without pre-scan grounding",
         )
     elif config.exploration_context is None:
+        # The in-process context short-circuits first; the disk cache is only
+        # consulted when there is no in-memory context to reuse.
+        cache_key = exploration_cache_key(
+            ctx.work.head_sha or "", diff, tier, config.exploration_depth
+        )
+        if exploration_path.is_dir() and read_cache_key(exploration_path) == cache_key:
+            # Early return BEFORE the pre_scan/write_to_dir block below: routing
+            # a hit through it with an empty in-memory context would overwrite
+            # the cached files with "No data collected" stubs.
+            print_dim(console, f"Reusing exploration pre-scan from {exploration_path}")
+            ctx.data["exploration_dir"] = exploration_path
+            return
+
+        # Miss: drop any stale directory so a partial previous result cannot be
+        # read as this run's grounding.
+        if exploration_path.is_dir():
+            shutil.rmtree(exploration_path, ignore_errors=True)
+
         if tier == "skip":
             print_dim(console, "Skipping exploration -- trivial diff")
             config.exploration_context = ExplorationContext()
@@ -695,10 +715,13 @@ async def _step_exploration(ctx: FlowContext) -> None:
                     diff_ref=_compute_diff_ref(target_dir),
                 )
             console.print(render_exploration_summary(config.exploration_context))
+        if config.exploration_context is not None:
+            exploration_dir = config.exploration_context.write_to_dir(exploration_path)
+            cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
+            ctx.data["exploration_dir"] = exploration_dir
+            return
     if EXPLORATION_AVAILABLE and config.exploration_context is not None:
-        exploration_dir = config.exploration_context.write_to_dir(
-            daydream_dir / "exploration"
-        )
+        exploration_dir = config.exploration_context.write_to_dir(exploration_path)
     ctx.data["exploration_dir"] = exploration_dir
 
 
@@ -1691,20 +1714,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             _backend_cache=backend_cache,
         )
 
-        try:
-            return await run_flow(ctx.registry, "deep", ctx)
-        finally:
-            exploration_cleanup = target_dir / ".daydream" / "exploration"
-            if exploration_cleanup.is_dir():
-                # Best-effort: a raised rmtree here would escape the finally and
-                # replace the run's real exit code with a cleanup exception.
-                try:
-                    shutil.rmtree(exploration_cleanup)
-                except OSError as exc:
-                    print_warning(
-                        console,
-                        f"Failed to clean up exploration artifacts at "
-                        f"{exploration_cleanup}: {exc}",
-                    )
-            # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
-            # subsequent --start-at resumes can find the artifacts they need.
+        # Nothing is torn down after the flow. .daydream/exploration/ is a
+        # content-keyed cache (see ``exploration_cache_key``) the next run reuses
+        # on an exact head+diff+tier+depth match and rewrites on a miss, and
+        # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
+        # subsequent --start-at resumes can find the artifacts they need.
+        return await run_flow(ctx.registry, "deep", ctx)

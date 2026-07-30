@@ -163,6 +163,9 @@ class StubBackend:
         # When set, the arbiter branch mints a ContinuationToken carrying this
         # session id, so a test can assert the merge call resumes it.
         self.arbiter_session_id: str | None = None
+        # When set, the pattern-scanner specialist names this convention, so a
+        # test can prove WHICH run produced the on-disk exploration artifacts.
+        self.exploration_sentinel: str | None = None
 
     def _is_runaway(self, prompt: str, pl: str) -> bool:
         """Whether this turn should emit the unbounded budget-tripping burst."""
@@ -247,7 +250,7 @@ class StubBackend:
             payload = {
                 "conventions": [
                     {
-                        "name": "OpenAPI First",
+                        "name": self.exploration_sentinel or "OpenAPI First",
                         "description": "openapi.yaml is the HTTP contract",
                         "source": "CLAUDE.md",
                     }
@@ -261,7 +264,11 @@ class StubBackend:
             payload = {
                 "affected_files": [],
                 "dependencies": [
-                    {"source": "App.tsx", "target": "api.py", "relationship": "calls"}
+                    {
+                        "source": "App.tsx",
+                        "target": "api.py",
+                        "relationship": self.exploration_sentinel or "calls",
+                    }
                 ],
             }
             yield TextEvent(text=json.dumps(payload))
