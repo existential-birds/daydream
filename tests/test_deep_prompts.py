@@ -696,3 +696,45 @@ def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     """#279: the precedence rule appears only when a fresh PR body was ingested."""
     assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
+
+
+def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: Path) -> None:
+    """The verify prompt carries neither the schema dump nor a write instruction.
+
+    The schema reaches every backend via ``output_schema``, and the host writes
+    the verdicts file, so both blocks were pure duplication.
+    """
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [
+        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+         "line": 10, "description": "x", "rationale": "y"}
+    ]
+    prompt = build_verification_prompt(
+        items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
+    )
+
+    assert "conforming EXACTLY to this schema" not in prompt
+    assert "RECOMMENDATION_VERDICTS_SCHEMA" not in prompt
+    assert "Write your JSON verdicts" not in prompt
+    # The read-only clause no longer dangles an exception for the output path.
+    assert "Do NOT write, edit, or move files." in prompt
+    assert "except the JSON output" not in prompt
+    # output_path is accepted-but-ignored: it must not appear in the prompt.
+    assert "verdicts.json" not in prompt
+    # The substantive instructions survive.
+    assert "recommendation-verifier agent" in prompt
+    assert "unverified_assumptions" in prompt
+
+
+def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
+    """Two different output_path values produce byte-identical prompts."""
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [
+        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+         "line": 10, "description": "x", "rationale": "y"}
+    ]
+    a = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "a.json")
+    b = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "b.json")
+    assert a == b

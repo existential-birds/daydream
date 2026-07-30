@@ -539,11 +539,12 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Recommendation verifier (#83). Discriminator is the schema constant name
-        # embedded by build_verification_prompt — structural, so rewording won't
-        # break this branch. The stub only emits a well-formed payload; the phase
-        # persists it to recommendation-verdicts.json itself.
-        if "RECOMMENDATION_VERDICTS_SCHEMA" in prompt:
+        # Recommendation verifier (#83). Discriminator is the verifier's role
+        # sentence — the schema dump it used to key off was removed from the
+        # prompt (the schema reaches backends via output_schema). The stub only
+        # emits a well-formed payload; the phase persists it to
+        # recommendation-verdicts.json itself.
+        if "you are the recommendation-verifier agent" in pl:
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={

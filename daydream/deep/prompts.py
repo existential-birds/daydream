@@ -15,13 +15,11 @@ Public builders:
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
 
 from daydream.phases import (
-    RECOMMENDATION_VERDICTS_SCHEMA,
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
@@ -693,16 +691,23 @@ def build_verification_prompt(
 
     Hard contract:
       - Read-only tools only: Read, Grep, Glob, and Bash restricted to
-        non-mutating commands (git, cat, ls).
+        non-mutating commands (git, cat, ls). The verifier writes nothing —
+        the host persists the verdicts it returns as structured output.
       - The non-structural finding list is rendered inline below.
       - Empty issue list yields an empty verdict list (no error).
+
+    The verdict schema is NOT dumped into the prompt: it reaches every backend
+    through ``output_schema`` (claude natively, codex via a temp file, pi by
+    appending its own instruction), so an inline copy is a duplicate the model
+    pays for twice.
 
     Args:
         items: The non-structural (per-stack / cross-stack) canonical items to
             verify. Rendered inline into the prompt; verdicts are keyed by each
             item's canonical ``id`` (the verdict ``issue_id``).
         cwd: Absolute working directory the verifier runs in (grounds path resolution).
-        output_path: Where the verifier must write its JSON verdicts file.
+        output_path: Accepted and ignored — kept because dropping a prompt kwarg
+            is a breaking extension change. The host writes the verdicts file.
     """
     from daydream.deep.render import render_report
 
@@ -722,9 +727,9 @@ def build_verification_prompt(
         "Read-only contract (MANDATORY):\n"
         "  - Allowed tools: Read, Grep, Glob, Bash.\n"
         "  - Bash is restricted to non-mutating commands only: `git`, `cat`, `ls`.\n"
-        "  - Do NOT write, edit, or move files anywhere except the JSON output "
-        "path specified below. Do NOT run `git commit`, `git add`, `git checkout`, "
-        "`git reset`, `git stash`, or any other state-changing command."
+        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
+        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
+        "state-changing command."
     )
     parts.append(
         "Turn budget: cap your investigation at 25 turns total. Prefer Grep/Glob "
@@ -768,13 +773,9 @@ def build_verification_prompt(
         "array. This is NOT an error."
     )
     parts.append(
-        "Output JSON conforming EXACTLY to this schema. Every verdict entry "
-        "MUST include all four required fields, even when "
-        "`unverified_assumptions` is an empty array.\n\n"
-        "RECOMMENDATION_VERDICTS_SCHEMA = "
-        + json.dumps(RECOMMENDATION_VERDICTS_SCHEMA, indent=4)
+        "Every verdict entry MUST include all four required fields, even when "
+        "`unverified_assumptions` is an empty array."
     )
-    parts.append(f"Write your JSON verdicts to {output_path}.")
     return "\n\n".join(parts)
 
 
