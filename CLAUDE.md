@@ -185,8 +185,17 @@ and recorder are backend-agnostic.
 
 Every `run_agent()` call is bounded by wall-clock and tool-call limits, tiered by
 phase. Budget exhaustion emits a `TurnEndEvent` and marks the trajectory partial.
-The default wall budget is 1800s; the default tool-call budget varies by phase.
-The improve phases deliberately run with no wall budget.
+The default wall budget is `DEFAULT_WALL_BUDGET_S` (1800s); the default tool-call
+budget varies by phase. Every deep-flow agent is capped — wonder, per-stack,
+parse, arbiter, merge, supervise, suppression, verify, fix, and the test run.
+The test run uses `TEST_WALL_BUDGET_S` (3600s) instead: it bounds the *target
+repo's* suite, not an LLM long tail, so a legitimately slow suite must not be
+truncated. Only the improve phases deliberately run with no wall budget.
+
+Budget truncation is never silently absorbed: a truncated wonder or parse raises
+(a partial pass would drop findings without a trace), and a truncated per-stack
+review is routed into `failed_stacks` so the merge prompt lists it under
+"Uncovered stacks" rather than recording it as a clean pass.
 
 Independently, the pi and codex backends bound their stdout stream with an idle
 timeout (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`, default 2700s): a subprocess that
@@ -248,16 +257,49 @@ partition is named in `.daydream/improve/coverage.json` and the report's
 ### Deep-review pipeline
 
 ```text
-exploration pre-scan
+exploration pre-scan (cached across runs)
     -> intent analysis (Sonnet)
-    -> alternative review (gated by diff size)
-    -> per-stack reviews (parallel, Sonnet; structural review for cross-cutting concerns)
+    -> alternative review (wonder) ∥ per-stack reviews (parallel, Sonnet;
+       structural review for cross-cutting concerns)
+    -> per-stack parse (parallel)
     -> arbiter review (Opus, scoped to high-severity/contested findings)
-    -> cross-stack merge (dedup)
+    -> cross-stack merge (dedup; resumes the arbiter's session)
     -> recommendation verification (conditional)
     -> fix gate (parallel, batched per-file)
     -> test validation
 ```
+
+Wonder and the per-stack fan-out are siblings in one task group on a fresh
+multi-stack run: wonder only feeds the merge agent and the dedup pre-filter, so
+the reviewers do not wait for it and their prompts drop the `alternatives.json`
+pointer. They join before parse consumes the artifact. Single-stack mode and
+every `--start-at` resume keep the serial order and the pointer — in single-stack
+mode there is no merge agent, so the reviewer pointer is the only path wonder
+findings take into the report. Because the step boundary moved, this is extension
+API v4 (see `docs/extensions.md`).
+
+The N per-stack parse calls run concurrently; results are consumed in stack-name
+order so merge input ordering and global issue numbering stay reproducible.
+
+The intent and wonder prompts inline the whole diff when it fits
+`INLINE_DIFF_BUDGET_BYTES` (the same 12 KiB bound the per-stack path uses), and
+fall back to the `diff.patch` pointer above it. The cross-stack merge resumes the
+arbiter's session when both phases resolve to the same backend instance; the
+resumed prompt adds one line forcing a re-read of the per-stack record files,
+which were rewritten on disk after arbitration.
+
+`.daydream/exploration/` survives the run and is reused by the next one on an
+**exact** key match (head SHA + diff + tier + depth, stored in a sibling
+`cache-key` file); a miss rewrites both. Near-matches never count — a stale hit
+would misground every review prompt. Uncommitted worktree edits are not in the
+key, so an exact-key hit on a dirty tree can serve pre-edit exploration. The
+`--shallow` and `--review` flows still delete the directory, so alternating flows
+degrades to a cache miss.
+
+`--start-at` refuses to resume onto stale artifacts: a fresh run records the diff
+it reviewed in `.daydream/deep/diff-key`, and a resume whose diff no longer
+matches (or a pre-upgrade directory with no key) exits 1 instead of adjudicating
+stale findings against changed code.
 
 Small diffs short-circuit the fan-out: the multi-stack pipeline is skipped and diff
 hunks are inlined directly into a single review prompt.
@@ -266,7 +308,8 @@ hunks are inlined directly into a single review prompt.
 
 A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
 (discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
-The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 3);
+The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 4;
+the v4 bump removed the `alternatives` step and raised the supported floor to 4);
 extensions can also register one `ToolDecision`-returning tool supervisor, and
 `daydream ext validate` resolve-checks the loaded registry. The versioned contract —
 name inventories, module shape, supervision seam, and bump policy — is
