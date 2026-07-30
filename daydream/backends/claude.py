@@ -338,7 +338,12 @@ class ClaudeBackend:
         """Execute a prompt and yield unified events.
 
         Args:
-            continuation: Ignored by Claude backend.
+            continuation: When it carries ``backend == "claude"``, its
+                ``session_id`` is passed to the SDK as ``options.resume`` so the
+                CLI replays the prior turn's conversation. A token minted by any
+                other backend is ignored (cold start), never an error. A retried
+                attempt resumes from the same original token, since ``run_agent``
+                passes the input token on every attempt.
             agents: Optional mapping of specialist name -> AgentDefinition for
                 subagent support. Keys are the specialist names the lead agent
                 dispatches by; they MUST be preserved verbatim.
@@ -347,8 +352,10 @@ class ClaudeBackend:
                 not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
                 — under ``bypassPermissions`` ``allowed_tools`` does not restrict
                 the toolset — so the tool list is left unchanged.
-            persist_session: Accepted for backend protocol parity. Claude does
-                not expose persisted CLI sessions here, so this is ignored.
+            persist_session: When True, the final ``ResultEvent`` mints a
+                ``ContinuationToken`` carrying ``ResultMessage.session_id`` so a
+                later call can resume this conversation. False suppresses the
+                token (the turn is one-shot).
 
         Raises:
             ClaudeAgentError: If the agent run ends with an error result
@@ -386,10 +393,21 @@ class ClaudeBackend:
             },
         )
 
+        # Resume the prior conversation when the caller threaded a claude-minted
+        # token through. Options stay otherwise byte-stable so prefix caching
+        # survives.
+        if continuation is not None and continuation.backend == "claude":
+            resume_id = continuation.data.get("session_id")
+            if resume_id:
+                options.resume = resume_id
+
         if agents:
             options.agents = agents
 
         structured_result: Any = None
+        # SDK session id from the terminal ResultMessage; minted into the
+        # ContinuationToken so a later call can --resume this conversation.
+        session_id: str | None = None
         # Latest AssistantMessage.model, stamped on the trailing CostEvent so the
         # recorder can upgrade the generic ``"claude"`` label to the real SDK id.
         last_assistant_model: str | None = None
@@ -466,6 +484,7 @@ class ClaudeBackend:
 
                     elif isinstance(msg, ResultMessage):
                         response_terminated = True
+                        session_id = getattr(msg, "session_id", None)
                         if msg.is_error:
                             detail = msg.result or msg.subtype or "unknown error"
                             if msg.subtype == "error_max_turns":
@@ -495,7 +514,14 @@ class ClaudeBackend:
 
                 yield ResultEvent(
                     structured_output=structured_result,
-                    continuation=None,
+                    continuation=(
+                        ContinuationToken(
+                            backend="claude",
+                            data={"session_id": session_id},
+                        )
+                        if persist_session and session_id
+                        else None
+                    ),
                 )
             except GeneratorExit:
                 if not response_terminated:

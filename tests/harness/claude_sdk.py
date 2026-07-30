@@ -72,6 +72,9 @@ class MockResultMessage:
     is_error: bool = False
     result: str | None = None
     subtype: str = "success"
+    # Real ResultMessage always carries one; default None keeps every existing
+    # scripted message minting no continuation until a test opts in.
+    session_id: str | None = None
 
 
 def patch_claude_sdk(
