@@ -36,7 +36,7 @@ def _run_main(argv: list[str]) -> int:
 def test_ext_validate_ok(ext_dir, capsys) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def supervise(name, tool_input, *, phase):\n"
         "    return ToolDecision(veto=False)\n"
         "def register(r): r.register_tool_supervisor(supervise)\n"
@@ -44,22 +44,22 @@ def test_ext_validate_ok(ext_dir, capsys) -> None:
     rc = _run_main(["ext", "validate"])
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out)
-    assert "DAYDREAM_EXT_DIR" in out and "api version 3" in out.lower()
+    assert "DAYDREAM_EXT_DIR" in out and "api version 4" in out.lower()
     assert "tool supervisor: registered" in out.lower()
 
 
 def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
-    ext_dir.write_module("DAYDREAM_EXT_API = 2\ndef register(r): ...\n")
+    ext_dir.write_module("DAYDREAM_EXT_API = 4\ndef register(r): ...\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out).lower()
     assert "tool supervisor: none" in out
-    assert "supported: 1..3" in out
+    assert "supported: 4..4" in out
 
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -> None:
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def register(r): r.register_tool_supervisor(None)\n"
     )
     rc = _run_main(["ext", "validate"])
@@ -70,7 +70,7 @@ def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -
 def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "async def supervise(name, tool_input, *, phase):\n"
         "    return ToolDecision(veto=False)\n"
         "def register(r): r.register_tool_supervisor(supervise)\n"
@@ -84,7 +84,7 @@ def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> 
 
 def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def register(r):\n"
         "    r.set_flow('deep', ['ghost'])\n"
     )
