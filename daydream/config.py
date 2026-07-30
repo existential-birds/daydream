@@ -50,6 +50,12 @@ DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
 DEFAULT_WALL_BUDGET_S = 1800.0
 DEFAULT_TOOL_CALL_BUDGET = 50
 
+# Wall budget for the test-run turn. Deliberately larger than
+# DEFAULT_WALL_BUDGET_S: it bounds the TARGET repo's own test suite, not an LLM
+# long tail, and a legitimately slow suite must not be truncated. It still
+# bounds a hung turn.
+TEST_WALL_BUDGET_S = 3600.0
+
 # Per-file-group aggregate budget for the fix phase (issue #201). The
 # per-invocation guards above bound each individual run_agent turn; these bound
 # the *cumulative* cost of all fix turns targeting a single file group, so one

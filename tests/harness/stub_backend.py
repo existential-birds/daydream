@@ -150,6 +150,8 @@ class StubBackend:
         self.runaway_alternatives: bool = False
         self.runaway_stack: str | None = None
         self.runaway_parse: str | None = None
+        # ``runaway_test``: the test-suite turn (a hung suite, never a result).
+        self.runaway_test: bool = False
         # When True, the alternatives branch raises instead of answering.
         self.fail_alternatives: bool = False
 
@@ -166,6 +168,8 @@ class StubBackend:
             and "you are reviewing the" in pl
             and f"you are reviewing the {self.runaway_stack} stack" in pl
         ):
+            return True
+        if self.runaway_test and "run the project's test suite" in pl:
             return True
         return (
             self.runaway_parse is not None

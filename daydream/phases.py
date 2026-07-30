@@ -52,6 +52,7 @@ from daydream.config import (
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
+    TEST_WALL_BUDGET_S,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -1473,7 +1474,21 @@ For each issue found, return a JSON object with this structure:
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=schema, phase=DaydreamPhase.PARSE)
+    result, _, budget_reason = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=schema,
+        phase=DaydreamPhase.PARSE,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+    )
+
+    # A truncated parse would silently drop the whole stack's findings, so it
+    # fails the run. The degrade path below stays for genuinely unparseable
+    # model output only.
+    if budget_reason:
+        raise RuntimeError(f"Feedback parse hit its budget: {budget_reason}")
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
@@ -2235,7 +2250,13 @@ async def phase_test_and_heal(
         test_command_override = None
 
         output, continuation, _ = await run_agent(
-            backend, work.repo, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
+            backend,
+            work.repo,
+            prompt,
+            continuation=continuation,
+            phase=DaydreamPhase.TEST,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=TEST_WALL_BUDGET_S,
         )
 
         test_passed = detect_test_success(output)

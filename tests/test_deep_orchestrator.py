@@ -4657,3 +4657,79 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
     failures = json.loads(failures_path.read_text())
     assert "python" in failures, failures
     assert "budget" in failures["python"].lower()
+
+
+async def test_budget_truncated_parse_fails_loudly(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A budget-truncated parse fails the run instead of dropping a stack's findings."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_parse = "python"
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        with pytest.raises(RuntimeError, match="budget"):
+            await run(
+                make_config(
+                    multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+                )
+            )
+
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
+    # The truncated stack wrote no records file — the run refused to proceed
+    # with a silently-empty bucket.
+    assert not (run_root / "deep" / "stack-python-records.json").exists()
+
+
+async def test_runaway_test_turn_is_bounded_and_reaches_abort(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A hung test turn is capped, so the run reaches the heal/abort path.
+
+    Discriminating: uncapped, the test-suite stream never completes and ``run``
+    never returns — ``fail_after`` turns that regression into a failure rather
+    than an infinite hang.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_test = True
+    # heal=False keeps phase_test_and_heal REAL so the runaway turn is actually
+    # dispatched through run_agent's budget guard.
+    mute_side_effects(heal=False)
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+            )
+        )
+
+    # Truncation flows into detect_test_success() False -> heal/abort; the run
+    # terminates with an int exit code instead of hanging.
+    assert isinstance(exit_code, int)
+    test_turns = [
+        c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()
+    ]
+    assert test_turns, "the test phase never ran"
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
