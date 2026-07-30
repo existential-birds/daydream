@@ -4440,3 +4440,149 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     assert stub.test_suite_calls == 1, (
         f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
     )
+
+
+# --- Parse fan-out runs concurrently (D-21 parallel) -------------------------
+
+
+def _parse_stack_name(prompt: str) -> str:
+    """Stack name a parse prompt points at, via its ``stack-<name>-review.md``."""
+    m = re.search(r"stack-(\S+?)-review\.md", prompt)
+    return m.group(1) if m else ""
+
+
+# Parse tasks are started in sorted(stack_name) order: generic, python, react,
+# structure. The rendezvous makes the FIRST of those wait on the LAST, so the
+# serial loop deadlocks (structure never starts) while concurrent execution
+# completes.
+_FIRST_PARSE_STACK = "generic"
+_LAST_PARSE_STACK = "structure"
+
+
+class _RendezvousParseStub(StubBackend):
+    """Parse for the first stack blocks until the last stack's parse starts.
+
+    Only a concurrent implementation completes: the serial loop reaches
+    ``generic`` first and would wait forever for ``structure``, which it has
+    not started yet.
+    """
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.other_parse_started = anyio.Event()
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        if "extract only actionable issues" in prompt.lower():
+            name = _parse_stack_name(prompt)
+            if name == _LAST_PARSE_STACK:
+                self.other_parse_started.set()
+            elif name == _FIRST_PARSE_STACK:
+                await self.other_parse_started.wait()
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+async def test_parse_runs_concurrently(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The N per-stack parse calls overlap; every stack's records land on disk."""
+    stub = _RendezvousParseStub(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+
+    with anyio.fail_after(15):
+        exit_code = await _run_deep(multi_stack_target)
+
+    assert exit_code == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert sorted(p.name for p in deep.glob("stack-*-records.json")) == [
+        "stack-generic-records.json",
+        "stack-python-records.json",
+        "stack-react-records.json",
+        "stack-structure-records.json",
+    ]
+
+    # The first-started stack could only finish after the last one had begun.
+    parse_order = [
+        _parse_stack_name(c["prompt"])
+        for c in stub.calls
+        if "extract only actionable issues" in c["prompt"].lower()
+    ]
+    assert parse_order.index(_LAST_PARSE_STACK) < parse_order.index(
+        _FIRST_PARSE_STACK
+    ), parse_order
+
+
+class _FailingParseStub(StubBackend):
+    """Raises a distinctive error for one stack's parse; siblings succeed."""
+
+    def __init__(self, target: Path, failing_stack: str) -> None:
+        super().__init__(target)
+        self._failing_stack = failing_stack
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        if (
+            "extract only actionable issues" in prompt.lower()
+            and _parse_stack_name(prompt) == self._failing_stack
+        ):
+            raise ZeroDivisionError("parse blew up")
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+async def test_parse_failure_propagates_original_exception_type(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One stack's parse failure fails the run with its own exception type.
+
+    Not an ExceptionGroup — the task group's captured failure is re-raised
+    directly, matching the serial loop's semantics.
+    """
+    stub = _FailingParseStub(multi_stack_target, failing_stack="python")
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+
+    with pytest.raises(ZeroDivisionError, match="parse blew up"):
+        await _run_deep(multi_stack_target)
+
+    # Siblings that finished before the failure surfaced kept their records.
+    deep = multi_stack_target / ".daydream" / "deep"
+    survivors = sorted(p.name for p in deep.glob("stack-*-records.json"))
+    assert "stack-python-records.json" not in survivors
+    assert survivors, "sibling parse results must survive one stack's failure"

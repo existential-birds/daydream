@@ -21,9 +21,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
+from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
@@ -88,6 +90,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     get_current_recorder,
+    maybe_fork,
     phase_scope,
 )
 from daydream.ui import (
@@ -877,28 +880,69 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             all_records.extend(records)
             record_sources.extend(source_name for _ in records)
     else:
-        # Pre-merge parse pass (D-21). Sort by stack_name so merge input
-        # order is independent of parallel-task completion order, keeping
-        # the merge prompt and global issue numbering reproducible.
-        for stack_name, output_path in sorted(per_stack_outputs.items()):
-            # Language stacks carry severity so the scoped arbiter can
-            # select high/contested findings (#168). The structural
-            # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
-            # high-conviction by construction and is partitioned out of
-            # arbitration/dedup below, defaulting to high at merge.
-            record_schema = (
-                FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
-            )
-            async with phase_scope(DaydreamPhase.PARSE):
-                records = await phase_parse_feedback(
-                    ctx.backend_for("parse"),
-                    ctx.work,
-                    input_path=output_path,
-                    output_schema=record_schema,
-                )
-            records_path = per_stack_records_path(dd, stack_name)
-            records_path.write_text(json.dumps(records, indent=2))
-            per_stack_records_paths.append(records_path)
+        # Pre-merge parse pass (D-21). The N parse calls run concurrently;
+        # results are consumed in stack_name order below so merge input order
+        # is independent of task completion order, keeping the merge prompt
+        # and global issue numbering reproducible.
+        parse_backend = ctx.backend_for("parse")
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
+        recorder = get_current_recorder()
+        parse_results: dict[str, list[dict[str, Any]]] = {}
+        parse_failures: dict[str, BaseException] = {}
+
+        async with phase_scope(DaydreamPhase.PARSE):
+            async with anyio.create_task_group() as tg:
+                for stack_name, output_path in sorted(per_stack_outputs.items()):
+                    # Language stacks carry severity so the scoped arbiter can
+                    # select high/contested findings (#168). The structural
+                    # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+                    # high-conviction by construction and is partitioned out of
+                    # arbitration/dedup below, defaulting to high at merge.
+                    record_schema = (
+                        FEEDBACK_SCHEMA
+                        if stack_name == STRUCTURE_STACK_NAME
+                        else PER_STACK_RECORD_SCHEMA
+                    )
+
+                    # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+                    async def _parse_one(
+                        stack_name: str = stack_name,
+                        input_path: Path = output_path,
+                        schema: dict[str, Any] = record_schema,
+                    ) -> None:
+                        async with limiter:
+                            async with maybe_fork(recorder, f"parse-{stack_name}"):
+                                try:
+                                    records = await phase_parse_feedback(
+                                        parse_backend,
+                                        ctx.work,
+                                        input_path=input_path,
+                                        output_schema=schema,
+                                    )
+                                except BaseException as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
+                                    parse_failures[stack_name] = exc
+                                    return
+                                # Written per task, not after the join, so a
+                                # sibling's failure cannot discard records that
+                                # already succeeded (they survive for --start-at).
+                                per_stack_records_path(dd, stack_name).write_text(
+                                    json.dumps(records, indent=2)
+                                )
+                                parse_results[stack_name] = records
+
+                    tg.start_soon(_parse_one)
+
+        # Fail the run on the first failure by stack name — same semantics and
+        # exception type as the serial loop, just deferred past the join so
+        # sibling records that completed are already on disk.
+        if parse_failures:
+            raise parse_failures[sorted(parse_failures)[0]]
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.PARSE)
+
+        for stack_name in sorted(parse_results):
+            records = parse_results[stack_name]
+            per_stack_records_paths.append(per_stack_records_path(dd, stack_name))
             all_records.extend(records)
             record_sources.extend(stack_name for _ in records)
 
