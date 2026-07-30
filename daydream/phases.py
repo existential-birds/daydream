@@ -2815,6 +2815,7 @@ async def phase_per_stack_reviews(
     exploration_dir: Path | None = None,
     diff_text: str | None = None,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -2888,6 +2889,7 @@ async def phase_per_stack_reviews(
                     exploration_dir=exploration_dir,
                     prior_commits=prior_commits,
                     intent_authoritative=intent_authoritative,
+                    include_alternatives=include_alternatives,
                 )
             else:
                 # Issue #172 Fix B: inline the relevant diff hunks for this
@@ -2911,6 +2913,7 @@ async def phase_per_stack_reviews(
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
+                        include_alternatives=include_alternatives,
                     )
                 else:
                     # Route the raw Beagle stack key through the backend
@@ -2928,6 +2931,7 @@ async def phase_per_stack_reviews(
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
+                        include_alternatives=include_alternatives,
                     )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).

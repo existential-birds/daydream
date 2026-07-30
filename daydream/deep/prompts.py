@@ -68,6 +68,7 @@ def _context_pointers(
     intent_path: Path,
     alternatives_path: Path,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> str:
     """Reference pointers for TTT stage outputs (D-09/D-19 context bus).
 
@@ -75,6 +76,10 @@ def _context_pointers(
     pointer to ``intent_path`` is accompanied by a provenance sentence and the
     ``AUTHORITATIVE_INTENT_RULE`` precedence rule, since the intent was grounded
     by a fresh, head-matched PR description (issue #279).
+
+    ``include_alternatives=False`` omits exactly the alternatives paragraph and
+    nothing else — for callers running concurrently with the wonder pass, whose
+    ``alternatives.json`` does not exist yet.
     """
     alternatives_paragraph = (
         f"TTT alternative-review findings are at {alternatives_path}. Use them as a "
@@ -82,18 +87,18 @@ def _context_pointers(
         f"language-specific evidence."
     )
     if intent_authoritative:
-        return (
+        head = (
             f"TTT intent summary is at {intent_path}. Read it before starting your "
             f"review -- it records the author's stated intent from the pull-request "
             f"description."  # provenance sentence
             f"\n{AUTHORITATIVE_INTENT_RULE}"
-            f"\n{alternatives_paragraph}"
         )
-    return (
+        return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
+    head = (
         f"TTT intent summary is at {intent_path}. Read it before starting your review "
-        f"so your findings align with the author's stated intent.\n"
-        f"{alternatives_paragraph}"
+        f"so your findings align with the author's stated intent."
     )
+    return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
 
 
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
@@ -261,6 +266,7 @@ def build_per_stack_prompt(
     prior_commits: str | None = None,
     inline_diff: str | None = None,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -295,6 +301,7 @@ def build_per_stack_prompt(
             intent_path=intent_path,
             alternatives_path=alternatives_path,
             intent_authoritative=intent_authoritative,
+            include_alternatives=include_alternatives,
         )
     )
     parts.append(_confidence_and_convention_instructions())
@@ -318,6 +325,7 @@ def build_structural_prompt(
     exploration_dir: Path | None = None,
     prior_commits: str | None = None,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> str:
     """Assemble the structural-maintainability meta-stack prompt.
 
@@ -357,6 +365,7 @@ def build_structural_prompt(
             intent_path=intent_path,
             alternatives_path=alternatives_path,
             intent_authoritative=intent_authoritative,
+            include_alternatives=include_alternatives,
         )
     )
     parts.append(
@@ -812,6 +821,7 @@ def build_generic_fallback_prompt(
     prior_commits: str | None = None,
     inline_diff: str | None = None,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -849,6 +859,7 @@ def build_generic_fallback_prompt(
             intent_path=intent_path,
             alternatives_path=alternatives_path,
             intent_authoritative=intent_authoritative,
+            include_alternatives=include_alternatives,
         )
     )
     parts.append(_confidence_and_convention_instructions())

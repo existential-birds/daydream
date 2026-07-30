@@ -738,3 +738,88 @@ def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
     a = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "a.json")
     b = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "b.json")
     assert a == b
+
+
+# --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
+
+
+def test_per_stack_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_per_stack_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, include_alternatives=True,
+    )
+    without = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, include_alternatives=False,
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without  # ONLY the alternatives paragraph is dropped
+    assert build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p,
+    ) == with_alts  # default is True
+
+
+def test_structural_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        include_alternatives=True,
+    )
+    without = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        include_alternatives=False,
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without
+    assert build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+    ) == with_alts
+
+
+def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_generic_fallback_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_generic_fallback_prompt(
+        files=["config.yaml"], **p, include_alternatives=True
+    )
+    without = build_generic_fallback_prompt(
+        files=["config.yaml"], **p, include_alternatives=False
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without
+    assert build_generic_fallback_prompt(files=["config.yaml"], **p) == with_alts
+
+
+def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
+    """The authoritative-intent upgrade survives include_alternatives=False."""
+    from daydream.deep.prompts import build_per_stack_prompt
+
+    p = _paths(tmp_path)
+    without = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, intent_authoritative=True, include_alternatives=False,
+    )
+    assert "alternatives.json" not in without
+    assert "author's stated intent from the pull-request description" in without
+    assert AUTHORITATIVE_INTENT_RULE in without
+
+
+def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:
+    """Arbiter/supervise/suppression/merge take no kwarg and always point at alts."""
+    import inspect
+
+    from daydream.deep import prompts as dp
+
+    for name in ("build_arbiter_prompt", "build_merge_prompt"):
+        sig = inspect.signature(getattr(dp, name))
+        assert "include_alternatives" not in sig.parameters, name
