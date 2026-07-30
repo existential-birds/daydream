@@ -771,14 +771,14 @@ def test_unsupported_reasoning_effort_fails_at_construction():
 # ---------------------------------------------------------------------------
 
 
-def test_claude_fanout_concurrency_defaults_to_four(monkeypatch):
+def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch):
     monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 4
-
-
-def test_claude_fanout_concurrency_env_raises_the_hint(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
+
+
+def test_claude_fanout_concurrency_env_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "3")
+    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 3
 
 
 def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
@@ -790,17 +790,17 @@ def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
     ("env_value", "expected"),
     [
         ("6", 6),
-        ("0", 4),
-        ("-1", 4),
-        ("notanint", 4),
-        ("", 4),
+        ("0", 8),
+        ("-1", 8),
+        ("notanint", 8),
+        ("", 8),
     ],
 )
 def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value, expected):
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
-    if expected == 4:
-        assert "using default 4" in caplog.text
+    if expected == 8:
+        assert "using default 8" in caplog.text
 
 
 # --- Session continuation via SDK resume --------------------------------------

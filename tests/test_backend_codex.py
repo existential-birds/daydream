@@ -710,7 +710,7 @@ def test_text_extraction_top_level_wins_over_content_blocks() -> None:
 
 @pytest.mark.parametrize(
     ("raw", "ceiling", "expected"),
-    [(None, 10, 4), ("8", 10, 8), ("8", 2, 2), ("0", 10, 4), ("-1", 10, 4), ("notanint", 10, 4)],
+    [(None, 10, 8), ("3", 10, 3), ("8", 2, 2), ("0", 10, 8), ("-1", 10, 8), ("notanint", 10, 8)],
 )
 def test_codex_fanout_concurrency_honours_the_shared_env_override(
     monkeypatch: pytest.MonkeyPatch, raw: str | None, ceiling: int, expected: int
