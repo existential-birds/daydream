@@ -195,10 +195,11 @@ def _all_trajectories(trajectories: dict) -> list[dict]:
 def analyze_costs(trajectories: dict) -> dict:
     """Cost and token breakdown across all agents.
 
-    Sums costs across all trajectory files.  The ATIF spec says
-    ``total_cost_usd`` should include subagent costs, but in practice the
-    daydream recorder emits per-agent costs separately in forked files, so we
-    sum everything to get the true total.
+    Run totals come from the root trajectory's ``final_metrics`` alone: the
+    recorder folds each fork's totals into the parent at fork close, so the
+    root is already whole-run truth and re-summing the sibling files would
+    double-count. ``by_agent`` rows still come from the individual files, so
+    the per-agent breakdown keeps its fork-level detail.
 
     The recorder also stores only *non-cached* tokens in ``prompt_tokens``
     (despite the spec saying it should include cached).  We detect this when
@@ -219,10 +220,20 @@ def analyze_costs(trajectories: dict) -> dict:
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 
-    total_cost = sum(a["cost_usd"] for a in agents)
-    total_prompt = sum(a["prompt_tokens"] for a in agents)
-    total_completion = sum(a["completion_tokens"] for a in agents)
-    total_cached = sum(a["cached_tokens"] for a in agents)
+    # Root-only totals — the root's final_metrics is fork-inclusive. Fall back
+    # to summing the rows when there is no root file (fork-only inputs).
+    root = trajectories.get("main")
+    if root:
+        root_fm = root.get("final_metrics") or {}
+        total_cost = root_fm.get("total_cost_usd") or 0.0
+        total_prompt = root_fm.get("total_prompt_tokens") or 0
+        total_completion = root_fm.get("total_completion_tokens") or 0
+        total_cached = root_fm.get("total_cached_tokens") or 0
+    else:
+        total_cost = sum(a["cost_usd"] for a in agents)
+        total_prompt = sum(a["prompt_tokens"] for a in agents)
+        total_completion = sum(a["completion_tokens"] for a in agents)
+        total_cached = sum(a["cached_tokens"] for a in agents)
 
     # Detect recorder quirk: prompt_tokens = non-cached only
     if total_cached > total_prompt:

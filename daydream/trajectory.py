@@ -1464,6 +1464,17 @@ class _ForkCM:
             pass
         self._exited_at = now_iso()
         if write_ok and child.parent is not None:
+            # The root trajectory's final_metrics is whole-run truth: fold the
+            # fork's totals in so manifest/eval consumers read one number
+            # instead of re-summing sibling files. The fork file keeps its own
+            # share. A failed child write folds nothing (the error already
+            # degrades the record, D-11).
+            child.parent._accumulate_metrics(
+                prompt_tokens=child._final_totals["prompt"],
+                completion_tokens=child._final_totals["completion"],
+                cached_tokens=child._final_totals["cached"],
+                cost_usd=child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None,
+            )
             child.parent._register_sibling(child.path, self._descriptor)
             try:
                 sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))

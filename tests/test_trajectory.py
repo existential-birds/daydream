@@ -669,11 +669,17 @@ async def test_step_id_isolation_across_siblings(tmp_path: Path) -> None:
     assert child_ids[0] == 1
 
 
-# SUBA-09: Parent FinalMetrics exclude children
+# SUBA-09 (superseded): parent FinalMetrics are fork-inclusive
 
 
-async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
-    """SUBA-09: Parent FinalMetrics totals do NOT include child step metrics."""
+async def test_parent_metrics_include_children(tmp_path: Path) -> None:
+    """Parent FinalMetrics totals fold in child totals; the child file keeps its own.
+
+    Supersedes the original SUBA-09 expectation (parent excludes children): the
+    root trajectory is now whole-run truth so manifest and eval consumers read
+    one number instead of re-summing sibling files. The parent's own share stays
+    recoverable from its per-step metrics.
+    """
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -696,8 +702,16 @@ async def test_parent_metrics_exclude_children(tmp_path: Path) -> None:
     parent_traj = read_trajectory(recorder.path)
     child_traj = read_trajectory(child.path)
 
-    assert parent_traj["final_metrics"]["total_prompt_tokens"] == 100
+    assert parent_traj["final_metrics"]["total_prompt_tokens"] == 300
     assert child_traj["final_metrics"]["total_prompt_tokens"] == 200
+
+    # The parent's own share is still distinguishable from the folded total.
+    own = sum(
+        s["metrics"]["prompt_tokens"]
+        for s in parent_traj["steps"]
+        if s.get("metrics") and s["metrics"].get("prompt_tokens")
+    )
+    assert own == 100
 
 
 # SUBA-02: Dispatch step has subagent_trajectory_ref
@@ -1229,3 +1243,130 @@ def test_custom_run_flow_member_exists() -> None:
     assert DaydreamRunFlow.CUSTOM.value == "custom"
     # str-Enum: the value round-trips as a plain string for metadata serialization
     assert DaydreamRunFlow("custom") is DaydreamRunFlow.CUSTOM
+
+
+# Fork totals fold into the parent — the root file is whole-run truth
+
+
+async def test_fork_totals_fold_into_parent(tmp_path: Path) -> None:
+    """Root final_metrics includes fork totals; the fork file keeps its own share."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent-text"))
+            inv.observe(MetricsEvent(
+                message_id="m-1", prompt_tokens=100, completion_tokens=20,
+                cached_tokens=10, cost_usd=1.0,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("deep-python") as child:
+            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
+                cinv.observe(TextEvent(text="child-text"))
+                cinv.observe(MetricsEvent(
+                    message_id="m-2", prompt_tokens=40, completion_tokens=8,
+                    cached_tokens=4, cost_usd=0.5,
+                ))
+                cinv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    parent = read_trajectory(recorder.path)["final_metrics"]
+    assert parent["total_prompt_tokens"] == 140
+    assert parent["total_completion_tokens"] == 28
+    assert parent["total_cached_tokens"] == 14
+    assert parent["total_cost_usd"] == pytest.approx(1.5)
+
+    child_fm = read_trajectory(child.path)["final_metrics"]
+    assert child_fm["total_prompt_tokens"] == 40
+    assert child_fm["total_cost_usd"] == pytest.approx(0.5)
+
+
+async def test_empty_fork_folds_nothing_into_parent(tmp_path: Path) -> None:
+    """A fork whose write produced no steps contributes no totals."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent-text"))
+            inv.observe(MetricsEvent(
+                message_id="m-1", prompt_tokens=100, completion_tokens=20,
+                cached_tokens=10, cost_usd=1.0,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("empty-child"):
+            pass
+
+    parent = read_trajectory(recorder.path)["final_metrics"]
+    assert parent["total_prompt_tokens"] == 100
+    assert parent["total_cost_usd"] == pytest.approx(1.0)
+
+
+async def test_nested_fork_totals_reach_the_root(tmp_path: Path) -> None:
+    """Fold is transitive: a fork of a fork reaches the root's final_metrics."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="root"))
+            inv.observe(MetricsEvent(
+                message_id="m-1", prompt_tokens=10, completion_tokens=1,
+                cached_tokens=0, cost_usd=0.1,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("outer") as outer:
+            async with outer.invocation(phase=DaydreamPhase.DEEP) as oinv:
+                oinv.observe(TextEvent(text="outer"))
+                oinv.observe(MetricsEvent(
+                    message_id="m-2", prompt_tokens=20, completion_tokens=2,
+                    cached_tokens=0, cost_usd=0.2,
+                ))
+                oinv.observe(ResultEvent(structured_output=None, continuation=None))
+            async with outer.fork("inner") as inner:
+                async with inner.invocation(phase=DaydreamPhase.DEEP) as iinv:
+                    iinv.observe(TextEvent(text="inner"))
+                    iinv.observe(MetricsEvent(
+                        message_id="m-3", prompt_tokens=30, completion_tokens=3,
+                        cached_tokens=0, cost_usd=0.3,
+                    ))
+                    iinv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    root = read_trajectory(recorder.path)["final_metrics"]
+    assert root["total_prompt_tokens"] == 60
+    assert root["total_cost_usd"] == pytest.approx(0.6)
+
+
+async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
+    """Root final_metrics is fork-inclusive, so analyze_costs must not re-sum forks."""
+    from daydream.eval.analyzer import analyze_costs, load_trajectories
+
+    session = "sess-fold-0001"
+    daydream_dir = tmp_path / ".daydream"
+    recorder = TrajectoryRecorder(
+        path=daydream_dir / "runs" / session / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id=session,
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent"))
+            inv.observe(MetricsEvent(
+                message_id="m-1", prompt_tokens=100, completion_tokens=20,
+                cached_tokens=10, cost_usd=1.0,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("deep-python") as child:
+            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
+                cinv.observe(TextEvent(text="child"))
+                cinv.observe(MetricsEvent(
+                    message_id="m-2", prompt_tokens=40, completion_tokens=8,
+                    cached_tokens=4, cost_usd=0.5,
+                ))
+                cinv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    costs = analyze_costs(load_trajectories(daydream_dir, session))
+    assert costs["total_cost_usd"] == pytest.approx(1.5)  # not 2.0 (root 1.5 + fork 0.5)
+    assert costs["total_prompt_tokens_raw"] == 140  # not 180
+    assert costs["total_completion_tokens"] == 28
+
+    # by_agent rows stay per-file, so the fork keeps its own share.
+    by_agent = {a["agent"]: a for a in costs["by_agent"]}
+    assert len(by_agent) == 2
+    assert any(a["cost_usd"] == pytest.approx(0.5) for a in costs["by_agent"])
