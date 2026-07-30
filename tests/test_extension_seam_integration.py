@@ -46,7 +46,7 @@ import json
 
 from daydream.extensions import FlowStep
 
-DAYDREAM_EXT_API = 2
+DAYDREAM_EXT_API = 4
 
 
 async def _filter_items(ctx):
@@ -364,7 +364,7 @@ async def test_fork_disables_respond_step(
     backend), and the removed respond step never invoked its skill.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def register(r):\n"
         "    r.remove('pr-feedback', 'respond-feedback')\n"
     )
@@ -391,7 +391,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "async def _ro(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
@@ -454,7 +454,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "async def _ro(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
@@ -480,25 +480,29 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
 ALTERNATIVES_MARKER = "Given this intent, explore the codebase and evaluate the implementation"
 
 
-async def test_fork_disables_alternatives_in_deep(
+async def test_fork_disables_arbiter_in_deep(
     ext_dir: ExtDir,
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext removal of ``alternatives`` skips only that step in deep.
+    """A daydream_ext removal of ``arbiter`` skips only that step in deep.
 
     Observable outcomes: exit 0, the deep pipeline still ran (the intent prompt
-    reached the backend), and the removed alternatives step never sent its
-    prompt. The presence + exit-code assertions make the absence assertion
+    reached the backend), and the removed arbiter step never sent its prompt.
+    The presence + exit-code assertions make the absence assertion
     discriminating: a run that no-ops entirely fails the presence check.
+
+    Retargeted from ``alternatives`` at extension API v4: wonder folded into the
+    ``per-stack-reviews`` step, so ``alternatives`` is no longer a removable
+    step name.
     """
     from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def register(r):\n"
-        "    r.remove('deep', 'alternatives')\n"
+        "    r.remove('deep', 'arbiter')\n"
     )
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
@@ -514,7 +518,8 @@ async def test_fork_disables_alternatives_in_deep(
     prompts = [call["prompt"] for call in backend.calls]
     assert rc == 0
     assert any("intent" in p.lower() for p in prompts)  # pipeline still ran
-    assert not any(ALTERNATIVES_MARKER in p for p in prompts)  # removed step never sent its prompt
+    # Removed step never sent its prompt.
+    assert not any("you are the arbiter" in p.lower() for p in prompts)
 
 
 # Task 17 fixture source: a fork registers phase ``ro_gate`` whose run() resolves
@@ -523,7 +528,7 @@ async def test_fork_disables_alternatives_in_deep(
 # (``skill('phase:ro_gate')``), then inserts it into the deep flow after ``intent``.
 FULL_RO_EXT = (
     "from daydream.extensions import FlowStep, get_registry\n"
-    "DAYDREAM_EXT_API = 2\n"
+    "DAYDREAM_EXT_API = 4\n"
     "def _ro_prompt(skill):\n"
     "    return f'RO-GATE {skill}'\n"
     "async def _ro(ctx):\n"
@@ -545,7 +550,7 @@ FULL_RO_EXT = (
 # as a brand-new flow name (NOT one of the four built-ins).
 CUSTOM_FLOW_EXT = (
     "from daydream.extensions import FlowStep\n"
-    "DAYDREAM_EXT_API = 2\n"
+    "DAYDREAM_EXT_API = 4\n"
     "async def _audit(ctx):\n"
     "    from daydream.agent import run_agent\n"
     "    from daydream.trajectory import DaydreamPhase\n"
@@ -598,7 +603,7 @@ async def _run_tool_case(
 
     ext_dir.write_module(
         "from daydream.extensions import FlowStep, ToolDecision\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "async def _audit(ctx):\n"
         "    from daydream.agent import run_agent\n"
         "    from daydream.trajectory import DaydreamPhase\n"
@@ -634,7 +639,7 @@ async def test_builtin_and_fork_tool_supervisor_conflict_fails_loud(
 
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
-        "DAYDREAM_EXT_API = 2\n"
+        "DAYDREAM_EXT_API = 4\n"
         "def _fork_supervisor(name, tool_input, *, phase):\n"
         "    return ToolDecision(veto=False)\n"
         "def register(r):\n"

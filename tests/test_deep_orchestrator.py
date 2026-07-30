@@ -974,7 +974,10 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     first = {name: order.index(name) for name in set(order)}
     assert first["intent"] < first["alternatives"]
-    assert first["alternatives"] < first["per-stack"]
+    # Wonder now runs CONCURRENTLY with the per-stack fan-out on a multi-stack
+    # run, so it no longer strictly precedes it; the guarantee is that it joins
+    # before parse consumes alternatives.json.
+    assert first["alternatives"] < first["parse"]
     assert first["per-stack"] < first["parse"]
     assert first["parse"] < first["merge"]
 
@@ -1019,7 +1022,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert per_stack_prompts
     for p in per_stack_prompts:
         assert "intent.md" in p
-        assert "alternatives.json" in p
+        # Multi-stack: wonder runs alongside this fan-out, so alternatives.json
+        # does not exist yet and its pointer is deliberately omitted.
+        assert "alternatives.json" not in p
 
     # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
     # notice). Contract: a generic-fallback prompt is emitted for README.md.
@@ -4933,3 +4938,136 @@ async def test_skip_tier_writes_empty_alternatives(
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+
+
+# --- Task 12c: wonder runs concurrently with the per-stack fan-out -----------
+
+
+class _WonderRendezvousStub(StubBackend):
+    """The wonder turn blocks until a per-stack review has started.
+
+    Serial code deadlocks (wonder runs strictly before the fan-out); concurrent
+    code completes.
+    """
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self.per_stack_started = anyio.Event()
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        pl = prompt.lower()
+        if "you are reviewing the" in pl:
+            self.per_stack_started.set()
+        elif "would you have done this differently" in pl or "evaluate the implementation" in pl:
+            await self.per_stack_started.wait()
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+
+
+async def test_wonder_runs_concurrently_with_per_stack(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Wonder and the fan-out overlap; alternatives.json lands before parse reads it."""
+    _silence(monkeypatch)
+    _install_raw(monkeypatch, _WonderRendezvousStub(multi_stack_target))
+
+    with anyio.fail_after(15):
+        assert await _run_deep(multi_stack_target) == 0
+
+    alts = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text()
+    )
+    assert alts, "wonder's artifact must be written before parse consumes it"
+
+
+async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multi-stack: reviewers drop the pointer; adjudication prompts keep it."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"  # ensure the arbiter runs
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    per_stack = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
+    assert per_stack
+    for prompt in per_stack:
+        assert "alternatives.json" not in prompt
+        assert "intent.md" in prompt  # only the alternatives paragraph is dropped
+
+    for phrase in ("you are the arbiter", "cross-stack merge agent"):
+        matching = [c["prompt"] for c in stub.calls if phrase in c["prompt"].lower()]
+        assert matching, phrase
+        assert all("alternatives.json" in p for p in matching), phrase
+
+
+async def test_single_stack_keeps_serial_order_and_pointer(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Single-stack mode has no merge agent, so the reviewer pointer must survive."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    order = [c["prompt"].lower() for c in stub.calls]
+    wonder_idx = next(
+        i for i, p in enumerate(order)
+        if "would you have done this differently" in p or "evaluate the implementation" in p
+    )
+    per_stack_idx = next(i for i, p in enumerate(order) if "you are reviewing the" in p)
+    assert wonder_idx < per_stack_idx, "single-stack mode must stay serial"
+
+    per_stack = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
+    assert per_stack
+    assert all("alternatives.json" in p for p in per_stack)
+
+
+async def test_wonder_failure_fails_run_with_fanout_outputs_on_disk(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A held wonder exception is re-raised after the join, original type intact."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fail_alternatives = True
+
+    with pytest.raises(RuntimeError, match="alternatives blew up"):
+        await _run_deep(multi_stack_target)
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    reviews = sorted(p.name for p in deep.glob("stack-*-review.md"))
+    assert reviews, "fan-out outputs must survive for a --start-at resume"
+
+
+def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
+    from daydream.deep.orchestrator import STEPS
+    from daydream.extensions.api import EXTENSION_API_VERSION
+
+    assert EXTENSION_API_VERSION == 4
+    names = [s.name for s in STEPS]
+    assert "alternatives" not in names
+    assert "per-stack-reviews" in names

@@ -761,8 +761,8 @@ async def _step_intent(ctx: FlowContext) -> None:
     ctx.data["intent_path"] = intent_p
 
 
-async def _step_alternatives(ctx: FlowContext) -> None:
-    """TTT alternative-review (tier-gated) + TTT artifact writes."""
+async def _wonder(ctx: FlowContext) -> None:
+    """TTT alternative-review (tier-gated) + its artifact write."""
     intent_summary = ctx.data["intent_summary"]
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
@@ -785,7 +785,45 @@ async def _step_alternatives(ctx: FlowContext) -> None:
     ctx.data["alts_path"] = alts_p
 
 
-async def _step_per_stack_reviews(ctx: FlowContext) -> None:
+async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
+    """Wonder (TTT alternative-review) alongside the per-stack review fan-out.
+
+    On a fresh multi-stack run the two are siblings in one task group: wonder
+    only feeds the merge agent and the dedup pre-filter, so the reviewers do not
+    need to wait for it. Their prompts drop the ``alternatives.json`` pointer,
+    since the file does not exist yet.
+
+    Single-stack mode and every ``--start-at`` resume keep today's serial order
+    and the pointer — in single-stack mode there is no merge agent, so the
+    reviewer pointer is the ONLY path wonder findings take into the report.
+    """
+    # A resume (--start-at per-stack/merge/fix) skips wonder entirely — its
+    # artifact is already on disk, which is also why the pointer stays on.
+    run_wonder = _fresh_ttt(ctx)
+    concurrent = run_wonder and not ctx.data["single_stack_mode"]
+    holder: dict[str, BaseException | None] = {"exc": None}
+
+    async def _wonder_guarded() -> None:
+        # Held, not degraded: a wonder failure must fail the run, but only after
+        # the fan-out's outputs are on disk for a later resume.
+        try:
+            await _wonder(ctx)
+        except BaseException as exc:  # noqa: BLE001 -- re-raised after the join
+            holder["exc"] = exc
+
+    if run_wonder and not concurrent:
+        await _wonder(ctx)
+
+    async with anyio.create_task_group() as tg:
+        if concurrent:
+            tg.start_soon(_wonder_guarded)
+        await _per_stack_body(ctx, include_alternatives=not concurrent)
+
+    if holder["exc"] is not None:
+        raise holder["exc"]
+
+
+async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> None:
     """Per-stack review fan-out, with failure persistence and resume reconstruction."""
     config = ctx.config
     dd = ctx.data["dd"]
@@ -805,6 +843,7 @@ async def _step_per_stack_reviews(ctx: FlowContext) -> None:
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
+                include_alternatives=include_alternatives,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -1493,8 +1532,7 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
 STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="exploration", run=_step_exploration),
     FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
-    FlowStep(name="alternatives", run=_step_alternatives, config_phase="wonder", enabled=_fresh_ttt),
-    FlowStep(name="per-stack-reviews", run=_step_per_stack_reviews, config_phase="per_stack_review"),
+    FlowStep(name="per-stack-reviews", run=_step_wonder_and_per_stack, config_phase="per_stack_review"),
     FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
     FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(

@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 3`** (supported: `1..3`).
+Current contract version: **`EXTENSION_API_VERSION = 4`** (supported: `4..4`).
 
 ## Extension module contract
 
@@ -23,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 3          # must be within daydream's supported range
+DAYDREAM_EXT_API = 4          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
@@ -120,6 +120,21 @@ not bump the version.
 
 ### Changelog
 
+- **Version 4** — **hard-breaking**. The `alternatives` step is removed from
+  the `deep` flow: the TTT alternative-review (wonder) now runs concurrently
+  with the per-stack fan-out inside the `per-stack-reviews` step, so on a fresh
+  multi-stack run the reviewers no longer wait for it. Removing a step name is a
+  breaking change to the flow inventory, so per the policy above the floor rises
+  to `4` in the same release: the supported range is `4..4` and every fork must
+  declare `DAYDREAM_EXT_API = 4`. Forks that did `r.remove("deep",
+  "alternatives")` or `insert_after("deep", anchor="alternatives", ...)` must
+  retarget — `alternatives` is no longer a step name. `[tool.daydream.phases.wonder]`
+  is unchanged: the config key survives, resolved inside `per-stack-reviews`.
+  Additive in the same release (no bump of their own): the `include_alternatives`
+  kwarg on the `per-stack` / `structural` / `generic-fallback` prompts, the
+  `inline_diff` kwarg on the `intent` / `alternatives` prompts, the
+  `resumed_from_arbiter` kwarg on the `merge` prompt, and the `verify` prompt's
+  `output_path` becoming accepted-but-ignored.
 - **Version 3** — additive. Adds the `improve` flow and its steps, the
   `audit:<category>[:<stack>]` skill slots, and three new prompt slots: `audit`
   (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
@@ -129,15 +144,13 @@ not bump the version.
   this release, so no v1 or v2 extension can have overridden them. No existing
   flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
   method changed. The floor therefore stays at `1`: the supported range is
-  `1..3` and an extension declaring `DAYDREAM_EXT_API = 1` or `2` keeps loading
-  unchanged. New forks should declare `DAYDREAM_EXT_API = 3`; a fork only needs
-  to bump if it wants to override one of the new slots.
+  `1..3` at the time. (Version 4 later raised the floor to `4`, so 1-3 are now
+  aged out.)
 - **Version 2** — adds the synchronous tool-supervisor seam, the
-  `ToolDecision` result, and the public `items_file` findings surface. The
-  extension module literal for that contract is `DAYDREAM_EXT_API = 2`. Still
-  within the supported range.
+  `ToolDecision` result, and the public `items_file` findings surface. Aged out
+  by the version-4 floor raise.
 - **Version 1** — initial flow, skill, prompt, stack, loader, and validation
-  contract. Still within the supported range.
+  contract. Aged out by the version-4 floor raise.
 
 ## Tool supervision
 
@@ -236,21 +249,25 @@ an existing config key.
 |---|------|------------|
 | 1 | `exploration` | `exploration` |
 | 2 | `intent` | `intent` |
-| 3 | `alternatives` | `wonder` |
-| 4 | `per-stack-reviews` | `per_stack_review` |
-| 5 | `per-stack-parse` | `parse` |
-| 6 | `arbiter` | `arbiter` |
-| 7 | `cross-stack-merge` | `merge` |
-| 8 | `single-stack-merge` | `single-stack-merge` |
-| 9 | `load-items` | `load-items` |
-| 10 | `supervise` | `supervise` |
-| 11 | `findings-out` | `findings-out` |
-| 12 | `post-review` | `post-review` |
-| 13 | `fix-gate` | `fix-gate` |
-| 14 | `verify` | `verify` |
-| 15 | `fix` | `fix` |
-| 16 | `test` | `test` |
-| 17 | `commit` | `fix` |
+| 3 | `per-stack-reviews` | `per_stack_review` |
+| 4 | `per-stack-parse` | `parse` |
+| 5 | `arbiter` | `arbiter` |
+| 6 | `cross-stack-merge` | `merge` |
+| 7 | `single-stack-merge` | `single-stack-merge` |
+| 8 | `load-items` | `load-items` |
+| 9 | `supervise` | `supervise` |
+| 10 | `findings-out` | `findings-out` |
+| 11 | `post-review` | `post-review` |
+| 12 | `fix-gate` | `fix-gate` |
+| 13 | `verify` | `verify` |
+| 14 | `fix` | `fix` |
+| 15 | `test` | `test` |
+| 16 | `commit` | `fix` |
+
+`per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
+multi-stack run the two are siblings in one task group, so wonder no longer has
+a step of its own. Its per-phase config key is still `wonder`
+(`[tool.daydream.phases.wonder]`), resolved inside the step.
 
 #### `shallow` (`--shallow` single-skill loop)
 
@@ -452,7 +469,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 3
+DAYDREAM_EXT_API = 4
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -487,7 +504,7 @@ consumers, so their reads observe the rewritten canonical JSON.
 ### Disable a phase
 
 ```python
-r.remove("deep", "alternatives")
+r.remove("deep", "arbiter")
 ```
 
 ### Replace a phase
@@ -582,7 +599,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 3
+DAYDREAM_EXT_API = 4
 
 def _ro_prompt(skill):
     return f"RO-GATE {skill}"
