@@ -401,17 +401,6 @@ def _stack_preflight_line(stack: StackAssignment) -> str:
     return f"{stack.stack_name}: {skill} -- {len(stack.files)} file(s){docs_suffix}"
 
 
-def _write_ttt_artifacts(
-    deep_dir_path: Path, *, intent_summary: str, alt_issues: list[dict[str, Any]]
-) -> tuple[Path, Path]:
-    """Persist TTT intent + alternatives to the deep artifact directory."""
-    intent_p = _intent_path(deep_dir_path)
-    alts_p = _alternatives_path(deep_dir_path)
-    intent_p.write_text(intent_summary)
-    alts_p.write_text(json.dumps(alt_issues, indent=2))
-    return intent_p, alts_p
-
-
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
 
@@ -765,6 +754,11 @@ async def _step_intent(ctx: FlowContext) -> None:
             pr_description=pr_description,
             diff_text=ctx.data["diff"],
         )
+    # Each TTT step persists its own half, so a later step's failure cannot
+    # discard an artifact this one already produced.
+    intent_p = _intent_path(ctx.data["dd"])
+    intent_p.write_text(ctx.data["intent_summary"])
+    ctx.data["intent_path"] = intent_p
 
 
 async def _step_alternatives(ctx: FlowContext) -> None:
@@ -786,9 +780,9 @@ async def _step_alternatives(ctx: FlowContext) -> None:
                 diff_text=ctx.data["diff"],
             )
 
-    ctx.data["intent_path"], ctx.data["alts_path"] = _write_ttt_artifacts(
-        ctx.data["dd"], intent_summary=intent_summary, alt_issues=alt_issues
-    )
+    alts_p = _alternatives_path(ctx.data["dd"])
+    alts_p.write_text(json.dumps(alt_issues, indent=2))
+    ctx.data["alts_path"] = alts_p
 
 
 async def _step_per_stack_reviews(ctx: FlowContext) -> None:

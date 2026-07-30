@@ -4880,3 +4880,56 @@ def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
     assert omitted == explicit_false
     assert resumed != omitted
     assert resumed.startswith(omitted)  # purely additive addendum
+
+
+# --- Task 12b: each TTT step writes its own artifact -------------------------
+
+
+async def test_intent_artifact_survives_wonder_failure(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """intent.md is on disk even when the wonder step dies.
+
+    Discriminating: both files used to be written together AFTER the wonder
+    agent, so a wonder failure discarded the intent artifact too.
+    """
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fail_alternatives = True
+
+    with pytest.raises(RuntimeError, match="alternatives blew up"):
+        await _run_deep(multi_stack_target)
+
+    intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
+    assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
+    # The wonder half never ran, so its artifact is legitimately absent.
+    assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
+
+
+async def test_both_ttt_artifacts_written_on_the_happy_path(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relocating the writer leaves contents and ctx.data pointers unchanged."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert deep / "intent.md"
+    assert (deep / "intent.md").read_text().strip()
+    assert json.loads((deep / "alternatives.json").read_text())
+
+
+async def test_skip_tier_writes_empty_alternatives(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both artifacts exist even when the diff is small enough to run wonder."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    deep = tiny_diff_target / ".daydream" / "deep"
+    assert (deep / "intent.md").read_text().strip()
+    assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
