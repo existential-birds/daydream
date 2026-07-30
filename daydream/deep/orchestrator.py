@@ -38,6 +38,8 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    diff_key,
+    diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
     merged_items_path,
@@ -1640,6 +1642,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
+    current_diff_sha = diff_key(diff)
+    if config.start_at not in ("per-stack", "merge", "fix"):
+        # Fresh run only: a resume must NOT rewrite the key it is checked
+        # against, or the staleness gate would self-heal and pass every time.
+        dd.mkdir(parents=True, exist_ok=True)
+        diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.DEEP,
@@ -1652,12 +1660,12 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Resume gate (D-34, D-36, D-37).
+        # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
-                check_deep_artifacts(config.start_at, dd)
+                check_deep_artifacts(config.start_at, dd, current_diff_sha=current_diff_sha)
             except FileNotFoundError as exc:
-                print_error(console, "Missing Deep Artifact", str(exc))
+                print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
 
         # Stack detection (from diff file list). Availability is resolved once in

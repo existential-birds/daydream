@@ -191,6 +191,13 @@ daydream --no-archive /path/to/project        # skip run archival
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
+`--start-at` refuses to resume onto stale artifacts. A fresh run records the
+diff it reviewed in `.daydream/deep/diff-key`; if the diff has changed since,
+the resume exits 1 rather than adjudicating stale findings against changed code
+— re-run without `--start-at` to regenerate. An artifact directory produced
+before diff tracking existed has no key and is refused for the same reason: it
+cannot be verified.
+
 `--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
 
 Per-phase model and backend overrides are no longer CLI flags. Set them in the config file (see [Configuration](#configuration)).

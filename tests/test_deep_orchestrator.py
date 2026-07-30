@@ -124,6 +124,21 @@ def _record(**overrides: Any) -> dict[str, Any]:
     return record
 
 
+def _write_matching_diff_key(target: Path, deep: Path) -> None:
+    """Write ``diff-key`` for *target*'s current diff into *deep*.
+
+    These primed artifacts stand in for a prior run over the same diff, so the
+    key must match what ``run_deep``'s preamble computes.
+    """
+    from daydream import git_ops
+    from daydream.deep.artifacts import diff_key, diff_key_path
+    from daydream.workspace import _resolve_base
+
+    base = _resolve_base(target, None, None)
+    diff = git_ops.diff(target, base)
+    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+
+
 def _prime_merge_resume(
     target: Path,
     *,
@@ -143,6 +158,9 @@ def _prime_merge_resume(
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
+    # Freshness key: these artifacts stand in for a prior run over the SAME diff,
+    # so the resume gate must see a matching key (a missing one refuses).
+    _write_matching_diff_key(target, deep)
     for stack, records in (
         ("python", python),
         ("react", react),
@@ -5071,3 +5089,59 @@ def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names
+
+
+# --- Task 15: --start-at refuses artifacts produced from a different diff -----
+
+
+async def test_start_at_merge_refuses_after_the_diff_changes(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh run writes diff-key; changing the diff then blocks the resume."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    key_file = deep / "diff-key"
+    original_key = key_file.read_text().strip()
+    assert original_key, "a fresh run must record the diff key"
+
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    _git(multi_stack_target, "add", "api.py")
+    _git(multi_stack_target, "commit", "-m", "change again")
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    # The run bailed before any agent turn.
+    assert stub2.calls == []
+    # A refused resume must NOT rewrite the key it is checked against.
+    assert key_file.read_text().strip() == original_key
+
+
+async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The freshness gate is not a blanket refusal: same diff still resumes."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    assert any("cross-stack merge agent" in c["prompt"].lower() for c in stub2.calls)
+
+
+async def test_pre_upgrade_artifacts_without_a_key_refuse_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An artifact dir from before diff tracking is treated as unverifiable."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    (multi_stack_target / ".daydream" / "deep" / "diff-key").unlink()
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert stub2.calls == []
