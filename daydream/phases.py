@@ -1136,6 +1136,21 @@ def build_review_prompt(
     return "\n".join(parts)
 
 
+def _inlineable_diff(diff_text: str | None) -> str | None:
+    """The diff to inline, or ``None`` when it is absent or over budget.
+
+    Reuses the per-stack path's ``INLINE_DIFF_BUDGET_BYTES`` so every inlined
+    prompt shares one bound. An empty diff is under budget and inlines as-is.
+    """
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    if diff_text is None:
+        return None
+    if len(diff_text.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES:
+        return None
+    return diff_text
+
+
 def build_intent_prompt(
     *,
     diff_path: str = "",
@@ -1143,6 +1158,7 @@ def build_intent_prompt(
     log: str = "",
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
 
@@ -1155,6 +1171,10 @@ def build_intent_prompt(
             present (non-empty after strip), an authoritative-intent section is
             prepended ahead of the diff-reading instructions. When ``None`` or
             empty, the prompt is byte-identical to the no-PR-body case.
+        inline_diff: When supplied, the whole diff is inlined and the
+            read-the-file instruction is dropped. ``None`` (the default, and
+            what every over-budget caller passes) keeps the ``diff_path``
+            pointer text byte-identical.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -1176,9 +1196,21 @@ def build_intent_prompt(
             f"{safe_body}\n"
             "</pr_description>\n"
         )
+    if inline_diff is not None:
+        diff_section = (
+            "The complete diff under review is inlined below (do NOT re-Read "
+            f"{diff_path} — it is already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "You have full access to explore the codebase. Examine it alongside "
+            "the diff above to understand the intent of these changes. "
+        )
+    else:
+        diff_section = (
+            f"You have full access to explore the codebase. Read the diff file at {diff_path} "
+            f"and examine the codebase to understand the intent of these changes. "
+        )
     body = (
-        f"You have full access to explore the codebase. Read the diff file at {diff_path} "
-        f"and examine the codebase to understand the intent of these changes. "
+        f"{diff_section}"
         f"That diff is the complete review target, already computed against the "
         f"repository's base branch — this run is not tied to a GitHub pull request, so "
         f"do not look up, list, or ask about pull requests. Do not invoke any skills or "
@@ -1196,18 +1228,37 @@ def build_alternative_review_prompt(
     intent_summary: str = "",
     diff_path: str = "",
     exploration_dir: Path | None = None,
+    inline_diff: str | None = None,
 ) -> str:
-    """Assemble the prompt for `phase_alternative_review`."""
+    """Assemble the prompt for `phase_alternative_review`.
+
+    Args:
+        inline_diff: When supplied, the whole diff is inlined and the
+            read-the-file instruction is dropped. ``None`` (the default, and
+            what every over-budget caller passes) keeps the ``diff_path``
+            pointer text byte-identical.
+    """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
     parts.append(_confidence_and_convention_instructions())
+    if inline_diff is not None:
+        diff_clause = (
+            "in the diff inlined below (do NOT re-Read "
+            f"{diff_path} — it is already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "Report only concrete problems you can substantiate "
+        )
+    else:
+        diff_clause = (
+            f"in the diff at {diff_path}. Report only concrete problems you can substantiate "
+        )
     body = (
         f"The intent of this PR has been confirmed as:\n\n"
         f"{intent_summary}\n\n"
         f"Given this intent, explore the codebase and evaluate the implementation "
-        f"in the diff at {diff_path}. Report only concrete problems you can substantiate "
+        f"{diff_clause}"
         f"with evidence — correctness bugs, design decisions that will cause a real "
         f"failure, or violations of a Codebase Convention above. Do NOT list stylistic "
         f"preferences, speculative 'nice to have' opinions, or alternatives you cannot "
@@ -2585,6 +2636,7 @@ async def phase_understand_intent(
     *,
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
+    diff_text: str | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -2619,6 +2671,7 @@ async def phase_understand_intent(
         log=log,
         exploration_dir=exploration_dir,
         pr_description=pr_description,
+        inline_diff=_inlineable_diff(diff_text),
     )
 
     while True:
@@ -2689,6 +2742,7 @@ async def phase_alternative_review(
     intent_summary: str,
     *,
     exploration_dir: Path | None = None,
+    diff_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -2707,6 +2761,7 @@ async def phase_alternative_review(
         intent_summary=intent_summary,
         diff_path=str(diff_path),
         exploration_dir=exploration_dir,
+        inline_diff=_inlineable_diff(diff_text),
     )
 
     console.print()

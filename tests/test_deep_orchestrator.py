@@ -1129,12 +1129,14 @@ async def test_pr_body_reaches_intent_prompt(
 async def test_no_pr_body_degrades_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
-    """No PR body -> intent prompt is byte-for-byte today's behavior.
+    """No PR body -> intent prompt carries no PR-description section.
 
     Also asserts the diff-is-the-target directives: the intent prompt must
-    point at the on-disk diff file, tell the agent the run is not tied to a
-    GitHub pull request (so it never hunts for or asks about open PRs), and
-    forbid skill/slash-command invocation.
+    ground the agent in the diff, tell it the run is not tied to a GitHub pull
+    request (so it never hunts for or asks about open PRs), and forbid
+    skill/slash-command invocation. This fixture's diff is under
+    ``INLINE_DIFF_BUDGET_BYTES``, so the diff arrives inlined with a
+    do-not-re-Read clause rather than as a bare pointer.
     """
     from daydream.runner import run
 
@@ -1148,7 +1150,8 @@ async def test_no_pr_body_degrades_cleanly(
     intent = _intent_prompt(stub)
     assert PR_SENTINEL not in intent
     assert "pull request description" not in intent.lower()
-    assert "Read the diff file at" in intent
+    assert "diff --git" in intent  # inlined, not pointed at
+    assert "do NOT re-Read" in intent
     assert ".daydream/diff.patch" in intent
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
@@ -4733,3 +4736,56 @@ async def test_runaway_test_turn_is_bounded_and_reaches_abort(
     run_root = multi_stack_target / ".daydream"
     stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
     assert any("budget" in str(v) for v in stop_reasons), stop_reasons
+
+
+async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    intent_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    )
+    wonder_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "evaluate the implementation" in c["prompt"].lower()
+    )
+
+    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "diff --git" in prompt, f"{name} prompt did not inline the diff"
+        assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
+    assert "Read the diff file at" not in intent_prompt
+
+
+async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    # Push the diff over the byte budget with a large committed file.
+    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
+    (multi_stack_target / "big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "big.py")
+    _git(multi_stack_target, "commit", "-m", "add big file")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    intent_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    )
+    wonder_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "evaluate the implementation" in c["prompt"].lower()
+    )
+
+    assert "Read the diff file at" in intent_prompt
+    assert "diff.patch" in wonder_prompt
+    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"

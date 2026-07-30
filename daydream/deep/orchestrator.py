@@ -763,6 +763,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             ctx.data["branch"],
             exploration_dir=ctx.data["exploration_dir"],
             pr_description=pr_description,
+            diff_text=ctx.data["diff"],
         )
 
 
@@ -782,6 +783,7 @@ async def _step_alternatives(ctx: FlowContext) -> None:
                 ctx.data["diff_path"],
                 intent_summary,
                 exploration_dir=ctx.data["exploration_dir"],
+                diff_text=ctx.data["diff"],
             )
 
     ctx.data["intent_path"], ctx.data["alts_path"] = _write_ttt_artifacts(

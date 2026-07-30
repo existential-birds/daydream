@@ -2800,3 +2800,98 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert batched_calls == ["a.py"]
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
+
+
+# --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------
+
+
+_INLINE_TEST_DIFF = (
+    "diff --git a/x.py b/x.py\n"
+    "--- a/x.py\n"
+    "+++ b/x.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def test_intent_prompt_inlines_small_diff() -> None:
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(
+        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+        inline_diff=_INLINE_TEST_DIFF,
+    )
+    assert "+++ b/x.py" in prompt
+    assert "+new" in prompt
+    assert "Read the diff file at" not in prompt
+    assert "do NOT re-Read" in prompt
+
+
+def test_intent_prompt_pointer_when_diff_is_none() -> None:
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(
+        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+    )
+    assert "Read the diff file at .daydream/diff.patch" in prompt
+    assert "+++ b/x.py" not in prompt
+
+
+def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
+    """Passing inline_diff=None reproduces today's prompt exactly."""
+    from daydream.phases import build_intent_prompt
+
+    explicit_none = build_intent_prompt(
+        diff_path="d.patch", branch="b", log="l", inline_diff=None
+    )
+    omitted = build_intent_prompt(diff_path="d.patch", branch="b", log="l")
+    assert explicit_none == omitted
+
+
+def test_alternatives_prompt_inlines_small_diff() -> None:
+    from daydream.phases import build_alternative_review_prompt
+
+    prompt = build_alternative_review_prompt(
+        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+        inline_diff=_INLINE_TEST_DIFF,
+    )
+    assert "+++ b/x.py" in prompt
+    assert "in the diff at .daydream/diff.patch" not in prompt
+    assert "do NOT re-Read" in prompt
+
+
+def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
+    from daydream.phases import build_alternative_review_prompt
+
+    prompt = build_alternative_review_prompt(
+        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+    )
+    assert "in the diff at .daydream/diff.patch" in prompt
+    assert "+++ b/x.py" not in prompt
+
+
+def test_inlineable_diff_budget_boundaries() -> None:
+    """Under and exactly-at budget inline; over budget falls back to the pointer."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.phases import _inlineable_diff
+
+    assert _inlineable_diff(None) is None
+    assert _inlineable_diff("") == ""  # empty diff is under budget
+    exactly = "x" * INLINE_DIFF_BUDGET_BYTES
+    assert _inlineable_diff(exactly) == exactly
+    over = "x" * (INLINE_DIFF_BUDGET_BYTES + 1)
+    assert _inlineable_diff(over) is None
+
+
+def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
+    """A multi-byte diff just over the byte budget is not inlined."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.phases import _inlineable_diff
+
+    # 3 bytes per char in UTF-8, so this is ~3x the budget in bytes while
+    # being under it in characters.
+    multibyte = "あ" * (INLINE_DIFF_BUDGET_BYTES // 2)
+    assert len(multibyte) < INLINE_DIFF_BUDGET_BYTES
+    assert len(multibyte.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES
+    assert _inlineable_diff(multibyte) is None

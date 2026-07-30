@@ -343,8 +343,8 @@ noted.
 | Prompt | Kwargs |
 |--------|--------|
 | `review` | `skill_invocation`, `diff_instruction`, `review_output_path`, `exploration_dir`, `prior_commits` |
-| `intent` | `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description` |
-| `alternatives` | `intent_summary`, `diff_path`, `exploration_dir` |
+| `intent` | `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff` |
+| `alternatives` | `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
 | `per-stack` | `skill_invocation`, `stack_name`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `inline_diff`, `intent_authoritative` |
 | `structural` | `skill_invocation`, `files`, `diff_path`, `intent_path`, `alternatives_path`, `output_path`, `cwd`, `exploration_dir`, `prior_commits`, `intent_authoritative` |
