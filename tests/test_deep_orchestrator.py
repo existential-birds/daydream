@@ -4586,3 +4586,74 @@ async def test_parse_failure_propagates_original_exception_type(
     survivors = sorted(p.name for p in deep.glob("stack-*-records.json"))
     assert "stack-python-records.json" not in survivors
     assert survivors, "sibling parse results must survive one stack's failure"
+
+
+# --- Budget caps on the deep-review agents -----------------------------------
+
+
+async def test_budget_truncated_wonder_fails_loudly(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A budget-truncated wonder pass fails the run instead of degrading to [].
+
+    Discriminating: uncapped, the wonder turn's unbounded burst never ends, so
+    ``fail_after`` trips; with the cap but the old degrade path the run would
+    exit 0 carrying an empty alternatives lens.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_alternatives = True
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        with pytest.raises(RuntimeError, match="budget"):
+            await run(
+                make_config(
+                    multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+                )
+            )
+
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
+    # The run died instead of writing an empty alternatives lens.
+    alts = multi_stack_target / ".daydream" / "deep" / "alternatives.json"
+    assert not alts.exists() or json.loads(alts.read_text()) != []
+
+
+async def test_budget_truncated_stack_lands_in_failed_stacks(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A truncated per-stack review is recorded as a failure, not a success."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_stack = "python"
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        await run(
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+            )
+        )
+
+    failures_path = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
+    failures = json.loads(failures_path.read_text())
+    assert "python" in failures, failures
+    assert "budget" in failures["python"].lower()

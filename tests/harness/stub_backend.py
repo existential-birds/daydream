@@ -141,6 +141,37 @@ class StubBackend:
         # (in addition to the sentinels), producing a real tracked-tree change so
         # a test can assert the recommended-change patch captures daydream's edit.
         self.fix_edit_line: str | None = None
+        # Runaway knobs mirroring ``runaway_fix`` for the deep-review phases: an
+        # unbounded ToolStartEvent burst with no ResultEvent, so run_agent's
+        # tool-call budget trips and returns a budget_reason.
+        # ``runaway_alternatives``: the wonder turn.
+        # ``runaway_stack``: the per-stack review turn for that stack name.
+        # ``runaway_parse``: the parse turn for that stack name.
+        self.runaway_alternatives: bool = False
+        self.runaway_stack: str | None = None
+        self.runaway_parse: str | None = None
+        # When True, the alternatives branch raises instead of answering.
+        self.fail_alternatives: bool = False
+
+    def _is_runaway(self, prompt: str, pl: str) -> bool:
+        """Whether this turn should emit the unbounded budget-tripping burst."""
+        if self.runaway_alternatives and (
+            "would you have done this differently" in pl or "evaluate the implementation" in pl
+        ):
+            return True
+        stack_match = re.search(r"stack-(\S+?)-review\.md", prompt)
+        stack_name = stack_match.group(1) if stack_match else None
+        if (
+            self.runaway_stack is not None
+            and "you are reviewing the" in pl
+            and f"you are reviewing the {self.runaway_stack} stack" in pl
+        ):
+            return True
+        return (
+            self.runaway_parse is not None
+            and "extract only actionable issues" in pl
+            and stack_name == self.runaway_parse
+        )
 
     async def execute(
         self,
@@ -164,9 +195,19 @@ class StubBackend:
             self._shared.append(call)
         pl = prompt.lower()
 
+        if self._is_runaway(prompt, pl):
+            # Unbounded burst, never a ResultEvent -- run_agent's tool-call
+            # budget is the only thing that ends this stream.
+            for n in range(500):
+                yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
+                await anyio.sleep(0)
+            return
+
         # TTT alternative-review -> structured output. Checked BEFORE intent: the
         # alt prompt embeds the intent summary, defeating a naive substring check.
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
+            if self.fail_alternatives:
+                raise RuntimeError("alternatives blew up")
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={

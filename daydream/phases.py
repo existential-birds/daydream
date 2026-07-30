@@ -2691,13 +2691,27 @@ async def phase_alternative_review(
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
 
-    result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
+    result, _, budget_reason = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=ALTERNATIVE_REVIEW_SCHEMA,
+        phase=DaydreamPhase.ALTERNATIVES,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
+
+    # A budget-truncated wonder pass is a run failure, not an empty lens: the
+    # findings it would have produced are silently missing, and every
+    # downstream stage would treat [] as "nothing to see".
+    if budget_reason:
+        raise RuntimeError(f"Alternative review hit its budget: {budget_reason}")
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
     else:
+        # Only genuinely unusable model output degrades to an empty lens; the
+        # budget case above already failed the run.
         if not get_quiet_mode():
             print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
@@ -2849,8 +2863,22 @@ async def phase_per_stack_reviews(
                 async with limiter:
                     async with maybe_fork(recorder, f"deep-{stack_name}"):
                         try:
-                            await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
-                            results[stack_name] = task_output
+                            _, _, budget_reason = await run_agent(
+                                backend,
+                                work.repo,
+                                task_prompt,
+                                phase=DaydreamPhase.DEEP,
+                                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                            )
+                            if budget_reason:
+                                # A truncated stack did not really pass: route it
+                                # into failures so merge lists it under
+                                # "Uncovered stacks" instead of silently shipping
+                                # a partial review as a complete one.
+                                failures[stack_name] = f"budget exhausted: {budget_reason}"
+                            else:
+                                results[stack_name] = task_output
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             failures[stack_name] = f"{type(e).__name__}: {e}"
 
@@ -2970,6 +2998,8 @@ async def phase_supervise_review(
         prompt,
         output_schema=SUPERVISE_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
     if not isinstance(result, dict) or not isinstance(result.get("verdicts"), list):
         raise ValueError(f"Supervisor returned no verdicts list (got {type(result).__name__})")
@@ -3081,7 +3111,15 @@ async def phase_arbiter_review(
         exploration_dir=exploration_dir,
         intent_authoritative=intent_authoritative,
     )
-    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=ARBITER_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+    )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
@@ -3177,7 +3215,13 @@ async def phase_suppression_review(
         exploration_dir=exploration_dir,
     )
     result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=SUPPRESSION_SCHEMA, phase=DaydreamPhase.DEEP
+        backend,
+        work.repo,
+        prompt,
+        output_schema=SUPPRESSION_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
@@ -3468,7 +3512,13 @@ async def phase_cross_stack_merge(
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
     result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=MERGED_ITEMS_SCHEMA, phase=DaydreamPhase.DEEP
+        backend,
+        work.repo,
+        prompt,
+        output_schema=MERGED_ITEMS_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
 
     # Fail loudly on empty/invalid output -- a silent [] would hide a broken
