@@ -269,3 +269,100 @@ def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
     assert "| — |" in review_row
     assert _EXPECTED_COST_CELL not in review_row
     assert f"<sub>Cost unavailable: model `{_CUSTOM_MODEL}` is not in the price table.</sub>" in out
+
+
+# --- Per-phase token cells reflect whole-invocation usage --------------------
+
+
+async def test_per_phase_cells_show_whole_invocation_tokens(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A multi-turn phase renders the SUM of its turns, not the last snapshot.
+
+    Drives two phases through ``run_agent`` with a real recorder, each phase
+    reporting usage once per turn, then reads the rendered per-phase table.
+    """
+    from collections.abc import AsyncGenerator
+    from typing import Any
+
+    from daydream.agent import run_agent
+    from daydream.backends import (
+        AgentEvent,
+        ContinuationToken,
+        MetricsEvent,
+        ResultEvent,
+        TextEvent,
+    )
+    from daydream.trajectory import DaydreamPhase
+    from tests.harness.trajectory import make_recorder
+
+    class _MultiTurn:
+        model = "claude-opus-5"
+        fanout_concurrency = 4
+
+        def __init__(self, turns: int, in_tok: int, out_tok: int) -> None:
+            self.turns, self.in_tok, self.out_tok = turns, in_tok, out_tok
+
+        def execute(
+            self,
+            cwd: Path,
+            prompt: str,
+            output_schema: dict[str, Any] | None = None,
+            continuation: ContinuationToken | None = None,
+            agents: dict[str, Any] | None = None,
+            max_turns: int | None = None,
+            read_only: bool = False,
+            persist_session: bool = True,
+        ) -> AsyncGenerator[AgentEvent, None]:
+            turns, in_tok, out_tok = self.turns, self.in_tok, self.out_tok
+
+            async def _gen() -> AsyncGenerator[AgentEvent, None]:
+                for i in range(turns):
+                    yield TextEvent(text=f"turn {i + 1}")
+                    yield MetricsEvent(
+                        message_id=f"m-{i}",
+                        prompt_tokens=in_tok,
+                        completion_tokens=out_tok,
+                        cached_tokens=0,
+                        cost_usd=None,
+                        model_name="claude-opus-5",
+                    )
+                yield ResultEvent(structured_output=None, continuation=None)
+
+            return _gen()
+
+        async def cancel(self) -> None:
+            return None
+
+        def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+            return f"/{skill_key}"
+
+    run_dir = tmp_path / ".daydream"
+    recorder = make_recorder(tmp_path, agent_model_name="claude-opus-5")
+    async with recorder:
+        await run_agent(
+            _MultiTurn(turns=4, in_tok=25_000, out_tok=1_000),
+            tmp_path,
+            "review",
+            phase=DaydreamPhase.REVIEW,
+        )
+        await run_agent(
+            _MultiTurn(turns=2, in_tok=10_000, out_tok=500),
+            tmp_path,
+            "fix",
+            phase=DaydreamPhase.FIX,
+        )
+    assert run_dir.exists()
+
+    rc = summarize(recorder.path)
+    assert rc == 0
+    out = capsys.readouterr().out
+
+    review_row = next(ln for ln in out.splitlines() if ln.startswith("| Review"))
+    fix_row = next(ln for ln in out.splitlines() if ln.startswith("| Fix"))
+    # 4 x 25k = 100k input / 4 x 1k = 4k output, not the last turn's 25k/1k.
+    assert "100,000" in review_row, review_row
+    assert "4,000" in review_row, review_row
+    # 2 x 10k = 20k input / 2 x 500 = 1k output.
+    assert "20,000" in fix_row, fix_row
+    assert "1,000" in fix_row, fix_row

@@ -69,6 +69,41 @@ def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
     """Metrics ``extra`` carrier for reasoning_tokens (#192), or None when absent."""
     return {"reasoning_tokens": reasoning_tokens} if reasoning_tokens is not None else None
 
+
+def _add(left: Any, right: Any) -> Any:
+    """Sum two optional numbers, treating None as absent (not zero)."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _merge_metrics(existing: "Metrics", incoming: "Metrics") -> "Metrics":
+    """Additively merge a later MetricsEvent into a Step's running metrics.
+
+    A multi-turn invocation reports usage once per turn; every one of those
+    turns is billed, so a Step spanning them carries their sum rather than the
+    last turn's snapshot. reasoning_tokens rides in ``extra`` (#192) and sums
+    the same way; other ``extra`` keys are carried forward.
+    """
+    merged_extra: dict[str, Any] | None = None
+    if existing.extra is not None or incoming.extra is not None:
+        merged_extra = {**(existing.extra or {}), **(incoming.extra or {})}
+        reasoning = _add(
+            (existing.extra or {}).get("reasoning_tokens"),
+            (incoming.extra or {}).get("reasoning_tokens"),
+        )
+        if reasoning is not None:
+            merged_extra["reasoning_tokens"] = reasoning
+    return existing.model_copy(update={
+        "prompt_tokens": _add(existing.prompt_tokens, incoming.prompt_tokens),
+        "completion_tokens": _add(existing.completion_tokens, incoming.completion_tokens),
+        "cached_tokens": _add(existing.cached_tokens, incoming.cached_tokens),
+        "cost_usd": _add(existing.cost_usd, incoming.cost_usd),
+        "extra": merged_extra,
+    })
+
 # Redaction patterns (REDA-01..04). Order in _REDACTION_RULES matters: URL-credential
 # before bare API-key (so the captured credential isn't re-matched), PEM before env-var
 # (so `VAR=<PEM>` collapses whole instead of leaking the key body), env-var before bare
@@ -405,16 +440,20 @@ def _reset_recorder_for_tests() -> None:
 
 @dataclass
 class Invocation:
-    """Per-``run_agent()`` recording scope; closes one Step per assistant turn.
+    """Per-``run_agent()`` recording scope for one model conversation.
 
     Owns the Step buffer for one model conversation and the in-flight
     ``tool_call_id -> host-step`` map (CORE-06). ``parent`` linkage lives on
     ``TrajectoryRecorder`` (Phase 3, D-02), not on ``Invocation``.
 
-    Each ``TurnEndEvent`` from the backend closes the open Step so multi-turn
-    invocations produce N Steps (not a single collapsed Step). ``ResultEvent``
-    also closes the open Step at the end of the invocation; ``finish()``
-    performs a final idempotent close so partial turns are not dropped.
+    A ``TurnEndEvent`` closes the open Step, so a backend that emits one per
+    turn produces N Steps. ``run_agent``'s normal loop does not forward
+    TurnEndEvents, so in practice an invocation is usually a single Step
+    spanning every turn; its ``metrics`` accumulate additively across the
+    turns' MetricsEvents rather than holding the last turn's snapshot.
+    ``ResultEvent`` also closes the open Step at the end of the invocation;
+    ``finish()`` performs a final idempotent close so partial turns are not
+    dropped.
 
     Tool-result-after-close: a ``ToolStartEvent`` followed by a
     ``TurnEndEvent`` and then a ``ToolResultEvent`` is legal — the result
@@ -613,13 +652,20 @@ class Invocation:
             # #192: reasoning_tokens is a SUBSET of completion_tokens (not
             # additive). Vendored Metrics has no dedicated field (D-03), so
             # carry it via the documented extension carrier ``extra``.
-            target["_metrics"] = Metrics(
+            #
+            # Accumulate-or-assign: a Step spanning several turns carries the
+            # sum of those turns' usage, not the last turn's snapshot — every
+            # turn was billed. Keeps ``final == Σ steps`` (the recorder-level
+            # tally below accumulates every event too).
+            incoming = Metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
                 extra=_reasoning_extra(event.reasoning_tokens),
             )
+            prior = target["_metrics"]
+            target["_metrics"] = incoming if prior is None else _merge_metrics(prior, incoming)
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)

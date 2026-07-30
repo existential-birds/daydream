@@ -28,6 +28,7 @@ from daydream.backends import (
     MetricsEvent,
     ResultEvent,
     TextEvent,
+    TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.trajectory import make_recorder, read_trajectory
@@ -340,3 +341,96 @@ async def test_cost_event_only_backend_still_accumulates(tmp_path: Path) -> None
     assert final["total_completion_tokens"] == 7
     assert final["total_cached_tokens"] == 3
     assert final["total_cost_usd"] == pytest.approx(0.4)
+
+
+@dataclass
+class _MetricsOnlyBackend:
+    """Emits N turns of MetricsEvents with no TurnEndEvent, so they all land on
+    a single Step (``run_agent``'s normal loop does not forward TurnEndEvent)."""
+
+    turns: int
+    in_tok: int
+    out_tok: int
+    model = "mock-model"
+    fanout_concurrency = 4
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        turns, in_tok, out_tok = self.turns, self.in_tok, self.out_tok
+
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            for i in range(turns):
+                yield TextEvent(text=f"turn {i + 1}")
+                yield MetricsEvent(
+                    message_id=f"m-{i}",
+                    prompt_tokens=in_tok,
+                    completion_tokens=out_tok,
+                    cached_tokens=2,
+                    cost_usd=0.01,
+                )
+            yield ResultEvent(structured_output=None, continuation=None)
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def test_step_metrics_accumulate_across_turns(tmp_path: Path) -> None:
+    """A Step spanning 3 turns carries their sum, not the last turn's snapshot."""
+    traj = await _drive_one(tmp_path, _MetricsOnlyBackend(turns=3, in_tok=100, out_tok=10))
+
+    agent_metrics = [s["metrics"] for s in traj["steps"] if s.get("metrics")]
+    assert agent_metrics[-1]["prompt_tokens"] == 300  # Σ turns, not 100
+    assert agent_metrics[-1]["completion_tokens"] == 30
+    assert agent_metrics[-1]["cached_tokens"] == 6
+    assert agent_metrics[-1]["cost_usd"] == pytest.approx(0.03)
+
+
+async def test_step_metrics_sum_equals_final_metrics(tmp_path: Path) -> None:
+    """The ``final == Σ steps`` invariant holds once steps accumulate."""
+    traj = await _drive_one(tmp_path, _MetricsOnlyBackend(turns=3, in_tok=100, out_tok=10))
+
+    step_sum = sum(
+        s["metrics"]["prompt_tokens"]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get("prompt_tokens")
+    )
+    assert traj["final_metrics"]["total_prompt_tokens"] == step_sum == 300
+
+
+async def test_turn_end_event_still_splits_steps(tmp_path: Path) -> None:
+    """A TurnEndEvent still closes the Step, so per-turn metrics stay separate.
+
+    Driven at the ``Invocation.observe`` seam, not through ``run_agent``:
+    run_agent's normal loop deliberately does not forward TurnEndEvent, so the
+    splitting behavior is only observable here.
+    """
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            for i in range(2):
+                inv.observe(TextEvent(text=f"turn {i + 1}"))
+                inv.observe(MetricsEvent(
+                    message_id=f"m-{i}", prompt_tokens=100, completion_tokens=10,
+                    cached_tokens=None, cost_usd=None,
+                ))
+                inv.observe(TurnEndEvent(message_id=f"m-{i}"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    traj = read_trajectory(recorder.path)
+    agent_metrics = [s["metrics"] for s in traj["steps"] if s.get("metrics")]
+    assert [m["prompt_tokens"] for m in agent_metrics] == [100, 100]
+    assert traj["final_metrics"]["total_prompt_tokens"] == 200
