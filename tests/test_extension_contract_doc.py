@@ -20,7 +20,6 @@ def test_contract_doc_names_every_registered_surface() -> None:
         "items_file",
         "read",
         "rewrite",
-        "DAYDREAM_EXT_API = 4",
         "raise the floor",
         "PlanWriterResult",
         "Sequence[str]",

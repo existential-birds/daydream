@@ -3,10 +3,11 @@
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from daydream.extensions import EXTENSION_API_VERSION
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
@@ -614,6 +615,9 @@ def _no_harvest_row_spacing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(harvest, "_row_spacing_sleep", _noop)
 
 
+_CURRENT_API = object()  # sentinel: "use the tool's current version"
+
+
 class ExtDir:
     """Helper for the ``ext_dir`` fixture: writes a ``daydream_ext`` package to tmp."""
 
@@ -621,8 +625,22 @@ class ExtDir:
         self._root = root
         self._monkeypatch = monkeypatch
 
-    def write_module(self, source: str) -> Path:
-        """Write ``<tmp>/daydream_ext/__init__.py`` and point ``$DAYDREAM_EXT_DIR`` at it."""
+    def write_module(self, source: str, *, api_version: Any = _CURRENT_API) -> Path:
+        """Write ``<tmp>/daydream_ext/__init__.py`` and point ``$DAYDREAM_EXT_DIR`` at it.
+
+        Args:
+            api_version: Prepended as ``DAYDREAM_EXT_API = <value>``. Defaults to the
+                tool's current ``EXTENSION_API_VERSION``, so fixtures that are not
+                about versioning never restate it and a version bump does not touch
+                them. Pass a value to pin one — including a raw source fragment such
+                as ``"'1'"``, which is interpolated verbatim so the loader's
+                malformed-declaration cases still work. Pass ``None`` to omit the
+                line entirely.
+        """
+        if api_version is _CURRENT_API:
+            api_version = EXTENSION_API_VERSION
+        if api_version is not None:
+            source = f"DAYDREAM_EXT_API = {api_version}\n{source}"
         package = self._root / "daydream_ext"
         package.mkdir(exist_ok=True)
         (package / "__init__.py").write_text(source)

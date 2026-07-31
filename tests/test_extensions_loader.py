@@ -19,9 +19,9 @@ from tests.conftest import ExtDir
 def test_supported_extension_loads(ext_dir: ExtDir, version: int, skill: str) -> None:
     """Load supported extension API versions and apply their registry override."""
     ext_dir.write_module(
-        f"DAYDREAM_EXT_API = {version}\n"
         "def register(registry):\n"
-        f"    registry.override_skill('structural', '{skill}')\n"
+        f"    registry.override_skill('structural', '{skill}')\n",
+        api_version=version,
     )
     assert build_registry().skill("structural") == skill
 
@@ -43,13 +43,13 @@ def test_unsupported_extension_version_is_rejected(
     message: str,
 ) -> None:
     """Reject missing, malformed, boolean, and unsupported API declarations."""
-    ext_dir.write_module(f"DAYDREAM_EXT_API = {declaration}\ndef register(registry): ...\n")
+    ext_dir.write_module("def register(registry): ...\n", api_version=declaration)
     with pytest.raises(ExtensionVersionError, match=message):
         build_registry()
 
 
 def test_register_exception_is_wrapped_and_named(ext_dir: ExtDir) -> None:
-    ext_dir.write_module("DAYDREAM_EXT_API = 4\ndef register(registry):\n    raise RuntimeError('boom')\n")
+    ext_dir.write_module("def register(registry):\n    raise RuntimeError('boom')\n")
     with pytest.raises(ExtensionError, match=r"daydream_ext.*boom"):
         build_registry()
 

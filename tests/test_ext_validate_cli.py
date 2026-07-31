@@ -36,7 +36,6 @@ def _run_main(argv: list[str]) -> int:
 def test_ext_validate_ok(ext_dir, capsys) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
-        "DAYDREAM_EXT_API = 4\n"
         "def supervise(name, tool_input, *, phase):\n"
         "    return ToolDecision(veto=False)\n"
         "def register(r): r.register_tool_supervisor(supervise)\n"
@@ -49,7 +48,7 @@ def test_ext_validate_ok(ext_dir, capsys) -> None:
 
 
 def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
-    ext_dir.write_module("DAYDREAM_EXT_API = 4\ndef register(r): ...\n")
+    ext_dir.write_module("def register(r): ...\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 0
     out = strip_ansi(capsys.readouterr().out).lower()
@@ -58,10 +57,7 @@ def test_ext_validate_without_supervisor_reports_none(ext_dir, capsys) -> None:
 
 
 def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -> None:
-    ext_dir.write_module(
-        "DAYDREAM_EXT_API = 4\n"
-        "def register(r): r.register_tool_supervisor(None)\n"
-    )
+    ext_dir.write_module("def register(r): r.register_tool_supervisor(None)\n")
     rc = _run_main(["ext", "validate"])
     assert rc == 1
     assert "tool supervisor" in strip_ansi(capsys.readouterr().out).lower()
@@ -70,7 +66,6 @@ def test_ext_validate_rejects_invalid_supervisor_registration(ext_dir, capsys) -
 def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> None:
     ext_dir.write_module(
         "from daydream.extensions import ToolDecision\n"
-        "DAYDREAM_EXT_API = 4\n"
         "async def supervise(name, tool_input, *, phase):\n"
         "    return ToolDecision(veto=False)\n"
         "def register(r): r.register_tool_supervisor(supervise)\n"
@@ -84,7 +79,6 @@ def test_ext_validate_rejects_async_supervisor_registration(ext_dir, capsys) -> 
 
 def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 4\n"
         "def register(r):\n"
         "    r.set_flow('deep', ['ghost'])\n"
     )
