@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream.eval.analyzer import analyze_grounding, load_trajectories
+from daydream.eval.analyzer import analyze_costs, analyze_grounding, load_trajectories
 
 
 def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
@@ -63,6 +63,100 @@ def test_exact_match_takes_precedence(tmp_path: Path):
 
     assert result["main"] is not None
     assert result["main"]["marker"] == "exact"
+
+
+def test_analyze_costs_preserves_fractional_aggregate_precision():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {"total_cost_usd": 0.00006},
+        },
+        "forked": [],
+    }
+
+    result = analyze_costs(trajectories)
+
+    assert result["total_cost_usd"] == 0.00006
+    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
+
+
+def test_analyze_costs_includes_cached_tokens_when_prompt_dominates():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {
+                "total_prompt_tokens": 140,
+                "total_cached_tokens": 14,
+            },
+        },
+        "forked": [],
+    }
+
+    result = analyze_costs(trajectories)
+
+    assert result["total_input_tokens"] == 154
+    assert result["cache_hit_rate"] == 0.0909
+
+
+def test_analyze_costs_assigns_nested_forks_their_own_metrics():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {
+                "total_cost_usd": 0.6,
+                "total_prompt_tokens": 60,
+                "total_completion_tokens": 6,
+                "total_cached_tokens": 3,
+                "total_steps": 3,
+            },
+            "extra": {
+                "subtrajectories": [
+                    {"sibling_trajectory_ref": "runs/session/trajectories/outer.json"}
+                ]
+            },
+        },
+        "forked": [
+            {
+                "_source_file": "outer.json",
+                "final_metrics": {
+                    "total_cost_usd": 0.5,
+                    "total_prompt_tokens": 50,
+                    "total_completion_tokens": 5,
+                    "total_cached_tokens": 2,
+                    "total_steps": 2,
+                },
+                "extra": {
+                    "subtrajectories": [
+                        {"sibling_trajectory_ref": "runs/session/trajectories/inner.json"}
+                    ]
+                },
+            },
+            {
+                "_source_file": "inner.json",
+                "final_metrics": {
+                    "total_cost_usd": 0.3,
+                    "total_prompt_tokens": 30,
+                    "total_completion_tokens": 3,
+                    "total_cached_tokens": 1,
+                    "total_steps": 1,
+                },
+            },
+        ],
+    }
+
+    result = analyze_costs(trajectories)
+
+    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
+    assert by_agent["main"]["cost_usd"] == pytest.approx(0.1)
+    assert by_agent["outer"]["cost_usd"] == pytest.approx(0.2)
+    assert by_agent["inner"]["cost_usd"] == pytest.approx(0.3)
+    assert by_agent["main"]["steps"] == 1
+    assert by_agent["outer"]["steps"] == 1
+    assert by_agent["inner"]["steps"] == 1
+    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == pytest.approx(
+        result["total_cost_usd"]
+    )
+    assert sum(agent["steps"] for agent in result["by_agent"]) == 3
 
 
 # --- analyze_grounding ---

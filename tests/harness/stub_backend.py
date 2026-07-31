@@ -215,6 +215,7 @@ class StubBackend:
             "agents": agents,
             "model": self.model,
             "continuation": continuation,
+            "max_turns": max_turns,
         }
         self.calls.append(call)
         if self._shared is not None:

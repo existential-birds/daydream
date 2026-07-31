@@ -2,8 +2,9 @@
 
 ``.daydream/exploration/`` now survives a run and is keyed by
 ``head sha + diff + tier + depth`` (``daydream.exploration.exploration_cache_key``).
-A second run with an identical key reuses the directory verbatim and fires zero
-specialist agents; any key change re-runs the pre-scan and rewrites the files.
+A second run with an identical key and a clean working tree reuses the directory
+verbatim and fires zero specialist agents; any key change or uncommitted edit
+re-runs the pre-scan and rewrites the files.
 
 Every test drives the real ``runner.run`` -> deep orchestrator path with only the
 backend seam stubbed.
@@ -34,6 +35,8 @@ def _count_specialist_calls(stub: StubBackend) -> int:
 async def _run_deep(target: Path) -> int:
     from daydream.runner import RunConfig, run
 
+    exclude = target / ".git" / "info" / "exclude"
+    exclude.write_text(f"{exclude.read_text()}\n.daydream/\n.review-output.md\n")
     return await run(RunConfig(target=str(target), start_at="review", cleanup=False))
 
 
@@ -89,6 +92,28 @@ async def test_diff_change_invalidates_cache(
     assert _count_specialist_calls(stub2) > 0, "changed diff must re-fire specialists"
 
     assert (exploration / "cache-key").read_text().strip() != key_after_run1
+    dependencies = (exploration / "dependencies.md").read_text()
+    assert "RUN2 SENTINEL" in dependencies
+    assert "RUN1 SENTINEL" not in dependencies
+
+
+async def test_uncommitted_edit_invalidates_cache(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dirty working tree bypasses a matching cache and re-runs the pre-scan."""
+    silence(monkeypatch)
+    stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
+    assert await _run_deep(multi_stack_target) == 0
+    assert _count_specialist_calls(stub1) > 0
+
+    exploration = multi_stack_target / ".daydream" / "exploration"
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+
+    stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
+    assert await _run_deep(multi_stack_target) == 0
+    assert _count_specialist_calls(stub2) > 0, "dirty tree must re-fire specialists"
+
+    assert not (exploration / "cache-key").exists()
     dependencies = (exploration / "dependencies.md").read_text()
     assert "RUN2 SENTINEL" in dependencies
     assert "RUN1 SENTINEL" not in dependencies

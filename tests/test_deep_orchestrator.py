@@ -4646,7 +4646,10 @@ class _FailingParseStub(StubBackend):
 
 
 async def test_parse_failure_propagates_original_exception_type(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
     """One stack's parse failure fails the run with its own exception type.
 
@@ -4658,14 +4661,39 @@ async def test_parse_failure_propagates_original_exception_type(
     monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
+    from daydream.runner import run
+
+    trajectory_path = tmp_path / "trajectory.json"
     with pytest.raises(ZeroDivisionError, match="parse blew up"):
-        await _run_deep(multi_stack_target)
+        await run(make_config(multi_stack_target, trajectory_path=trajectory_path))
 
     # Siblings that finished before the failure surfaced kept their records.
     deep = multi_stack_target / ".daydream" / "deep"
     survivors = sorted(p.name for p in deep.glob("stack-*-records.json"))
     assert "stack-python-records.json" not in survivors
     assert survivors, "sibling parse results must survive one stack's failure"
+
+    trajectory = json.loads(trajectory_path.read_text())
+    parse_dispatches = [
+        step
+        for step in trajectory["steps"]
+        if step.get("extra", {}).get("daydream_phase") == "parse"
+        and step["message"].startswith("Dispatching ")
+    ]
+    assert len(parse_dispatches) == 1
+    dispatch_results = parse_dispatches[0]["observation"]["results"]
+    linked_stacks = {
+        result["content"].removeprefix("Dispatched to parse-")
+        for result in dispatch_results
+    }
+    successful_stacks = {
+        path.removeprefix("stack-").removesuffix("-records.json")
+        for path in survivors
+    }
+    assert successful_stacks <= linked_stacks
+    for result in dispatch_results:
+        reference = result["subagent_trajectory_ref"][0]
+        assert (multi_stack_target / ".daydream" / reference["trajectory_path"]).is_file()
 
 
 # --- Budget caps on the deep-review agents -----------------------------------
@@ -5077,7 +5105,6 @@ async def test_both_ttt_artifacts_written_on_the_happy_path(
     assert await _run_deep(multi_stack_target) == 0
 
     deep = multi_stack_target / ".daydream" / "deep"
-    assert deep / "intent.md"
     assert (deep / "intent.md").read_text().strip()
     assert json.loads((deep / "alternatives.json").read_text())
 

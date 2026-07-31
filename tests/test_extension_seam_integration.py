@@ -499,6 +499,7 @@ async def test_fork_disables_arbiter_in_deep(
         "    r.remove('deep', 'arbiter')\n"
     )
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
+    backend.parse_severity = "high"
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.

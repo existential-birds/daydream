@@ -663,7 +663,8 @@ def _protect_tree_after_fix_failures(
 
 
 async def _step_exploration(ctx: FlowContext) -> None:
-    """Exploration pre-scan (D-43), reused across runs on an exact key match."""
+    """Exploration pre-scan (D-43), reused only for clean trees on a key match."""
+    from daydream import git_ops
     from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
     from daydream.runner import _compute_diff_ref
 
@@ -687,7 +688,16 @@ async def _step_exploration(ctx: FlowContext) -> None:
         cache_key = exploration_cache_key(
             ctx.work.head_sha or "", diff, tier, config.exploration_depth
         )
-        if exploration_path.is_dir() and read_cache_key(exploration_path) == cache_key:
+        try:
+            status = git_ops.status_porcelain(target_dir)
+            clean_worktree = not status.strip()
+        except git_ops.GitError:
+            clean_worktree = False
+        if (
+            clean_worktree
+            and exploration_path.is_dir()
+            and read_cache_key(exploration_path) == cache_key
+        ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
             # a hit through it with an empty in-memory context would overwrite
             # the cached files with "No data collected" stubs.
@@ -719,7 +729,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
-            cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
+            if clean_worktree:
+                cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
             ctx.data["exploration_dir"] = exploration_dir
             return
     if EXPLORATION_AVAILABLE and config.exploration_context is not None:
@@ -833,7 +844,7 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
         # the fan-out's outputs are on disk for a later resume.
         try:
             await _wonder(ctx)
-        except BaseException as exc:  # noqa: BLE001 -- re-raised after the join
+        except Exception as exc:  # noqa: BLE001 -- re-raised after the join
             holder["exc"] = exc
 
     if run_wonder and not concurrent:
@@ -979,7 +990,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                                         input_path=input_path,
                                         output_schema=schema,
                                     )
-                                except BaseException as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
+                                except Exception as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
                                     parse_failures[stack_name] = exc
                                     return
                                 # Written per task, not after the join, so a
@@ -992,13 +1003,13 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
 
                     tg.start_soon(_parse_one)
 
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.PARSE)
         # Fail the run on the first failure by stack name — same semantics and
         # exception type as the serial loop, just deferred past the join so
         # sibling records that completed are already on disk.
         if parse_failures:
             raise parse_failures[sorted(parse_failures)[0]]
-        if recorder is not None:
-            recorder.create_dispatch_step(phase=DaydreamPhase.PARSE)
 
         for stack_name in sorted(parse_results):
             records = parse_results[stack_name]
@@ -1723,8 +1734,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         )
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a
-        # content-keyed cache (see ``exploration_cache_key``) the next run reuses
-        # on an exact head+diff+tier+depth match and rewrites on a miss, and
+        # content-keyed cache (see ``exploration_cache_key``) the next clean-tree
+        # run reuses on an exact head+diff+tier+depth match and rewrites on a miss, and
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.
         return await run_flow(ctx.registry, "deep", ctx)
