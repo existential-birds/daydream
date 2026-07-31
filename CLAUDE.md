@@ -4,21 +4,27 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project overview
 
-Daydream is an automated code review and fix loop. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Automated code review and fix loop: reviews diffs with stack-specific
+[Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and
+records every agent interaction as an
+[ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus
+pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
 
-The default flow is a deep multi-stack pipeline. `--shallow` opts into a single-skill loop. `--comment` and `--review` produce review-only output (PR comments or markdown report). The `daydream feedback <pr#>` subcommand ingests bot review comments.
+Default flow is the deep multi-stack pipeline; `--shallow` is a single-skill loop; `--comment`/`--review`
+are review-only; `daydream feedback <pr#>` ingests bot review comments. Three backends — Claude
+(in-process SDK), Codex and Pi (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
-Three backends are supported: Claude (in-process SDK), Codex (subprocess CLI), and Pi (subprocess CLI for z.ai GLM models). All backends emit the same `AgentEvent` stream, consumed by `run_agent()` and the trajectory recorder.
+Reference docs: `README.md` (user CLI + config), `docs/{extensions,benchmark,evaluation-framework}.md`.
 
 ## Commands
 
 ```bash
-make install   # install dependencies and git hooks
+make install   # uv sync
 make hooks     # install pre-push hook
-make lint      # ruff
-make typecheck # mypy daydream tests
-make test      # pytest
-make check     # lint + typecheck + full pytest (the gate)
+make lint      # ruff check daydream tests bench
+make typecheck # mypy daydream tests bench
+make test      # pytest -n auto
+make check     # lockcheck + lint + typecheck + full pytest (the gate)
 ```
 
 ```bash
@@ -28,87 +34,64 @@ daydream --comment /path/to/project                # review -> post inline PR co
 daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
 daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
 
-# Other verbs / flags
+# Other verbs / flags (`--help-all` for the full advanced surface)
 daydream --shallow -s python /path/to/project      # shallow Python review-fix-test loop
 daydream --review /path/to/project                 # review only, skip fixes
 daydream --yes /path/to/project                    # auto-apply fixes without prompting
 daydream --loop 3 /path/to/project                 # repeat review-fix-test up to 3 rounds
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # bot PR comments
 daydream --non-interactive /path/to/project        # unattended/harness run
-daydream --help-all                                # full advanced flag surface
 
 # Findings artifact (two-phase post)
 daydream --review --findings-out findings.json --pr-number 7 /path
 daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo
 
-# Self-hosted review bot
-daydream setup /path/to/repo --repo OWNER/REPO     # one-command App + secrets + workflow PR
+daydream setup /path/to/repo --repo OWNER/REPO     # self-hosted bot: App + secrets + workflow PR
 daydream setup /path/to/repo --verify              # read-only install audit
+daydream summarize <path>                          # run-info markdown for a run dir or file
+daydream ext validate                              # resolve-check daydream_ext registry
 
-# Run-info markdown
-daydream summarize <path>                          # print trajectory summary for a run dir or file
-
-# Data pipeline (under the `corpus` namespace)
+# Corpus pipeline
 daydream corpus harvest                            # annotate archived runs (reward + label)
-daydream corpus build --out out.jsonl              # project labeled runs to JSONL training corpus
+daydream corpus build --out out.jsonl              # project labeled runs to JSONL
 daydream corpus label <session_id> --outcome accepted
-
-# Extension seam
-daydream ext validate                              # load daydream_ext, resolve-check flows/skills/prompts/stacks
 
 # Benchmark
 daydream bench --benchmark-repo ../code-review-benchmark/offline --score
-
-# Benchmark against a review bot's own PR history (harvested corpus)
 daydream bench harvest --repo OWNER/REPO --bot "coderabbitai[bot]" --out ./cr-corpus
 daydream bench --harvest-dir ./cr-corpus --judge-route anthropic-direct  # martian route needs --benchmark-repo
-
-# Per-phase model/backend overrides are config-file-only (no CLI flags):
-#   set [tool.daydream] / [tool.daydream.phases.<phase>] in pyproject.toml or .daydream.toml.
-#   Precedence: CLI (--model/--backend) > config file > built-in default.
 ```
 
 ## Testing standard (mandatory)
 
-Every user-visible behavior must have at least one **real-path test**: a test that
-enters from the production entrypoint (`runner.run` / the CLI) with real
-dependencies (real temp git worktree, real filesystem, real event loop), mocking only
-the external network/API backend (via the `Backend` protocol / `create_backend` seam).
-Tests must assert observable outcomes (exit code, files written, fixes applied or
-declined, transcript state), never that a function was merely called. Unit tests are
-supplementary, not a substitute. Reference exemplar: the non-interactive/EOF gate tests
-in `tests/test_deep_orchestrator.py`.
+Every user-visible behavior must have at least one **real-path test**: a test that enters from the
+production entrypoint (`runner.run` / the CLI) with real dependencies (real temp git worktree, real
+filesystem, real event loop), mocking only the external network/API backend (via the `Backend` protocol /
+`create_backend` seam). Tests must assert observable outcomes (exit code, files written, fixes applied or
+declined, transcript state), never that a function was merely called. Unit tests are supplementary, not a
+substitute. Reference exemplar: the non-interactive/EOF gate tests in `tests/test_deep_orchestrator.py`.
 
-**No caveats.** All work is completed and proven, or explicitly in progress. No
-deferred items, no "optional" follow-ups, no smoke-tests substituted for real coverage.
+**No caveats.** All work is completed and proven, or explicitly in progress. No deferred items, no
+"optional" follow-ups, no smoke-tests substituted for real coverage.
 
 ## Non-negotiable: fix bugs at the root
 
-The highest-priority directive in this file. Violating it makes the agent dangerous
-and unusable.
+The highest-priority directive in this file. Violating it makes the agent dangerous and unusable.
 
-1. A bug in a safety or verification mechanism is fixed at its root cause, never
-   bypassed. `git push --no-verify`, skipping tests, commenting out checks, deleting
-   guards, lowering assertions are all forbidden. Making the gate pass honestly IS
-   the goal.
-
-2. Own your own bugs in plain language. Do not describe your own defect as the tool,
-   hook, or framework being "destructive" or "buggy."
-
+1. A bug in a safety or verification mechanism is fixed at its root cause, never bypassed.
+   `git push --no-verify`, skipping tests, commenting out checks, deleting guards, and lowering
+   assertions are all forbidden. Making the gate pass honestly IS the goal.
+2. Own your own bugs in plain language. Do not describe your own defect as the tool, hook, or framework
+   being "destructive" or "buggy."
 3. Fix the bug where it lives, not at a convenient downstream layer.
-
-4. A dangerous bug (state corruption, data loss, compromised safety mechanism)
-   outranks the assigned task. Stop and fix it first.
-
-5. Never claim success that isn't verified-working. "Committed" or "pushed" is not
-   "working" unless the actual behavior is verified.
-
-6. When the user pushes back more than once on the same point, stop defending and do
-   the direct, root-cause fix.
+4. A dangerous bug (state corruption, data loss, compromised safety mechanism) outranks the assigned
+   task. Stop and fix it first.
+5. Never claim success that isn't verified-working. "Committed" or "pushed" is not "working" unless the
+   actual behavior is verified.
+6. When the user pushes back more than once on the same point, stop defending and do the direct,
+   root-cause fix.
 
 ## Architecture
-
-### Execution flow
 
 ```text
 cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
@@ -118,154 +101,95 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
               \-> ui/ (terminal output)
 ```
 
-- `runner.run()` is the async entry. It builds the per-run extension `Registry`
-  (`build_registry()`), sets it on a `ContextVar`, and dispatches one of five
-  registered flows — `deep` (default), `shallow`, `review` (`--review`/`--comment`),
-  `pr-feedback` (`daydream feedback <pr#>`), or `improve`
-  (`daydream improve`) — or a custom extension flow (`--flow NAME`). Each uses
-  a preamble plus `flows.run_flow()` over the flow's ordered `FlowStep` list.
-- `agent.run_agent()` is the only agent call site. Never call a backend/SDK directly
-  from phases. It wraps `Backend.execute()` and drives the Rich UI + trajectory recorder.
-- Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel
-  `run_agent()` calls under `anyio.CapacityLimiter(4)`, not SDK `agents=`.
-- `TrajectoryRecorder` propagates via `ContextVar`; `recorder.fork()` creates sibling
-  trajectories for parallel fan-outs.
+- `runner.run()` is the async entry: builds the per-run extension `Registry` onto a `ContextVar`, then
+  dispatches one of five flows — `deep` (default), `shallow`, `review`, `pr-feedback`, `improve` — or a
+  custom extension flow (`--flow NAME`), each a preamble plus `run_flow()` over its ordered `FlowStep` list.
+- `agent.run_agent()` is the only agent call site. **Never call a backend/SDK directly from phases.**
+- Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel `run_agent()` calls under
+  `anyio.CapacityLimiter(effective_fanout_concurrency(ceiling, backend))`, **not** SDK `agents=`.
+- `TrajectoryRecorder` propagates via `ContextVar`; `recorder.fork()` makes sibling trajectories per fan-out.
 
 ### Module responsibilities
 
-| Component | Responsibility | File |
-|-----------|----------------|------|
-| CLI | Arg parsing, signal handling, process lifecycle, subcommand dispatch | `cli.py` |
-| Runner | Flow preambles (workspace, diff, recorder), backend resolution, registry build, flow dispatch | `runner.py` |
-| Flows | `FlowContext` + `run_flow()` engine (ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups); shallow/review/pr-feedback step functions | `flows/` |
-| Extensions | Versioned extension API: `Registry` (phases+flows, skill slots, named prompts, stack rules), `daydream_ext` loader, built-in seeding | `extensions/` |
-| Deep orchestrator | Deep-flow step functions (exploration, intent, alternatives, per-stack, arbiter, merge, verify, fix) | `deep/orchestrator.py` |
-| Improve advisor | Read-only repository reconnaissance, category audits, vetting, prioritization, and host-rendered plan artifacts | `improve/` |
-| Phases | Stateless async `phase_*()` workflow steps and prompt builders | `phases.py` |
-| Agent | Backend wrapper, event stream to UI, global state, budget enforcement | `agent.py` |
-| Trajectory | ATIF v1.7 recorder, redaction, ContextVar propagation | `trajectory.py` |
-| Backends | `Backend` protocol, `ClaudeBackend`, `CodexBackend`, `PiBackend`, `AgentEvent` union, `create_backend()` | `backends/` |
-| UI | Rich terminal output (Dracula theme): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` | `ui/` |
-| Config | Skill mappings, per-phase model defaults, constants | `config.py` |
-| Config file | `[tool.daydream]` / `.daydream.toml` parser for per-phase overrides | `config_file.py` |
-| Exploration | Pre-scan codebase context (tree-sitter import resolution, convention detection) | `exploration.py`, `exploration_runner.py`, `tree_sitter_index.py` |
-| Deep detection | Stack router (`detect_stacks()`), artifact paths, dedup pre-filter | `deep/detection.py`, `deep/dedup.py`, `deep/artifacts.py` |
-| Arbiter | Scoped Opus pass over high-severity/contested findings | `deep/arbiter.py` |
-| PR review | Post findings as inline GitHub PR comments | `pr_review.py` |
-| PR comment renderer | Pure renderer: trajectory in, markdown out | `pr_comment_renderer.py` |
-| Findings | Strict-schema findings artifact builder (two-phase post) | `findings.py` |
-| Pricing | Cost synthesis from token counts when backend doesn't report cost | `pricing.py` |
-| GitHub App | Scoped installation token minting for bot identity | `github_app.py` |
-| Bot setup | One-command App registration, secret deposit, workflow PR | `bot_setup.py` |
-| Summarize | Run-info markdown for a trajectory file or run directory | `summarize.py` |
-| Archive | Run archival, SQLite index, manifest | `archive/` |
-| Training | Corpus pipeline: harvest, reward, bitemporal projection, JSONL export | `training/` |
-| Benchmark | `daydream bench` orchestrator, PR acquisition, scoring | `benchmark/` |
-| Eval | Deterministic trajectory analysis (cost, grounding, coverage) | `eval/` |
-| Prompts | System prompt builder, exploration subagent prompts, CWD grounding instruction | `prompts/` |
+| File | Responsibility |
+|------|----------------|
+| `cli.py` | Args, signals, process lifecycle, subcommand dispatch |
+| `runner.py` | Flow preambles (workspace, diff, recorder), backend resolution, registry, dispatch |
+| `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
+| `extensions/` | `Registry` (phases+flows, skill slots, prompts, stack rules), `daydream_ext` loader |
+| `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
+| `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
+| `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
+| `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
+| `phases.py` | Stateless async `phase_*()` steps and prompt builders |
+| `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
+| `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
+| `backends/` | `Backend` protocol, Claude/Codex/Pi, `AgentEvent` union, `create_backend()` |
+| `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
+| `config.py` | Skill mappings, per-phase model/effort defaults, budgets, improve effort tiers |
+| `config_file.py` | `[tool.daydream]` / `.daydream.toml` parser |
+| `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree |
+| `git_ops.py` | **Single point of contact for every `git`/`gh` shell-out** |
+| `exploration*.py`, `tree_sitter_index.py` | Pre-scan: tree-sitter import resolution, convention detection |
+| `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
+| `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
+| `pr_review.py`, `pr_comment_renderer.py` | Post inline PR comments; pure trajectory→markdown renderer |
+| `findings.py` | Strict-schema findings artifact (two-phase post) |
+| `pricing.py` | Cost synthesis when the backend reports none |
+| `github_app.py`, `bot_identity.py` | Token minting; `[bot]`-tolerant login comparator |
+| `bot_setup.py` | App registration, secret deposit, workflow PR |
+| `summarize.py` | Run-info markdown for a trajectory file or run dir |
+| `archive/` | Run archival, SQLite index, manifest |
+| `training/` | Corpus: harvest, reward, bitemporal projection, JSONL export |
+| `benchmark/` | `daydream bench` orchestrator, PR acquisition, scoring |
+| `eval/` | Deterministic trajectory analysis (cost, grounding, coverage) |
+| `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
 ### Backend protocol
 
-```python
-class Backend(Protocol):
-    model: str
-    def execute(self, cwd, prompt, output_schema=None, continuation=None,
-                agents=None, max_turns=None, read_only=False) -> AsyncIterator[AgentEvent]: ...
-    async def cancel(self) -> None: ...
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str: ...
-```
-
-Backends yield `AgentEvent` instances (an 8-member union: `TextEvent`,
-`ThinkingEvent`, `ToolStartEvent`, `ToolResultEvent`, `CostEvent`, `MetricsEvent`,
-`TurnEndEvent`, `ResultEvent`). The `TrajectoryRecorder` consumes this stream and
-builds ATIF Steps. Adding a backend means producing this stream correctly; the phases
-and recorder are backend-agnostic.
+`Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()` + `format_skill_invocation()`.
+`execute()` yields the 8-member `AgentEvent` union (`Text`, `Thinking`, `ToolStart`, `ToolResult`, `Cost`,
+`Metrics`, `TurnEnd`, `Result`). Adding a backend means producing that stream correctly — phases and the
+recorder are backend-agnostic.
 
 ### Run-agent budgets
 
-Every `run_agent()` call is bounded by a wall-clock budget. Budget exhaustion
-emits a `TurnEndEvent` and marks the trajectory partial. The default wall budget
-is `DEFAULT_WALL_BUDGET_S` (1800s). Every deep-flow agent is capped — wonder,
-per-stack, parse, arbiter, merge, supervise, suppression, verify, fix, and the
-test run. The test run uses `TEST_WALL_BUDGET_S` (3600s) instead: it bounds the
-*target repo's* suite, not an LLM long tail, so a legitimately slow suite must
-not be truncated. Only the improve phases deliberately run with no wall budget.
+| Bound | Value | Scope |
+|-------|-------|-------|
+| `DEFAULT_WALL_BUDGET_S` | 1800s | every `run_agent()` turn (improve phases deliberately unbounded) |
+| `TEST_WALL_BUDGET_S` | 3600s | the test run — bounds the *target repo's* suite, not an LLM tail |
+| `DEFAULT_TOOL_CALL_BUDGET` | `None` | unlimited; per-call `tool_call_budget` still accepted |
+| `DEFAULT_GROUP_MAX_WALL_S` / `_SERIAL_ITEMS` | 600s / 6 | cumulative over all fix calls for one file group |
+| `EXPLORATION_MAX_TURNS` | 50 | exploration specialists — the only `max_turns` call site |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | 2700s | pi/codex stdout silence before the subprocess is killed |
 
-`DEFAULT_TOOL_CALL_BUDGET` is `None` (unlimited): a tool-call count is a poor
-proxy for a runaway turn, and the former ceiling of 50 truncated legitimately
-exploratory phases mid-pass and failed the run. Wall-clock is the real bound on
-the time tail; `run_agent` still accepts an explicit `tool_call_budget` per call
-site.
-
-Turn ceilings are gone from the fix and verify phases for the same reason: a
-`max_turns` cap does not fail soft. The Claude CLI ends the turn with
-`error_max_turns`, the backend raises `MaxTurnsError`, and the fix group is
-recorded in `fix-failures.json` and reverted — a real fix on a large file is
-thrown away rather than trimmed. `run_agent` still accepts `max_turns` per call
-site (exploration specialists keep theirs; they degrade silently and are bounded
-by a 300s timeout).
-
-Budget truncation is never silently absorbed: a truncated wonder or parse raises
-(a partial pass would drop findings without a trace), and a truncated per-stack
-review is routed into `failed_stacks` so the merge prompt lists it under
-"Uncovered stacks" rather than recording it as a clean pass.
-
-Independently, the pi and codex backends bound their stdout stream with an idle
-timeout (`DAYDREAM_STREAM_IDLE_TIMEOUT_S`, default 2700s): a subprocess that
-emits nothing for that long is killed and the turn fails with a `StreamStalledError`.
-It fires on the absence of output, never on slow output, and sits above the wall
-budget so it can only bite where nothing else bounds the turn. A stall is
-**not retryable** — the idle window is a terminal bound on a subprocess
-invocation, so `run_agent` does not re-arm a fresh subprocess and a stalled
-stream cannot consume the generic retry budget.
-
-`run_agent` retries any backend error whose `retryable` flag is set, with
-exponential backoff, up to the backend's attempt budget. The default is **20
-attempts** for every backend (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides it) because
-every provider — Anthropic included — drops connections often enough that a
-smaller budget lets one blip kill a whole run. Only a deliberate tool-supervisor
-veto, a stalled stream, and a non-transport logic error are terminal;
-API/transport failures are not.
+- Exhaustion emits a `TurnEndEvent` and marks the trajectory partial. **Truncation is never silently
+  absorbed**: a truncated wonder or parse raises; a truncated per-stack review goes to `failed_stacks` so
+  merge lists it under "Uncovered stacks" instead of recording a clean pass.
+- Do not add `max_turns` to fix or verify — it does not fail soft. The turn ends `error_max_turns`, the
+  backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
+  a real fix away rather than trimming it.
+- `run_agent` retries any `retryable` backend error with exponential backoff, **20 attempts**, all backends
+  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto, stalled stream,
+  non-transport logic error. A stall fires only on the *absence* of output, never on slow output.
 
 ### Config and per-phase model overrides
 
-`config.py` holds:
-- `DEFAULT_CLAUDE_MODEL`, `DEFAULT_CODEX_MODEL`, `DEFAULT_PI_MODEL` constants.
-- `PHASE_DEFAULT_MODELS[backend][phase]` Claude/Codex per-phase model tiering;
-  Pi resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
-- Skill mappings (`REVIEW_SKILLS`, `SKILL_MAP`).
+`config.py` holds `DEFAULT_{CLAUDE,CODEX,PI,EXPLORATION}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
+`PHASE_DEFAULT_EFFORT` (Codex only), budget constants, improve `EFFORT_TIERS`, and skill mappings. Pi
+resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
 
-Per-phase overrides are config-file-only (`[tool.daydream]` /
-`[tool.daydream.phases.<phase>]` in `pyproject.toml` or `.daydream.toml`). There are
-no per-phase CLI flags. Precedence (highest first): CLI `--model`/`--backend` >
-config-file phase override > config-file global > backend default. Resolved in
-`runner._resolve_backend()`. `[tool.daydream.phases.<phase>]` accepts any registered
-step's config key, including fork-defined phases (per-flow key tables in
-`docs/extensions.md`).
+**Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set
+`[tool.daydream.phases.<phase>]` in `pyproject.toml` or the top-level equivalent in `.daydream.toml`.
+Precedence: CLI `--model`/`--backend` > config-file phase > config-file global > backend default; resolved
+in `runner._resolve_backend()`. The phase table accepts any registered step's config key, including
+fork-defined phases (`docs/extensions.md`).
 
-Improve runtime controls are CLI-derived `RunConfig` fields:
-`improve_effort`, `improve_focus`, `improve_scope`, and
-`improve_plan_description`. They have no environment
-variable equivalents. Service discovery and the audit fan-out bounds are
-config-file-only:
-
-```toml
-[tool.daydream.improve]
-service_roots = ["apps/*", "web"]
-partition_max_files = 400   # per-partition file cap (default 400)
-max_partition_groups = 8    # audit groups per run (tier default: standard 8, deep unbounded)
-
-[tool.daydream.improve.service_groups]
-commerce = ["apps/billing", "apps/catalog"]
-```
-
-Use the equivalent top-level `[improve]` and `[improve.service_groups]` tables
-in `.daydream.toml`. Both bounds also accept their hyphenated spellings
-(`partition-max-files`, `max-partition-groups`); non-positive values are
-ignored. Audit fan-out is `partition-groups × categories`; when
-`max_partition_groups` binds, the largest groups are kept and every skipped
-partition is named in `.daydream/improve/coverage.json` and the report's
-"What was not audited" section.
+Improve runtime controls are CLI-derived `RunConfig` fields (`improve_effort`, `improve_focus`,
+`improve_scope`, `improve_plan_description`) with **no** env-var equivalents; service discovery and fan-out
+bounds are config-file-only (`[tool.daydream.improve]`, keys in README "Configuration"). Fan-out is
+`partition-groups × categories`; when `max_partition_groups` binds, the largest groups are kept and every
+skipped partition is named in `.daydream/improve/coverage.json` and the report's "What was not audited".
 
 ### Deep-review pipeline
 
@@ -282,120 +206,65 @@ exploration pre-scan (cached across runs)
     -> test validation
 ```
 
-Wonder and the per-stack fan-out are siblings in one task group on a fresh
-multi-stack run: wonder only feeds the merge agent and the dedup pre-filter, so
-the reviewers do not wait for it and their prompts drop the `alternatives.json`
-pointer. They join before parse consumes the artifact. Single-stack mode and
-every `--start-at` resume keep the serial order and the pointer — in single-stack
-mode there is no merge agent, so the reviewer pointer is the only path wonder
-findings take into the report. Because the step boundary moved, this is extension
-API v4 (see `docs/extensions.md`).
-
-The N per-stack parse calls run concurrently; results are consumed in stack-name
-order so merge input ordering and global issue numbering stay reproducible.
-
-The intent and wonder prompts inline the whole diff when it fits
-`INLINE_DIFF_BUDGET_BYTES` (the same 12 KiB bound the per-stack path uses), and
-fall back to the `diff.patch` pointer above it. The cross-stack merge resumes the
-arbiter's session when both phases resolve to the same backend instance; the
-resumed prompt adds one line forcing a re-read of the per-stack record files,
-which were rewritten on disk after arbitration.
-
-`.daydream/exploration/` survives the run and is reused by the next one on an
-**exact** key match (head SHA + diff + tier + depth, stored in a sibling
-`cache-key` file); a miss rewrites both. Near-matches never count — a stale hit
-would misground every review prompt. Uncommitted worktree edits are not in the
-key, so an exact-key hit on a dirty tree can serve pre-edit exploration. The
-`--shallow` and `--review` flows still delete the directory, so alternating flows
-degrades to a cache miss.
-
-`--start-at` refuses to resume onto stale artifacts: a fresh run records the diff
-it reviewed in `.daydream/deep/diff-key`, and a resume whose diff no longer
-matches (or a pre-upgrade directory with no key) exits 1 instead of adjudicating
-stale findings against changed code.
-
-Small diffs short-circuit the fan-out: the multi-stack pipeline is skipped and diff
-hunks are inlined directly into a single review prompt.
+- Wonder ∥ per-stack are siblings in one task group on a fresh multi-stack run (wonder feeds only merge and
+  the dedup pre-filter, so reviewer prompts drop the `alternatives.json` pointer; they join before parse).
+  Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
+  has no merge agent, so that pointer is the only path wonder findings take into the report. This boundary
+  is why the extension API is v4.
+- The N parse calls run concurrently but are consumed in **stack-name order**, keeping merge input ordering
+  and global issue numbering reproducible.
+- Intent and wonder prompts inline the diff under `INLINE_DIFF_BUDGET_BYTES` (12 KiB, shared with per-stack),
+  else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
+- Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
+  prompt forces a re-read of the per-stack record files, rewritten after arbitration.
+- `.daydream/exploration/` survives the run, reused only on an **exact** key match (head SHA + diff + tier +
+  depth, in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
+  are not in the key, so an exact hit on a dirty tree can serve pre-edit exploration. `--shallow`/`--review`
+  delete the directory, so alternating flows always misses.
+- `--start-at` refuses stale artifacts: a fresh run records its diff in `.daydream/deep/diff-key`; a resume
+  whose diff no longer matches (or has no key) exits 1 rather than adjudicating stale findings.
 
 ### Extension seam
 
-A fork customizes phases, skills, and prompts from a top-level `daydream_ext` package
-(discovered via `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`.
-The module exports `DAYDREAM_EXT_API` equal to `EXTENSION_API_VERSION` (currently 4;
-the v4 bump removed the `alternatives` step and raised the supported floor to 4);
-extensions can also register one `ToolDecision`-returning tool supervisor, and
-`daydream ext validate` resolve-checks the loaded registry. The versioned contract —
-name inventories, module shape, supervision seam, and bump policy — is
-`docs/extensions.md`.
+A fork customizes phases, flows, skills, and prompts from a top-level `daydream_ext` package (found via
+`$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`. It must export
+`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 4), may
+register one `ToolDecision`-returning tool supervisor, and is resolve-checked by `daydream ext validate`.
+Full contract: `docs/extensions.md`.
 
-## Constraints
+## Constraints and conventions
 
-- **SDK**: `claude-agent-sdk==0.2.116`. Must stay ≥ 0.2.111: earlier versions tear
-  down the CLI subprocess unshielded on the cancellation path, so a budget/fan-out
-  cancellation mid-stream corrupts anyio's cancel-scope stack ("Attempted to exit a
-  cancel scope that isn't the current tasks's current cancel scope"). Agent capabilities go through the `Backend` /
-  `AgentEvent` abstraction; Claude is one of three backends.
-- **ATIF**: Vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0). Pinned to
-  ATIF v1.7 emission. `pydantic>=2.11.7` required.
-- **No `harbor` runtime dep.** ATIF models live in `daydream/trajectory.py` only.
-- **Module-bloat ban**: No ATIF model construction inside `phases.py` or `ui/`.
-
-## Conventions
-
-- **`make check`** = `uv lock --check` + ruff over `daydream tests bench` +
-  `mypy daydream tests bench` + pytest. The pre-push hook
-  (`scripts/hooks/pre-push`) runs the same gate: lockcheck, lint, typecheck,
-  full pytest.
-- Ruff: 120 cols, rules `E F I W`, target py312.
-- **Conventional Commits** (`feat(backends): ...`, `fix(agent): ...`). Stage files
-  explicitly (`git add <path>`), never `git add -A`.
-- **Testing standard**: real-path tests through `runner.run`/CLI, mocking only the
-  backend seam. Assert observable outcomes, never "function was called."
+- **SDK** `claude-agent-sdk==0.2.116`, must stay ≥ 0.2.111: earlier versions tear down the CLI subprocess
+  unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
+- **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
+  Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
+  `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
+- Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
+- **`make check`** = `uv lock --check` + ruff/mypy over `daydream tests bench` + pytest;
+  `scripts/hooks/pre-push` runs the identical gate.
+- Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
+- **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
-
-## Dependencies
-
-| Package | Version | Role |
-|---------|---------|------|
-| `claude-agent-sdk` | 0.2.116 | Claude backend (in-process SDK) |
-| `anyio` | >=4.0 | Async runtime, parallel task groups |
-| `rich` | >=13.0 | Terminal UI |
-| `pyfiglet` | >=1.0 | ASCII art banners |
-| `pydantic` | >=2.11.7 | ATIF model validation |
-| `PyJWT` | >=2.0 | GitHub App token minting |
-| `python-dotenv` | >=1.0 | `.env` loading for `daydream bench` |
-| `jsonschema` | >=4.0 | JSON Schema validation |
-| `tree-sitter` | 0.25.2 | Static import resolution |
-| `tree-sitter-{python,typescript,go,rust}` | various | Language grammars |
 
 ## Environment variables
 
 | Variable | Scope | Purpose |
 |----------|-------|---------|
-| `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` | GitHub App identity | Bot posting under App identity |
-| `DAYDREAM_BOT_HANDLE` | GitHub Actions | Bot mention handle (without `@`) |
-| `DAYDREAM_AUTO_REVIEW` | GitHub Actions | Set `false` to disable auto-review on PR open |
-| `DAYDREAM_PRICES_FILE` | Cost pricing | Override path to `prices.toml` |
-| `DAYDREAM_ARCHIVE_DIR` | Archive | Override archive directory |
-| `DAYDREAM_SKILLS_DIR` | Pi backend | Override Beagle skill-directory resolution |
-| `DAYDREAM_EXT_DIR` | Extensions | Explicit path to the `daydream_ext` package (overrides `import daydream_ext`) |
-| `DAYDREAM_GH_TIMEOUT_SECONDS` | Git ops | Override `gh` CLI timeout |
-| `DAYDREAM_GH_TIMEOUT_RETRIES` | Git ops | Override `gh` timeout retry count |
-| `PI_PROVIDER` / `PI_THINKING` | Pi backend | Forwarded as `pi` CLI flags (`--provider` / `--thinking`; `PI_THINKING` loses to a resolved per-phase `reasoning_effort`) |
-| `PI_API_KEY` | Pi backend | Copied into the child process's provider-native credential env var (e.g. `ZAI_API_KEY`), never onto argv/CLI flags (security); ignored with a warning if the provider has no mapped native var |
-| `DAYDREAM_PI_RETRY_ATTEMPTS` / `DAYDREAM_PI_RETRY_BASE_DELAY_S` | Pi backend | Transient retry tuning |
-| `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex backends | Parallel `execute()` hint for orchestrator fan-outs (default `8`; non-integer or non-positive warns and falls back). Pi keeps its own `DAYDREAM_PI_FANOUT_CONCURRENCY` (default `10`). |
-| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex backends | Seconds of stdout silence before a stalled CLI subprocess is killed (default `2700`; `0` disables). Fires only on the absence of output — a slow but streaming CLI never trips it. A stall is not retryable: the idle window is a terminal bound on a subprocess invocation, so `run_agent` does not re-arm a fresh subprocess and a stalled stream cannot consume the retry budget. |
-| `CLAUDE_CONFIG_DIR` | Claude backend | Override `~/.claude` directory |
-| `MARTIAN_API_KEY` / `MARTIAN_BASE_URL` / `MARTIAN_MODEL` | Benchmark | Judge endpoint and model (`martian` route) |
-| `ANTHROPIC_API_KEY` | Benchmark | Direct Anthropic judge (`anthropic-direct` route) |
+| `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` | GitHub App | Bot identity (PEM **content**, not a path) |
+| `DAYDREAM_BOT_HANDLE` / `DAYDREAM_AUTO_REVIEW` | Actions | Mention handle (no `@`); `false` disables auto-review |
+| `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
+| `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
+| `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |
+| `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
+| `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
+| `DAYDREAM_FANOUT_CONCURRENCY` | Claude / Codex | Parallel `execute()` hint (default 8; bad value warns). Pi uses `DAYDREAM_PI_FANOUT_CONCURRENCY` (default 10) |
+| `DAYDREAM_STREAM_IDLE_TIMEOUT_S` | Pi / Codex | Stdout-silence kill (default 2700; `0` disables) |
+| `MARTIAN_API_KEY` / `_BASE_URL` / `_MODEL`, `ANTHROPIC_API_KEY` | Benchmark | Judge endpoint/model (`martian` / `anthropic-direct`) |
+
+Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `DAYDREAM_SKILLS_DIR` (Beagle skills,
+Pi), `PI_CODING_AGENT_DIR` (`~/.pi/agent`), `CLAUDE_CONFIG_DIR` (`~/.claude`).
 
 ## Platform requirements
 
-- Python 3.12.13+ (minimum per `pyproject.toml`), uv package manager
-- `git` and `gh` on `$PATH`
-- Beagle plugin installed in Claude Code (for `beagle-*:review-*` skills)
-- `codex` CLI on `$PATH` (only for `--backend codex`)
-- `pi` CLI on `$PATH` (only for `--backend pi`)
-- Pre-push hook at `scripts/hooks/pre-push`: lint + typecheck + full test suite
-- Console script entrypoint: `daydream = "daydream.cli:main"`
+Python ≥3.12.13 + uv; `git` and `gh` on `$PATH`; Beagle plugin installed in Claude Code (for
+`beagle-*:review-*` skills); `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.
