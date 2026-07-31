@@ -1155,7 +1155,18 @@ class TrajectoryRecorder:
         return self._step_id_counter
 
     def _extend_steps(self, steps: list[Step]) -> None:
+        """Merge a finished Invocation's steps back in ``step_id`` order.
+
+        ``step_id`` is allocated when a step opens but flushed here when its
+        Invocation closes, so append-order only equals id-order while at most
+        one Invocation is open. Concurrent siblings on one recorder (wonder
+        alongside the per-stack fan-out, whose ``create_dispatch_step`` appends
+        straight to ``self.steps``) break that: the run then dies at write time
+        on ATIF's "sequential from 1" check. Sorting on insert keeps the
+        documented ``steps: step_id 1..N`` invariant true by construction.
+        """
         self.steps.extend(steps)
+        self.steps.sort(key=lambda s: s.step_id)
 
     def _upgrade_model_name(self, candidate: str) -> None:
         """Promote *candidate* over a generic backend label.
@@ -1407,7 +1418,10 @@ class TrajectoryRecorder:
         been flushed back to ``self.steps`` (the flush happens in
         ``_InvocationCM.__aexit__`` via ``Invocation.finish``). For a partial
         flush we want those in-flight steps too; this helper concatenates
-        them in registration order without mutating either buffer.
+        them in ``step_id`` order without mutating either buffer — an active
+        invocation's unflushed steps can predate an already-flushed one (see
+        :meth:`_extend_steps`), and the partial file has to satisfy the same
+        sequential-ids check as the final write.
         """
         if not self._active_invocations:
             return list(self.steps)
@@ -1417,6 +1431,7 @@ class TrajectoryRecorder:
             snapshot.extend(inv.snapshot_steps(snapshot_step_id=next_id))
             if inv._open_step_dict is not None:
                 next_id += 1
+        snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
     def write_partial(self) -> None:

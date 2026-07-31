@@ -158,6 +158,11 @@ class StubBackend:
         self.runaway_parse: str | None = None
         # ``runaway_test``: the test-suite turn (a hung suite, never a result).
         self.runaway_test: bool = False
+        # When >0, the wonder turn emits this many ToolStartEvents and THEN its
+        # normal structured result -- a long but terminating turn, unlike the
+        # runaway knobs. Set above a tool-call ceiling to prove the ceiling does
+        # (or no longer does) truncate a legitimately exploratory pass.
+        self.alternatives_tool_calls: int = 0
         # When True, the alternatives branch raises instead of answering.
         self.fail_alternatives: bool = False
         # When set, the arbiter branch mints a ContinuationToken carrying this
@@ -225,6 +230,9 @@ class StubBackend:
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             if self.fail_alternatives:
                 raise RuntimeError("alternatives blew up")
+            for n in range(self.alternatives_tool_calls):
+                yield ToolStartEvent(id=f"alt-tc-{n}", name="Read", input={"file_path": "api.py"})
+                await anyio.sleep(0)
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={

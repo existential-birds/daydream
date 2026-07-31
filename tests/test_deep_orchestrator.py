@@ -4617,6 +4617,50 @@ async def test_parse_failure_propagates_original_exception_type(
 # --- Budget caps on the deep-review agents -----------------------------------
 
 
+async def test_root_trajectory_step_ids_survive_concurrent_wonder(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A wonder turn outliving the per-stack fan-out still writes a valid trajectory.
+
+    Wonder and the fan-out are siblings on ONE recorder: wonder's step ids are
+    allocated when its invocation opens but flushed when it closes, while the
+    fan-out's ``create_dispatch_step`` appends to the same list in between. A
+    handful of tool calls in the wonder turn makes wonder lose that race
+    deterministically — the count stays under any tool-call ceiling so this
+    holds independently of the default budget.
+
+    Discriminating: without the ``step_id``-ordered merge in ``_extend_steps``
+    the root list is [1, 2, 4, 3, ...], ATIF's "sequential from 1" check rejects
+    it, and the explicit-path write raises SystemExit(2) — the whole run dies at
+    the finish line with no trajectory on disk.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.alternatives_tool_calls = 5
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(60):
+        await run(
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+            )
+        )
+
+    payload = json.loads(traj.read_text())
+    ids = [s["step_id"] for s in payload["steps"]]
+    assert ids == list(range(1, len(ids) + 1)), ids
+    # The concurrent wonder turn is present in the root trajectory, not dropped.
+    phases = [(s.get("extra") or {}).get("daydream_phase") for s in payload["steps"]]
+    assert "alternatives" in phases, phases
+
+
 async def test_budget_truncated_wonder_fails_loudly(
     multi_stack_target: Path,
     tmp_path: Path,
