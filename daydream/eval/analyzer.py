@@ -198,8 +198,10 @@ def analyze_costs(trajectories: dict) -> dict:
     Run totals come from the root trajectory's ``final_metrics`` alone: the
     recorder folds each fork's totals into the parent at fork close, so the
     root is already whole-run truth and re-summing the sibling files would
-    double-count. ``by_agent`` rows still come from the individual files, so
-    the per-agent breakdown keeps its fork-level detail.
+    double-count. ``by_agent`` rows keep fork-level detail by listing each
+    fork separately, and the main-agent row is the root's folded totals *minus*
+    the fork totals (so the main row is main-agent-only and
+    ``sum(by_agent) == total`` rather than double-counting the forks).
 
     The recorder also stores only *non-cached* tokens in ``prompt_tokens``
     (despite the spec saying it should include cached).  We detect this when
@@ -207,16 +209,39 @@ def analyze_costs(trajectories: dict) -> dict:
     ``prompt + cached`` in that case.
     """
     agents: list[dict] = []
+    main_traj = trajectories.get("main")
+    # The root's final_metrics is fork-inclusive (each fork's totals fold into
+    # the parent at fork close), yet every fork is also its own row below.
+    # Subtract the folded fork totals from the main row so it reflects
+    # main-agent-only activity and sum(by_agent) == total.
+    forked = trajectories.get("forked") or []
+    fold_cost = sum((f.get("final_metrics") or {}).get("total_cost_usd") or 0.0 for f in forked)
+    fold_prompt = sum((f.get("final_metrics") or {}).get("total_prompt_tokens") or 0 for f in forked)
+    fold_completion = sum((f.get("final_metrics") or {}).get("total_completion_tokens") or 0 for f in forked)
+    fold_cached = sum((f.get("final_metrics") or {}).get("total_cached_tokens") or 0 for f in forked)
+    fold_steps = sum((f.get("final_metrics") or {}).get("total_steps") or 0 for f in forked)
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         fm = traj.get("final_metrics") or {}
+        if traj is main_traj:
+            cost_usd = (fm.get("total_cost_usd") or 0.0) - fold_cost
+            prompt_tokens = (fm.get("total_prompt_tokens") or 0) - fold_prompt
+            completion_tokens = (fm.get("total_completion_tokens") or 0) - fold_completion
+            cached_tokens = (fm.get("total_cached_tokens") or 0) - fold_cached
+            steps = (fm.get("total_steps") or len(traj.get("steps", []))) - fold_steps
+        else:
+            cost_usd = fm.get("total_cost_usd") or 0.0
+            prompt_tokens = fm.get("total_prompt_tokens") or 0
+            completion_tokens = fm.get("total_completion_tokens") or 0
+            cached_tokens = fm.get("total_cached_tokens") or 0
+            steps = fm.get("total_steps") or len(traj.get("steps", []))
         agents.append({
             "agent": label,
-            "cost_usd": fm.get("total_cost_usd") or 0.0,
-            "prompt_tokens": fm.get("total_prompt_tokens") or 0,
-            "completion_tokens": fm.get("total_completion_tokens") or 0,
-            "cached_tokens": fm.get("total_cached_tokens") or 0,
-            "steps": fm.get("total_steps") or len(traj.get("steps", [])),
+            "cost_usd": cost_usd,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "cached_tokens": cached_tokens,
+            "steps": steps,
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 

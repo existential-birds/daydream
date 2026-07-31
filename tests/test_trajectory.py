@@ -1366,7 +1366,10 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
     assert costs["total_prompt_tokens_raw"] == 140  # not 180
     assert costs["total_completion_tokens"] == 28
 
-    # by_agent rows stay per-file, so the fork keeps its own share.
+    # by_agent rows keep fork-level detail, and the main row is the root's
+    # folded totals minus the fork totals, so sum(by_agent) == total (no
+    # double-count of the fork).
     by_agent = {a["agent"]: a for a in costs["by_agent"]}
     assert len(by_agent) == 2
     assert any(a["cost_usd"] == pytest.approx(0.5) for a in costs["by_agent"])
+    assert sum(a["cost_usd"] for a in costs["by_agent"]) == pytest.approx(costs["total_cost_usd"])

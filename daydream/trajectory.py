@@ -486,8 +486,11 @@ class Invocation:
     # Set-once per invocation: did any MetricsEvent already carry tokens / cost?
     # A trailing CostEvent that re-states what MetricsEvents reported must not
     # accumulate again (codex re-states per turn, pi re-states the summed
-    # totals). Never reset — retry attempts share this Invocation and each
-    # attempt bills separately, so summing across attempts stays correct.
+    # totals). Each retry attempt mints a fresh Invocation (agent.py opens
+    # `recorder.invocation(...)` inside the attempt loop), so these flags start
+    # False per attempt and each attempt's MetricsEvent/CostEvent de-dupe
+    # independently while the recorder-level tally still sums every billed
+    # attempt.
     _tokens_from_metrics: bool = False
     _cost_from_metrics: bool = False
 
