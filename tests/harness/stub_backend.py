@@ -124,6 +124,10 @@ class StubBackend:
         # the tree before exhausting its turn budget, so a test can assert the
         # orchestrator reverts that partial edit and saves a recovery patch.
         self.fix_partial_then_maxturns: str | None = None
+        # Turns this stub's fix agent needs to finish. Models the CLI contract:
+        # a turn ceiling below this raises MaxTurnsError instead of applying the
+        # edit. Set above a former ceiling to prove the fix is no longer capped.
+        self.fix_turns_needed: int = 0
         # Repo-relative path of a stray untracked file the failing group creates
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
@@ -588,6 +592,10 @@ class StubBackend:
                 raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
+            if max_turns is not None and self.fix_turns_needed > max_turns:
+                raise MaxTurnsError(
+                    f"stub: fix for {fixed_name} needs {self.fix_turns_needed} turns, capped at {max_turns}"
+                )
             if self.deferred_write_pairs is not None:
                 for index, path in enumerate(self.deferred_write_pairs, start=1):
                     edit_target = Path(path) if Path(path).is_absolute() else cwd / path

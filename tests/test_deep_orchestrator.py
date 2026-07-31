@@ -548,6 +548,60 @@ async def test_parallel_fix_applies_all_disjoint_files(
         assert (multi_stack_target / f".fixed-{f.replace('.', '_')}").exists()
 
 
+async def test_long_fix_is_not_turn_capped(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path: a fix that needs many turns lands instead of dying on max_turns.
+
+    Root bug: every fix turn carried a hard 40-turn ceiling (80 for a 2-finding
+    batch), so a real fix on a large file came back as
+    ``MaxTurnsError: error_max_turns``, the group was recorded in
+    ``fix-failures.json``, and the tree protection reverted the work.
+
+    The stub models the CLI contract -- it raises ``MaxTurnsError`` when the
+    ceiling it is handed is below the turns the fix needs. Both group shapes are
+    exercised: ``api.py`` has ONE finding (the un-scaled single-fix path) and
+    ``App.tsx`` has TWO (the batched path, formerly scaled to 40 x count). At 200
+    turns needed, both ceilings would have tripped.
+
+    Fails if any turn ceiling comes back: the sentinels vanish, the manifest goes
+    ``partial`` with fix_failures, and the run exits 1.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_turns_needed = 200
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "App.tsx", "high"),
+        _merge_item(3, "App.tsx", "medium"),
+    ]
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop",
+            non_interactive=False, archive=True,
+        )
+    )
+
+    assert exit_code == 0
+    assert (multi_stack_target / ".fixed-api_py").exists()
+    assert (multi_stack_target / ".fixed-App_tsx").exists()
+
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert not manifest["fix_failures"]
+
+
 async def test_parallel_fix_same_file_no_race(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

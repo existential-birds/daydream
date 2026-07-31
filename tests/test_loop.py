@@ -314,16 +314,16 @@ async def test_loop_uses_incremental_diff_on_iteration_2(loop_target, mock_ui_lo
 
 
 @pytest.mark.asyncio
-async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, install_backend,
-                                                make_config):
-    """Real-path: the fix agent's backend.execute receives max_turns == FIX_MAX_TURNS (40).
+async def test_fix_phase_receives_no_turn_cap(loop_target, mock_ui_loop, install_backend,
+                                              make_config):
+    """Real-path: the fix agent's backend.execute receives max_turns None.
 
     Drives the production entrypoint (runner.run, shallow single pass) through a
     real temp git worktree and asserts the turn budget the backend ACTUALLY
-    receives on the fix dispatch — not that the literal exists in source.
+    receives on the fix dispatch — not that the literal exists in source. A
+    ceiling here is what produced ``MaxTurnsError: error_max_turns`` on real
+    fixes; wall-clock is the bound instead.
     """
-    from daydream.phases import FIX_MAX_TURNS
-
     captured_fix_turns: list[int | None] = []
 
     class TurnCapturingBackend(PhaseDispatchBackend):
@@ -343,5 +343,4 @@ async def test_fix_phase_receives_fix_max_turns(loop_target, mock_ui_loop, insta
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert captured_fix_turns == [FIX_MAX_TURNS]
-    assert FIX_MAX_TURNS == 40
+    assert captured_fix_turns == [None]

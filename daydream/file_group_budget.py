@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 class FileGroupBudget:
     """Aggregate guard over all fix ``run_agent`` calls for one file group (#201).
 
-    The per-invocation guards (``FIX_MAX_TURNS``, ``DEFAULT_WALL_BUDGET_S``)
-    bound each individual turn. This bounds their *sum* within a single file
+    The per-invocation guard (``DEFAULT_WALL_BUDGET_S``) bounds each individual
+    turn. This bounds their *sum* within a single file
     group so one file with many findings cannot silently dominate a
     review-fix-test run (root cause of the 62-min pi/GLM run in #186).
     Enforced between calls in ``phase_fix_parallel`` (Approach B —

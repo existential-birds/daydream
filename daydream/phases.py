@@ -75,12 +75,6 @@ _logger = logging.getLogger(__name__)
 
 TEST_OUTPUT_TAIL_LINES = 100
 
-# Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
-FIX_MAX_TURNS = 40
-
-
-# Verify re-reads the fixed files and runs checks; same generous bound as fix.
-VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
 
 
@@ -1676,7 +1670,6 @@ async def phase_verify_recommendations(
         work.repo,
         prompt,
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
-        max_turns=VERIFY_MAX_TURNS,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
@@ -1854,7 +1847,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
     await run_agent(
         backend, work.repo, prompt,
-        phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+        phase=DaydreamPhase.FIX,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         progress_callback=progress_cb,
@@ -1942,7 +1935,6 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
-    scaled_max_turns = FIX_MAX_TURNS * count
     scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
@@ -1958,7 +1950,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
-        phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
+        phase=DaydreamPhase.FIX,
         tool_call_budget=scaled_tool_budget,
         wall_budget_s=scaled_wall_budget,
         progress_callback=progress_cb,
@@ -2272,7 +2264,7 @@ async def phase_test_and_heal(
             concise_mode=_backend_concise_fix_prompts(backend),
         )
         await run_agent(
-            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )

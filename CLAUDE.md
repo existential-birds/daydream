@@ -197,6 +197,14 @@ exploratory phases mid-pass and failed the run. Wall-clock is the real bound on
 the time tail; `run_agent` still accepts an explicit `tool_call_budget` per call
 site.
 
+Turn ceilings are gone from the fix and verify phases for the same reason: a
+`max_turns` cap does not fail soft. The Claude CLI ends the turn with
+`error_max_turns`, the backend raises `MaxTurnsError`, and the fix group is
+recorded in `fix-failures.json` and reverted — a real fix on a large file is
+thrown away rather than trimmed. `run_agent` still accepts `max_turns` per call
+site (exploration specialists keep theirs; they degrade silently and are bounded
+by a 300s timeout).
+
 Budget truncation is never silently absorbed: a truncated wonder or parse raises
 (a partial pass would drop findings without a trace), and a truncated per-stack
 review is routed into `failed_stacks` so the merge prompt lists it under

@@ -80,16 +80,18 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
+async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
     tmp_path, monkeypatch, make_work, silence_console,
 ):
-    """Driving the heal loop to a fix attempt passes an absolute path + FIX_MAX_TURNS.
+    """Driving the heal loop to a fix attempt passes an absolute path and no turn cap.
 
     Root bug being guarded: the heal fix prompt listed repo-relative paths so the
     fix agent's first Read missed and it flailed globbing $HOME unbounded. The fix
-    maps listed files to absolute under the repo and caps the run at FIX_MAX_TURNS.
+    maps listed files to absolute under the repo. The turn count is deliberately
+    uncapped — wall-clock is the bound; a turn ceiling killed real fixes with
+    ``error_max_turns`` and lost the partial edit.
     """
-    from daydream.phases import FIX_MAX_TURNS, phase_test_and_heal
+    from daydream.phases import phase_test_and_heal
 
     silence_console("daydream.phases")
 
@@ -120,8 +122,8 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
     abs_path = str(tmp_path / "src" / "handler.py")
     assert abs_path in fix_prompt, "Fix prompt must list the absolute path so the first Read hits"
     assert "- src/handler.py" not in fix_prompt
-    # The FIX run_agent call (2nd execute) carries the turn budget; test runs do not.
-    assert backend.max_turns[1] == FIX_MAX_TURNS
+    # No turn ceiling on any call, including the FIX run_agent call (2nd execute).
+    assert backend.max_turns == [None, None, None]
 
 
 @pytest.mark.asyncio
@@ -351,9 +353,9 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_passes_turn_budget(tmp_path, make_work, silence_console):
-    """phase_fix caps a flailing agent with the FIX_MAX_TURNS turn budget."""
-    from daydream.phases import FIX_MAX_TURNS, phase_fix
+async def test_phase_fix_passes_no_turn_cap(tmp_path, make_work, silence_console):
+    """phase_fix sends no turn ceiling: a real fix is bounded by wall-clock only."""
+    from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
 
@@ -362,8 +364,7 @@ async def test_phase_fix_passes_turn_budget(tmp_path, make_work, silence_console
 
     await phase_fix(backend, make_work(tmp_path), item, 1, 1)
 
-    assert backend.max_turns == [FIX_MAX_TURNS]
-    assert FIX_MAX_TURNS == 40
+    assert backend.max_turns == [None]
 
 
 @pytest.mark.asyncio
