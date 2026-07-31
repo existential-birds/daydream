@@ -307,7 +307,7 @@ and plan repair — the phases whose output is executed
 later by a weaker agent with no context beyond the plan file, so every
 ambiguity left in a plan is paid for downstream.
 
-The improve flow runs with **no wall-clock or tool-call budget**. Its turns are
+The improve flow runs with **no wall-clock budget**. Its turns are
 long by design and a budget abort returns partial output that reads as
 complete.
 

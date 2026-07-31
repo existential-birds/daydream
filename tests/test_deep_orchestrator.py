@@ -4617,6 +4617,46 @@ async def test_parse_failure_propagates_original_exception_type(
 # --- Budget caps on the deep-review agents -----------------------------------
 
 
+async def test_tool_heavy_wonder_completes_under_default_budget(
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """The default tool-call budget is unlimited, so a tool-heavy wonder pass lands.
+
+    The wonder turn makes 60 tool calls -- above the old default ceiling of 50 --
+    and then answers normally. Discriminating: restore any finite default and this
+    turn is truncated, ``phase_alternatives`` raises "Alternative review hit its
+    budget", and neither the exit code nor the alternatives lens below survives.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.alternatives_tool_calls = 60
+    mute_side_effects()
+
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(60):
+        exit_code = await run(
+            make_config(
+                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
+            )
+        )
+
+    assert isinstance(exit_code, int)
+
+    # The wonder findings reached disk instead of dying with the truncated turn.
+    alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
+    assert [i["title"] for i in alts] == ["Inconsistent greeting wording"]
+
+    run_root = multi_stack_target / ".daydream"
+    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
+    assert not any("tool_call_budget" in str(v) for v in stop_reasons), stop_reasons
+
+
 async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     multi_stack_target: Path,
     tmp_path: Path,

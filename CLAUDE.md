@@ -183,14 +183,19 @@ and recorder are backend-agnostic.
 
 ### Run-agent budgets
 
-Every `run_agent()` call is bounded by wall-clock and tool-call limits, tiered by
-phase. Budget exhaustion emits a `TurnEndEvent` and marks the trajectory partial.
-The default wall budget is `DEFAULT_WALL_BUDGET_S` (1800s); the default tool-call
-budget varies by phase. Every deep-flow agent is capped — wonder, per-stack,
-parse, arbiter, merge, supervise, suppression, verify, fix, and the test run.
-The test run uses `TEST_WALL_BUDGET_S` (3600s) instead: it bounds the *target
-repo's* suite, not an LLM long tail, so a legitimately slow suite must not be
-truncated. Only the improve phases deliberately run with no wall budget.
+Every `run_agent()` call is bounded by a wall-clock budget. Budget exhaustion
+emits a `TurnEndEvent` and marks the trajectory partial. The default wall budget
+is `DEFAULT_WALL_BUDGET_S` (1800s). Every deep-flow agent is capped — wonder,
+per-stack, parse, arbiter, merge, supervise, suppression, verify, fix, and the
+test run. The test run uses `TEST_WALL_BUDGET_S` (3600s) instead: it bounds the
+*target repo's* suite, not an LLM long tail, so a legitimately slow suite must
+not be truncated. Only the improve phases deliberately run with no wall budget.
+
+`DEFAULT_TOOL_CALL_BUDGET` is `None` (unlimited): a tool-call count is a poor
+proxy for a runaway turn, and the former ceiling of 50 truncated legitimately
+exploratory phases mid-pass and failed the run. Wall-clock is the real bound on
+the time tail; `run_agent` still accepts an explicit `tool_call_budget` per call
+site.
 
 Budget truncation is never silently absorbed: a truncated wonder or parse raises
 (a partial pass would drop findings without a trace), and a truncated per-stack

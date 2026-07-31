@@ -1943,7 +1943,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
     scaled_max_turns = FIX_MAX_TURNS * count
-    scaled_tool_budget = DEFAULT_TOOL_CALL_BUDGET * count
+    scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
     progress_cb: Callable[[Text], Any] | None = None
