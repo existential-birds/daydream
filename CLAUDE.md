@@ -41,26 +41,10 @@ daydream --yes /path/to/project                    # auto-apply fixes without pr
 daydream --loop 3 /path/to/project                 # repeat review-fix-test up to 3 rounds
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # bot PR comments
 daydream --non-interactive /path/to/project        # unattended/harness run
-
-# Findings artifact (two-phase post)
-daydream --review --findings-out findings.json --pr-number 7 /path
-daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo
-
-daydream setup /path/to/repo --repo OWNER/REPO     # self-hosted bot: App + secrets + workflow PR
-daydream setup /path/to/repo --verify              # read-only install audit
-daydream summarize <path>                          # run-info markdown for a run dir or file
-daydream ext validate                              # resolve-check daydream_ext registry
-
-# Corpus pipeline
-daydream corpus harvest                            # annotate archived runs (reward + label)
-daydream corpus build --out out.jsonl              # project labeled runs to JSONL
-daydream corpus label <session_id> --outcome accepted
-
-# Benchmark
-daydream bench --benchmark-repo ../code-review-benchmark/offline --score
-daydream bench harvest --repo OWNER/REPO --bot "coderabbitai[bot]" --out ./cr-corpus
-daydream bench --harvest-dir ./cr-corpus --judge-route anthropic-direct  # martian route needs --benchmark-repo
 ```
+
+The rest of the surface — `post-findings`, `setup`, `summarize`, `ext validate`, `corpus *` — is in
+README "Additional Commands" / "Corpus Commands"; `daydream bench` is in `docs/benchmark.md`.
 
 ## Testing standard (mandatory)
 
@@ -126,24 +110,18 @@ cli.py -> runner.py -> flows/engine.py (run_flow over registered FlowSteps)
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
-| `config.py` | Skill mappings, per-phase model/effort defaults, budgets, improve effort tiers |
-| `config_file.py` | `[tool.daydream]` / `.daydream.toml` parser |
+| `config.py`, `config_file.py` | Skill mappings, per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
 | `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree |
 | `git_ops.py` | **Single point of contact for every `git`/`gh` shell-out** |
 | `exploration*.py`, `tree_sitter_index.py` | Pre-scan: tree-sitter import resolution, convention detection |
 | `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
 | `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
-| `pr_review.py`, `pr_comment_renderer.py` | Post inline PR comments; pure trajectory→markdown renderer |
-| `findings.py` | Strict-schema findings artifact (two-phase post) |
-| `pricing.py` | Cost synthesis when the backend reports none |
-| `github_app.py`, `bot_identity.py` | Token minting; `[bot]`-tolerant login comparator |
-| `bot_setup.py` | App registration, secret deposit, workflow PR |
-| `summarize.py` | Run-info markdown for a trajectory file or run dir |
-| `archive/` | Run archival, SQLite index, manifest |
-| `training/` | Corpus: harvest, reward, bitemporal projection, JSONL export |
-| `benchmark/` | `daydream bench` orchestrator, PR acquisition, scoring |
-| `eval/` | Deterministic trajectory analysis (cost, grounding, coverage) |
+| `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
+| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
+
+Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.py`, `github_app.py`,
+`bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
 
 ### Backend protocol
 
