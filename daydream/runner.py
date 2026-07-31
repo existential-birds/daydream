@@ -563,6 +563,29 @@ def _get_head_sha(cwd: Path) -> str | None:
         return None
 
 
+def _run_posts_to_github(config: RunConfig) -> bool:
+    """Return whether the flow selected by ``config`` can write to GitHub.
+
+    This mirrors :func:`_dispatch`'s precedence: feedback mode may reply to
+    PR comments; an explicit ``--flow deep`` and the default non-shallow loop
+    both execute deep's ``post-review`` step; and ``--comment`` posts inline
+    comments. ``--review``, shallow loops, and generic custom flows are
+    report-only from the runner's perspective, so they retain the ambient
+    ``gh`` identity. A custom flow that gains a GitHub write must explicitly
+    add its dispatch contract here before it can use App credentials.
+    """
+    if config.bot is not None:
+        return True
+
+    if config.flow_name is not None:
+        return config.flow_name == "deep"
+
+    if config.output_mode == "comment":
+        return True
+
+    return config.output_mode == "loop" and not config.shallow
+
+
 # Public entry points
 
 
@@ -651,11 +674,10 @@ async def run(config: RunConfig | None = None) -> int:
 
     # Resolve the active GitHub identity once onto config.identity. Under App
     # credentials this also mints + injects the installation token into every ``gh``
-    # subprocess; every hard-abort case surfaces as GitHubAppError.
-    # ``--flow review`` is equivalent to ``--review``: treat it as posting so the
-    # GitHub App token is minted and injected the same way.
+    # subprocess when the selected flow posts; every hard-abort case surfaces as
+    # GitHubAppError. Read-only flows deliberately preserve the ambient identity.
     _flow_is_review = config.flow_name == "review"
-    is_posting = config.bot is not None or config.output_mode in ("comment", "review") or _flow_is_review
+    is_posting = _run_posts_to_github(config)
     try:
         identity = github_app.resolve_run_identity(target_dir, config.pr_repo, is_posting=is_posting)
     except github_app.GitHubAppError as exc:

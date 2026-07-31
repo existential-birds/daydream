@@ -5,11 +5,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from daydream import runner
+from daydream import git_ops, runner
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
@@ -155,6 +156,113 @@ async def test_run_dispatches_to_expected_flow(
     assert work is patch_workspace
     observed = getattr(seen_config, expected_attr)
     assert observed == expected_value and type(observed) is type(expected_value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
+async def test_deep_run_mints_app_identity_before_posting_path(
+    flow_name: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: WorkContext,
+    silence_runner_ui: None,
+    tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+) -> None:
+    """Deep dispatches mint the App token before reaching their PR-posting path."""
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
+    events: list[str] = []
+
+    def fake_mint(*_args: object) -> SimpleNamespace:
+        events.append("mint")
+        return SimpleNamespace(
+            token="installation-token",
+            identity="daydream-review[bot]",
+            expires_at=4_102_444_800.0,
+        )
+
+    async def fake_post(*_args: object, **_kwargs: object) -> None:
+        events.append("post")
+
+    async def fake_deep(_work: WorkContext, config: RunConfig) -> int:
+        events.append("deep")
+        assert config.identity == "daydream-review[bot]"
+        assert git_ops.get_gh_token_env() == {"GH_TOKEN": "installation-token"}
+        from daydream.pr_review import post_review_to_pr_from_report
+
+        await post_review_to_pr_from_report(tmp_path, tmp_path / "report.md", console=runner.console)
+        return 0
+
+    monkeypatch.setattr("daydream.github_app._mint_installation_token", fake_mint)
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", fake_post)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_deep)
+
+    rc = await runner.run(make_config(tmp_path, flow_name=flow_name, pr_repo="acme/widgets"))
+
+    assert rc == 0
+    assert events == ["mint", "deep", "post"]
+
+
+@pytest.mark.asyncio
+async def test_review_run_does_not_mint_app_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    patch_workspace: WorkContext,
+    silence_runner_ui: None,
+    tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+) -> None:
+    """``--review`` remains report-only when App credentials are configured."""
+    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
+    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
+    monkeypatch.setattr("daydream.github_app.resolve_user_identity", lambda _target: "operator")
+
+    def mint_forbidden(*_args: object) -> SimpleNamespace:
+        pytest.fail("report-only --review must not mint an App installation token")
+
+    async def post_forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("report-only --review must not post a PR review")
+
+    async def fake_review(_work: WorkContext, config: RunConfig) -> int:
+        assert config.identity == "operator"
+        return 0
+
+    monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
+    monkeypatch.setattr("daydream.runner._run_review", fake_review)
+
+    rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
+
+    assert rc == 0
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (RunConfig(bot="review-bot"), True),
+        (RunConfig(output_mode="comment"), True),
+        (RunConfig(output_mode="loop"), True),
+        (RunConfig(flow_name="deep"), True),
+        (RunConfig(output_mode="review"), False),
+        (RunConfig(flow_name="review"), False),
+        (RunConfig(output_mode="loop", shallow=True), False),
+        (RunConfig(flow_name="shallow"), False),
+        (RunConfig(flow_name="custom-audit"), False),
+    ],
+    ids=[
+        "pr_feedback",
+        "comment",
+        "default_deep",
+        "explicit_deep",
+        "review",
+        "explicit_review",
+        "shallow_loop",
+        "explicit_shallow",
+        "custom_flow",
+    ],
+)
+def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool) -> None:
+    """The identity classifier follows the runner's known write-capable paths."""
+    assert runner._run_posts_to_github(config) is expected
 
 
 @pytest.mark.asyncio
