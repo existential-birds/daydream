@@ -10,7 +10,8 @@ import pytest
 from tests.harness.stub_backend import install_stub_backend, silence
 
 
-def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
+def _test_step_stop_reasons(run_root: Path, traj: Path) -> list[str]:
+    """stop_reason values on TEST-phase trajectory steps (empty list if none)."""
     values: list[str] = []
     for path in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
         try:
@@ -20,9 +21,11 @@ def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
         if not isinstance(payload, dict):
             continue
         for step in payload.get("steps", []):
-            value = (step.get("extra") or {}).get(key)
-            if value:
-                values.append(value)
+            extra = step.get("extra") or {}
+            if extra.get("daydream_phase") == "test":
+                reason = extra.get("stop_reason")
+                if reason:
+                    values.append(str(reason))
     return values
 
 
@@ -67,7 +70,7 @@ async def test_runaway_test_turn_is_bounded_and_reaches_abort(
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
         exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
-    assert isinstance(exit_code, int)
+    assert exit_code != 0
     assert [c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()]
-    assert any("budget" in str(v)
-               for v in _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason"))
+    test_stop_reasons = _test_step_stop_reasons(multi_stack_target / ".daydream", traj)
+    assert any("budget" in r for r in test_stop_reasons), test_stop_reasons
