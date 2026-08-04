@@ -662,9 +662,22 @@ def _protect_tree_after_fix_failures(
                     pass
 
 
+def _has_non_daydream_worktree_changes(status: str) -> bool:
+    """Whether porcelain output names a path outside Daydream-owned artifacts."""
+    for line in status.splitlines():
+        paths = line[3:].split(" -> ")
+        if not all(
+            path == ".daydream"
+            or path.startswith(".daydream/")
+            or path == REVIEW_OUTPUT_FILE
+            for path in paths
+        ):
+            return True
+    return False
+
+
 async def _step_exploration(ctx: FlowContext) -> None:
-    """Exploration pre-scan (D-43), reused only for clean trees on a key match."""
-    from daydream import git_ops
+    """Exploration pre-scan (D-43), reused on an exact key match."""
     from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
     from daydream.runner import _compute_diff_ref
 
@@ -688,14 +701,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
         cache_key = exploration_cache_key(
             ctx.work.head_sha or "", diff, tier, config.exploration_depth
         )
-        try:
-            status = git_ops.status_porcelain(target_dir)
-            clean_worktree = not status.strip()
-        except git_ops.GitError:
-            clean_worktree = False
         if (
-            clean_worktree
-            and exploration_path.is_dir()
+            exploration_path.is_dir()
             and read_cache_key(exploration_path) == cache_key
         ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
@@ -729,7 +736,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
-            if clean_worktree:
+            if config.exploration_context.completed:
                 cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
             ctx.data["exploration_dir"] = exploration_dir
             return
@@ -1657,6 +1664,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     if config.start_at not in ("per-stack", "merge", "fix"):
         # Fresh run only: a resume must NOT rewrite the key it is checked
         # against, or the staleness gate would self-heal and pass every time.
+        shutil.rmtree(dd, ignore_errors=True)
         dd.mkdir(parents=True, exist_ok=True)
         diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
@@ -1675,6 +1683,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
                 check_deep_artifacts(config.start_at, dd, current_diff_sha=current_diff_sha)
+                if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
+                    raise FileNotFoundError(
+                        f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
+                        "since the review artifacts were generated.\n\n"
+                        "Resuming would review stale findings against changed code.\n"
+                        "Re-run without --start-at to regenerate them."
+                    )
             except FileNotFoundError as exc:
                 print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
@@ -1734,8 +1749,8 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         )
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a
-        # content-keyed cache (see ``exploration_cache_key``) the next clean-tree
-        # run reuses on an exact head+diff+tier+depth match and rewrites on a miss, and
+        # content-keyed cache (see ``exploration_cache_key``) the next run reuses
+        # on an exact head+diff+tier+depth match and rewrites on a miss, and
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.
         return await run_flow(ctx.registry, "deep", ctx)

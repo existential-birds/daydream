@@ -1,0 +1,73 @@
+"""Deep non-wonder budget/truncation integration tests."""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import anyio
+import pytest
+
+from tests.harness.stub_backend import install_stub_backend, silence
+
+
+def _scan_trajectory_extra(run_root: Path, traj: Path, key: str) -> list[str]:
+    values: list[str] = []
+    for path in list(run_root.rglob("*.json")) + ([traj] if traj.exists() else []):
+        try:
+            payload = json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for step in payload.get("steps", []):
+            value = (step.get("extra") or {}).get(key)
+            if value:
+                values.append(value)
+    return values
+
+
+async def test_budget_truncated_stack_lands_in_failed_stacks(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config, mute_side_effects,
+) -> None:
+    """A truncated per-stack review is recorded as a failure, not a success."""
+    from daydream.runner import run
+
+    silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_stack = "python"
+    mute_side_effects()
+    with anyio.fail_after(30):
+        await run(
+            make_config(
+                multi_stack_target,
+                trajectory_path=tmp_path / "trajectory.json",
+                assume="yes",
+                output_mode="loop",
+            )
+        )
+    failures = json.loads((multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json").read_text())
+    assert "python" in failures, failures
+    assert "budget" in failures["python"].lower()
+
+
+async def test_runaway_test_turn_is_bounded_and_reaches_abort(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config, mute_side_effects,
+) -> None:
+    """A hung test turn is capped, so the run reaches the heal/abort path."""
+    from daydream.runner import run
+
+    silence(monkeypatch)
+    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.runaway_test = True
+    mute_side_effects(heal=False)
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+    assert isinstance(exit_code, int)
+    assert [c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()]
+    assert any("budget" in str(v)
+               for v in _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason"))

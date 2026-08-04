@@ -199,13 +199,12 @@ def analyze_costs(trajectories: dict) -> dict:
     recorder folds each fork's totals into the parent at fork close, so the
     root is already whole-run truth and re-summing the sibling files would
     double-count. ``by_agent`` rows keep fork-level detail by listing each
-    fork separately, with every row excluding its direct children. This makes
-    the main row main-agent-only and keeps ``sum(by_agent) == total`` without
-    double-counting nested forks.
+    fork separately, with cost and token rows excluding their direct children.
+    Step counts remain document-local.
 
-    The recorder stores only *non-cached* tokens in ``prompt_tokens``
-    (despite the spec saying it should include cached), so
-    ``total_input_tokens`` is always ``prompt + cached``.
+    ``cached_tokens`` is a subset of ``prompt_tokens``, so
+    ``total_input_tokens`` is the prompt-token total without adding the cache
+    hit subset again.
     """
     agents: list[dict] = []
     forked = trajectories.get("forked") or []
@@ -225,24 +224,23 @@ def analyze_costs(trajectories: dict) -> dict:
         fold_prompt = sum((f.get("final_metrics") or {}).get("total_prompt_tokens") or 0 for f in direct_forks)
         fold_completion = sum((f.get("final_metrics") or {}).get("total_completion_tokens") or 0 for f in direct_forks)
         fold_cached = sum((f.get("final_metrics") or {}).get("total_cached_tokens") or 0 for f in direct_forks)
-        fold_steps = sum(
-            (f.get("final_metrics") or {}).get("total_steps") or len(f.get("steps", []))
-            for f in direct_forks
-        )
         agents.append({
             "agent": label,
             "cost_usd": (fm.get("total_cost_usd") or 0.0) - fold_cost,
             "prompt_tokens": (fm.get("total_prompt_tokens") or 0) - fold_prompt,
             "completion_tokens": (fm.get("total_completion_tokens") or 0) - fold_completion,
             "cached_tokens": (fm.get("total_cached_tokens") or 0) - fold_cached,
-            "steps": (fm.get("total_steps") or len(traj.get("steps", []))) - fold_steps,
+            "steps": fm.get("total_steps") or len(traj.get("steps", [])),
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 
-    # Root-only totals — the root's final_metrics is fork-inclusive. Fall back
-    # to summing the rows when there is no root file (fork-only inputs).
+    # Marked roots have fork-inclusive final_metrics. Older trajectories lack
+    # the marker and retain their legacy per-file aggregation.
     root = trajectories.get("main")
-    if root:
+    root_metrics_include_forks = (
+        ((root or {}).get("final_metrics") or {}).get("extra") or {}
+    ).get("daydream_metric_scope") == "whole_run_including_forks"
+    if root and root_metrics_include_forks:
         root_fm = root.get("final_metrics") or {}
         total_cost = root_fm.get("total_cost_usd") or 0.0
         total_prompt = root_fm.get("total_prompt_tokens") or 0
@@ -254,7 +252,7 @@ def analyze_costs(trajectories: dict) -> dict:
         total_completion = sum(a["completion_tokens"] for a in agents)
         total_cached = sum(a["cached_tokens"] for a in agents)
 
-    total_input = total_prompt + total_cached
+    total_input = total_prompt
     cache_hit_rate = total_cached / total_input if total_input > 0 else 0.0
 
     return {

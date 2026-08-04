@@ -842,6 +842,36 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_phase_understand_intent_rejects_budget_truncated_summary(
+    tmp_path, monkeypatch, make_work, silence_console,
+):
+    """A partial intent response is never returned for downstream persistence."""
+    from daydream.phases import phase_understand_intent
+
+    silence_console("daydream.phases")
+
+    async def _truncated_run_agent(*args, **kwargs):
+        return "partial intent", None, "wall_budget_exceeded"
+
+    monkeypatch.setattr("daydream.phases.run_agent", _truncated_run_agent)
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user",
+        lambda *args, **kwargs: pytest.fail("a truncated response must not reach confirmation"),
+    )
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git a/login.py ...")
+
+    with pytest.raises(RuntimeError, match="Intent analysis hit its budget: wall_budget_exceeded"):
+        await phase_understand_intent(
+            ScriptedBackend(), make_work(tmp_path),
+            diff_path=diff_file,
+            log="abc1234 add login page",
+            branch="feat/login",
+        )
+
+
+@pytest.mark.asyncio
 async def test_phase_understand_intent_correction_then_confirm(
     tmp_path, monkeypatch, make_work, silence_console,
 ):

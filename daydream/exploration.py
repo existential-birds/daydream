@@ -74,6 +74,7 @@ class ExplorationContext:
         dependencies: Dependency relationships between files.
         guidelines: Project guideline snippets (from CLAUDE.md etc).
         raw_notes: Unstructured exploration notes.
+        completed: Whether exploration ran to completion rather than degrading.
     """
 
     affected_files: list[FileInfo] = field(default_factory=list)
@@ -81,6 +82,7 @@ class ExplorationContext:
     dependencies: list[Dependency] = field(default_factory=list)
     guidelines: list[str] = field(default_factory=list)
     raw_notes: str = ""
+    completed: bool = True
 
     def to_prompt_section(self) -> str:
         """Render exploration context as text for prompt injection.
@@ -216,7 +218,7 @@ async def safe_explore(
 ) -> ExplorationContext:
     """Run exploration with graceful degradation.
 
-    Catches any exception from explore_fn and returns an empty
+    Catches any exception from explore_fn and returns an incomplete empty
     ExplorationContext instead. Displays a warning banner via Rich UI.
     """
     try:
@@ -226,7 +228,7 @@ async def safe_explore(
 
         console = create_console()
         print_warning(console, "Exploration failed -- proceeding with review only")
-        return ExplorationContext()
+        return ExplorationContext(completed=False)
 
 
 def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:

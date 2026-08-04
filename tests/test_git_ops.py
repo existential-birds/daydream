@@ -332,6 +332,20 @@ def test_diff_returns_changes(tmp_path: Path) -> None:
     assert "+hello" in out
 
 
+def test_diff_includes_staged_and_unstaged_worktree_changes(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    (repo / "staged.txt").write_text("staged\n")
+    _git(repo, "add", "staged.txt")
+    (repo / "base.txt").write_text("unstaged\n")
+
+    out = git_ops.diff(repo, "main")
+
+    assert "staged.txt" in out
+    assert "-base" in out
+    assert "+unstaged" in out
+
+
 def test_diff_excludes_paths(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     _git(repo, "checkout", "-b", "topic")

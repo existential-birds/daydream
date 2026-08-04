@@ -156,11 +156,11 @@ def _prime_merge_resume(
     """
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
+    # Mirror a fresh run: the key marks the beginning of artifact production, so
+    # every primed prerequisite must be newer than it.
+    _write_matching_diff_key(target, deep)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
-    # Freshness key: these artifacts stand in for a prior run over the SAME diff,
-    # so the resume gate must see a matching key (a missing one refuses).
-    _write_matching_diff_key(target, deep)
     for stack, records in (
         ("python", python),
         ("react", react),
@@ -4522,411 +4522,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     )
 
 
-# --- Parse fan-out runs concurrently (D-21 parallel) -------------------------
-
-
-def _parse_stack_name(prompt: str) -> str:
-    """Stack name a parse prompt points at, via its ``stack-<name>-review.md``."""
-    m = re.search(r"stack-(\S+?)-review\.md", prompt)
-    return m.group(1) if m else ""
-
-
-# Parse tasks are started in sorted(stack_name) order: generic, python, react,
-# structure. The rendezvous makes the FIRST of those wait on the LAST, so the
-# serial loop deadlocks (structure never starts) while concurrent execution
-# completes.
-_FIRST_PARSE_STACK = "generic"
-_LAST_PARSE_STACK = "structure"
-
-
-class _RendezvousParseStub(StubBackend):
-    """Parse for the first stack blocks until the last stack's parse starts.
-
-    Only a concurrent implementation completes: the serial loop reaches
-    ``generic`` first and would wait forever for ``structure``, which it has
-    not started yet.
-    """
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target)
-        self.other_parse_started = anyio.Event()
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        if "extract only actionable issues" in prompt.lower():
-            name = _parse_stack_name(prompt)
-            if name == _LAST_PARSE_STACK:
-                self.other_parse_started.set()
-            elif name == _FIRST_PARSE_STACK:
-                await self.other_parse_started.wait()
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-async def test_parse_runs_concurrently(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The N per-stack parse calls overlap; every stack's records land on disk."""
-    stub = _RendezvousParseStub(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-
-    with anyio.fail_after(15):
-        exit_code = await _run_deep(multi_stack_target)
-
-    assert exit_code == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    assert sorted(p.name for p in deep.glob("stack-*-records.json")) == [
-        "stack-generic-records.json",
-        "stack-python-records.json",
-        "stack-react-records.json",
-        "stack-structure-records.json",
-    ]
-
-    # The first-started stack could only finish after the last one had begun.
-    parse_order = [
-        _parse_stack_name(c["prompt"])
-        for c in stub.calls
-        if "extract only actionable issues" in c["prompt"].lower()
-    ]
-    assert parse_order.index(_LAST_PARSE_STACK) < parse_order.index(
-        _FIRST_PARSE_STACK
-    ), parse_order
-
-
-class _FailingParseStub(StubBackend):
-    """Raises a distinctive error for one stack's parse; siblings succeed."""
-
-    def __init__(self, target: Path, failing_stack: str) -> None:
-        super().__init__(target)
-        self._failing_stack = failing_stack
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        if (
-            "extract only actionable issues" in prompt.lower()
-            and _parse_stack_name(prompt) == self._failing_stack
-        ):
-            raise ZeroDivisionError("parse blew up")
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-async def test_parse_failure_propagates_original_exception_type(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    """One stack's parse failure fails the run with its own exception type.
-
-    Not an ExceptionGroup — the task group's captured failure is re-raised
-    directly, matching the serial loop's semantics.
-    """
-    stub = _FailingParseStub(multi_stack_target, failing_stack="python")
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-
-    from daydream.runner import run
-
-    trajectory_path = tmp_path / "trajectory.json"
-    with pytest.raises(ZeroDivisionError, match="parse blew up"):
-        await run(make_config(multi_stack_target, trajectory_path=trajectory_path))
-
-    # Siblings that finished before the failure surfaced kept their records.
-    deep = multi_stack_target / ".daydream" / "deep"
-    survivors = sorted(p.name for p in deep.glob("stack-*-records.json"))
-    assert "stack-python-records.json" not in survivors
-    assert survivors, "sibling parse results must survive one stack's failure"
-
-    trajectory = json.loads(trajectory_path.read_text())
-    parse_dispatches = [
-        step
-        for step in trajectory["steps"]
-        if step.get("extra", {}).get("daydream_phase") == "parse"
-        and step["message"].startswith("Dispatching ")
-    ]
-    assert len(parse_dispatches) == 1
-    dispatch_results = parse_dispatches[0]["observation"]["results"]
-    linked_stacks = {
-        result["content"].removeprefix("Dispatched to parse-")
-        for result in dispatch_results
-    }
-    successful_stacks = {
-        path.removeprefix("stack-").removesuffix("-records.json")
-        for path in survivors
-    }
-    assert successful_stacks <= linked_stacks
-    for result in dispatch_results:
-        reference = result["subagent_trajectory_ref"][0]
-        assert (multi_stack_target / ".daydream" / reference["trajectory_path"]).is_file()
-
-
-# --- Budget caps on the deep-review agents -----------------------------------
-
-
-async def test_tool_heavy_wonder_completes_under_default_budget(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """The default tool-call budget is unlimited, so a tool-heavy wonder pass lands.
-
-    The wonder turn makes 60 tool calls -- above the old default ceiling of 50 --
-    and then answers normally. Discriminating: restore any finite default and this
-    turn is truncated, ``phase_alternatives`` raises "Alternative review hit its
-    budget", and neither the exit code nor the alternatives lens below survives.
-    """
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.alternatives_tool_calls = 60
-    mute_side_effects()
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(60):
-        exit_code = await run(
-            make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-            )
-        )
-
-    assert isinstance(exit_code, int)
-
-    # The wonder findings reached disk instead of dying with the truncated turn.
-    alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
-    assert [i["title"] for i in alts] == ["Inconsistent greeting wording"]
-
-    run_root = multi_stack_target / ".daydream"
-    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
-    assert not any("tool_call_budget" in str(v) for v in stop_reasons), stop_reasons
-
-
-async def test_root_trajectory_step_ids_survive_concurrent_wonder(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """A wonder turn outliving the per-stack fan-out still writes a valid trajectory.
-
-    Wonder and the fan-out are siblings on ONE recorder: wonder's step ids are
-    allocated when its invocation opens but flushed when it closes, while the
-    fan-out's ``create_dispatch_step`` appends to the same list in between. A
-    handful of tool calls in the wonder turn makes wonder lose that race
-    deterministically — the count stays under any tool-call ceiling so this
-    holds independently of the default budget.
-
-    Discriminating: without the ``step_id``-ordered merge in ``_extend_steps``
-    the root list is [1, 2, 4, 3, ...], ATIF's "sequential from 1" check rejects
-    it, and the explicit-path write raises SystemExit(2) — the whole run dies at
-    the finish line with no trajectory on disk.
-    """
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.alternatives_tool_calls = 5
-    mute_side_effects()
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(60):
-        await run(
-            make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-            )
-        )
-
-    payload = json.loads(traj.read_text())
-    ids = [s["step_id"] for s in payload["steps"]]
-    assert ids == list(range(1, len(ids) + 1)), ids
-    # The concurrent wonder turn is present in the root trajectory, not dropped.
-    phases = [(s.get("extra") or {}).get("daydream_phase") for s in payload["steps"]]
-    assert "alternatives" in phases, phases
-
-
-async def test_budget_truncated_wonder_fails_loudly(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """A budget-truncated wonder pass fails the run instead of degrading to [].
-
-    Discriminating: uncapped, the wonder turn's unbounded burst never ends, so
-    ``fail_after`` trips; with the cap but the old degrade path the run would
-    exit 0 carrying an empty alternatives lens.
-    """
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.runaway_alternatives = True
-    mute_side_effects()
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        with pytest.raises(RuntimeError, match="budget"):
-            await run(
-                make_config(
-                    multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-                )
-            )
-
-    run_root = multi_stack_target / ".daydream"
-    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
-    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
-    # The run died instead of writing an empty alternatives lens.
-    alts = multi_stack_target / ".daydream" / "deep" / "alternatives.json"
-    assert not alts.exists() or json.loads(alts.read_text()) != []
-
-
-async def test_budget_truncated_stack_lands_in_failed_stacks(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """A truncated per-stack review is recorded as a failure, not a success."""
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.runaway_stack = "python"
-    mute_side_effects()
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        await run(
-            make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-            )
-        )
-
-    failures_path = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
-    failures = json.loads(failures_path.read_text())
-    assert "python" in failures, failures
-    assert "budget" in failures["python"].lower()
-
-
-async def test_budget_truncated_parse_fails_loudly(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """A budget-truncated parse fails the run instead of dropping a stack's findings."""
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.runaway_parse = "python"
-    mute_side_effects()
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        with pytest.raises(RuntimeError, match="budget"):
-            await run(
-                make_config(
-                    multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-                )
-            )
-
-    run_root = multi_stack_target / ".daydream"
-    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
-    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
-    # The truncated stack wrote no records file — the run refused to proceed
-    # with a silently-empty bucket.
-    assert not (run_root / "deep" / "stack-python-records.json").exists()
-
-
-async def test_runaway_test_turn_is_bounded_and_reaches_abort(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """A hung test turn is capped, so the run reaches the heal/abort path.
-
-    Discriminating: uncapped, the test-suite stream never completes and ``run``
-    never returns — ``fail_after`` turns that regression into a failure rather
-    than an infinite hang.
-    """
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.runaway_test = True
-    # heal=False keeps phase_test_and_heal REAL so the runaway turn is actually
-    # dispatched through run_agent's budget guard.
-    mute_side_effects(heal=False)
-
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(
-            make_config(
-                multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"
-            )
-        )
-
-    # Truncation flows into detect_test_success() False -> heal/abort; the run
-    # terminates with an int exit code instead of hanging.
-    assert isinstance(exit_code, int)
-    test_turns = [
-        c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()
-    ]
-    assert test_turns, "the test phase never ran"
-    run_root = multi_stack_target / ".daydream"
-    stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
-    assert any("budget" in str(v) for v in stop_reasons), stop_reasons
-
-
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4978,97 +4573,6 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     assert "diff.patch" in wonder_prompt
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
         assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
-
-
-# --- Merge resumes the arbiter's session -------------------------------------
-
-
-def _merge_call(stub: StubBackend) -> dict[str, Any]:
-    return next(c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower())
-
-
-async def test_merge_resumes_arbiter_session(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The merge call resumes the arbiter's session and warns about stale records."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"  # drives arbiter selection
-    stub.arbiter_session_id = "arb-sess"
-
-    assert await _run_deep(multi_stack_target) == 0
-
-    merge_call = _merge_call(stub)
-    assert merge_call["continuation"] is not None
-    assert merge_call["continuation"].data["session_id"] == "arb-sess"
-    # The resumed context holds pre-adjudication records, so the prompt must
-    # force a re-read from disk.
-    assert "re-read" in merge_call["prompt"].lower()
-
-
-async def test_merge_cold_when_arbiter_mints_no_token(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No arbiter token -> merge runs cold with today's prompt, no addendum."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.arbiter_session_id = None  # backend mints nothing (e.g. persist_session off)
-
-    assert await _run_deep(multi_stack_target) == 0
-
-    merge_call = _merge_call(stub)
-    assert merge_call["continuation"] is None
-    assert "re-read" not in merge_call["prompt"].lower()
-
-
-async def test_merge_cold_when_arbiter_skipped_on_resume(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """--start-at merge past a completed adjudication runs merge cold."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.arbiter_session_id = "arb-sess"
-
-    # High-severity records WOULD qualify for arbitration, so the marker is the
-    # only thing keeping the arbiter from running.
-    high = _record(description="py issue", severity="high")
-    deep = _prime_merge_resume(
-        multi_stack_target,
-        python=[high],
-        react=[_record(description="tsx issue", severity="high")],
-        generic=[_record(description="md issue", severity="high")],
-        structure=[],
-    )
-    (deep / "arbiter-complete.marker").write_text("done")
-
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
-
-    arbiter_calls = [c for c in stub.calls if "you are the arbiter" in c["prompt"].lower()]
-    assert arbiter_calls == []
-    merge_call = _merge_call(stub)
-    assert merge_call["continuation"] is None
-    assert "re-read" not in merge_call["prompt"].lower()
-
-
-def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
-    """resumed_from_arbiter=False reproduces today's prompt exactly."""
-    from daydream.deep.prompts import build_merge_prompt
-
-    kwargs: dict[str, Any] = dict(
-        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        dedup_candidates_path=tmp_path / "dedup.json",
-        output_path=tmp_path / "out.md",
-    )
-    omitted = build_merge_prompt(**kwargs)
-    explicit_false = build_merge_prompt(**kwargs, resumed_from_arbiter=False)
-    resumed = build_merge_prompt(**kwargs, resumed_from_arbiter=True)
-
-    assert omitted == explicit_false
-    assert resumed != omitted
-    assert resumed.startswith(omitted)  # purely additive addendum
 
 
 # --- Task 12b: each TTT step writes its own artifact -------------------------
@@ -5123,129 +4627,6 @@ async def test_skip_tier_writes_empty_alternatives(
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-# --- Task 12c: wonder runs concurrently with the per-stack fan-out -----------
-
-
-class _WonderRendezvousStub(StubBackend):
-    """The wonder turn blocks until a per-stack review has started.
-
-    Serial code deadlocks (wonder runs strictly before the fan-out); concurrent
-    code completes.
-    """
-
-    def __init__(self, target: Path) -> None:
-        super().__init__(target)
-        self.per_stack_started = anyio.Event()
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ):
-        pl = prompt.lower()
-        if "you are reviewing the" in pl:
-            self.per_stack_started.set()
-        elif "would you have done this differently" in pl or "evaluate the implementation" in pl:
-            await self.per_stack_started.wait()
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
-def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
-    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
-
-
-async def test_wonder_runs_concurrently_with_per_stack(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Wonder and the fan-out overlap; alternatives.json lands before parse reads it."""
-    _silence(monkeypatch)
-    _install_raw(monkeypatch, _WonderRendezvousStub(multi_stack_target))
-
-    with anyio.fail_after(15):
-        assert await _run_deep(multi_stack_target) == 0
-
-    alts = json.loads(
-        (multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text()
-    )
-    assert alts, "wonder's artifact must be written before parse consumes it"
-
-
-async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Multi-stack: reviewers drop the pointer; adjudication prompts keep it."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"  # ensure the arbiter runs
-
-    assert await _run_deep(multi_stack_target) == 0
-
-    per_stack = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
-    assert per_stack
-    for prompt in per_stack:
-        assert "alternatives.json" not in prompt
-        assert "intent.md" in prompt  # only the alternatives paragraph is dropped
-
-    for phrase in ("you are the arbiter", "cross-stack merge agent"):
-        matching = [c["prompt"] for c in stub.calls if phrase in c["prompt"].lower()]
-        assert matching, phrase
-        assert all("alternatives.json" in p for p in matching), phrase
-
-
-async def test_single_stack_keeps_serial_order_and_pointer(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Single-stack mode has no merge agent, so the reviewer pointer must survive."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-
-    assert await _run_deep(tiny_diff_target) == 0
-
-    order = [c["prompt"].lower() for c in stub.calls]
-    wonder_idx = next(
-        i for i, p in enumerate(order)
-        if "would you have done this differently" in p or "evaluate the implementation" in p
-    )
-    per_stack_idx = next(i for i, p in enumerate(order) if "you are reviewing the" in p)
-    assert wonder_idx < per_stack_idx, "single-stack mode must stay serial"
-
-    per_stack = [c["prompt"] for c in stub.calls if "you are reviewing the" in c["prompt"].lower()]
-    assert per_stack
-    assert all("alternatives.json" in p for p in per_stack)
-
-
-async def test_wonder_failure_fails_run_with_fanout_outputs_on_disk(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A held wonder exception is re-raised after the join, original type intact."""
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.fail_alternatives = True
-
-    with pytest.raises(RuntimeError, match="alternatives blew up"):
-        await _run_deep(multi_stack_target)
-
-    deep = multi_stack_target / ".daydream" / "deep"
-    reviews = sorted(p.name for p in deep.glob("stack-*-review.md"))
-    assert reviews, "fan-out outputs must survive for a --start-at resume"
-
-
 def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
@@ -5282,6 +4663,36 @@ async def test_start_at_merge_refuses_after_the_diff_changes(
     assert stub2.calls == []
     # A refused resume must NOT rewrite the key it is checked against.
     assert key_file.read_text().strip() == original_key
+
+
+async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_key(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh run cannot certify a new diff key alongside old deep outputs."""
+    _silence(monkeypatch)
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    stale = deep / "obsolete-artifact.txt"
+    stale.write_text("stale")
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+    assert not stale.exists()
+    assert (deep / "diff-key").is_file()
+
+
+async def test_start_at_merge_refuses_after_an_uncommitted_worktree_change(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resumes reject review artifacts once the worktree is no longer clean."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert stub2.calls == []
 
 
 async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(

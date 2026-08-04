@@ -35,6 +35,7 @@ from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.trajectory import (
     DaydreamPhase,
@@ -1133,14 +1134,12 @@ def build_review_prompt(
 def _inlineable_diff(diff_text: str | None) -> str | None:
     """The diff to inline, or ``None`` when it is absent or over budget.
 
-    Reuses the per-stack path's ``INLINE_DIFF_BUDGET_BYTES`` so every inlined
-    prompt shares one bound. An empty diff is under budget and inlines as-is.
+    Uses the shared prompt-size policy. An empty diff is under budget and
+    inlines as-is.
     """
-    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
-
     if diff_text is None:
         return None
-    if len(diff_text.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES:
+    if not fits_inline_diff_budget(diff_text):
         return None
     return diff_text
 
@@ -2670,11 +2669,13 @@ async def phase_understand_intent(
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _, _ = await run_agent(
+        output, _, budget_reason = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
+        if budget_reason is not None:
+            raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()

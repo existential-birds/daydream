@@ -256,11 +256,29 @@ def check_deep_artifacts(
             stored = key_file.read_text(encoding="utf-8").strip()
         except OSError:
             stored = ""
-        if stored != current_diff_sha:
+        prerequisites = [deep_dir_path / name for name in _DEEP_STAGE_PREREQS[stage]]
+        if stage == "merge":
+            prerequisites.extend(records)
+        if stage == "fix":
+            prerequisites.append(merged_items_path(deep_dir_path))
+
+        try:
+            key_mtime = key_file.stat().st_mtime_ns
+            has_stale_prerequisite = any(
+                artifact.stat().st_mtime_ns < key_mtime for artifact in prerequisites
+            )
+        except OSError:
+            has_stale_prerequisite = True
+
+        if stored != current_diff_sha or has_stale_prerequisite:
             detail = (
                 f"  - {key_file} is missing (produced before diff tracking)"
                 if not stored
-                else f"  - {key_file} records a different diff"
+                else (
+                    f"  - prerequisite artifacts predate {key_file}"
+                    if has_stale_prerequisite
+                    else f"  - {key_file} records a different diff"
+                )
             )
             raise FileNotFoundError(
                 f"Cannot resume at stage '{stage}' -- the artifacts in\n"

@@ -25,6 +25,7 @@ from daydream.phases import (
     _exploration_pointer,
     _settled_decisions_block,
 )
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
@@ -111,13 +112,6 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     )
 
 
-# Issue #172 — Read-once diff hunks (Fix B). Upper byte bound for the inlined
-# diff section in per-stack / generic prompts. Above this bound the helper
-# returns ``None`` and the prompt falls back to the diff_path pointer so the
-# prompt size stays bounded. ~12 KiB comfortably fits a few hundred lines of
-# unified diff without bloating the per-stack review prompts.
-INLINE_DIFF_BUDGET_BYTES = 12_288
-
 # Per-file block splitter (splits the unified diff at each `diff --git` header).
 _DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
 # `+++ ` and `--- ` file headers inside a single block.
@@ -195,7 +189,7 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
     if not selected:
         return None
     result = "".join(selected)
-    if len(result.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES:
+    if not fits_inline_diff_budget(result):
         return None
     return result
 

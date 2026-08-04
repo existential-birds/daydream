@@ -230,6 +230,7 @@ async def pre_scan(
         return static_context
 
     results: dict[str, Any] = {}
+    specialist_failed = False
 
     specialist_max_turns = EXPLORATION_MAX_TURNS
     recorder = get_current_recorder()
@@ -238,6 +239,7 @@ async def pre_scan(
     )
 
     async def _run_specialist(name: str, prompt: str, schema: dict) -> None:
+        nonlocal specialist_failed
         async with limiter, maybe_fork(recorder, f"explore-{name}"):
             try:
                 structured, _, _ = await run_agent(
@@ -248,7 +250,10 @@ async def pre_scan(
                 )
                 if isinstance(structured, dict):
                     results[name] = structured
+                else:
+                    specialist_failed = True
             except Exception:  # noqa: BLE001 - best-effort path; exploration degrades silently per D-08
+                specialist_failed = True
                 pass
 
     # All three specialists receive the same affected-files list. It is bounded
@@ -262,7 +267,7 @@ async def pre_scan(
         FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary) for f in static_files
     ]
 
-    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS):
+    with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:
         async with anyio.create_task_group() as tg:
             if tier == "single":
                 dep_prompt = build_dependency_tracer_prompt(static_files_abs, diff_ref, cwd=repo_root)
@@ -286,10 +291,13 @@ async def pre_scan(
         recorder.create_dispatch_step(phase=DaydreamPhase.EXPLORATION)
 
     if not results:
+        static_context.completed = not (specialist_failed or timeout_scope.cancel_called)
         return static_context
 
     subagent_context = _parse_envelope(results)
-    return merge_contexts(static_context, subagent_context)
+    context = merge_contexts(static_context, subagent_context)
+    context.completed = not (specialist_failed or timeout_scope.cancel_called)
+    return context
 
 
 def _sample_paths(paths: list[str], limit: int) -> list[str]:

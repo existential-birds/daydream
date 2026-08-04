@@ -386,6 +386,7 @@ class ClaudeBackend:
             output_format=output_format,
             max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
             max_turns=max_turns,
+            extra_args={"no-session-persistence": None} if not persist_session else {},
             # None leaves the CLI's ambient default; the SDK omits --effort.
             effort=self.reasoning_effort,
             hooks={

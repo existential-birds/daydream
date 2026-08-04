@@ -1,5 +1,6 @@
 """Deep-mode artifact path + check_deep_artifacts tests (D-18, D-36, D-37)."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -163,10 +164,28 @@ def test_check_deep_artifacts_accepts_matching_diff_key(tmp_path: Path) -> None:
     from daydream.deep.artifacts import check_deep_artifacts
 
     deep_dir = tmp_path / ".daydream" / "deep"
-    _seed_merge_stage(deep_dir)
+    deep_dir.mkdir(parents=True)
     (deep_dir / "diff-key").write_text("bbbb")
+    _seed_merge_stage(deep_dir)
 
     check_deep_artifacts("merge", deep_dir, current_diff_sha="bbbb")  # must not raise
+
+
+def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(
+    tmp_path: Path,
+) -> None:
+    """A matching key cannot validate artifacts left from an earlier run."""
+    from daydream.deep.artifacts import check_deep_artifacts
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    _seed_merge_stage(deep_dir)
+    key_file = deep_dir / "diff-key"
+    key_file.write_text("bbbb")
+    key_mtime = key_file.stat().st_mtime_ns + 1_000_000_000
+    os.utime(key_file, ns=(key_mtime, key_mtime))
+
+    with pytest.raises(FileNotFoundError, match="different diff"):
+        check_deep_artifacts("merge", deep_dir, current_diff_sha="bbbb")
 
 
 def test_check_deep_artifacts_without_sha_skips_the_freshness_gate(tmp_path: Path) -> None:

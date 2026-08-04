@@ -114,6 +114,7 @@ async def test_safe_explore_returns_result_on_success():
 
     result = await safe_explore(fake_explore)
     assert result is expected
+    assert result.completed is True
     assert result.affected_files == expected.affected_files
 
 
@@ -122,6 +123,7 @@ async def test_safe_explore_returns_empty_on_failure():
         raise RuntimeError("SDK timeout")
 
     result = await safe_explore(failing_explore)
+    assert result.completed is False
     assert result.affected_files == []
     assert result.conventions == []
     assert result.dependencies == []

@@ -849,10 +849,11 @@ async def test_result_event_mints_session_token(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_token_without_persist_session(monkeypatch):
-    """persist_session=False suppresses the token even when a session id exists."""
+    """persist_session=False disables SDK session persistence and suppresses the token."""
+    captured: dict[str, Any] = {}
     patch_claude_sdk(
         monkeypatch,
-        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")]),
+        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")], captured=captured),
     )
     backend = ClaudeBackend(model="opus")
 
@@ -863,6 +864,7 @@ async def test_no_token_without_persist_session(monkeypatch):
     ]
 
     assert results[0].continuation is None
+    assert captured["options"].extra_args == {"no-session-persistence": None}
 
 
 @pytest.mark.asyncio

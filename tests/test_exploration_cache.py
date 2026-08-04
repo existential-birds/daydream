@@ -2,9 +2,8 @@
 
 ``.daydream/exploration/`` now survives a run and is keyed by
 ``head sha + diff + tier + depth`` (``daydream.exploration.exploration_cache_key``).
-A second run with an identical key and a clean working tree reuses the directory
-verbatim and fires zero specialist agents; any key change or uncommitted edit
-re-runs the pre-scan and rewrites the files.
+A second run with an identical key reuses the directory verbatim and fires zero
+specialist agents; any key change re-runs the pre-scan and rewrites the files.
 
 Every test drives the real ``runner.run`` -> deep orchestrator path with only the
 backend seam stubbed.
@@ -97,26 +96,46 @@ async def test_diff_change_invalidates_cache(
     assert "RUN1 SENTINEL" not in dependencies
 
 
-async def test_uncommitted_edit_invalidates_cache(
+async def test_uncommitted_edit_reuses_an_exact_cache_key(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A dirty working tree bypasses a matching cache and re-runs the pre-scan."""
+    """An exact key hit remains reusable when the worktree is dirty."""
     silence(monkeypatch)
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
 
     exploration = multi_stack_target / ".daydream" / "exploration"
-    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
-    assert _count_specialist_calls(stub2) > 0, "dirty tree must re-fire specialists"
+    assert _count_specialist_calls(stub2) == 0, "exact key hit must skip specialists"
 
-    assert not (exploration / "cache-key").exists()
+    assert (exploration / "cache-key").exists()
     dependencies = (exploration / "dependencies.md").read_text()
-    assert "RUN2 SENTINEL" in dependencies
-    assert "RUN1 SENTINEL" not in dependencies
+    assert "RUN1 SENTINEL" in dependencies
+    assert "RUN2 SENTINEL" not in dependencies
+
+
+async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unignored Daydream output alone does not make a rebuilt cache ineligible."""
+    from daydream.runner import RunConfig, run
+
+    silence(monkeypatch)
+    stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
+    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
+    assert _count_specialist_calls(stub1) > 0
+
+    exploration = multi_stack_target / ".daydream" / "exploration"
+    (exploration / "cache-key").write_text("stale")
+
+    stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
+    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)) == 0
+    assert _count_specialist_calls(stub2) > 0
+    assert (exploration / "cache-key").read_text().strip() != "stale"
 
 
 async def test_depth_change_invalidates_cache(
@@ -175,6 +194,27 @@ async def test_missing_key_file_is_a_miss(
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0
+
+
+async def test_failed_exploration_is_not_durably_cached(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded pre-scan is materialized for this run but cannot be reused."""
+    from daydream.deep import orchestrator
+
+    silence(monkeypatch)
+    _install(monkeypatch, multi_stack_target, "unused")
+
+    async def failing_pre_scan(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("exploration unavailable")
+
+    monkeypatch.setattr(orchestrator, "pre_scan", failing_pre_scan)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    exploration = multi_stack_target / ".daydream" / "exploration"
+    assert exploration.is_dir()
+    assert not (exploration / "cache-key").exists()
 
 
 def test_cache_key_is_sensitive_to_every_component() -> None:

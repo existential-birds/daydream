@@ -957,6 +957,7 @@ class TrajectoryRecorder:
     pr_repo: str | None = None
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
+    _folded_fork_totals: bool = False
     _previous_token: Any = None
     _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
     # Active invocations whose in-flight steps haven't been flushed yet.
@@ -1363,6 +1364,15 @@ class TrajectoryRecorder:
         if steps is None:
             steps = self.steps
         version = daydream.__version__
+        final_metrics_extra: dict[str, Any] | None = None
+        if self._folded_fork_totals:
+            # Token and cost totals include successful fork trajectories, but
+            # total_steps remains scoped to this document's own step list.
+            # Cached tokens remain a subset of prompt tokens, not an addition.
+            final_metrics_extra = {
+                "daydream_metric_scope": "whole_run_including_forks",
+                "total_steps_scope": "local_trajectory",
+            }
 
         final_metrics = FinalMetrics(
             total_prompt_tokens=self._final_totals["prompt"] or None,
@@ -1372,6 +1382,7 @@ class TrajectoryRecorder:
                 self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None
             ),
             total_steps=len(steps),
+            extra=final_metrics_extra,
         )
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
         if self.pr_number is not None:
@@ -1539,6 +1550,7 @@ class _ForkCM:
                 cached_tokens=child._final_totals["cached"],
                 cost_usd=child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None,
             )
+            child.parent._folded_fork_totals = True
             child.parent._register_sibling(child.path, self._descriptor)
             try:
                 sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))

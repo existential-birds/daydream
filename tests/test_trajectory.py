@@ -1273,6 +1273,11 @@ async def test_fork_totals_fold_into_parent(tmp_path: Path) -> None:
     assert parent["total_completion_tokens"] == 28
     assert parent["total_cached_tokens"] == 14
     assert parent["total_cost_usd"] == pytest.approx(1.5)
+    assert parent["total_steps"] == len(read_trajectory(recorder.path)["steps"])
+    assert parent["extra"] == {
+        "daydream_metric_scope": "whole_run_including_forks",
+        "total_steps_scope": "local_trajectory",
+    }
 
     child_fm = read_trajectory(child.path)["final_metrics"]
     assert child_fm["total_prompt_tokens"] == 40
