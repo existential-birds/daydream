@@ -200,15 +200,9 @@ async def test_failed_exploration_is_not_durably_cached(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A degraded pre-scan is materialized for this run but cannot be reused."""
-    from daydream.deep import orchestrator
-
     silence(monkeypatch)
-    _install(monkeypatch, multi_stack_target, "unused")
-
-    async def failing_pre_scan(*args: object, **kwargs: object) -> object:
-        raise RuntimeError("exploration unavailable")
-
-    monkeypatch.setattr(orchestrator, "pre_scan", failing_pre_scan)
+    stub = _install(monkeypatch, multi_stack_target, "unused")
+    stub.fail_exploration = True
 
     assert await _run_deep(multi_stack_target) == 0
 

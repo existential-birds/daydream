@@ -175,6 +175,10 @@ class StubBackend:
         # When set, the pattern-scanner specialist names this convention, so a
         # test can prove WHICH run produced the on-disk exploration artifacts.
         self.exploration_sentinel: str | None = None
+        # When True, the exploration specialists raise instead of answering, so
+        # the real pre_scan degrade path runs: specialist_failed -> completed
+        # False -> exploration dir materialized without a cache-key.
+        self.fail_exploration: bool = False
 
     def _is_runaway(self, prompt: str, pl: str) -> bool:
         """Whether this turn should emit the unbounded budget-tripping burst."""
@@ -260,6 +264,8 @@ class StubBackend:
         # structured_output (keyed into results[name] by _run_specialist) plus a
         # TextEvent of raw JSON the production gate must suppress from the terminal.
         if "you are the **pattern-scanner** specialist" in pl:
+            if self.fail_exploration:
+                raise RuntimeError("exploration unavailable")
             payload = {
                 "conventions": [
                     {
@@ -274,6 +280,8 @@ class StubBackend:
             yield ResultEvent(structured_output=payload, continuation=None)
             return
         if "you are the **dependency-tracer** specialist" in pl:
+            if self.fail_exploration:
+                raise RuntimeError("exploration unavailable")
             payload = {
                 "affected_files": [],
                 "dependencies": [
