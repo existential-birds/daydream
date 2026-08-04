@@ -16,6 +16,57 @@ from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.git_helpers import commit as _commit
+from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
+from tests.test_deep_pr_comment_integration import (
+    FakeAssistantMessage,
+    FakeResultMessage,
+    FakeTextBlock,
+    FakeThinkingBlock,
+    FakeToolResultBlock,
+    FakeToolUseBlock,
+    FakeUserMessage,
+    _answer_prompts,
+    _FakeSDKClient,
+    _silence_ui,
+)
+
+
+@pytest.fixture
+def deep_target(tmp_path: Path) -> Path:
+    """Real git repo on a feature branch with one Python file changed.
+
+    Mirrors ``tests/test_deep_pr_comment_integration.py``'s fixture so the
+    real-path App-identity test drives the identical single-file deep path
+    (tier ``"skip"``) with the shared fake SDK.
+    """
+    repo = tmp_path / "deep_repo"
+    _init_repo(repo)
+    (repo / "foo.py").write_text("def foo():\n    return 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "init")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "foo.py").write_text("def foo():\n    return 2\n")
+    _git(repo, "add", ".")
+    _commit(repo, "tweak foo")
+    return repo
+
+
+@pytest.fixture
+def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch every SDK symbol that ``ClaudeBackend.execute`` does isinstance on."""
+    for symbol, fake in (
+        ("ClaudeSDKClient", _FakeSDKClient),
+        ("AssistantMessage", FakeAssistantMessage),
+        ("UserMessage", FakeUserMessage),
+        ("ResultMessage", FakeResultMessage),
+        ("TextBlock", FakeTextBlock),
+        ("ThinkingBlock", FakeThinkingBlock),
+        ("ToolUseBlock", FakeToolUseBlock),
+        ("ToolResultBlock", FakeToolResultBlock),
+    ):
+        monkeypatch.setattr(f"daydream.backends.claude.{symbol}", fake)
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 # A failing test run, then the heal fix agent's turn.
@@ -163,15 +214,36 @@ async def test_run_dispatches_to_expected_flow(
 async def test_deep_run_mints_app_identity_before_posting_path(
     flow_name: str | None,
     monkeypatch: pytest.MonkeyPatch,
-    patch_workspace: WorkContext,
-    silence_runner_ui: None,
-    tmp_path: Path,
-    make_config: Callable[..., RunConfig],
+    deep_target: Path,
+    patch_sdk: None,
 ) -> None:
-    """Deep dispatches mint the App token before reaching their PR-posting path."""
+    """Real-path: deep runs mint the App token before their PR-posting path.
+
+    Drives ``daydream.runner.run`` end-to-end in deep mode — both the default
+    dispatch (``flow_name=None``) and an explicit ``--flow deep`` — on a real
+    temp git worktree with GitHub App credentials set. Only the external
+    network/API seams are mocked: the App installation-token mint, the Claude
+    SDK transport (``patch_sdk``), and the final ``gh`` PR-posting transport
+    (``find_open_pr`` + ``_submit_review``). The real deep orchestrator,
+    ``ClaudeBackend.execute``, every phase, ``_post``, ``classify``, and
+    ``build_payload`` run unmodified.
+
+    Asserts the observable outcome rather than a stubbed loop: the App token
+    is minted before the posting path is reached, ``config.identity`` resolves
+    to the App bot identity, and the minted token is injected as ``GH_TOKEN``
+    into every ``gh`` subprocess for the duration of the run.
+    """
+    from daydream import pr_review
+    from daydream.runner import RunConfig
+
+    _silence_ui(monkeypatch)
+    _answer_prompts(monkeypatch)
+
     monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "test-private-key")
+
     events: list[str] = []
+    payloads: list[dict[str, Any]] = []
 
     def fake_mint(*_args: object) -> SimpleNamespace:
         events.append("mint")
@@ -181,26 +253,48 @@ async def test_deep_run_mints_app_identity_before_posting_path(
             expires_at=4_102_444_800.0,
         )
 
-    async def fake_post(*_args: object, **_kwargs: object) -> None:
+    fake_pr = pr_review.PRInfo(
+        number=123,
+        head_sha="0" * 40,
+        base_sha="1" * 40,
+        base_ref="main",
+        owner="test-owner",
+        repo="test-repo",
+        url="https://example/pr/123",
+    )
+
+    def fake_find_open_pr(_target_dir: object) -> pr_review.PRInfo:
+        events.append("find-open-pr")
+        return fake_pr
+
+    def fake_submit_review(
+        _target_dir: object, _pr: object, payload: dict[str, Any]
+    ) -> tuple[str, None]:
         events.append("post")
-
-    async def fake_deep(_work: WorkContext, config: RunConfig) -> int:
-        events.append("deep")
-        assert config.identity == "daydream-review[bot]"
-        assert git_ops.get_gh_token_env() == {"GH_TOKEN": "installation-token"}
-        from daydream.pr_review import post_review_to_pr_from_report
-
-        await post_review_to_pr_from_report(tmp_path, tmp_path / "report.md", console=runner.console)
-        return 0
+        payloads.append(payload)
+        return "https://example/pr/123#review-1", None
 
     monkeypatch.setattr("daydream.github_app._mint_installation_token", fake_mint)
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", fake_post)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_deep)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", fake_find_open_pr)
+    monkeypatch.setattr("daydream.pr_review._submit_review", fake_submit_review)
 
-    rc = await runner.run(make_config(tmp_path, flow_name=flow_name, pr_repo="acme/widgets"))
+    config = RunConfig(
+        target=str(deep_target),
+        flow_name=flow_name,
+        pr_repo="acme/widgets",
+        cleanup=False,
+        archive=False,
+    )
 
-    assert rc == 0
-    assert events == ["mint", "deep", "post"]
+    rc = await runner.run(config)
+
+    assert rc == 0, f"run() returned {rc}"
+    # Mint strictly precedes the posting path: find_open_pr is _post()'s first
+    # action, and the review is submitted only after classify + build_payload.
+    assert events == ["mint", "find-open-pr", "post"], events
+    assert config.identity == "daydream-review[bot]"
+    assert git_ops.get_gh_token_env() == {"GH_TOKEN": "installation-token"}
+    assert payloads, "deep flow never reached _submit_review"
 
 
 @pytest.mark.asyncio
