@@ -29,10 +29,11 @@ _LAST_PARSE_STACK = "structure"
 
 
 class _RendezvousParseStub(StubBackend):
-    """Parse for the first stack blocks until the last stack's parse starts."""
+    """The first and last stack's parse both block until the other has started."""
 
     def __init__(self, target: Path) -> None:
         super().__init__(target)
+        self.first_parse_started = anyio.Event()
         self.other_parse_started = anyio.Event()
 
     async def execute(
@@ -44,7 +45,9 @@ class _RendezvousParseStub(StubBackend):
             name = _parse_stack_name(prompt)
             if name == _LAST_PARSE_STACK:
                 self.other_parse_started.set()
+                await self.first_parse_started.wait()
             elif name == _FIRST_PARSE_STACK:
+                self.first_parse_started.set()
                 await self.other_parse_started.wait()
         async for event in super().execute(
             cwd, prompt, output_schema=output_schema, continuation=continuation,
@@ -75,7 +78,7 @@ async def test_parse_runs_concurrently(multi_stack_target: Path, monkeypatch: py
     ]
     parse_order = [_parse_stack_name(c["prompt"]) for c in stub.calls
                    if "extract only actionable issues" in c["prompt"].lower()]
-    assert parse_order.index(_LAST_PARSE_STACK) < parse_order.index(_FIRST_PARSE_STACK), parse_order
+    assert {_FIRST_PARSE_STACK, _LAST_PARSE_STACK} <= set(parse_order), parse_order
 
 
 class _FailingParseStub(StubBackend):

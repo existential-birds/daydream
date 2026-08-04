@@ -107,11 +107,12 @@ async def test_budget_truncated_wonder_fails_loudly(
 
 
 class _WonderRendezvousStub(StubBackend):
-    """The wonder turn blocks until a per-stack review has started."""
+    """Wonder and per-stack reviews each block until the other has started."""
 
     def __init__(self, target: Path) -> None:
         super().__init__(target)
         self.per_stack_started = anyio.Event()
+        self.wonder_started = anyio.Event()
 
     async def execute(
         self, cwd: Path, prompt: str, output_schema: Any = None,
@@ -121,7 +122,9 @@ class _WonderRendezvousStub(StubBackend):
         pl = prompt.lower()
         if "you are reviewing the" in pl:
             self.per_stack_started.set()
+            await self.wonder_started.wait()
         elif "would you have done this differently" in pl or "evaluate the implementation" in pl:
+            self.wonder_started.set()
             await self.per_stack_started.wait()
         async for event in super().execute(
             cwd, prompt, output_schema=output_schema, continuation=continuation,
