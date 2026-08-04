@@ -304,8 +304,9 @@ def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str)
     real reuse cases (bot re-review, --start-at resume, and an immediate re-run
     all share HEAD).
 
-    The orchestrator permits reuse only from a clean working tree. This key
-    therefore intentionally excludes uncommitted worktree edits.
+    An exact key match is reused even with uncommitted worktree edits: the key
+    intentionally excludes uncommitted edits because reuse is exact-match-only
+    on head SHA + diff + tier + depth.
     """
     payload = f"{head_sha}\n{diff}\n{tier}\n{depth}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

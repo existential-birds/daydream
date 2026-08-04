@@ -426,13 +426,13 @@ Daydream can run as a self-hosted PR review bot in your own repository's GitHub 
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
 
-`.daydream/exploration/` is reused only on an **exact** key match — a stale hit
-would misground every review prompt, so near-matches never count. Known
-limitation: cache reuse requires a clean worktree; uncommitted edits force a
-cache miss and rebuild, even when the artifact key otherwise matches. The
-`--shallow` and `--review` flows still delete the directory, so alternating
-flows degrades to a cache miss (never to stale grounding — the key file is
-deleted with the directory).
+`.daydream/exploration/` is reused on an **exact** key match regardless of
+uncommitted worktree edits: the key intentionally excludes uncommitted edits
+(head SHA + diff + tier + depth), so an exact-key hit on a dirty tree serves
+exploration computed before those edits. Near-matches never count — a stale hit
+would misground every review prompt. The `--shallow` and `--review` flows still
+delete the directory, so alternating flows degrades to a cache miss (never to
+stale grounding — the key file is deleted with the directory).
 
 ## Development
 
