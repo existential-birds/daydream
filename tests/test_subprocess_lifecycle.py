@@ -60,8 +60,7 @@ async def test_terminate_process_kills_whole_group() -> None:
 
     await terminate_process(proc)
 
-    with pytest.raises(ProcessLookupError):
-        os.killpg(pgid, 0)
+    await _wait_for_group_gone(pgid)
 
 
 async def test_terminate_process_releases_fds() -> None:
@@ -90,8 +89,7 @@ async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     await cancel_processes(procs)
 
     for pgid in pgids:
-        with pytest.raises(ProcessLookupError):
-            os.killpg(pgid, 0)
+        await _wait_for_group_gone(pgid)
     assert _fd_count() == base
 
 
@@ -111,6 +109,32 @@ async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
     while not path.exists():
         if loop.time() > deadline:
             raise TimeoutError(f"timed out waiting for the backend CLI marker at {path}")
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 10.0) -> None:
+    """Await *pgid*'s disappearance (a readiness wait, not a fixed sleep).
+
+    A group-signal kill reaps the direct child synchronously, but a grandchild
+    reparented to PID 1 lingers as a zombie until init reaps it — and a zombie
+    still answers ``killpg(pgid, 0)``. Asserting ``ProcessLookupError`` in the
+    same event-loop tick as the kill therefore races the kernel's reap: on a
+    loaded host (CI runners, parallel suites) the window is wide enough to fail
+    intermittently. Polling until the group is gone makes the assertion
+    deterministic — the observable outcome is "no process remains in the group",
+    not "the group vanished by the next instruction". The loop exits the moment
+    ``killpg`` raises; the timeout is a failure bound, not a synchronization
+    delay (same contract as ``_wait_for_file``).
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        if loop.time() > deadline:
+            raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
         await asyncio.sleep(0.01)
 
 
@@ -193,6 +217,5 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
                 pass
 
     assert pgid is not None
-    with pytest.raises(ProcessLookupError):
-        os.killpg(pgid, 0)
+    await _wait_for_group_gone(pgid)
     assert _fd_count() == base_fds
