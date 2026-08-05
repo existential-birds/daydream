@@ -374,6 +374,62 @@ def test_query_runs_with_where(tmp_path: Path):
     assert ids == {"s1", "s3"}
 
 
+def test_upsert_run_persists_erosion_verbosity(tmp_path: Path):
+    """erosion/verbosity round-trip through upsert_run -> query_runs, filterable and sortable."""
+    upsert_run(tmp_path, make_manifest(session_id="s-q1", erosion=0.34, verbosity=0.19))
+    upsert_run(tmp_path, make_manifest(session_id="s-q2", archive_path="/tmp/s-q2"))
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-q3", erosion=0.51, verbosity=0.07, archive_path="/tmp/s-q3"),
+    )
+
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-q1",))[0]
+    assert row["erosion"] == pytest.approx(0.34)
+    assert row["verbosity"] == pytest.approx(0.19)
+
+    # The query layer's WHERE binds against the new columns.
+    scored = query_runs(tmp_path, where="erosion IS NOT NULL")
+    assert {r["session_id"] for r in scored} == {"s-q1", "s-q3"}
+
+    # The columns are sortable (NULLs sort first in SQLite).
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    try:
+        ordered = [r[0] for r in conn.execute("SELECT session_id FROM runs ORDER BY erosion")]
+    finally:
+        conn.close()
+    assert ordered == ["s-q2", "s-q1", "s-q3"]
+
+
+def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path):
+    """A pre-existing index.db without erosion/verbosity gains them via ALTER-ADD.
+
+    Mirrors the source_path/composite_reward additive migration: a legacy runs
+    table (no erosion/verbosity columns) must keep its rows and gain the
+    columns on the next production write, never dropping or rewriting data.
+    """
+    from daydream.archive.index import _CREATE_TABLE
+
+    legacy_ddl = _CREATE_TABLE.replace("    erosion REAL,\n    verbosity REAL,\n", "")
+    assert "erosion" not in legacy_ddl
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("legacy-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-run")),
+    )
+    conn.commit()
+    conn.close()
+
+    # The production write path must ALTER-ADD the columns non-destructively.
+    upsert_run(tmp_path, make_manifest(session_id="s-mig-q", erosion=0.42, verbosity=0.08))
+
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-run",))[0]
+    assert legacy["erosion"] is None  # pre-existing row preserved, columns nullable
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-q",))[0]
+    assert row["erosion"] == pytest.approx(0.42)
+    assert row["verbosity"] == pytest.approx(0.08)
+
+
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
