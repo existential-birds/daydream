@@ -883,3 +883,110 @@ def test_per_stack_prompt_test_quality_rubric_sits_after_skill_invocation(tmp_pa
         **p,
     )
     assert out.index("test-quality rubric") > out.index("/beagle-python:review-python")
+
+
+# =============================================================================
+# Issue #314 — anti-slop review rubric (structural erosion + verbosity patterns)
+# =============================================================================
+
+_ANTI_SLOP_ANCHORS = (
+    "complexity concentration",
+    "extraction into focused callables",
+    "identity comprehension",
+    "empty-list guards",
+    "single-use intermediate variables",
+    "casts to dodge type checking",
+    "trivial wrapper",
+    "nested ladders",
+    "same hunk structure repeated",
+    "medium/low",
+    "pre-existing-and-growing",
+)
+
+
+def _assert_anti_slop_anchors(out: str) -> None:
+    missing = [anchor for anchor in _ANTI_SLOP_ANCHORS if anchor not in out]
+    assert not missing, f"anti-slop rubric is missing pinned anchors: {missing}"
+
+
+def test_per_stack_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
+    """#314: the per-stack review prompt ships the anti-slop rubric.
+
+    The rubric targets the SlopCodeBench degradation patterns in the diff
+    hunks: complexity concentration into already-large functions, verbosity
+    (identity comprehensions, empty-list guards, single-use intermediates,
+    casts to dodge type checking, trivial wrappers, nested ladders), and
+    copy-pasted duplication.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "anti-slop rubric" in out
+    _assert_anti_slop_anchors(out)
+
+
+def test_structural_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
+    """#314: the structural review prompt ships the anti-slop rubric.
+
+    The structural reviewer is the primary home for the erosion half of the
+    rubric (file-size budgets, layering, branching shape), so the same
+    self-contained instruction is appended there too.
+    """
+    p = _paths(tmp_path)
+    out = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+    assert "anti-slop rubric" in out
+    _assert_anti_slop_anchors(out)
+
+
+def test_per_stack_prompt_anti_slop_rubric_sits_after_skill_invocation(tmp_path: Path) -> None:
+    """#314: the rubric lands after the skill invocation so the reviewer applies
+    it to the diff hunks it reviews, not ahead of the per-stack instructions."""
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert out.index("anti-slop rubric") > out.index("/beagle-python:review-python")
+
+
+def test_structural_prompt_anti_slop_rubric_sits_after_verification_protocol(tmp_path: Path) -> None:
+    """#314: the rubric lands after the verification-protocol gates in the
+    structural prompt, so the reviewer applies the gates first, then the
+    anti-slop rubric to the hunks."""
+    p = _paths(tmp_path)
+    out = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+    assert out.index("anti-slop rubric") > out.index("verification-protocol gates")
+
+
+def test_anti_slop_rubric_severity_layering(tmp_path: Path) -> None:
+    """#314: severity is calibrated to medium/low, and pre-existing-and-growing
+    erosion is flagged as growth -- guards the over-application failure mode.
+
+    Without the layering awareness, a reviewer would re-flag the whole eroded
+    function on every PR instead of isolating the growth the diff introduces.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "medium/low" in out
+    assert "pre-existing-and-growing" in out
+    assert "flag the growth, not the whole function" in out
+

@@ -92,6 +92,33 @@ TEST_QUALITY_RUBRIC_INSTRUCTION = (
     "behavior the test claims to cover."
 )
 
+# Per-stack + structural anti-slop review rubric (issue #314). Embedded inline as
+# instruction text for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``:
+# per-stack and structural reviewers run with cwd set to the reviewed repo, so a
+# bare skill-file read resolves against that repo and silently drops the rubric.
+# Targets the SlopCodeBench degradation patterns -- structural erosion, verbosity,
+# duplication -- in the code hunks, with severity calibrated so it flags
+# maintainability regressions without over-applying to legitimate structure.
+ANTI_SLOP_RUBRIC_INSTRUCTION = (
+    "Apply the anti-slop rubric to every code hunk in the diff "
+    "(stated inline here -- no skill file read is required). It targets the "
+    "SlopCodeBench degradation patterns -- structural erosion, verbosity, "
+    "duplication:\n"
+    "  1. Flag complexity concentration: when a hunk adds logic to a function "
+    "that is already large/high-complexity (cyclomatic complexity > ~10, or > ~80 "
+    "lines), require extraction into focused callables -- especially when the "
+    "same pattern (flag pair, branch ladder, error guard) is repeated verbatim.\n"
+    "  2. Verbosity: flag redundant code -- identity comprehensions instead of "
+    "filter/map, empty-list guards inside loops, single-use intermediate "
+    "variables, casts to dodge type checking, trivial wrapper functions, "
+    "nested ladders.\n"
+    "  3. Duplication: flag the same hunk structure repeated (e.g. N flags x 2 "
+    "branches) that should be a loop/helper/template.\n"
+    "  4. Severity calibration: maintainability findings are medium/low -- not "
+    "high -- unless the erosion is pre-existing-and-growing; then flag the "
+    "growth, not the whole function."
+)
+
 
 def _context_pointers(
     *,
@@ -333,6 +360,7 @@ def build_per_stack_prompt(
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
+    parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
@@ -402,6 +430,7 @@ def build_structural_prompt(
     parts.append(_full_diff_pointer(diff_path))
     parts.append(skill_invocation)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
