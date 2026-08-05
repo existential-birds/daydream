@@ -836,6 +836,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
     _commit(project, "change")
 
     pre_migration = migration.read_bytes()
+    preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
+    preexisting_untracked.write_text("-- local draft\n")
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
@@ -860,11 +862,15 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert exit_code == 0
     assert migration.read_bytes() == pre_migration
     assert b"FORBIDDEN EDIT" not in migration.read_bytes()
+    assert preexisting_untracked.read_text() == "-- local draft\n"
     assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
     assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
-    violations = project / ".daydream" / "generated-file-violations.json"
+    violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert violations.exists()
-    assert "migrations/0001_init.sql" in violations.read_text()
+    assert json.loads(violations.read_text()) == {
+        "violations": ["migrations/0001_init.sql"],
+        "ref": "HEAD",
+    }
     patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
     assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
 

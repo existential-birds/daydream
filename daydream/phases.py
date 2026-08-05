@@ -34,7 +34,11 @@ from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
-from daydream.generated_files import GENERATED_FILES_PROMPT_RULE
+from daydream.generated_files import (
+    GENERATED_FILES_PROMPT_RULE,
+    is_generated_file,
+    related_manifest_paths,
+)
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
@@ -2235,6 +2239,87 @@ async def _emit_failure_handoff(
             )
 
 
+def _reject_test_healing_generated_file_edits(
+    repo: Path,
+    *,
+    snapshot: str | None,
+    pre_untracked: set[str],
+) -> list[str]:
+    """Restore existing generated files changed by one test-healing fix."""
+    ref = snapshot or "HEAD"
+    recovery_dir = repo / ".daydream" / "partial-fixes"
+
+    changed = git_ops.changed_files(repo, preexisting_untracked=pre_untracked)
+    direct_violations: list[str] = []
+    paths_to_restore: list[str] = []
+    for path in changed:
+        try:
+            content = (repo / path).read_bytes()
+        except OSError:
+            content = None
+        if not is_generated_file(path, content):
+            continue
+        direct_violations.append(path)
+        paths_to_restore.append(path)
+
+    changed_set = set(changed)
+    for path in direct_violations:
+        for manifest_path in related_manifest_paths(path):
+            if manifest_path in changed_set and manifest_path not in paths_to_restore:
+                paths_to_restore.append(manifest_path)
+
+    violations: list[str] = []
+    for path in paths_to_restore:
+        try:
+            patch = git_ops.diff_worktree_against(repo, ref, [path])
+        except GitError as exc:
+            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
+            patch = ""
+
+        # A generated file created by the healing agent is absent from the
+        # pre-fix ref and is therefore allowed.
+        if not patch and path not in pre_untracked:
+            continue
+
+        if path not in pre_untracked:
+            try:
+                git_ops.show(repo, ref, path)
+            except GitError:
+                continue
+
+        try:
+            recovery_dir.mkdir(parents=True, exist_ok=True)
+            slug = path.replace("/", "-").replace("\\", "-")
+            (recovery_dir / f"{slug}.patch").write_text(patch, encoding="utf-8")
+        except OSError as exc:
+            print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
+
+        try:
+            git_ops.restore_paths_from_ref(repo, ref, [path])
+        except GitError as exc:
+            print_warning(console, f"Could not restore generated file '{path}': {exc}")
+            continue
+        if path in direct_violations:
+            violations.append(path)
+
+    if violations:
+        artifact = repo / ".daydream" / "deep" / "generated-file-violations.json"
+        try:
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text(
+                json.dumps({"violations": violations, "ref": ref}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print_warning(console, f"Could not record generated-file violations: {exc}")
+        print_warning(
+            console,
+            f"Reverted forbidden edits to existing generated files: {', '.join(violations)}. "
+            "Add a new migration file instead.",
+        )
+    return violations
+
+
 async def phase_test_and_heal(
     backend: Backend,
     work: WorkContext,
@@ -2263,6 +2348,16 @@ async def phase_test_and_heal(
 
     async def _launch_fix(output: str) -> None:
         nonlocal retries_used, continuation
+        # Test healing happens after deep mode's batch-level generated-file
+        # guard. Take an equivalent per-agent snapshot so a healing agent
+        # cannot rewrite an existing migration or other generated artifact.
+        try:
+            snapshot = git_ops.stash_create(work.repo)
+            pre_untracked = set(git_ops.list_untracked(work.repo))
+        except GitError as exc:
+            print_warning(console, f"Could not snapshot tree before test-healing fix: {exc}")
+            snapshot = None
+            pre_untracked = set()
         fix_prompt = get_registry().prompt("fix")(
             output, feedback_items, repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
@@ -2271,6 +2366,9 @@ async def phase_test_and_heal(
             backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        )
+        _reject_test_healing_generated_file_edits(
+            work.repo, snapshot=snapshot, pre_untracked=pre_untracked,
         )
         retries_used += 1
         continuation = None

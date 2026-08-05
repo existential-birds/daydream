@@ -40,6 +40,36 @@ class _HealBackend(ScriptedBackend):
         return [call["read_only"] for call in self.calls]
 
 
+def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(tmp_path, silence_console):
+    """The per-healing guard protects historical migrations after a fix agent runs."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- forbidden rewrite\n")
+    new_migration = tmp_path / "migrations" / "0002_add_users.sql"
+    new_migration.write_text("-- allowed new migration\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, pre_untracked=set(),
+    )
+
+    assert violations == ["migrations/0001_init.sql"]
+    assert migration.read_text() == "-- original\n"
+    assert new_migration.read_text() == "-- allowed new migration\n"
+    assert "migrations/0001_init.sql" in (
+        tmp_path / ".daydream" / "deep" / "generated-file-violations.json"
+    ).read_text()
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work, silence_console):
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
@@ -327,6 +357,8 @@ def test_build_fix_prompt_carries_generated_file_rule():
     prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
     assert "generated" in prompt.lower()
     assert "migration" in prompt.lower()
+    assert "package manifests" in prompt.lower()
+    assert "lockfile update" in prompt.lower()
 
 
 @pytest.mark.asyncio
