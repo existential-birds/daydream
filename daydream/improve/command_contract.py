@@ -12,14 +12,9 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-REPOSITORY_FILE_PATH_PATTERN = (
-    r"^(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\$\(|.*\$\{)"
-    r"[A-Za-z0-9._+@$-]+(?:/[A-Za-z0-9._+@$-]+)*$"
-)
-DIRECTORY_SCOPE_PATTERN = (
-    r"^(?!/)(?!.*(?:^|/)\.{1,2}(?:/|$))(?!.*\$\(|.*\$\{)"
-    r"[A-Za-z0-9._+@$-]+(?:/[A-Za-z0-9._+@$-]+)*/?$"
-)
+_PATH_SEGMENT = r"\.?[A-Za-z0-9_+@$-][A-Za-z0-9._+@$-]*"
+REPOSITORY_FILE_PATH_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*$"
+DIRECTORY_SCOPE_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?$"
 
 REPOSITORY_FILE_PATH_SCHEMA: dict[str, Any] = {
     "type": "string",
