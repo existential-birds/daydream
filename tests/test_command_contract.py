@@ -8,7 +8,9 @@ preserving the accept/reject grammar.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -21,6 +23,10 @@ from daydream.improve.command_contract import (
     valid_directory_scope_lexical,
     valid_repository_file_path,
 )
+from daydream.runner import RunConfig, run
+from tests.harness.improve_backend import install_improve_stub
+
+MakeConfig = Callable[..., RunConfig]
 
 ALL_SCHEMA_PATTERNS = [
     REPOSITORY_FILE_PATH_SCHEMA["pattern"],
@@ -114,3 +120,36 @@ def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
     assert valid_directory_scope_lexical(value)
     assert path_is_confined(tmp_path, value)
     assert path_is_confined(tmp_path, value, directory_scope=True)
+
+
+def _iter_schema_patterns(schema: Any) -> Iterator[str]:
+    """Yield the string value of every ``pattern`` key in a schema tree."""
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            if key == "pattern" and isinstance(value, str):
+                yield value
+            else:
+                yield from _iter_schema_patterns(value)
+    elif isinstance(schema, list):
+        for item in schema:
+            yield from _iter_schema_patterns(item)
+
+
+@pytest.mark.anyio
+async def test_improve_recon_schema_sent_to_backend_is_lookaround_free(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+    assert code == 0
+    schemas = [
+        call["output_schema"]
+        for call in stub.calls
+        if call.get("output_schema")
+    ]
+    assert schemas, "expected at least one structured-output turn"
+    for schema in schemas:
+        for pattern in _iter_schema_patterns(schema):
+            assert re.search(r"\(\?[=!<]", pattern) is None
