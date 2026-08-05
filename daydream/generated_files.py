@@ -1,6 +1,5 @@
 from fnmatch import fnmatchcase
 
-
 GENERATED_FILE_GLOBS: tuple[str, ...] = (
     "migrations/*.sql",
     "*/migrations/*.sql",
