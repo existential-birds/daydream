@@ -1,5 +1,6 @@
 import re
 from fnmatch import fnmatchcase
+from pathlib import Path
 
 GENERATED_FILE_GLOBS: tuple[str, ...] = (
     "migrations/*.sql",
@@ -76,3 +77,34 @@ def related_manifest_paths(path: str) -> tuple[str, ...]:
     directory, _, filename = normalized.rpartition("/")
     prefix = f"{directory}/" if directory else ""
     return tuple(f"{prefix}{manifest}" for manifest in _LOCKFILE_MANIFESTS.get(filename, ()))
+
+
+def _snapshot_untracked_generated_files(repo: Path, paths: set[str]) -> dict[str, bytes]:
+    """Capture byte baselines for generated files already untracked at fix start."""
+    snapshot: dict[str, bytes] = {}
+    for path in sorted(paths):
+        content = (repo / path).read_bytes()
+        if is_generated_file(path, content):
+            snapshot[path] = content
+    return snapshot
+
+
+def _changed_untracked_generated_files(repo: Path, snapshot: dict[str, bytes]) -> list[str]:
+    """Return snapshotted untracked generated paths whose bytes changed or disappeared."""
+    changed: list[str] = []
+    for path, baseline in snapshot.items():
+        try:
+            current = (repo / path).read_bytes()
+        except FileNotFoundError:
+            changed.append(path)
+            continue
+        if current != baseline:
+            changed.append(path)
+    return changed
+
+
+def _restore_untracked_generated_file(repo: Path, path: str, baseline: bytes) -> None:
+    """Write an untracked generated file's exact pre-fix bytes back to disk."""
+    file_path = repo / path
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    file_path.write_bytes(baseline)

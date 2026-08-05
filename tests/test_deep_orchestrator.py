@@ -837,7 +837,9 @@ async def test_fix_guard_reverts_generated_migration_edit(
 
     pre_migration = migration.read_bytes()
     preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
-    preexisting_untracked.write_text("-- local draft\n")
+    preexisting_untracked.write_bytes(b"-- local draft\r\n")
+    untouched_untracked = project / "migrations" / "0000_untouched.sql"
+    untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
@@ -845,6 +847,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     stub.merge_items = [
         _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
         _merge_item(2, "api.py", "high", desc="source fix"),
+        _merge_item(3, "migrations/0000_local_draft.sql", "high", desc="local schema fix"),
     ]
     stub.fix_edit_line = "\n-- FORBIDDEN EDIT\n"
     stub.fix_new_generated = "migrations/0002_add_x.sql"
@@ -862,13 +865,14 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert exit_code == 0
     assert migration.read_bytes() == pre_migration
     assert b"FORBIDDEN EDIT" not in migration.read_bytes()
-    assert preexisting_untracked.read_text() == "-- local draft\n"
+    assert preexisting_untracked.read_bytes() == b"-- local draft\r\n"
+    assert untouched_untracked.read_bytes() == b"-- untouched draft\r\n"
     assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
     assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert violations.exists()
     assert json.loads(violations.read_text()) == {
-        "violations": ["migrations/0001_init.sql"],
+        "violations": ["migrations/0001_init.sql", "migrations/0000_local_draft.sql"],
         "ref": "HEAD",
     }
     patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))

@@ -199,6 +199,67 @@ def test_test_healing_guard_reports_restoration_failure(tmp_path, monkeypatch, s
     assert migration.read_text() == "-- healing edit\n"
 
 
+def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(tmp_path, silence_console):
+    """A healing edit to an untracked migration is restored byte-for-byte."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    (tmp_path / "README.md").write_text("# Fixture\n")
+    git(tmp_path, "add", "README.md")
+    git_commit(tmp_path, "test: initialize healing fixture")
+    migration = tmp_path / "migrations" / "0000_local_draft.sql"
+    migration.parent.mkdir()
+    original = b"-- local draft\r\n"
+    migration.write_bytes(original)
+    pre_untracked = {"migrations/0000_local_draft.sql"}
+    pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_bytes(b"-- forbidden healing edit\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path,
+        snapshot=snapshot,
+        snapshot_captured=True,
+        pre_untracked=pre_untracked,
+        pre_untracked_contents=pre_untracked_contents,
+    )
+
+    assert violations == ["migrations/0000_local_draft.sql"]
+    assert migration.read_bytes() == original
+
+
+def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(tmp_path, silence_console):
+    """An untouched untracked migration remains byte-identical."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    (tmp_path / "README.md").write_text("# Fixture\n")
+    git(tmp_path, "add", "README.md")
+    git_commit(tmp_path, "test: initialize healing fixture")
+    migration = tmp_path / "migrations" / "0000_local_draft.sql"
+    migration.parent.mkdir()
+    original = b"-- local draft\r\n"
+    migration.write_bytes(original)
+    pre_untracked = {"migrations/0000_local_draft.sql"}
+    pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
+    snapshot = git_ops.stash_create(tmp_path)
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path,
+        snapshot=snapshot,
+        snapshot_captured=True,
+        pre_untracked=pre_untracked,
+        pre_untracked_contents=pre_untracked_contents,
+    )
+
+    assert violations == []
+    assert migration.read_bytes() == original
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work, silence_console):
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""

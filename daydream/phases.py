@@ -37,6 +37,9 @@ from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.generated_files import (
     GENERATED_FILES_PROMPT_RULE,
+    _changed_untracked_generated_files,
+    _restore_untracked_generated_file,
+    _snapshot_untracked_generated_files,
     is_generated_file,
     related_manifest_paths,
 )
@@ -2245,6 +2248,7 @@ def _reject_test_healing_generated_file_edits(
     *,
     snapshot: str | None,
     pre_untracked: set[str],
+    pre_untracked_contents: dict[str, bytes] | None = None,
     snapshot_captured: bool = True,
 ) -> list[str] | None:
     """Restore generated files, returning ``None`` if any restoration fails."""
@@ -2262,7 +2266,7 @@ def _reject_test_healing_generated_file_edits(
         )
     except GitError:
         return []
-    direct_violations: list[str] = []
+    tracked_violations: list[str] = []
     paths_to_restore: list[str] = []
     for path in changed:
         try:
@@ -2272,9 +2276,12 @@ def _reject_test_healing_generated_file_edits(
             continue
         if not is_generated_file(path, baseline):
             continue
-        direct_violations.append(path)
+        tracked_violations.append(path)
         paths_to_restore.append(path)
 
+    untracked_baselines = pre_untracked_contents or {}
+    untracked_violations = _changed_untracked_generated_files(repo, untracked_baselines)
+    direct_violations = [*tracked_violations, *untracked_violations]
     changed_set = set(changed)
     for path in direct_violations:
         for manifest_path in related_manifest_paths(path):
@@ -2305,6 +2312,22 @@ def _reject_test_healing_generated_file_edits(
         try:
             git_ops.restore_paths_from_ref(repo, ref, [path])
         except GitError as exc:
+            print_warning(console, f"Could not restore generated file '{path}': {exc}")
+            restoration_failed = True
+
+    for path in untracked_violations:
+        file_path = repo / path
+        if file_path.is_file():
+            try:
+                recovery_dir.mkdir(parents=True, exist_ok=True)
+                slug = path.replace("/", "-").replace("\\", "-")
+                digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+                (recovery_dir / f"{slug}-{digest}.orphan").write_bytes(file_path.read_bytes())
+            except OSError as exc:
+                print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
+        try:
+            _restore_untracked_generated_file(repo, path, untracked_baselines[path])
+        except OSError as exc:
             print_warning(console, f"Could not restore generated file '{path}': {exc}")
             restoration_failed = True
 
@@ -2361,11 +2384,13 @@ async def phase_test_and_heal(
         try:
             snapshot = git_ops.stash_create(work.repo)
             pre_untracked = set(git_ops.list_untracked(work.repo))
+            pre_untracked_contents = _snapshot_untracked_generated_files(work.repo, pre_untracked)
             snapshot_captured = True
-        except GitError as exc:
+        except (GitError, OSError) as exc:
             print_warning(console, f"Could not snapshot tree before test-healing fix: {exc}")
             snapshot = None
             pre_untracked = set()
+            pre_untracked_contents = {}
             snapshot_captured = False
         fix_prompt = get_registry().prompt("fix")(
             output, feedback_items, repo=work.repo,
@@ -2383,6 +2408,7 @@ async def phase_test_and_heal(
             snapshot=snapshot,
             snapshot_captured=snapshot_captured,
             pre_untracked=pre_untracked,
+            pre_untracked_contents=pre_untracked_contents,
         )
         return guard_result is not None
 
