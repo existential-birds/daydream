@@ -4946,3 +4946,144 @@ async def test_pre_upgrade_artifacts_without_a_key_refuse_resume(
     stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target, start_at="merge") == 1
     assert stub2.calls == []
+
+
+# Issue #314 — anti-slop review rubric: the complexity-concentration extraction
+# finding class flows through the real deep pipeline at the calibrated severity.
+
+
+def _eroded_main_repo(tmp_path: Path) -> Path:
+    """Build a repo whose feature branch adds an eroded ``main()``: repeated
+    ``--flag value`` / ``--flag=value`` branch pairs with no helper extracted
+    (the SlopCodeBench B.2 canonical shape the anti-slop rubric targets)."""
+    project = tmp_path / "eroded_main"
+    project.mkdir()
+    init = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "def main(argv):\n"
+        "    return 0\n"
+        "\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main(sys.argv))\n"
+    )
+    (project / "main.py").write_text(init)
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    eroded = (
+        "import sys\n"
+        "\n"
+        "\n"
+        "def main(argv):\n"
+        "    if '--verbose value' in argv:\n"
+        "        log('verbose on')\n"
+        "    if '--verbose=value' in argv:\n"
+        "        log('verbose on')\n"
+        "    if '--debug value' in argv:\n"
+        "        log('debug on')\n"
+        "    if '--debug=value' in argv:\n"
+        "        log('debug on')\n"
+        "    if '--color value' in argv:\n"
+        "        log('color on')\n"
+        "    if '--color=value' in argv:\n"
+        "        log('color on')\n"
+        "    return 0\n"
+        "\n"
+        "\n"
+        "def log(msg):\n"
+        "    print(msg)\n"
+        "\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    raise SystemExit(main(sys.argv))\n"
+    )
+    (project / "main.py").write_text(eroded)
+    _git(project, "add", ".")
+    _commit(project, "change: add flag handling inline")
+    return project
+
+
+async def test_anti_slop_rubric_extraction_finding_flows_through_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#314 acceptance: an eroded ``main()`` diff emits the extraction finding
+    class through the real deep pipeline, calibrated to medium.
+
+    The per-stack review prompt carries the anti-slop rubric (pinned by the
+    text tests in ``test_deep_prompts.py``); here the stub's per-stack review
+    branch emits the complexity-concentration finding the rubric targets, and
+    we assert it lands as an ordinary merged finding at ``medium`` severity --
+    calibration honored, no arbiter/suppression escalation for a
+    maintainability finding.
+    """
+    _silence(monkeypatch)
+    project = _eroded_main_repo(tmp_path)
+    stub = _install_stub_backend(monkeypatch, project)
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "main.py",
+            "line": 3,
+            "description": "extract the repeated --flag branch pairs into a focused callable",
+        }
+    }
+
+    exit_code = await _run_deep(project)
+    assert exit_code == 0
+
+    items_file = project / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    extraction = [it for it in items if "extract" in it.get("description", "")]
+    assert extraction, f"the extraction finding must be merged:\n{items}"
+    assert extraction[0]["severity"] == "medium"
+
+
+async def test_structural_finding_reported_medium_severity_survives_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#314 regression: a structural-stack anti-slop finding parsed with an
+    explicitly reported ``medium`` severity lands in ``merged-items.json`` as
+    ``medium`` -- NOT escalated to high.
+
+    The structural meta-stack used to parse with the severity-free
+    ``FEEDBACK_SCHEMA``, so every structural record merged at ``severity:
+    "high"`` and the anti-slop rubric's medium/low calibration (its primary
+    home on the structural path) was silently discarded. The fix parses the
+    structural stack with ``PER_STACK_RECORD_SCHEMA`` and preserves the
+    reported severity at merge. Real-path: drive the deep pipeline over an
+    eroded-diff repo whose structural parse emits a ``medium`` finding and
+    assert the observable outcome in the canonical ``merged-items.json``.
+    """
+    _silence(monkeypatch)
+    project = _eroded_main_repo(tmp_path)
+    stub = _install_stub_backend(monkeypatch, project)
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "main.py",
+            "line": 3,
+            "description": "structural: the --flag branch pairs grow main() past the extraction threshold",
+        }
+    }
+
+    exit_code = await _run_deep(project)
+    assert exit_code == 0
+
+    items_file = project / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    structural = [
+        it
+        for it in items
+        if it.get("lens") == "structural" and "extraction threshold" in it.get("description", "")
+    ]
+    assert structural, f"the structural finding must be merged:\n{items}"
+    assert structural[0]["severity"] == "medium", (
+        "structural anti-slop finding must keep its reported medium severity, "
+        f"got {structural[0].get('severity')!r}:\n{structural}"
+    )

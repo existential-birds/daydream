@@ -45,6 +45,8 @@ Determine whether Daydream provides materially better pre-merge review than the 
 
 Security dimensions informed by SeRe dataset categories [8]. Test adequacy informed by CR-Bench defect taxonomy [10].
 
+**Anti-slop review rubric (issue #314).** The review prompts embed an anti-slop rubric targeting the SlopCodeBench degradation patterns — structural erosion, verbosity, and duplication. It flags complexity concentration (logic added to already-large functions that should be extracted into focused callables), verbosity (identity comprehensions, empty-list guards, single-use intermediates, casts to dodge type checking, trivial wrappers, nested ladders), and copy-pasted duplication. Maintainability findings are calibrated medium/low — never high — under this rubric. Separately, when erosion is pre-existing-and-growing, the rubric scopes the finding to the growth the diff introduces: flag the growth, not the whole function.
+
 ### Meta-Quality
 
 | Dimension | Question |

@@ -360,10 +360,10 @@ class StubBackend:
                 "line": 1,
                 "evidence": "api.py:1",
             }
-            # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA, #168);
-            # emit the configured severity so a test can drive arbiter selection.
-            # The structural stack parses with FEEDBACK_SCHEMA (no severity prompt),
-            # so it never gets one -- matching production.
+            # Deep per-stack parse requests severity (PER_STACK_RECORD_SCHEMA,
+            # #168); every stack -- language or the structural meta-stack
+            # (#314) -- parses with this schema, so all emit the configured
+            # severity so a test can drive arbiter selection.
             if self.parse_severity is not None and "severity" in pl:
                 issue["severity"] = self.parse_severity
                 issue["confidence"] = "MEDIUM"
