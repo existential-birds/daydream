@@ -2,13 +2,13 @@
 
 ## Goal
 
-Determine whether Daydream provides materially better pre-merge review than commercial alternatives (Greptile, CodeRabbit, Copilot, etc.), with sufficient rigor that the conclusion is defensible to engineers, leadership, and external observers.
+Determine whether Daydream provides materially better pre-merge review than the status quo, with sufficient rigor that the conclusion is defensible to engineers, leadership, and external observers.
 
 ## Two Evaluation Arms
 
 ### Arm 1: Quantitative Martian Code Review Benchmark
 
-- **Daydream only** (competitors already scored on the public leaderboard) [1].
+- **Daydream only** — scored against the golden comments [1].
 - Martian measures precision, recall, and F1 against golden comments on 50 offline PRs (Sentry, Grafana, Cal.com, Discourse, Keycloak) and an online mode scoring 5,400+ real bot-reviewed PRs [1].
 - Report: overall F1, precision, recall, and high-severity-filtered F1.
 - **Limitations**: ground truth is developer action (not objective correctness), LLM judge introduces variance, offline set is small and potentially leaked, gold sets understate precision for high-recall tools [1].
@@ -18,7 +18,7 @@ Determine whether Daydream provides materially better pre-merge review than comm
 - Both tools run on identical PR snapshots with equivalent context access.
 - All comments anonymized, normalized, and randomly ordered.
 - Engineers rate blinded comments; a human gold baseline enables recall measurement.
-- Methodology informed by Atlassian's RovoDev deployment study [9] and SWR-Bench's PR-centric evaluation design [5].
+- Methodology informed by Atlassian's RovoDev deployment study [6] and SWR-Bench's PR-centric evaluation design [2].
 
 ---
 
@@ -43,7 +43,7 @@ Determine whether Daydream provides materially better pre-merge review than comm
 | Observability | Missing metrics/logs/traces, silent failure modes, unclear error messages? |
 | Documentation drift | Comments/docs/runbooks/changelog updated to match the diff? |
 
-Security dimensions informed by SeRe dataset categories [11]. Test adequacy informed by CR-Bench defect taxonomy [14].
+Security dimensions informed by SeRe dataset categories [8]. Test adequacy informed by CR-Bench defect taxonomy [10].
 
 ### Meta-Quality
 
@@ -53,9 +53,9 @@ Security dimensions informed by SeRe dataset categories [11]. Test adequacy info
 | Recall / false negatives | What real issues were missed? (requires gold baseline) |
 | Calibration | Are severity rankings in line with human expectations? Does the tool distinguish "must fix" from "consider"? |
 | Groundedness | Are real code paths cited, or generic advice? All factual claims supported by available code? |
-| Actionability | Can the engineer fix the issue directly from the comment? Informed by c-CRAB's review-to-fix methodology [6]. |
+| Actionability | Can the engineer fix the issue directly from the comment? Informed by c-CRAB's review-to-fix methodology [3]. |
 | Silence | Does the agent know when to say nothing? (correct silence on clean PRs vs inappropriate silence on buggy ones) |
-| Fix correctness | When a fix is suggested, does it compile/pass tests/introduce regressions? Informed by c-CRAB [6] and SWE-bench [20]. |
+| Fix correctness | When a fix is suggested, does it compile/pass tests/introduce regressions? Informed by c-CRAB [3] and SWE-bench [13]. |
 | Reproducibility | Same PR reviewed N times; do findings materially differ? |
 
 ---
@@ -64,7 +64,7 @@ Security dimensions informed by SeRe dataset categories [11]. Test adequacy info
 
 ### Human Gold Baseline
 
-The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1] [5] [9].
+The single most important methodological requirement: **a human gold baseline is needed to measure recall, not just precision.** This gap was identified across multiple benchmark studies [1] [2] [6].
 
 - Subset of 20-40 PRs receives independent human review by 2-3 engineers **before** seeing tool output.
 - Time-boxed: 20-30 min per normal PR, 45-60 min for large PRs (prevents impossibly thorough baseline).
@@ -83,7 +83,7 @@ The single most important methodological requirement: **a human gold baseline is
 
 - **Sample size**: 50-100 internal PRs for the qualitative arm. Minimum 30 for directional signal.
 - **Stratify** across: repo/service, language, PR size, PR type (feature, bugfix, refactor, migration, config).
-- **Include clean PRs** (no known issues) to test noise/silence behavior. This follows SWR-Bench's design of including 500 clean PRs alongside 500 change-PRs [5].
+- **Include clean PRs** (no known issues) to test noise/silence behavior. This follows SWR-Bench's design of including 500 clean PRs alongside 500 change-PRs [2].
 - Document exclusion criteria before evaluation.
 - Use paired design: both tools review the same PRs.
 
@@ -102,7 +102,7 @@ The single most important methodological requirement: **a human gold baseline is
 | Severity calibration | Severely misstated | Excellent prioritization |
 | Overall usefulness | Harmful/wasted time | Should block or strongly influence merge |
 
-Rubric design informed by DeepCRCEval's finding that less than 10% of benchmark comments are high quality for automation, and that BLEU/text-similarity metrics poorly capture review usefulness [10].
+Rubric design informed by DeepCRCEval's finding that less than 10% of benchmark comments are high quality for automation, and that BLEU/text-similarity metrics poorly capture review usefulness [7].
 
 Plus binary labels: *Would you want this posted? Would you change code because of it? Duplicate? Category?*
 
@@ -115,7 +115,7 @@ Plus binary labels: *Would you want this posted? Would you change code because o
 
 ### Inter-Rater Reliability
 
-Use **Krippendorff's alpha** (handles ordinal scales, missing ratings, multiple raters) [19].
+Use **Krippendorff's alpha** (handles ordinal scales, missing ratings, multiple raters) [12].
 
 | Alpha | Interpretation |
 |---|---|
@@ -181,13 +181,13 @@ The sections below address each.
 
 #### Confidence intervals: how precise is our estimate?
 
-**In plain terms:** A confidence interval (CI) is the range of values that our true score could plausibly take, given the data we have. If Daydream's precision is 65% with a 95% CI of [58%, 72%], we're confident the true precision is somewhere in that range. If Greptile's CI is [45%, 76%], the two ranges overlap so much that we can't declare a winner.
+**In plain terms:** A confidence interval (CI) is the range of values that our true score could plausibly take, given the data we have. If Daydream's precision is 65% with a 95% CI of [58%, 72%], we're confident the true precision is somewhere in that range. If the comparison tool's CI is [45%, 76%], the two ranges overlap so much that we can't declare a winner.
 
 **For ML researchers:** Use **PR-level bootstrap resampling** (1,000-10,000 iterations). On each iteration, sample PRs with replacement, recompute precision/recall/F1 for both tools on that resampled set, and record the difference. The 2.5th and 97.5th percentiles of the difference distribution give a 95% CI.
 
 **Why PR-level, not comment-level:** Comments within the same PR are not independent; a tool that misses one dependency issue on a PR tends to miss related issues too. Treating comments as independent inflates the apparent sample size and produces artificially tight confidence intervals. PR-level bootstrap respects the clustering structure.
 
-**What the CI tells you:** If the 95% CI for the difference (Daydream - Greptile) excludes zero, the difference is statistically significant. If it includes zero, the tools may be equivalent on that metric. Report CIs for all primary metrics, not just point estimates.
+**What the CI tells you:** If the 95% CI for the difference (Daydream - the comparison tool) excludes zero, the difference is statistically significant. If it includes zero, the tools may be equivalent on that metric. Report CIs for all primary metrics, not just point estimates.
 
 #### Minimum detectable effect: what difference is worth caring about?
 
@@ -210,7 +210,7 @@ State in the evaluation: *"We treat differences below 5 F1 points or below 10 pe
 
 #### Sample size: how many PRs do we need?
 
-**In plain terms:** The smaller the difference you're trying to detect, the more data you need. If Daydream is 30% better than Greptile, 20 PRs will make it obvious. If it's 5% better, you might need hundreds.
+**In plain terms:** The smaller the difference you're trying to detect, the more data you need. If Daydream is 30% better than the comparison tool, 20 PRs will make it obvious. If it's 5% better, you might need hundreds.
 
 **For ML researchers:** Statistical power is the probability of detecting a real difference of a given size. At 80% power and alpha=0.05:
 
@@ -245,19 +245,6 @@ State in the evaluation: *"We treat differences below 5 F1 points or below 10 pe
 3. **Apply Holm-Bonferroni correction** to primary metrics if formal hypothesis testing is needed. This adjusts the significance threshold downward based on the number of tests performed.
 4. **Prefer effect sizes and confidence intervals over p-values.** A p-value tells you "is there a difference?" An effect size with CI tells you "how big is the difference, and how sure are we?"; which is the more useful question for tool selection.
 
-#### Putting it together: what to report
-
-For each primary metric, report a table like this:
-
-```text
-Metric              Daydream (95% CI)    Competitor (95% CI)  Difference (95% CI)   Significant?
-Precision           21% [16, 26]         [varies by tool]     --                     TBD
-Recall              59% [49, 69]         [varies by tool]     --                     TBD
-F1                  0.31 [0.24, 0.38]    [varies by tool]     --                     TBD
-```
-
-(Provisional numbers from the 2026-06-04 single-sweep baseline in [benchmark.md](benchmark.md); CIs not yet computed. The full per-tool comparison lives in the HTML report.)
-
 ### Bias Mitigation Checklist
 
 | Bias | Mitigation |
@@ -275,7 +262,7 @@ F1                  0.31 [0.24, 0.38]    [varies by tool]     --                
 
 ## Operational Metrics
 
-Operational metrics informed by Atlassian RovoDev's production deployment metrics (code resolution rate, PR cycle time, human comment reduction) [9].
+Operational metrics informed by Atlassian RovoDev's production deployment metrics (code resolution rate, PR cycle time, human comment reduction) [6].
 
 | Metric | Definition |
 |---|---|
@@ -289,35 +276,18 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 
 ---
 
-## Competitor Context
-
-### Greptile
-
-- Martian leaderboard: F1 49.9%, precision 71.7%, recall 38.3% [1]. MorphLLM reports slightly different figures (66.2% precision, 40.4% recall, 50.2% F1) due to methodology differences [17].
-- Architecture: codegraph + multi-modal retrieval (not simple RAG) + TREX (runs code in sandbox, generates logs/screenshots/API traces) [2] [3].
-- Known weakness: signal-to-noise historically poor (19% address rate, improved to 55% via embedding-based filtering using ChromaDB on Cloudflare) [2]. Non-deterministic. Pricing complaints on $1/review overage [2].
-- Independence principle: Greptile's core thesis is that "the tool that generates the code should not be the same tool that reviews it" [2].
-
-### Market landscape
-
-- Best-in-class F1 on Martian is Gemini at 59.5% [1].
-- Category ARR approximately $420M, 133% YoY growth, 44% of teams use AI code review on some PRs [18].
-- The entire category is mediocre in absolute terms, which is the gap daydream targets.
-
----
-
 ## Additional Benchmarks (Optional for v1)
 
 | Benchmark | Why | N | Source |
 |---|---|---|---|
-| SWR-Bench | Clean PRs enable false-positive/noise measurement | 1,000 PRs | [5] |
-| c-CRAB | Tests actionability via executable tests: does the review guide a correct fix? | varies | [6] |
-| Qodo PR-Review-Bench | Injected bugs in multi-language PRs | 100 PRs, 580 issues | [7] |
-| AACR-Bench | Multilingual repo-level context; labels diff/file/repo context requirements | 200 PRs, 10 languages | [8] |
-| CR-Bench / CR-Evaluator | Defect-focused review with signal-to-noise ratio metric | 584 tasks (174 verified) | [14] |
-| SWE-PRBench | Matching human reviewer findings under controlled context settings | 350 PRs | [13] |
-| CodeFuse-CR-Bench | End-to-end repo-level Python review with multi-dimensional scoring | 601 instances, 70 projects | [15] |
-| SeRe | Security-specific code review evaluation | 6,732 instances, 5 languages | [11] |
+| SWR-Bench | Clean PRs enable false-positive/noise measurement | 1,000 PRs | [2] |
+| c-CRAB | Tests actionability via executable tests: does the review guide a correct fix? | varies | [3] |
+| Qodo PR-Review-Bench | Injected bugs in multi-language PRs | 100 PRs, 580 issues | [4] |
+| AACR-Bench | Multilingual repo-level context; labels diff/file/repo context requirements | 200 PRs, 10 languages | [5] |
+| CR-Bench / CR-Evaluator | Defect-focused review with signal-to-noise ratio metric | 584 tasks (174 verified) | [10] |
+| SWE-PRBench | Matching human reviewer findings under controlled context settings | 350 PRs | [9] |
+| CodeFuse-CR-Bench | End-to-end repo-level Python review with multi-dimensional scoring | 601 instances, 70 projects | [11] |
+| SeRe | Security-specific code review evaluation | 6,732 instances, 5 languages | [8] |
 
 ---
 
@@ -325,40 +295,26 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 
 [1] Martian Code Review Bench. `codereview.withmartian.com`. Repo: `github.com/withmartian/code-review-benchmark`.
 
-[2] Greptile Blog Posts (v2, v3, v4, TREX announcement). `greptile.com/blog`. 2024-2026.
+[2] SWR-Bench: "Benchmarking and Studying the LLM-based Code Review." arXiv:2509.01494. 2025.
 
-[3] Hatchet Case Study: Greptile's Workflow Infrastructure. `hatchet.run` / Greptile engineering blog. 2025.
+[3] c-CRAB: "Code Review Agent Benchmark." arXiv:2603.23448. Repo: `github.com/c-CRAB-Benchmark`. 2026.
 
-[4] Greptile AI Code Review Benchmark. `greptile.com/benchmarks`. 2025.
+[4] Qodo PR-Review-Bench / Code Review Benchmark 1.0. HF dataset: `Qodo/PR-Review-Bench`. GitHub: `agentic-review-benchmarks`. 2025-2026.
 
-[5] SWR-Bench: "Benchmarking and Studying the LLM-based Code Review." arXiv:2509.01494. 2025.
+[5] AACR-Bench: "Repository-level Automated Code Review." arXiv:2601.19494. Repo: `github.com/alibaba/aacr-bench`. HF: `Alibaba-Aone/aacr-bench`. 2026.
 
-[6] c-CRAB: "Code Review Agent Benchmark." arXiv:2603.23448. Repo: `github.com/c-CRAB-Benchmark`. 2026.
+[6] Atlassian RovoDev: "LLM-based Code Reviewer in Enterprise Workflows." arXiv:2601.01129. 2026.
 
-[7] Qodo PR-Review-Bench / Code Review Benchmark 1.0. HF dataset: `Qodo/PR-Review-Bench`. GitHub: `agentic-review-benchmarks`. 2025-2026.
+[7] DeepCRCEval: "Evaluating Code Review Comment Quality." arXiv:2412.18291. FASE 2025.
 
-[8] AACR-Bench: "Repository-level Automated Code Review." arXiv:2601.19494. Repo: `github.com/alibaba/aacr-bench`. HF: `Alibaba-Aone/aacr-bench`. 2026.
+[8] SeRe: "Security-Related Code Review Dataset." arXiv:2601.01042. ICSE 2026.
 
-[9] Atlassian RovoDev: "LLM-based Code Reviewer in Enterprise Workflows." arXiv:2601.01129. 2026.
+[9] SWE-PRBench: "Evaluating AI Code Review Against Human Reviewer Findings." arXiv:2603.26130. HF: `foundry-ai/swe-prbench`. 2026.
 
-[10] DeepCRCEval: "Evaluating Code Review Comment Quality." arXiv:2412.18291. FASE 2025.
+[10] CR-Bench / CR-Evaluator: "Benchmarking AI Code Review Agents for Defect Detection." arXiv:2603.11078. 2026.
 
-[11] SeRe: "Security-Related Code Review Dataset." arXiv:2601.01042. ICSE 2026.
+[11] CodeFuse-CR-Bench: "End-to-End Repository-Level Code Review Evaluation." arXiv:2509.14856. 2025.
 
-[12] CodeReviewer: "Automating Code Review Activities by Large-Scale Pre-training." ESEC/FSE 2022. Repo: `github.com/microsoft/CodeBERT/tree/master/CodeReviewer`.
+[12] Krippendorff, K. *Content Analysis: An Introduction to Its Methodology.* 4th ed. SAGE Publications, 2018. ISBN: 978-1506395653.
 
-[13] SWE-PRBench: "Evaluating AI Code Review Against Human Reviewer Findings." arXiv:2603.26130. HF: `foundry-ai/swe-prbench`. 2026.
-
-[14] CR-Bench / CR-Evaluator: "Benchmarking AI Code Review Agents for Defect Detection." arXiv:2603.11078. 2026.
-
-[15] CodeFuse-CR-Bench: "End-to-End Repository-Level Code Review Evaluation." arXiv:2509.14856. 2025.
-
-[16] CodeReviewQA: "Can LLMs Understand Code Review Comments?" arXiv:2503.16167. 2025.
-
-[17] MorphLLM: "AI Code Review Tool Comparison." `morphllm.com`. 2026.
-
-[18] IdeaPlan: "AI Code Review Market Report." `ideaplan.io`. 2026.
-
-[19] Krippendorff, K. *Content Analysis: An Introduction to Its Methodology.* 4th ed. SAGE Publications, 2018. ISBN: 978-1506395653.
-
-[20] SWE-bench: "Can Language Models Resolve Real-World GitHub Issues?" Jimenez et al. ICLR 2024. Repo: `github.com/swe-bench/SWE-bench`. `swebench.com`.
+[13] SWE-bench: "Can Language Models Resolve Real-World GitHub Issues?" Jimenez et al. ICLR 2024. Repo: `github.com/swe-bench/SWE-bench`. `swebench.com`.

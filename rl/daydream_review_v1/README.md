@@ -50,18 +50,19 @@ backend only needs to learn a base URL and a key:
 | `codex` | OpenAI Responses | `$CODEX_HOME/config.toml` provider block + `CODEX_INTERCEPT_KEY` |
 | `pi` | Chat Completions | an installed pi provider extension + `VF_INTERCEPT_API_KEY` |
 
-`claude` is the default for a LOCAL smoke run only, because its CLI is what the
-base image already carries and its injection needs no provisioning file.
+`claude` is the default backend — for smoke runs and the real eval rollout
+(`configs/eval-docker.toml` also sets `backend = "claude"`) — because its CLI is
+what the base image already carries and its injection needs no provisioning file.
 `osprey` lands as one more class when daydream ships that backend.
 
 **Only `pi` can train.** Two facts compose. The interception server passes the
 agent's dialect straight through to the upstream — the URL is
-`base_url + dialect.upstream_path` (`clients/eval.py:95`), no cross-dialect
+`base_url + dialect.upstream_path` (`verifiers/clients/eval.py:95`), no cross-dialect
 adapter. And at training time the upstream is verifiers' renderer client, which
 tokenizes with an HF chat template, calls vLLM's `/inference/v1/generate` (this
 is how `token_ids` and `logprobs` reach the trace), and raises
 `NotImplementedError` on any dialect but Chat Completions
-(`clients/train.py:233-239`).
+(`verifiers/clients/train.py:233-239`).
 
 So `codex` (Responses) and `claude` (Anthropic Messages) work for an **eval**
 against a hosted provider and cannot be used for a **training run** at these
@@ -122,15 +123,21 @@ uv run eval @ configs/eval-docker.toml -m <your policy model id> --client.base-u
 `https://api.pinference.ai/api/v1`, so any offline run must set `push = false`
 and an explicit `--client.base-url`. The URL must keep its `/v1` suffix: the
 client string-appends the dialect's path, and omitting it yields an HTML 404.
-Both are baked into `configs/*.toml`.
+Both are baked into `configs/*.toml` — `push = false` in both eval-stub and
+eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
+(the docker config has no `[client]` block and takes it from the CLI).
 
 ## Things worth knowing before you trust a number
 
-- **A rollout that finds NOTHING scores `intrinsic_composite` 1.0.** Grounding is
-  vacuously perfect over an empty finding set. `score_trajectory` is reused
-  verbatim on purpose, so the fix belongs to the Stage-0 rubric (#91); until then,
-  watch the `n_findings` metric next to the reward. Reward climbing while
-  `n_findings` falls is the policy learning to say nothing.
+- **A rollout that finds NOTHING scores `intrinsic_composite` 0.0, not 1.0.**
+  `analyze_grounding` returns `grounding_rate = None` over an empty finding set
+  (undefined, not vacuously perfect), so no credit axis is present and
+  `score_trajectory` returns `composite = None`, mapped to 0.0 at the reward
+  boundary. A correct "nothing wrong here" therefore scores the same as a broken
+  run; any positive floor for a genuinely clean review is reward design and
+  belongs to the Stage-0 rubric (#91). Keep watching the `n_findings` metric
+  next to the reward — reward climbing while `n_findings` falls is the policy
+  learning to say nothing.
 - **The correctness axis exists only when the fix gate was accepted.**
   `deep/recommendation-verdicts.json` is written only on that branch, so a
   review-only rollout scores on grounding and format alone.

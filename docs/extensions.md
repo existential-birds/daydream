@@ -541,7 +541,7 @@ r.set_flow("ro-audit", ["ro_audit"])
 # daydream --flow ro-audit /path/to/project
 ```
 
-A built-in name passed to `--flow` (`deep`/`shallow`/`review`) routes to its
+A built-in name passed to `--flow` (`deep`/`shallow`/`review`/`improve`) routes to its
 dedicated helper, so behavior matches the corresponding flag. `pr-feedback` is
 not selectable via `--flow` (it needs a PR number and bot identity — use
 `daydream feedback`). An unregistered name errors with the same resolve check

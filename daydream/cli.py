@@ -259,9 +259,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         dest="reasoning_effort",
         metavar="EFFORT",
         help="Global reasoning-effort override (e.g. low, medium, high). "
-             "Only applied by the Codex backend, forwarded as "
-             "-c model_reasoning_effort=<EFFORT>. Ignored for claude/pi. "
-             "Takes precedence over any per-phase config-file override.",
+             "Consumed by every backend through its native knob: Codex as "
+             "-c model_reasoning_effort=<EFFORT>, Claude as --effort, Pi as "
+             "--thinking. Takes precedence over any per-phase config-file override.",
     )
     parser.add_argument(
         "--non-interactive",

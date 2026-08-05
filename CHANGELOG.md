@@ -156,7 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `daydream bench` now supports `--trials N` to run the benchmark N times against the same PR set and report mean plus standard deviation for precision, recall, and F1. Surfaces variance so a single noisy run doesn't mask regressions or false improvements.
 
-- **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#232](https://github.com/existential-birds/daydream/pull/248))
+- **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#248](https://github.com/existential-birds/daydream/pull/248))
 
   The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
 
@@ -242,9 +242,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Daydream now supports z.ai GLM models through a new `PiBackend` that spawns the `pi` CLI as a subprocess and parses its JSONL event stream into unified `AgentEvent` types. Implements the same subprocess+JSONL pattern proven by `CodexBackend`, with full ATIF v1.6 trajectory parity including tool-use events, cost reporting, and structured-output emulation. Per-phase model defaults for z.ai models are configured in `config.py`.
 
-- **bench:** Review-bot comparison harness (daydream vs coderabbit/greptile) ([#208](https://github.com/existential-birds/daydream/pull/208))
+- **bench:** Review-bot comparison harness (daydream vs other SaaS review bots) ([#208](https://github.com/existential-birds/daydream/pull/208))
 
-  Adds `bench/review-bot-compare/` with a replay-driven harness that runs daydream and SaaS review bots (CodeRabbit, Greptile) against the same held-out PRs, harvests their findings, and judges them on a level playing field. Produces per-PR precision/recall metrics so review quality can be compared head-to-head.
+  Adds `bench/review-bot-compare/` with a replay-driven harness that runs daydream and other SaaS review bots against the same held-out PRs, harvests their findings, and judges them on a level playing field. Produces per-PR precision/recall metrics so review quality can be compared head-to-head.
 
 - **bench:** Offline benchmark report — daydream vs the SaaS field ([#224](https://github.com/existential-birds/daydream/pull/224))
 
@@ -440,7 +440,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Tests that exercise archive functionality now use a temporary directory instead of the user's real archive, preventing test runs from creating stale entries in the production archive index.
 
-- **explore:** Remove `.coderabbit.yaml` from pattern-scanner prompts ([#96](https://github.com/existential-birds/daydream/pull/96))
+- **explore:** Remove third-party review-bot config files from pattern-scanner prompts ([#96](https://github.com/existential-birds/daydream/pull/96))
 
 ### Security
 
@@ -466,7 +466,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **scripts:** Add `scripts/review-historic-pr <PR>` helper for benchmarking daydream against already-merged PRs ([#79](https://github.com/existential-birds/daydream/pull/79))
 
-  Pins the review to the exact code state the PR introduced (PR head against the merge-base on the original target branch) so output is apples-to-apples with whatever was reviewed at PR time (greptile, coderabbit, etc.). Honors `DAYDREAM_ARGS`, `KEEP_BRANCHES`, and optional `ZIP` / `ZIP_OUT` env vars for bundling `.review-output.md` plus the ATIF trajectory directory. Requires `gh`, `git`, `jq`, and `daydream` on `$PATH`.
+  Pins the review to the exact code state the PR introduced (PR head against the merge-base on the original target branch) so output is apples-to-apples with whatever was reviewed at PR time. Honors `DAYDREAM_ARGS`, `KEEP_BRANCHES`, and optional `ZIP` / `ZIP_OUT` env vars for bundling `.review-output.md` plus the ATIF trajectory directory. Requires `gh`, `git`, `jq`, and `daydream` on `$PATH`.
 
 ### Changed
 
@@ -571,7 +571,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **pr-review:** Restyle inline GitHub PR reviews with severity emoji prefixes, per-file collapsible `<details>` sections, and 🔮 AI agent prompts under a "Code Review Summary" header ([#52](https://github.com/existential-birds/daydream/pull/52))
 
-  Aligns the posted review with CodeRabbit-style formatting so findings are easier to skim and the consolidated agent prompt is more actionable.
+  Aligns the posted review's formatting so findings are easier to skim and the consolidated agent prompt is more actionable.
 
 - **pr-review:** Replace the static "here are all findings" AI agent prompt with a fetch-and-fix workflow ([#52](https://github.com/existential-birds/daydream/pull/52))
 
@@ -811,7 +811,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **cli:** Add `--pr` flag for PR feedback mode that fetches and fixes bot review comments ([#9](https://github.com/existential-birds/daydream/pull/9))
 
-  Run `daydream /path --pr 42 --bot coderabbitai[bot]` to fetch bot comments from a PR, apply fixes in parallel, commit, push, and respond. Omit the PR number to auto-detect from the current branch.
+  Run `daydream /path --pr 42 --bot "reviewbot[bot]"` to fetch bot comments from a PR, apply fixes in parallel, commit, push, and respond. Omit the PR number to auto-detect from the current branch.
 
 - **cli:** Add `--bot` flag to specify which bot's comments to process ([#9](https://github.com/existential-birds/daydream/pull/9))
 

@@ -138,9 +138,10 @@ class RunConfig:
             table sources. Default None.
         reasoning_effort: Global default reasoning-effort override (e.g. "low",
             "medium", "high"), resolved by ``_resolved_reasoning_effort``
-            (CLI > config-file phase > config-file global). Only the Codex
-            backend applies it (forwarded as ``-c model_reasoning_effort=...``);
-            ignored for claude/pi. Default None.
+            (CLI > config-file phase > config-file global). Every backend
+            applies it through its native knob (Codex as ``-c
+            model_reasoning_effort=...``, Claude as ``--effort``, Pi as
+            ``--thinking``). Default None.
         file_config: File-sourced configuration (``[tool.daydream]`` /
             ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
             as a low-precedence source. None is treated as an empty config.

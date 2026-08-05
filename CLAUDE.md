@@ -154,7 +154,7 @@ recorder are backend-agnostic.
 ### Config and per-phase model overrides
 
 `config.py` holds `DEFAULT_{CLAUDE,CODEX,PI,EXPLORATION}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
-`PHASE_DEFAULT_EFFORT` (Codex only), budget constants, improve `EFFORT_TIERS`, and skill mappings. Pi
+`PHASE_DEFAULT_EFFORT` (deep/review half Codex-only; improve half all three backends), budget constants, improve `EFFORT_TIERS`, and skill mappings. Pi
 resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
 
 **Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set

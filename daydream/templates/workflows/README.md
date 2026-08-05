@@ -68,17 +68,14 @@ No single job ever holds both PR code and the App private key:
   and posts. Untrusted values reach shells via `env:` only, never `${{ }}`
   interpolation.
 
-The binding security spec is the daydream repo's
-`.beagle/concepts/self-hosted-review-bot/roadmap.md` §"Sub-project #2
-security design — the privilege split"; these templates implement it.
-
 ## Dedup limitations (v1)
 
 Re-reviews deduplicate against the bot's own prior comments via hidden
 fingerprint markers in each comment body:
 
-- **Exact fingerprint match only.** Identity is file + normalized title +
-  anchors + normalized description. A finding whose message drifts between
+- **Exact fingerprint match only.** Identity is file + normalized description
+  + sorted anchors + normalized rationale (`compute_fingerprint` in
+  `daydream/pr_review.py`). A finding whose message drifts between
   runs reads as one stale finding plus one new finding — expect an occasional
   duplicate with rephrased wording.
 - **Matched findings are left untouched** — no comment editing.

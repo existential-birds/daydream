@@ -71,7 +71,7 @@ daydream bench --reviewer glm --only grafana --limit 1
 
 Wire the pipeline cheaply before spending on the paid judge. Run two Grafana PRs with scoring off:
 
-> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 60 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting the sweep. If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
+> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 300 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting that PR (the sweep continues, but the run exits non-zero). If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
 
 ```bash
 daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --no-score
@@ -218,7 +218,7 @@ A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<
 The withmartian set is not the only corpus. `daydream bench harvest` builds one from a repository's own history with a commercial review bot: every PR the bot reviewed becomes a benchmark entry whose golden comments are the bot's findings. That measures daydream against a bot on *your* code, not on 26 fixed upstream PRs.
 
 ```bash
-daydream bench harvest --repo acme/widgets --bot "coderabbitai[bot]" --out ./cr-corpus --limit 200
+daydream bench harvest --repo acme/widgets --bot "reviewbot[bot]" --out ./harvested --limit 200
 ```
 
 `--bot` takes the bot's login; the `[bot]` suffix is optional (GitHub's REST API keeps it on `user.login` while GraphQL drops it, and the harvester matches either form). `--state {all,open,closed,merged}` filters which PRs are scanned. The output dir *is* the corpus — one harvest, one corpus, no per-repo nesting:
@@ -299,5 +299,5 @@ Caveats:
 
 - **Single sweep.** No variance band; the LLM judge runs at `temperature: 0.0` but is not fully deterministic.
 - **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
-- **Precision gap.** 36 TP against 139 FP. Precision (0.206) sits below the README's 50% target. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
+- **Precision gap.** 36 TP against 139 FP. Precision (0.206) is the weakest metric of the three. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
 - **Tied to this setup.** Reviewer pipeline, date both move the number.
