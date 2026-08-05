@@ -171,6 +171,34 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
     assert migration.read_text() == "-- healing edit\n"
 
 
+def test_test_healing_guard_reports_restoration_failure(tmp_path, monkeypatch, silence_console):
+    """A forbidden edit remains unsafe when Git cannot restore its baseline."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "test: initialize migration fixture")
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- healing edit\n")
+    monkeypatch.setattr(
+        "daydream.phases.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations is None
+    assert migration.read_text() == "-- healing edit\n"
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work, silence_console):
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
@@ -208,6 +236,27 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
     assert "src/handler.py" in fix_prompt
     assert "src/utils.py" in fix_prompt
     assert "Analyze the failures and fix them" in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
+    tmp_path, monkeypatch, make_work, silence_console,
+):
+    """A failed generated-file restore stops healing before another test run."""
+    from daydream.phases import phase_test_and_heal
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "2")
+    monkeypatch.setattr(
+        "daydream.phases._reject_test_healing_generated_file_edits",
+        lambda *args, **kwargs: None,
+    )
+
+    result = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert result == (False, 1, False)
+    assert backend.call_count == 2
 
 
 @pytest.mark.asyncio

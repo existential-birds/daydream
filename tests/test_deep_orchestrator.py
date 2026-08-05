@@ -875,6 +875,50 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
 
 
+async def test_fix_guard_restore_failure_aborts_before_commit(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A forbidden generated edit cannot reach commit when restoration fails."""
+    from daydream.git_ops import GitError
+    from daydream.runner import run
+
+    migration = multi_stack_target / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("SELECT 1;\n")
+    _git(multi_stack_target, "add", "migrations/0001_init.sql")
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(heal=True, commit=False)
+    stub = _CommittingStubBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
+    stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
+    monkeypatch.setattr(
+        "daydream.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+        )
+    )
+
+    assert exit_code == 1
+    assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
+
+
 async def test_parallel_fix_commit_runs_once_after_all(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

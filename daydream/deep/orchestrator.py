@@ -678,8 +678,8 @@ def _reject_generated_file_edits(
     snapshot: str | None,
     snapshot_captured: bool,
     pre_untracked: set[str],
-) -> list[str]:
-    """Restore changed generated files that existed before the fix pass."""
+) -> list[str] | None:
+    """Restore changed generated files, returning ``None`` if restoration fails."""
     from daydream import git_ops
     from daydream.git_ops import GitError
 
@@ -742,11 +742,13 @@ def _reject_generated_file_edits(
         except OSError as exc:
             print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
 
+    restoration_failed = False
     if paths_to_restore:
         try:
             git_ops.restore_paths_from_ref(repo, ref, paths_to_restore)
         except GitError as exc:
             print_warning(console, f"Could not restore generated files: {exc}")
+            restoration_failed = True
 
     if direct_violations:
         artifact = generated_file_violations_path(deep_dir(target_dir))
@@ -757,12 +759,13 @@ def _reject_generated_file_edits(
             )
         except OSError as exc:
             print_warning(console, f"Could not record generated-file violations: {exc}")
-        print_warning(
-            console,
-            f"Reverted forbidden edits to existing generated files: {', '.join(direct_violations)}. "
-            "Add a new migration file instead.",
-        )
-    return direct_violations
+        if not restoration_failed:
+            print_warning(
+                console,
+                f"Reverted forbidden edits to existing generated files: {', '.join(direct_violations)}. "
+                "Add a new migration file instead.",
+            )
+    return None if restoration_failed else direct_violations
 
 
 def _has_non_daydream_worktree_changes(status: str) -> bool:
@@ -1619,13 +1622,15 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     stale_leftover_p = fix_leftover_untracked_path(dd)
     if stale_leftover_p.exists():
         stale_leftover_p.unlink()
-    _reject_generated_file_edits(
+    generated_guard_result = _reject_generated_file_edits(
         work,
         target_dir,
         snapshot=pre_fix_snapshot,
         snapshot_captured=pre_fix_snapshot_captured,
         pre_untracked=pre_fix_untracked,
     )
+    if generated_guard_result is None:
+        return Stop(1)
     return None
 
 

@@ -2246,8 +2246,8 @@ def _reject_test_healing_generated_file_edits(
     snapshot: str | None,
     pre_untracked: set[str],
     snapshot_captured: bool = True,
-) -> list[str]:
-    """Restore existing generated files changed by one test-healing fix."""
+) -> list[str] | None:
+    """Restore generated files, returning ``None`` if any restoration fails."""
     if not snapshot_captured:
         # HEAD is not a safe substitute when capturing the pre-fix state
         # failed: it may discard edits that were present before this pass.
@@ -2281,7 +2281,7 @@ def _reject_test_healing_generated_file_edits(
             if manifest_path in changed_set and manifest_path not in paths_to_restore:
                 paths_to_restore.append(manifest_path)
 
-    violations: list[str] = []
+    restoration_failed = False
     for path in paths_to_restore:
         try:
             patch = git_ops.diff_worktree_against(repo, ref, [path])
@@ -2306,26 +2306,25 @@ def _reject_test_healing_generated_file_edits(
             git_ops.restore_paths_from_ref(repo, ref, [path])
         except GitError as exc:
             print_warning(console, f"Could not restore generated file '{path}': {exc}")
-            continue
-        if path in direct_violations:
-            violations.append(path)
+            restoration_failed = True
 
-    if violations:
+    if direct_violations:
         artifact = repo / ".daydream" / "deep" / "generated-file-violations.json"
         try:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(
-                json.dumps({"violations": violations, "ref": ref}, indent=2),
+                json.dumps({"violations": direct_violations, "ref": ref}, indent=2),
                 encoding="utf-8",
             )
         except OSError as exc:
             print_warning(console, f"Could not record generated-file violations: {exc}")
-        print_warning(
-            console,
-            f"Reverted forbidden edits to existing generated files: {', '.join(violations)}. "
-            "Add a new migration file instead.",
-        )
-    return violations
+        if not restoration_failed:
+            print_warning(
+                console,
+                f"Reverted forbidden edits to existing generated files: {', '.join(direct_violations)}. "
+                "Add a new migration file instead.",
+            )
+    return None if restoration_failed else direct_violations
 
 
 async def phase_test_and_heal(
@@ -2354,7 +2353,7 @@ async def phase_test_and_heal(
     continuation: ContinuationToken | None = None
     test_command_override: str | None = None
 
-    async def _launch_fix(output: str) -> None:
+    async def _launch_fix(output: str) -> bool:
         nonlocal retries_used, continuation
         # Test healing happens after deep mode's batch-level generated-file
         # guard. Take an equivalent per-agent snapshot so a healing agent
@@ -2377,14 +2376,15 @@ async def phase_test_and_heal(
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
-        _reject_test_healing_generated_file_edits(
+        retries_used += 1
+        continuation = None
+        guard_result = _reject_test_healing_generated_file_edits(
             work.repo,
             snapshot=snapshot,
             snapshot_captured=snapshot_captured,
             pre_untracked=pre_untracked,
         )
-        retries_used += 1
-        continuation = None
+        return guard_result is not None
 
     while True:
         console.print()
@@ -2458,7 +2458,8 @@ async def phase_test_and_heal(
             # Bounded auto fix-and-retry: launch one fix attempt, then loop.
             console.print()
             print_info(console, "Launching agent to fix test failures (auto)...")
-            await _launch_fix(output)
+            if not await _launch_fix(output):
+                return False, retries_used, False
             continue
 
         print_menu(console, "What would you like to do?", [
@@ -2506,7 +2507,8 @@ async def phase_test_and_heal(
         elif choice == "2":
             console.print()
             print_info(console, "Launching agent to fix test failures...")
-            await _launch_fix(output)
+            if not await _launch_fix(output):
+                return False, retries_used, False
             continue
 
         elif choice == "3":
