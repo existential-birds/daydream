@@ -245,33 +245,44 @@ _CORPUS_ROOT = Path(__file__).resolve().parents[1] / "benchmark" / "corpora" / "
 def test_real_osprey_coderabbit_manifest_loads():
     """Real-path check against the committed CodeRabbit-parity corpus.
 
-    Validates the committed ``manifest.json`` — the artifact that ships
-    (``index.json`` + ``manifest.json`` are git-tracked; the ``harvest/``
-    payloads are gitignored, so CI has the manifest but not the payloads).
-    The per-PR resolved-count cross-check against the harvest records runs
-    only when the gitignored payloads are present locally, so a stale index
-    cannot silently diverge from the payloads on a full checkout.
+    The committed ``manifest.json`` must be a faithful projection of the
+    git-tracked ``index.json`` inventory — PR order and numbers, per-PR
+    ``comment_count``/``resolved_count``, corpus ``pr_count``/``comment_count``
+    — so removing a PR (while adjusting totals), swapping snapshot commits, or
+    replacing golden IDs while preserving counts would fail this check in CI.
+    The harvest payloads themselves are gitignored; when they are present
+    locally, the manifest is additionally required to be identical to a full
+    rebuild, pinning snapshot commits and golden comment id/path/line.
     """
     manifest_path = _CORPUS_ROOT / "manifest.json"
-    if not manifest_path.exists():
+    index_path = _CORPUS_ROOT / "index.json"
+    if not manifest_path.exists() or not index_path.exists():
         pytest.skip("osprey-coderabbit manifest is not committed yet")
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["repo"] == "existential-birds/osprey"
-    assert manifest["bot"] == "coderabbitai[bot]"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    indexed_prs = index["prs"]
+
+    assert manifest["repo"] == index["repo"]
+    assert manifest["bot"] == index["bot"]
     assert manifest["state"] == "closed"
+    assert manifest["pr_count"] == index["n_prs_with_bot_activity"]
     assert manifest["pr_count"] >= 100  # real harvest: 142 PRs (of 400 scanned)
+    assert manifest["comment_count"] == sum(pr["n_inline_comments"] for pr in indexed_prs)
     assert manifest["comment_count"] > 0
-    assert len(manifest["prs"]) == manifest["pr_count"]
-    assert manifest["comment_count"] == sum(pr["comment_count"] for pr in manifest["prs"])
+    assert manifest["resolved_count"] == sum(pr["n_resolved_threads"] for pr in indexed_prs)
     assert manifest["resolved_count"] == sum(pr["resolved_count"] for pr in manifest["prs"])
+    assert [pr["number"] for pr in manifest["prs"]] == [pr["pr_number"] for pr in indexed_prs]
+    for pr, indexed in zip(manifest["prs"], indexed_prs, strict=True):
+        assert pr["number"] == indexed["pr_number"]
+        assert pr["comment_count"] == indexed["n_inline_comments"]
+        assert pr["resolved_count"] == indexed["n_resolved_threads"]
+        assert pr["snapshot_commit"] == indexed.get("review_commit_id")
     assert all(pr["golden_comments"] for pr in manifest["prs"] if pr["comment_count"] > 0)
 
     if not (_CORPUS_ROOT / "harvest").is_dir():
         pytest.skip("gitignored harvest/ payloads absent on CI; skipping payload cross-check")
 
-    for pr in manifest["prs"]:
-        record = json.loads((_CORPUS_ROOT / "harvest" / f"pr-{pr['number']}.json").read_text(encoding="utf-8"))
-        assert pr["resolved_count"] == sum(
-            1 for t in record.get("threads", []) if t.get("is_resolved")
-        )
+    rebuilt = build_corpus_manifest(_CORPUS_ROOT, harvested_at=manifest["harvested_at"])
+    assert rebuilt == manifest
+    assert rebuilt["prs"] == manifest["prs"]
