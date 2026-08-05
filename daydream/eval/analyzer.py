@@ -163,17 +163,74 @@ def _files_from_diff(diff_path: Path) -> list[str]:
     return sorted(files)
 
 
+_READ_VERBS = ("sed", "nl", "cat", "rg")
+_SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
+
+
+def _paths_from_command(command: str) -> set[str]:
+    """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
+
+    Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
+    ``cat``, and ``rg``. Commands may chain segments with ``&&``/``;`` and
+    redirect with ``2>/dev/null``. Extraction is deliberately permissive —
+    ``_path_matches`` matches by ``endswith``, so a stray operand simply never
+    matches a diff file — but flags, redirect targets, sed address ranges, and
+    the ``rg`` search pattern are filtered out.
+    """
+    paths: set[str] = set()
+    for segment in re.split(r"\s*(?:&&|;)\s*", command):
+        tokens = segment.split()
+        if not tokens:
+            continue
+        verb = tokens[0].split("/")[-1]
+        if verb not in _READ_VERBS:
+            continue
+        operands = [
+            tok.strip("\"'")
+            for tok in tokens[1:]
+            if not tok.startswith("-") and ">" not in tok
+        ]
+        if verb == "rg":
+            # The first non-numeric operand is the search pattern (flags like
+            # ``-C 3`` take numeric args); everything after it is a path.
+            pattern_idx = next(
+                (i for i, o in enumerate(operands) if not o.isdigit()), None
+            )
+            operands = operands[pattern_idx + 1:] if pattern_idx is not None else []
+        for operand in operands:
+            if not operand or _SED_RANGE_RE.fullmatch(operand):
+                continue
+            paths.add(operand)
+    return paths
+
+
+def _read_paths_for_call(tc: dict) -> list[str]:
+    """All file paths a single tool call reads, across backends.
+
+    - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
+    - pi:     lowercase ``read`` → ``arguments.path``
+    - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
+    """
+    fn = tc["function_name"]
+    args = tc["arguments"]
+    if fn == "Read":
+        p = args.get("file_path", "")
+        return [p] if p else []
+    if fn == "Grep":
+        p = args.get("path", "")
+        return [p] if p else []
+    if fn == "read":
+        p = args.get("path", "")
+        return [p] if p else []
+    if fn in ("shell", "bash"):
+        return sorted(_paths_from_command(args.get("command", "")))
+    return []
+
+
 def _files_read(tool_calls: list[dict]) -> set[str]:
     paths: set[str] = set()
     for tc in tool_calls:
-        if tc["function_name"] == "Read":
-            p = tc["arguments"].get("file_path", "")
-            if p:
-                paths.add(p)
-        elif tc["function_name"] == "Grep":
-            p = tc["arguments"].get("path", "")
-            if p:
-                paths.add(p)
+        paths.update(_read_paths_for_call(tc))
     return paths
 
 
@@ -313,10 +370,7 @@ def analyze_coverage(trajectories: dict, daydream_dir: Path) -> dict:
     if trajectories["main"]:
         for tc in _extract_tool_calls(trajectories["main"]):
             if tc["phase"] in ("deep", "alternatives"):
-                if tc["function_name"] in ("Read", "Grep"):
-                    p = tc["arguments"].get("file_path") or tc["arguments"].get("path", "")
-                    if p:
-                        review_reads.add(p)
+                review_reads.update(_read_paths_for_call(tc))
 
     covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
     uncovered = sorted(set(diff_files) - covered)
