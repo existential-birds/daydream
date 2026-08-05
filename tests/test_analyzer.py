@@ -254,6 +254,41 @@ def test_files_read_extracts_pi_read_and_bash_paths():
     assert "core/osprey-cli" in paths
 
 
+def _shell_reads(command: str) -> set[str]:
+    """Extract read paths from a single codex ``shell`` call."""
+    return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
+
+
+def test_files_read_skips_separated_redirect_target():
+    paths = _shell_reads("cat source.txt > target.py")
+
+    assert "source.txt" in paths
+    assert "target.py" not in paths
+
+
+def test_files_read_skips_redirect_and_pattern_for_rg():
+    paths = _shell_reads("rg -n 'pat' a.py b.py 2>/dev/null")
+
+    assert "a.py" in paths
+    assert "b.py" in paths
+    assert "/dev/null" not in paths
+    assert "pat" not in paths
+
+
+def test_files_read_preserves_quoted_paths_with_spaces():
+    assert "my file.py" in _shell_reads("cat 'my file.py'")
+    assert "my file.py" in _shell_reads('cat "my file.py"')
+
+
+def test_files_read_skips_rg_option_values():
+    paths = _shell_reads("rg -C 3 --glob '*.py' 'needle' src/app.py")
+
+    assert paths == {"src/app.py"}
+    assert "3" not in paths
+    assert "*.py" not in paths
+    assert "needle" not in paths
+
+
 def test_files_read_claude_read_and_grep_unchanged():
     calls = [
         {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
