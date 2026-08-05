@@ -1479,7 +1479,9 @@ async def phase_parse_feedback(
         output_schema: Optional structured-output schema. Defaults to
             ``FEEDBACK_SCHEMA``. Deep-mode's pre-merge per-stack parse passes
             ``PER_STACK_RECORD_SCHEMA`` so each record carries ``severity`` for
-            the scoped Opus arbiter (issue #168). When the schema requires a
+            the scoped Opus arbiter (issue #168); the structural meta-stack
+            parses with the same schema so its anti-slop severity calibration
+            survives merge (issue #314). When the schema requires a
             ``severity`` field, the prompt instructs the agent to extract it.
 
     Returns:
@@ -3468,9 +3470,12 @@ def _append_structural_and_write_merged(
       - parse ``structural_records_path`` with graceful degradation to ``[]``
         on malformed/missing output (a prior agent run may have emitted bad
         JSON -- degrade rather than crash);
-      - append structural findings tagged ``lens="structural"`` with HIGH/high
-        confidence/severity defaults -- the structural lens is high-conviction
-        by construction and must not be demoted at sort time;
+      - append structural findings tagged ``lens="structural"``, preserving
+        each record's reported confidence/severity (the anti-slop rubric
+        calibrates structural findings to medium/low, issue #314) and
+        defaulting to HIGH/high only for unlabeled records -- the structural
+        lens remains high-conviction by default and must not be demoted at
+        sort time;
       - normalize the combined list (fresh unique ids) and write the canonical
         ``merged-items.json``;
       - render ``review-output.md`` from the canonical items and copy it to
@@ -3497,10 +3502,14 @@ def _append_structural_and_write_merged(
     """
     from daydream.deep.render import render_report
 
-    # Append structural findings in Python, tagged lens="structural". They are
-    # parsed FEEDBACK_SCHEMA records ({id, description, file, line}) and carry no
-    # confidence/severity, so default both to HIGH/high -- the structural lens is
-    # high-conviction by construction and must not be demoted at sort time.
+    # Append structural findings in Python, tagged lens="structural". They parse
+    # with the severity-bearing PER_STACK_RECORD_SCHEMA (issue #314), so each
+    # record carries the structural reviewer's own severity/confidence -- the
+    # anti-slop rubric calibrates maintainability findings to medium/low, and
+    # that calibration must survive merge. Preserve the reported values; only
+    # legacy/unlabeled records (severity-free FEEDBACK_SCHEMA output) default
+    # to HIGH/high -- the structural lens stays high-conviction by default and
+    # must not be demoted at sort time.
     structural_items: list[dict[str, Any]] = []
     if structural_records_path is not None and structural_records_path.is_file():
         try:
@@ -3516,14 +3525,10 @@ def _append_structural_and_write_merged(
         for rec in structural_records:
             if not isinstance(rec, dict):
                 continue
-            structural_items.append(
-                {
-                    **rec,
-                    "lens": "structural",
-                    "confidence": rec.get("confidence", "HIGH"),
-                    "severity": rec.get("severity", "high"),
-                }
-            )
+            item = {**rec, "lens": "structural"}
+            item.setdefault("confidence", "HIGH")
+            item.setdefault("severity", "high")
+            structural_items.append(item)
 
     # Structural evidence gate (issue #227): drop speculative / evidence-free
     # findings BEFORE normalization so nothing ungrounded reaches the canonical
@@ -3686,10 +3691,12 @@ async def phase_cross_stack_merge(
             report can call out uncovered stacks explicitly.
         structural_records_path: Optional path to the parsed structural
             meta-stack records JSON. When provided, its findings are appended to
-            the canonical item list tagged ``lens="structural"`` (high severity
-            by construction -- the structural lens carries different convictions
-            and is not deduplicated against the language stacks). ``None`` when
-            the structural reviewer did not run (docs-only diff, empty diff).
+            the canonical item list tagged ``lens="structural"``, preserving
+            each record's reported severity -- the anti-slop rubric calibrates
+            structural findings to medium/low (issue #314) -- and defaulting to
+            high only for unlabeled records. The structural lens is not
+            deduplicated against the language stacks. ``None`` when the
+            structural reviewer did not run (docs-only diff, empty diff).
         intent_authoritative: Issue #279. When True, the merge prompt includes
             the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
             the TTT intent summary line, because the intent phase was grounded

@@ -75,7 +75,6 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.phases import (
-    FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
     _write_single_stack_merged_items,
     phase_alternative_review,
@@ -1106,16 +1105,17 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         async with phase_scope(DaydreamPhase.PARSE):
             async with anyio.create_task_group() as tg:
                 for stack_name, output_path in sorted(per_stack_outputs.items()):
-                    # Language stacks carry severity so the scoped arbiter can
-                    # select high/contested findings (#168). The structural
-                    # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
-                    # high-conviction by construction and is partitioned out of
-                    # arbitration/dedup below, defaulting to high at merge.
-                    record_schema = (
-                        FEEDBACK_SCHEMA
-                        if stack_name == STRUCTURE_STACK_NAME
-                        else PER_STACK_RECORD_SCHEMA
-                    )
+                    # Every stack -- language or the structural meta-stack --
+                    # parses with the severity-bearing PER_STACK_RECORD_SCHEMA.
+                    # Issue #314: the structural reviewer calibrates anti-slop
+                    # findings to medium/low, so its parse must carry severity
+                    # or that calibration is silently upgraded to high at merge
+                    # (the anti-slop rubric's primary home). The structural
+                    # meta-stack is still partitioned out of arbitration/dedup
+                    # below (unchanged); _append_structural_and_write_merged
+                    # preserves the reported severity, falling back to high only
+                    # for unlabeled records.
+                    record_schema = PER_STACK_RECORD_SCHEMA
 
                     # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
                     async def _parse_one(

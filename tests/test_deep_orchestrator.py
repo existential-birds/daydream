@@ -5041,3 +5041,49 @@ async def test_anti_slop_rubric_extraction_finding_flows_through_merge(
     extraction = [it for it in items if "extract" in it.get("description", "")]
     assert extraction, f"the extraction finding must be merged:\n{items}"
     assert extraction[0]["severity"] == "medium"
+
+
+async def test_structural_finding_reported_medium_severity_survives_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#314 regression: a structural-stack anti-slop finding parsed with an
+    explicitly reported ``medium`` severity lands in ``merged-items.json`` as
+    ``medium`` -- NOT escalated to high.
+
+    The structural meta-stack used to parse with the severity-free
+    ``FEEDBACK_SCHEMA``, so every structural record merged at ``severity:
+    "high"`` and the anti-slop rubric's medium/low calibration (its primary
+    home on the structural path) was silently discarded. The fix parses the
+    structural stack with ``PER_STACK_RECORD_SCHEMA`` and preserves the
+    reported severity at merge. Real-path: drive the deep pipeline over an
+    eroded-diff repo whose structural parse emits a ``medium`` finding and
+    assert the observable outcome in the canonical ``merged-items.json``.
+    """
+    _silence(monkeypatch)
+    project = _eroded_main_repo(tmp_path)
+    stub = _install_stub_backend(monkeypatch, project)
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "main.py",
+            "line": 3,
+            "description": "structural: the --flag branch pairs grow main() past the extraction threshold",
+        }
+    }
+
+    exit_code = await _run_deep(project)
+    assert exit_code == 0
+
+    items_file = project / ".daydream" / "deep" / "merged-items.json"
+    items = json.loads(items_file.read_text())["items"]
+    structural = [
+        it
+        for it in items
+        if it.get("lens") == "structural" and "extraction threshold" in it.get("description", "")
+    ]
+    assert structural, f"the structural finding must be merged:\n{items}"
+    assert structural[0]["severity"] == "medium", (
+        "structural anti-slop finding must keep its reported medium severity, "
+        f"got {structural[0].get('severity')!r}:\n{structural}"
+    )
