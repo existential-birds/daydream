@@ -63,6 +63,35 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Do NOT report a finding that fails any gate."
 )
 
+# Per-stack test-quality rubric (issue #308). Embedded inline as instruction text
+# for the same reason as ``VERIFICATION_PROTOCOL_INSTRUCTION``: per-stack
+# reviewers run with cwd set to the reviewed repo, so a bare skill-file read
+# resolves against that repo and silently drops the gates. The rubric targets
+# test hunks in the diff: vacuous assertions, internal-field/pointer-identity
+# assertions, nondeterminism, canonical-path bypasses, and portability breaks.
+TEST_QUALITY_RUBRIC_INSTRUCTION = (
+    "Apply the test-quality rubric to every test hunk in the diff "
+    "(stated inline here — no skill file read is required):\n"
+    "  1. Would this test fail if the behavior under test were wrong? Scan for "
+    "vacuous assertions — e.g. `read_to_string(...).unwrap_or_default()` "
+    "returning empty on failure, expected values built with the same helper "
+    "under test, a wait/retry helper returning the last nonmatching frame.\n"
+    "  2. Does it assert observable consequences (output, filesystem, exit code, "
+    "store state) rather than internal fields/pointers/dispatch plumbing "
+    "(`context as *const _ as usize`, dispatch internals, event payloads with no "
+    "observable check)?\n"
+    "  3. Is it deterministic (no sleeps, no `yield_now()` reaping assumptions, "
+    "no environment leaks — require restore guards for any env mutation)?\n"
+    "  4. Does it exercise the new behavior through the canonical public path (no "
+    "raw `system_prompt` copies, no bypassing the public API the behavior lives "
+    "behind)?\n"
+    "  5. Does it compile on all platforms (`#[cfg]` gates)?\n"
+    "Layering awareness: legitimate pure-function seams are fine — a unit test of "
+    "a pure `build_driver_request` or driver-boundary propagation helper is NOT an "
+    "internal-field assertion. Flag a seam ONLY when it bypasses the observable "
+    "behavior the test claims to cover."
+)
+
 
 def _context_pointers(
     *,
@@ -303,6 +332,7 @@ def build_per_stack_prompt(
     parts.append(_stack_scope_instruction(stack_name, files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(skill_invocation)
+    parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
