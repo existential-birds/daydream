@@ -762,6 +762,7 @@ _CC_DECISION_TYPES = frozenset(
         "conditional_expression",
         "boolean_operator",
         "case_clause",
+        "for_in_clause",
     }
 )
 
@@ -818,9 +819,34 @@ def _iter_function(func: Any) -> Iterator[Any]:
         stack.extend(reversed(node.children))
 
 
+def _is_comprehension_filter(node: Any) -> bool:
+    """An ``if_clause`` attached to a comprehension, not a match-case guard."""
+    parent = node.parent
+    if parent is None:
+        return False
+    if parent.type in _COMPREHENSION_TYPES:
+        return True
+    grandparent = parent.parent
+    return grandparent is not None and grandparent.type in _COMPREHENSION_TYPES
+
+
+def _is_wildcard_case(node: Any) -> bool:
+    """A ``case _:`` clause (no guard) — matches any value, adds no path."""
+    if node.type != "case_clause":
+        return False
+    if node.child_by_field_name("guard") is not None:
+        return False
+    pattern = next((c for c in node.children if c.type == "case_pattern"), None)
+    return pattern is not None and pattern.text.decode().strip() == "_"
+
+
 def _count_decision_nodes(node: Any) -> int:
     """Cyclomatic decision count of a subtree, skipping nested functions."""
     total = 1 if node.type in _CC_DECISION_TYPES else 0
+    if node.type == "case_clause" and _is_wildcard_case(node):
+        total -= 1
+    elif node.type == "if_clause" and _is_comprehension_filter(node):
+        total += 1
     for child in node.children:
         if child.type == "function_definition":
             continue
@@ -888,6 +914,7 @@ def _file_quality(path: Path) -> dict | None:
     sloc_file = sum(1 for line in lines if line.strip())
     flagged = _verbosity_flagged_lines(root)
     flagged |= _clone_flagged_lines(lines)
+    flagged &= {i for i, line in enumerate(lines) if line.strip()}
     verbosity = len(flagged) / sloc_file if sloc_file > 0 else 0.0
 
     return {
@@ -925,16 +952,31 @@ def _comprehension_body(node: Any) -> Any | None:
 
 
 def _identity_comprehension_lines(root: Any) -> set[int]:
-    """``[x for x in items]``-style comprehensions whose output is the loop var."""
+    """``[x for x in items]``-style comprehensions whose output is the loop var.
+
+    Only a single unfiltered generator whose body is exactly the generator
+    target qualifies; a filter or extra generator means the comprehension
+    does real work and is never flagged.
+    """
     flagged: set[int] = set()
     for node in _iter_tree(root):
         if node.type not in _COMPREHENSION_TYPES:
             continue
         for_clauses = [child for child in node.children if child.type == "for_in_clause"]
-        if not for_clauses:
+        if len(for_clauses) != 1:
             continue
         target = for_clauses[0].child_by_field_name("left")
         if target is None or target.type != "identifier":
+            continue
+        has_filter = any(
+            child.type == "if_clause"
+            or (
+                child.type == "for_in_clause"
+                and any(grandchild.type == "if_clause" for grandchild in child.children)
+            )
+            for child in node.children
+        )
+        if has_filter:
             continue
         body = _comprehension_body(node)
         if body is not None and body.text == target.text:
@@ -973,13 +1015,45 @@ def _empty_guard_variable(if_node: Any) -> str | None:
     return None
 
 
-def _tree_contains_identifier(node: Any, name: str) -> bool:
-    if node is None:
+def _is_len_call(node: Any, name: str) -> bool:
+    """``len(name)`` — a ``len`` call with exactly the single argument *name*."""
+    if node is None or node.type != "call":
         return False
-    return any(
-        n.type == "identifier" and n.text.decode() == name
-        for n in _iter_tree(node)
-    )
+    fn = node.child_by_field_name("function")
+    args = node.child_by_field_name("arguments")
+    if fn is None or fn.type != "identifier" or fn.text.decode() != "len":
+        return False
+    if args is None:
+        return False
+    arg_ids = [child for child in args.children if child.type == "identifier"]
+    return len(arg_ids) == 1 and arg_ids[0].text.decode() == name
+
+
+def _while_condition_proves_nonempty(condition: Any, name: str) -> bool:
+    """Does the *condition* prove *name* is a nonempty collection?
+
+    Only exact shapes prove it: the bare collection (``while items:``), a
+    bare ``len`` call (``while len(items):``), or a positive length
+    comparison (``while len(items) > 0:``). A predicate that merely receives
+    the collection (``while should_continue(items):``) does not, so the guard
+    may be required.
+    """
+    if condition is None:
+        return False
+    if condition.type == "identifier":
+        return condition.text.decode() == name
+    if _is_len_call(condition, name):
+        return True
+    if condition.type == "comparison_operator":
+        operands = list(condition.children)
+        if len(operands) == 3 and operands[1].type == ">":
+            left, _, right = operands
+            return (
+                _is_len_call(left, name)
+                and right.type == "integer"
+                and right.text.decode().strip() == "0"
+            )
+    return False
 
 
 def _empty_list_guard_lines(root: Any) -> set[int]:
@@ -1005,7 +1079,7 @@ def _empty_list_guard_lines(root: Any) -> set[int]:
                     and iterable.text.decode() == guard_var
                 ):
                     flagged.update(range(child.start_point.row, child.end_point.row + 1))
-            elif _tree_contains_identifier(node.child_by_field_name("condition"), guard_var):
+            elif _while_condition_proves_nonempty(node.child_by_field_name("condition"), guard_var):
                 flagged.update(range(child.start_point.row, child.end_point.row + 1))
     return flagged
 
@@ -1053,6 +1127,60 @@ def _return_value(return_node: Any) -> Any | None:
     return None
 
 
+def _param_definitions(params: Any) -> list[tuple[str, bool]] | None:
+    """Ordered ``(name, has_default)`` per parameter, or ``None`` if complex.
+
+    ``None`` covers positional-only ``/``, keyword-only ``*``, ``*args``, and
+    ``**kwargs``: a wrapper cannot forward those as plain positional names.
+    """
+    definitions: list[tuple[str, bool]] = []
+    for child in params.children:
+        if child.type in (",", "(", ")"):
+            continue
+        if child.type in (
+            "/",
+            "*",
+            "**",
+            "positional_separator",
+            "keyword_separator",
+            "list_splat",
+            "dictionary_splat",
+        ):
+            return None
+        if child.type == "identifier":
+            definitions.append((child.text.decode(), False))
+        elif child.type == "typed_parameter":
+            name = next((c for c in child.children if c.type == "identifier"), None)
+            if name is None:
+                return None
+            definitions.append((name.text.decode(), False))
+        elif child.type in ("default_parameter", "typed_default_parameter"):
+            name = child.child_by_field_name("name")
+            if name is None or name.type != "identifier":
+                return None
+            definitions.append((name.text.decode(), True))
+        else:
+            return None
+    return definitions
+
+
+def _forwarded_argument_names(args: Any) -> list[str] | None:
+    """Positional argument names of a call, or ``None`` if not plain identifiers.
+
+    A literal, keyword, ``*args``/``**kwargs``, or any other non-identifier
+    argument makes the call non-trivial (``None``).
+    """
+    names: list[str] = []
+    for child in args.children:
+        if child.type in (",", "(", ")"):
+            continue
+        if child.type == "identifier":
+            names.append(child.text.decode())
+        else:
+            return None
+    return names
+
+
 def _trivial_wrapper(func: Any) -> set[int] | None:
     """Flag a function whose whole body is ``return other(same args)``."""
     body = func.child_by_field_name("body")
@@ -1069,11 +1197,17 @@ def _trivial_wrapper(func: Any) -> set[int] | None:
     params = func.child_by_field_name("parameters")
     if fn_name is None or fn_name.type != "identifier" or args is None or params is None:
         return None
-    param_names = [child.text.decode() for child in params.children if child.type == "identifier"]
-    arg_names = [child.text.decode() for child in args.children if child.type == "identifier"]
-    if param_names == arg_names:
-        return set(range(func.start_point.row, func.end_point.row + 1))
-    return None
+    param_defs = _param_definitions(params)
+    arg_names = _forwarded_argument_names(args)
+    if param_defs is None or arg_names is None:
+        return None
+    if len(param_defs) != len(arg_names):
+        return None
+    if any(has_default for _, has_default in param_defs):
+        return None
+    if [name for name, _ in param_defs] != arg_names:
+        return None
+    return set(range(func.start_point.row, func.end_point.row + 1))
 
 
 def _trivial_wrapper_lines(root: Any) -> set[int]:
