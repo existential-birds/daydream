@@ -325,7 +325,7 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
 class _RecordingCancelBackend:
     """Minimal Backend that records cancel() calls and blocks forever in execute."""
 
-    model = "stub"
+    model = "mock-model"
 
     def __init__(self) -> None:
         self.cancelled = False
