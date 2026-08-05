@@ -69,3 +69,19 @@ async def test_terminate_process_is_idempotent() -> None:
     proc = await _spawn_holder()
     await terminate_process(proc)
     await terminate_process(proc)  # must not raise
+
+
+async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
+    """cancel_processes reaps every tracked process group, not just direct children."""
+    from daydream.backends._subprocess import cancel_processes
+
+    base = _fd_count()
+    procs = [await _spawn_holder() for _ in range(2)]
+    pgids = [os.getpgid(p.pid) for p in procs]
+
+    await cancel_processes(procs)
+
+    for pgid in pgids:
+        with pytest.raises(ProcessLookupError):
+            os.killpg(pgid, 0)
+    assert _fd_count() == base
