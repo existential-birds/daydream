@@ -73,6 +73,7 @@ Thumbs.db
 
 # daydream local run artifacts
 .daydream/
+daydream_plans/
 
 # Beagle local artifacts
 .beagle/
