@@ -21,6 +21,18 @@ records and is regenerable on demand::
 ``state`` reports the single PR state shared by every indexed PR (``closed``
 for a ``--state closed`` harvest), or ``"mixed"`` when the corpus spans states.
 
+Determinism: ``harvested_at`` is projected from the ``harvested_at`` the
+harvest stamped into ``index.json`` (see :func:`~daydream.benchmark.harvest.run_harvest`),
+never regenerated at manifest-build time. An older index without that key falls
+back to an already-committed ``manifest.json``'s date, so re-running the command
+on an unchanged corpus is byte-stable (identical bytes in, identical bytes out).
+
+Validation: a corpora that is incomplete or internally inconsistent is rejected
+rather than silently projected — a missing ``prs`` inventory, a harvest record
+missing its ``comments`` key, a declared ``n_inline_comments`` or
+``review_commit_id`` that disagrees with the record, or a missing per-PR record
+all raise before anything is written.
+
 Exports:
     build_corpus_manifest: Pure index + harvest-records -> manifest dict.
     write_corpus_manifest: Build and persist ``manifest.json`` atomically.
@@ -52,7 +64,10 @@ def build_corpus_manifest(corpus_root: Path, *, harvested_at: str | None = None)
     Args:
         corpus_root: Directory containing ``index.json`` and ``harvest/``.
         harvested_at: ISO date for the ``harvested_at`` field; defaults to the
-            current UTC date.
+            timestamp the harvest stamped into ``index.json``. When that too is
+            absent (a legacy index), an already-committed ``manifest.json``'s
+            date is reused so a regeneration is byte-stable; only as a last
+            resort is the current UTC date used.
 
     Returns:
         The manifest dict.
@@ -60,23 +75,52 @@ def build_corpus_manifest(corpus_root: Path, *, harvested_at: str | None = None)
     Raises:
         FileNotFoundError: If ``index.json`` or an indexed PR record is missing;
             a manifest is only meaningful for a complete corpus.
+        ValueError: If the corpus is internally inconsistent — ``index.json``
+            lacks the ``prs`` inventory, a harvest record lacks its ``comments``
+            key, or an index-declared ``n_inline_comments``/``review_commit_id``
+            disagrees with the record. An interrupted or stale re-harvest must
+            fail instead of being projected as hybrid metadata.
     """
-    index = json.loads((corpus_root / "index.json").read_text(encoding="utf-8"))
-    prs = index.get("prs", [])
+    index_path = corpus_root / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if "prs" not in index:
+        raise ValueError(
+            f"{index_path} is missing the 'prs' inventory; "
+            "refusing to fabricate an empty corpus"
+        )
+    prs = index["prs"]
 
     pr_entries: list[dict[str, Any]] = []
     comment_count = 0
     for pr in prs:
         number = pr["pr_number"]
-        record = json.loads((corpus_root / "harvest" / f"pr-{number}.json").read_text(encoding="utf-8"))
+        record_path = corpus_root / "harvest" / f"pr-{number}.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        if "comments" not in record:
+            raise ValueError(
+                f"{record_path} is missing the 'comments' key; a corrupt record "
+                "must fail, not project as zero golden comments"
+            )
         golden = [
             {"id": comment.get("id"), "path": comment.get("path"), "line": comment.get("line")}
-            for comment in record.get("comments", [])
+            for comment in record["comments"]
         ]
+        declared_comments = pr.get("n_inline_comments", 0)
+        if len(golden) != declared_comments:
+            raise ValueError(
+                f"index.json declares n_inline_comments={declared_comments} for PR #{number} "
+                f"but {record_path} has {len(golden)} golden comments"
+            )
+        snapshot_commit = record.get("review_commit_id")
+        if snapshot_commit != pr.get("review_commit_id"):
+            raise ValueError(
+                f"index.json declares review_commit_id={pr.get('review_commit_id')} for PR #{number} "
+                f"but {record_path} has {snapshot_commit}"
+            )
         pr_entries.append(
             {
                 "number": number,
-                "snapshot_commit": record.get("review_commit_id"),
+                "snapshot_commit": snapshot_commit,
                 "comment_count": len(golden),
                 "resolved_count": pr.get("n_resolved_threads", 0),
                 "golden_comments": golden,
@@ -86,7 +130,7 @@ def build_corpus_manifest(corpus_root: Path, *, harvested_at: str | None = None)
 
     states = {pr.get("state") for pr in prs}
     return {
-        "harvested_at": harvested_at or datetime.now(UTC).date().isoformat(),
+        "harvested_at": _resolve_harvested_at(corpus_root, index, harvested_at),
         "repo": index["repo"],
         "bot": index["bot"],
         "state": states.pop() if len(states) == 1 else "mixed",
@@ -95,6 +139,30 @@ def build_corpus_manifest(corpus_root: Path, *, harvested_at: str | None = None)
         "resolved_count": sum(pr.get("n_resolved_threads", 0) for pr in prs),
         "prs": pr_entries,
     }
+
+
+def _resolve_harvested_at(
+    corpus_root: Path, index: dict[str, Any], harvested_at: str | None
+) -> str:
+    """Pick the ``harvested_at`` date for the manifest, most-specific first.
+
+    Explicit arg > the timestamp the harvest stamped into ``index.json`` > the
+    already-committed ``manifest.json``'s date (so a regeneration of a legacy
+    corpus stays byte-stable) > the current UTC date.
+    """
+    if harvested_at is not None:
+        return harvested_at
+    if index.get("harvested_at"):
+        return index["harvested_at"]
+    manifest_path = corpus_root / MANIFEST_NAME
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if existing.get("harvested_at"):
+                return existing["harvested_at"]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return datetime.now(UTC).date().isoformat()
 
 
 def write_corpus_manifest(corpus_root: Path, *, harvested_at: str | None = None) -> Path:

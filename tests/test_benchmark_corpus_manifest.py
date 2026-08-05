@@ -26,12 +26,31 @@ def _write_fixture(root: Path) -> Path:
             {
                 "repo": "acme/widgets",
                 "bot": "cr[bot]",
+                "harvested_at": HARVESTED_AT,
                 "n_prs_with_bot_activity": 3,
                 "prs": [
-                    {"pr_number": 1, "state": "closed", "n_inline_comments": 2, "n_resolved_threads": 1},
-                    {"pr_number": 2, "state": "closed", "n_inline_comments": 1, "n_resolved_threads": 0},
+                    {
+                        "pr_number": 1,
+                        "state": "closed",
+                        "review_commit_id": "a" * 40,
+                        "n_inline_comments": 2,
+                        "n_resolved_threads": 1,
+                    },
+                    {
+                        "pr_number": 2,
+                        "state": "closed",
+                        "review_commit_id": "b" * 40,
+                        "n_inline_comments": 1,
+                        "n_resolved_threads": 0,
+                    },
                     # Review-summary-only PR: no inline comments, still indexed.
-                    {"pr_number": 3, "state": "closed", "n_inline_comments": 0, "n_resolved_threads": 0},
+                    {
+                        "pr_number": 3,
+                        "state": "closed",
+                        "review_commit_id": "c" * 40,
+                        "n_inline_comments": 0,
+                        "n_resolved_threads": 0,
+                    },
                 ],
             }
         ),
@@ -143,6 +162,81 @@ def test_manifest_subcommand_fails_on_incomplete_corpus(tmp_path):
     (corpus / "index.json").unlink()
     assert _handle_bench_command(["manifest", "--harvest-dir", str(corpus)]) == 2
     assert not (corpus / "manifest.json").exists()
+
+
+def test_build_corpus_manifest_rejects_missing_prs_inventory(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    index = json.loads((corpus / "index.json").read_text(encoding="utf-8"))
+    index.pop("prs")
+    (corpus / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing the 'prs' inventory"):
+        build_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+
+
+def test_build_corpus_manifest_rejects_missing_comments_key(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    record = json.loads((corpus / "harvest" / "pr-2.json").read_text(encoding="utf-8"))
+    record.pop("comments")
+    (corpus / "harvest" / "pr-2.json").write_text(json.dumps(record), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing the 'comments' key"):
+        build_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+
+
+def test_build_corpus_manifest_rejects_inline_count_mismatch(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    index = json.loads((corpus / "index.json").read_text(encoding="utf-8"))
+    index["prs"][0]["n_inline_comments"] = 5
+    (corpus / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="n_inline_comments=5"):
+        build_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+
+
+def test_build_corpus_manifest_rejects_snapshot_commit_mismatch(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    index = json.loads((corpus / "index.json").read_text(encoding="utf-8"))
+    index["prs"][0]["review_commit_id"] = "d" * 40
+    (corpus / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="review_commit_id"):
+        build_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+
+
+def test_manifest_subcommand_fails_on_inconsistent_corpus(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    index = json.loads((corpus / "index.json").read_text(encoding="utf-8"))
+    index["prs"][0]["n_inline_comments"] = 5
+    (corpus / "index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    assert _handle_bench_command(["manifest", "--harvest-dir", str(corpus)]) == 2
+    assert not (corpus / "manifest.json").exists()
+
+
+def test_write_corpus_manifest_is_deterministic(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    first = write_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+    second = write_corpus_manifest(corpus, harvested_at=HARVESTED_AT)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_manifest_projects_harvested_at_from_index(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    manifest = build_corpus_manifest(corpus)
+    assert manifest["harvested_at"] == HARVESTED_AT
+
+
+def test_manifest_reuses_committed_date_for_legacy_index(tmp_path):
+    corpus = _write_fixture(tmp_path / "corpus")
+    index = json.loads((corpus / "index.json").read_text(encoding="utf-8"))
+    index.pop("harvested_at")
+    (corpus / "index.json").write_text(json.dumps(index), encoding="utf-8")
+    write_corpus_manifest(corpus, harvested_at="2026-08-04")
+
+    assert build_corpus_manifest(corpus)["harvested_at"] == "2026-08-04"
+    # Regenerating a legacy index must not churn the committed date.
+    assert write_corpus_manifest(corpus).read_bytes() == write_corpus_manifest(corpus).read_bytes()
 
 
 _CORPUS_ROOT = Path(__file__).resolve().parents[1] / "benchmark" / "corpora" / "osprey-coderabbit"

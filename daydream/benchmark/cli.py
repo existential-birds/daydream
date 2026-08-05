@@ -399,8 +399,9 @@ def _handle_bench_manifest_command(argv: list[str]) -> int:
     """Handle ``daydream bench manifest --harvest-dir DIR``.
 
     Regenerates ``DIR/manifest.json`` from ``index.json`` + ``harvest/pr-*.json``.
-    Returns ``2`` (not an exception) when the corpus is incomplete, mirroring the
-    harvest sub-verb's failure convention.
+    Returns ``2`` (not an exception) when the corpus is incomplete or
+    internally inconsistent, mirroring the harvest sub-verb's failure
+    convention.
     """
     from daydream.agent import console
     from daydream.benchmark.corpus_manifest import write_corpus_manifest
@@ -410,7 +411,7 @@ def _handle_bench_manifest_command(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     try:
         path = write_corpus_manifest(args.harvest_dir)
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print_warning(console, f"cannot build manifest: {exc}")
         return 2
     print_info(console, f"Wrote {path}")
