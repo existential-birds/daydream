@@ -19,7 +19,8 @@ class BenchConfig:
             or None when the run is driven by a harvested corpus instead.
         cache_dir: Directory for per-PR blobless clones and fetched heads.
         judge_route: Benchmark scoring route; "martian" preserves the existing
-            OpenAI-compatible Martian path.
+            OpenAI-compatible Martian subprocess path, and the in-process routes
+            are "anthropic-direct" / "openai-compatible".
         model: Judge model id; None defers to the selected judge route's
             environment fallback. Whatever resolves drives both the judge and
             the per-model results dir.

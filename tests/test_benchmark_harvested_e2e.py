@@ -24,7 +24,14 @@ from daydream.benchmark.acquire import _cache_subdir_name
 from daydream.benchmark.anthropic_score import _DEDUP_SYSTEM, _EXTRACTION_SYSTEM, AnthropicJsonClient
 from daydream.benchmark.cli import _handle_bench_command
 from daydream.benchmark.judge import _JUDGE_SYSTEM
-from daydream.benchmark.score import ANTHROPIC_JUDGE_API_KEY_ENV, JUDGE_BASE_URL_ENV, model_results_dir
+from daydream.benchmark.openai_score import OpenAIJsonCompleter
+from daydream.benchmark.score import (
+    ANTHROPIC_JUDGE_API_KEY_ENV,
+    JUDGE_BASE_URL_ENV,
+    OPENAI_JUDGE_API_KEY_ENV,
+    OPENAI_JUDGE_BASE_URL_ENV,
+    model_results_dir,
+)
 from tests.harness.git_helpers import git as _git
 
 #: Slug used for the fixture corpus. The derived ``clone_url``
@@ -328,6 +335,81 @@ def test_harvested_corpus_scored_run_calls_judge_per_pair(harvested_run, monkeyp
     assert report["schema_version"] == 1 and report["corpus"] == "harvested"
     assert len(report["prs"]) == 2
     assert report["judge_route"] == "anthropic-direct" and report["judge_model"] == "judge-x"
+    assert report["aggregate"] == {
+        "scored_pr_count": 2,
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0,
+    }
+    assert all(entry["tp"] == 1 and entry["fp"] == 0 and entry["fn"] == 0 for entry in report["prs"])
+
+    # One judge call per (golden, candidate) pair, each carrying both texts.
+    assert len(judged_pairs) == 2
+    for pr_number, prompt in zip((1, 2), judged_pairs, strict=True):
+        assert f"bot finding on PR {pr_number}" in prompt
+        assert "daydream finding" in prompt
+
+
+def test_harvested_corpus_scored_run_openai_compatible_route(harvested_run, monkeypatch):
+    """An openai-compatible scored harvested run is entirely in-process.
+
+    The network is mocked at the OpenAI client seam only; extraction, dedup and
+    every per-pair ``same_issue`` call run through the production
+    ``openai-compatible`` scoring path.
+    """
+    _upstream, harvest_dir, cache_dir, calls = harvested_run
+
+    monkeypatch.setenv(OPENAI_JUDGE_API_KEY_ENV, "sk-openai-test")
+    monkeypatch.delenv(OPENAI_JUDGE_BASE_URL_ENV, raising=False)
+    monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
+
+    judged_pairs: list[str] = []
+
+    async def _canned(self, *, system, user, max_tokens):
+        if system == _EXTRACTION_SYSTEM:
+            return {"issues": ["daydream finding"]}
+        if system == _DEDUP_SYSTEM:
+            return {"groups": [[0]]}
+        assert system == _JUDGE_SYSTEM, f"unexpected judge-client system prompt: {system}"
+        judged_pairs.append(user)
+        return {"reasoning": "same underlying issue", "match": True, "confidence": 0.95}
+
+    monkeypatch.setattr(OpenAIJsonCompleter, "complete_json", _canned)
+
+    rc = _handle_bench_command(
+        [
+            "--harvest-dir",
+            str(harvest_dir),
+            "--cache-dir",
+            str(cache_dir),
+            "--score",
+            "--judge-route",
+            "openai-compatible",
+            "--model",
+            "judge-x",
+        ]
+    )
+
+    assert rc == 0
+    assert len(calls) == 2  # both PRs were reviewed before scoring
+
+    evals = json.loads((model_results_dir(harvest_dir, "judge-x") / "evaluations.json").read_text(encoding="utf-8"))
+    for pr_number in (1, 2):
+        leaf = evals[_golden_url(pr_number)]["daydream"]
+        assert leaf["judge_route"] == "openai-compatible"
+        assert leaf["judge_model"] == "judge-x"
+        assert leaf["errors_count"] == 0
+        assert leaf["tp"] == 1 and leaf["fp"] == 0 and leaf["fn"] == 0
+        assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+
+    # The emitted report carries the aggregate the canned judge produced.
+    report = json.loads((harvest_dir / ".daydream-bench" / "report-daydream.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == 1 and report["corpus"] == "harvested"
+    assert len(report["prs"]) == 2
+    assert report["judge_route"] == "openai-compatible" and report["judge_model"] == "judge-x"
     assert report["aggregate"] == {
         "scored_pr_count": 2,
         "tp": 2,

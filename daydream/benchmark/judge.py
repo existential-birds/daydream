@@ -3,8 +3,8 @@
 Every in-process "are these two findings the same issue?" decision in the
 repo goes through :class:`FindingJudge`. Both scored corpora reach it by the
 same route: the withmartian golden corpus and a harvested bot-review corpus
-are the same data shape, scored by the same ``anthropic-direct`` path, so the
-vendor-overlap comparison and the golden-corpus comparison share one judge
+are the same data shape, scored by the same in-process direct-scoring path, so
+the vendor-overlap comparison and the golden-corpus comparison share one judge
 implementation and one prompt.
 
 (The ``martian`` scoring route is deliberately outside this seam: it does not
@@ -112,14 +112,14 @@ def _parse_verdict(response: dict[str, Any]) -> JudgeVerdict:
     if "error" in response:
         raise JudgeError(str(response["error"]))
     if not isinstance(response.get("match"), bool):
-        raise JudgeError("Anthropic judge response 'match' must be a boolean.")
+        raise JudgeError("Judge response 'match' must be a boolean.")
     confidence = response.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, int | float):
-        raise JudgeError("Anthropic judge response 'confidence' must be a number.")
+        raise JudgeError("Judge response 'confidence' must be a number.")
     confidence = float(confidence)
     if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
-        raise JudgeError("Anthropic judge response 'confidence' must be between 0.0 and 1.0.")
+        raise JudgeError("Judge response 'confidence' must be between 0.0 and 1.0.")
     reasoning = response.get("reasoning", "")
     if not isinstance(reasoning, str):
-        raise JudgeError("Anthropic judge response 'reasoning' must be a string.")
+        raise JudgeError("Judge response 'reasoning' must be a string.")
     return JudgeVerdict(match=response["match"], confidence=confidence, reasoning=reasoning)
