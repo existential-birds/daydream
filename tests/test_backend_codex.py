@@ -225,6 +225,21 @@ async def test_codex_no_reasoning_effort_omits_config_override():
 
 
 @pytest.mark.asyncio
+async def test_spawn_uses_start_new_session() -> None:
+    """CLI spawns create a new session so the process group is killable."""
+    backend = CodexBackend(model="gpt-5.1-codex")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        return_value=mock_proc,
+    ) as mock_exec:
+        events = []
+        async for event in backend.execute(Path("/tmp"), "hello"):
+            events.append(event)
+    assert mock_exec.call_args.kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
     large_text = "x" * (70 * 1024)

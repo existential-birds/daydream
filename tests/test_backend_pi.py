@@ -328,6 +328,21 @@ async def test_cwd_passed_to_subprocess():
 
 
 @pytest.mark.asyncio
+async def test_spawn_uses_start_new_session() -> None:
+    """CLI spawns create a new session so the process group is killable."""
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch(
+        "daydream.backends.pi.asyncio.create_subprocess_exec",
+        return_value=mock_proc,
+    ) as mock_exec:
+        events = []
+        async for event in backend.execute(Path("/tmp"), "hello"):
+            events.append(event)
+    assert mock_exec.call_args.kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
 async def test_execute_raises_on_agents():
     """PiBackend refuses agents= with NotImplementedError (plan §5)."""
     backend = PiBackend(model="glm-5.2")

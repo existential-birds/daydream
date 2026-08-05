@@ -677,6 +677,7 @@ class PiBackend:
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
+                start_new_session=True,
             )
             self._processes.append(proc)
 

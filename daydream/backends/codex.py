@@ -202,6 +202,7 @@ class CodexBackend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
+                start_new_session=True,
             )
             self._processes.append(proc)
 
