@@ -218,7 +218,7 @@ A `trials-summary.json` is written to `<benchmark-repo>/.daydream-bench/trials/<
 The withmartian set is not the only corpus. `daydream bench harvest` builds one from a repository's own history with a commercial review bot: every PR the bot reviewed becomes a benchmark entry whose golden comments are the bot's findings. That measures daydream against a bot on *your* code, not on 26 fixed upstream PRs.
 
 ```bash
-daydream bench harvest --repo acme/widgets --bot "coderabbitai[bot]" --out ./cr-corpus --limit 200
+daydream bench harvest --repo acme/widgets --bot "reviewbot[bot]" --out ./harvested --limit 200
 ```
 
 `--bot` takes the bot's login; the `[bot]` suffix is optional (GitHub's REST API keeps it on `user.login` while GraphQL drops it, and the harvester matches either form). `--state {all,open,closed,merged}` filters which PRs are scanned. The output dir *is* the corpus — one harvest, one corpus, no per-repo nesting:
