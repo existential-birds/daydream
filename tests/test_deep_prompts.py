@@ -823,3 +823,63 @@ def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path)
     for name in ("build_arbiter_prompt", "build_merge_prompt"):
         sig = inspect.signature(getattr(dp, name))
         assert "include_alternatives" not in sig.parameters, name
+
+
+# =============================================================================
+# Issue #308 — test-quality rubric in the per-stack review prompt
+# =============================================================================
+
+
+def test_per_stack_prompt_includes_test_quality_rubric(tmp_path: Path) -> None:
+    """#308: the per-stack review prompt ships the test-quality rubric.
+
+    The rubric targets test hunks in the diff: vacuous assertions,
+    internal-field/pointer-identity assertions, nondeterminism, canonical-path
+    bypasses, and portability breaks.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "test-quality rubric" in out
+    assert "vacuous assertions" in out
+    assert "observable consequences" in out
+    assert "canonical public path" in out
+    assert "deterministic" in out
+    assert "`#[cfg]`" in out
+
+
+def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path) -> None:
+    """#308: the rubric must not over-apply to legitimate pure-function seams.
+
+    A unit test of a pure ``build_driver_request`` / driver-boundary propagation
+    helper is NOT an internal-field assertion; the rubric only flags a seam when
+    it bypasses the observable behavior the test claims to cover.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "pure-function seams" in out
+    assert "`build_driver_request`" in out
+    assert "internal-field assertion" in out
+    assert "bypasses the observable behavior" in out
+
+
+def test_per_stack_prompt_test_quality_rubric_sits_after_skill_invocation(tmp_path: Path) -> None:
+    """#308: the rubric lands after the skill invocation so the reviewer applies
+    it to each test hunk, not ahead of the per-stack review instructions."""
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert out.index("test-quality rubric") > out.index("/beagle-python:review-python")
