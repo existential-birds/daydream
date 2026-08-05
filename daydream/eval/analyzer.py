@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
+from daydream.generated_files import is_generated_file
 from daydream.timeutil import parse_iso_timestamp
 
 # Trajectory loading
@@ -745,7 +746,10 @@ def analyze_training_signals(
 # Quality metrics (issue #316) ----------------------------------------------
 
 _QUALITY_EXCLUDED_DIRS = frozenset(
-    {".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees", "dist", "build"}
+    {
+        ".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees",
+        "dist", "build", "vendor", "third_party", "migrations",
+    }
 )
 
 # Node types that add cyclomatic complexity (tree-sitter-python). ``else_clause``
@@ -766,7 +770,14 @@ _CC_DECISION_TYPES = frozenset(
     }
 )
 
-_COMPREHENSION_TYPES = frozenset({"list_comprehension", "set_comprehension", "dictionary_comprehension"})
+_COMPREHENSION_TYPES = frozenset(
+    {
+        "list_comprehension",
+        "set_comprehension",
+        "dictionary_comprehension",
+        "generator_expression",
+    }
+)
 
 _MIN_CLONE_BLOCK = 3
 _MAX_CLONE_BLOCK = 20
@@ -859,7 +870,11 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
 
     Excluded directories are matched on exact path components so a nested
     ``node_modules_extra/`` or a sibling ``.worktrees`` checkout never shadows
-    real source.
+    real source. Generated files are also out of scope: path-based rules
+    (``*_generated.py``, ``*.pb.py``, ``migrations/*.py``, …) and the
+    generated-file header marker are both applied via ``is_generated_file``,
+    so vendor/third_party trees and generated artifacts never reach the
+    metric denominators (Finding #8).
     """
     files: list[tuple[Path, str]] = []
     for path in workspace.rglob("*.py"):
@@ -869,15 +884,31 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
             continue
         if any(part in _QUALITY_EXCLUDED_DIRS for part in rel.parts):
             continue
+        try:
+            content = path.read_bytes()
+        except OSError:
+            continue
+        if is_generated_file(str(rel), content):
+            continue
         files.append((path, str(rel)))
     return sorted(files, key=lambda item: item[1])
 
 
-def _file_quality(path: Path) -> dict | None:
+def _file_quality(
+    path: Path,
+    cross_file_flagged: set[int] | None = None,
+) -> dict | None:
     """Erosion + verbosity metrics for one Python file, or ``None`` on parse failure.
 
     A file that cannot be parsed is counted in ``scoped_files`` by the caller
-    but excluded from the aggregates — quality analysis never crashes.
+    but excluded from the aggregates — quality analysis never crashes. Tree-sitter
+    returns a PARTIAL tree with ERROR/missing nodes for malformed Python, so a
+    root whose tree carries any error is treated as a parse failure instead of
+    aggregating garbage (Finding #9).
+
+    *cross_file_flagged* carries line rows (0-based) that duplicate a block also
+    present in another scoped file; they are OR'd into the verbosity set before
+    the ratio is computed (Finding #6).
     """
     parser = _quality_python_parser()
     if parser is None:
@@ -893,6 +924,8 @@ def _file_quality(path: Path) -> dict | None:
     if tree is None:
         return None
     root = tree.root_node
+    if root.has_error:
+        return None
 
     # Erosion: pooled cyclomatic mass of functions with CC > 10.
     functions = [node for node in _iter_tree(root) if node.type == "function_definition"]
@@ -914,6 +947,8 @@ def _file_quality(path: Path) -> dict | None:
     sloc_file = sum(1 for line in lines if line.strip())
     flagged = _verbosity_flagged_lines(root)
     flagged |= _clone_flagged_lines(lines)
+    if cross_file_flagged:
+        flagged |= cross_file_flagged
     flagged &= {i for i, line in enumerate(lines) if line.strip()}
     verbosity = len(flagged) / sloc_file if sloc_file > 0 else 0.0
 
@@ -944,9 +979,13 @@ def _verbosity_flagged_lines(root: Any) -> set[int]:
 
 
 def _comprehension_body(node: Any) -> Any | None:
-    """The output expression of a comprehension (skipping brackets)."""
+    """The output expression of a comprehension (skipping delimiters).
+
+    A generator expression wraps its output expression in ``(``/``)``, so
+    parens are skipped alongside the list/set/dict brackets.
+    """
     for child in node.children:
-        if child.type not in ("[", "]", "{", "}"):
+        if child.type not in ("[", "]", "{", "}", "(", ")"):
             return child
     return None
 
@@ -1284,6 +1323,46 @@ def _clone_flagged_lines(lines: list[str]) -> set[int]:
     return flagged
 
 
+def _cross_file_clone_flagged_lines(
+    file_lines: list[tuple[Path, list[str]]],
+) -> dict[Path, set[int]]:
+    """Line rows whose block also appears verbatim in another scoped file.
+
+    Same rule as ``_clone_flagged_lines`` (exact stripped contiguous block of
+    3..20 lines; blank-containing blocks skipped) but the match set spans
+    files: a block present in ≥2 distinct files flags every occurrence in
+    every file that holds it. Within-file duplicates stay
+    ``_clone_flagged_lines``'s job and are still counted per file, so the two
+    passes compose — a block duplicated twice inside ``a.py`` and once in
+    ``b.py`` is flagged in both, once per occurrence.
+    """
+    stripped_lines = {path: [line.strip() for line in lines] for path, lines in file_lines}
+    flagged: dict[Path, set[int]] = {path: set() for path in stripped_lines}
+
+    for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
+        by_first: dict[str, list[tuple[Path, int]]] = {}
+        for path, stripped in stripped_lines.items():
+            n = len(stripped)
+            if length > n:
+                continue
+            for i in range(n - length + 1):
+                if any(not stripped[j] for j in range(i, i + length)):
+                    continue
+                by_first.setdefault(stripped[i], []).append((path, i))
+        for starts in by_first.values():
+            if len({path for path, _ in starts}) < 2:
+                continue
+            by_block: dict[tuple[str, ...], list[tuple[Path, int]]] = {}
+            for path, i in starts:
+                by_block.setdefault(tuple(stripped_lines[path][i : i + length]), []).append((path, i))
+            for occurrences in by_block.values():
+                if len({path for path, _ in occurrences}) < 2:
+                    continue
+                for path, i in occurrences:
+                    flagged[path].update(range(i, i + length))
+    return flagged
+
+
 def analyze_quality(daydream_dir: str | Path) -> dict:
     """Structural erosion and verbosity of the post-fix workspace (issue #316).
 
@@ -1301,16 +1380,30 @@ def analyze_quality(daydream_dir: str | Path) -> dict:
     daydream_dir = Path(daydream_dir)
     workspace = daydream_dir.parent
 
+    scoped_files = _scoped_python_files(workspace)
+    scoped = len(scoped_files)
+
+    # Cross-file clone pass: read every scoped file's lines once and find
+    # blocks duplicated verbatim across >=2 files, then feed each file's
+    # cross-file line rows into its per-file verbosity below (Finding #6).
+    # Within-file duplicates are still handled per file inside _file_quality.
+    file_lines: list[tuple[Path, list[str]]] = []
+    for path, _rel in scoped_files:
+        try:
+            source = path.read_bytes()
+        except OSError:
+            continue
+        file_lines.append((path, source.decode("utf-8", errors="replace").splitlines()))
+    cross_file_flagged = _cross_file_clone_flagged_lines(file_lines)
+
     per_file: dict[str, dict] = {}
     total_mass = 0.0
     high_mass = 0.0
     total_flagged = 0
     total_loc = 0
-    scoped = 0
 
-    for path, rel in _scoped_python_files(workspace):
-        scoped += 1
-        quality = _file_quality(path)
+    for path, rel in scoped_files:
+        quality = _file_quality(path, cross_file_flagged=cross_file_flagged.get(path))
         if quality is None:
             continue
         per_file[rel] = quality["entry"]

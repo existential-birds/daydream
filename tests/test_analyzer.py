@@ -891,3 +891,165 @@ def test_quality_verbosity_trivial_wrapper_with_default_not_flagged(tmp_path: Pa
     result = analyze_quality(ws / ".daydream")
 
     assert result["per_file"]["app.py"]["verbosity"] == 0.0
+
+
+# --- review round 2 fix regressions (#316) ---
+
+
+_TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
+
+
+def test_quality_verbosity_flags_clones_across_files(tmp_path: Path):
+    """An exact block copied from ``a.py`` into ``b.py`` flags BOTH files.
+
+    Per-file clone detection alone never sees the duplicate — each per-file
+    invocation observes a single occurrence. The cross-file pass must index
+    blocks across scoped files and attribute them back.
+    """
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    ws = _quality_workspace(
+        tmp_path,
+        {"a.py": "def a():\n" + block, "b.py": "def b():\n" + block},
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["a.py"]["verbosity"] > 0
+    assert result["per_file"]["b.py"]["verbosity"] > 0
+    assert result["verbosity"] > 0
+
+
+def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path):
+    """A block present in only one file flags neither file."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "a.py": "def a():\n    if x > 1:\n        return 1\n    return 0\n",
+            "b.py": "def b(y):\n    return y * 2\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["a.py"]["verbosity"] == 0.0
+    assert result["per_file"]["b.py"]["verbosity"] == 0.0
+
+
+def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path):
+    """Within-file duplicates keep counting now that the cross-file pass exists."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def a():\n"
+                "    if x > 1:\n"
+                "        return 1\n"
+                "    return 0\n"
+                "\n"
+                "def b():\n"
+                "    if x > 1:\n"
+                "        return 1\n"
+                "    return 0\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
+
+
+def test_quality_erosion_generator_expression_filters_count_toward_cc(tmp_path: Path):
+    """Generator-expression filters are real branch paths, like list comprehensions."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def f(xs):\n"
+                "    return (x for x in xs "
+                + _TEN_COMPREHENSION_FILTERS
+                + ")\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["high_cc_functions"] == 1
+    assert entry["erosion"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("comprehension", "label"),
+    [
+        (f"[x for x in xs {_TEN_COMPREHENSION_FILTERS}]", "list"),
+        (f"{{x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "set"),
+        (f"{{x: x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "dict"),
+        (f"(x for x in xs {_TEN_COMPREHENSION_FILTERS})", "generator"),
+    ],
+)
+def test_quality_erosion_comprehension_types_cc_parity(
+    tmp_path: Path, comprehension: str, label: str
+):
+    """List/set/dict/generator comprehensions count generators + filters identically."""
+    ws = _quality_workspace(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["high_cc_functions"] == 1, label
+    assert entry["erosion"] == 1.0
+
+
+def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path):
+    """``(x for x in items)`` is an identity comprehension, exactly like a list one."""
+    ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["app.py"]["verbosity"] > 0
+
+
+def test_quality_excludes_generated_and_vendored_files(tmp_path: Path):
+    """Generated and vendored Python is out of metric scope (Finding #8).
+
+    Path-based generated files (``*_generated.py``, ``*.pb.py``,
+    ``migrations/*.py``), the generated-file header marker, and vendored
+    trees (``vendor``/``third_party``) must not reach ``per_file``,
+    ``scoped_files``, or the aggregate denominators.
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def f(x):\n    return x\n",
+            "api_generated.py": "def g(x):\n    return x\n",
+            "svc.pb.py": "def h(x):\n    return x\n",
+            "vendor/lib/v.py": "def i(x):\n    return x\n",
+            "third_party/lib/t.py": "def j(x):\n    return x\n",
+            "migrations/0001_init.py": "def k(x):\n    return x\n",
+            "gen_tool.py": "# Code generated by protoc. DO NOT EDIT.\ndef m(x):\n    return x\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert list(result["per_file"]) == ["app.py"]
+    assert result["scoped_files"] == 1
+
+
+def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path):
+    """A malformed file stays in scoped_files but not per_file or the ratios."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "good.py": "def f(x):\n    return x\n",
+            "broken.py": "def broken(:\n    return 1\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["scoped_files"] == 2
+    assert list(result["per_file"]) == ["good.py"]
+    assert result["verbosity"] == 0.0
