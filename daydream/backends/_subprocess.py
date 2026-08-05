@@ -7,6 +7,7 @@ import asyncio
 import logging
 import math
 import os
+import signal
 
 import anyio
 
@@ -128,6 +129,19 @@ async def terminate_process(
 ) -> None:
     """SIGTERM *proc*, wait up to *timeout* seconds, then SIGKILL if still running.
 
+    The signals reach the whole process group, not just the direct child: the
+    CLI is spawned with ``start_new_session=True``, making it the session leader
+    (``pgid == pid``), so a group signal reaches shell tools the CLI spawned as
+    grandchildren. The group is signalled *before* the direct child can die and
+    orphan them — a ``killpg`` on a group whose members have been reparented to
+    PID 1 fails with ``PermissionError`` on macOS, leaving the grandchildren to
+    hold the pipe write ends open (the Errno 24 leak).
+
+    The subprocess pipes are closed explicitly at the end: ``proc.stdout`` /
+    ``proc.stderr`` are ``StreamReader`` with no public ``close()``, and the fd
+    owner is ``proc._transport``, whose ``close()`` releases the pipe read ends
+    regardless of EOF (a surviving grandchild keeps EOF from ever arriving).
+
     Shielded from cancellation. The backend reads its subprocess inside an async
     generator, so a wall-budget scope firing mid-read unwinds the ``CancelledError``
     straight into the generator's ``finally`` — here — with the parent scope still
@@ -135,19 +149,70 @@ async def terminate_process(
     first ``await`` below re-raises before the wait/SIGKILL/reap can run: the child
     is signalled but never reaped, and a SIGTERM-ignoring child is not even killed.
     The shield lets this teardown run to completion before the cancel resumes.
+
+    Idempotent: on a second call the process is already reaped (``returncode`` is
+    set), so the terminate/wait sequence is skipped and the group signal and pipe
+    closes are no-ops.
     """
     grace = TERMINATE_GRACE_S if timeout is None else timeout
     with anyio.CancelScope(shield=True):
-        proc.terminate()
+        if proc.returncode is None:
+            _kill_process_group(proc, signal.SIGTERM)
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=grace)
+            except asyncio.TimeoutError:
+                # The CLI ignored SIGTERM. SIGKILL the group while it is still
+                # alive so the grandchildren die with it — killing just the
+                # direct child first would orphan them and a later group kill
+                # would fail with EPERM.
+                _kill_process_group(proc, signal.SIGKILL)
+                proc.kill()
+                await proc.wait()
+            else:
+                # The CLI exited on SIGTERM; reap any surviving grandchildren.
+                _kill_process_group(proc, signal.SIGKILL)
+        _close_process_io(proc)
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process, sig: int) -> None:
+    """Send *sig* to every process in *proc*'s process group (idempotent).
+
+    ``ProcessLookupError`` (group already gone — double-call, or the direct
+    child's death took it down) and ``PermissionError`` (the group holds
+    members orphaned into another session after the CLI died; macOS refuses the
+    signal) are both swallowed. ``proc.pid`` may be a non-int on test mocks,
+    which are skipped.
+    """
+    pid = getattr(proc, "pid", None)
+    if isinstance(pid, int):
         try:
-            await asyncio.wait_for(proc.wait(), timeout=grace)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _close_process_io(proc: asyncio.subprocess.Process) -> None:
+    """Close the subprocess transport and stdin, releasing the pipe fds.
+
+    ``proc.stdout``/``proc.stderr`` are ``asyncio.StreamReader`` with no public
+    ``close()`` — the fd owner is ``proc._transport``, whose ``close()``
+    releases the pipe read ends regardless of EOF. ``proc.stdin`` is an
+    ``asyncio.StreamWriter`` whose ``close()`` is a no-op after EOF.
+    """
+    transport = getattr(proc, "_transport", None)
+    if transport is not None:
+        transport.close()
+    if proc.stdin is not None:
+        proc.stdin.close()
 
 
 async def cancel_processes(processes: list[asyncio.subprocess.Process]) -> None:
-    """Cancel every tracked subprocess: SIGTERM all first, then wait/SIGKILL each.
+    """Cancel every tracked subprocess, reaping its group and pipes.
+
+    Delegates to :func:`terminate_process` per process: SIGTERM, grace, SIGKILL,
+    then group signal and pipe close. The observable contract is that every
+    process group is gone and every pipe fd released, idempotent on double-call.
 
     Shielded for the same reason as :func:`terminate_process`: the reap must
     finish even when the caller is already being cancelled.
@@ -155,10 +220,4 @@ async def cancel_processes(processes: list[asyncio.subprocess.Process]) -> None:
     snapshot = list(processes)
     with anyio.CancelScope(shield=True):
         for process in snapshot:
-            process.terminate()
-        for process in snapshot:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=TERMINATE_GRACE_S)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await terminate_process(process)
