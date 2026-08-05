@@ -15,7 +15,13 @@ from pathlib import Path
 import pytest
 
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
-from daydream.eval.analyzer import analyze_costs, analyze_grounding, load_trajectories
+from daydream.eval.analyzer import (
+    _files_read,
+    analyze_costs,
+    analyze_coverage,
+    analyze_grounding,
+    load_trajectories,
+)
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
@@ -203,3 +209,172 @@ def test_grounding_rate_is_undefined_with_zero_findings():
     assert result["grounded_count"] == 0
     assert result["ungrounded_count"] == 0
     assert result["grounding_rate"] is None
+
+
+# --- cross-backend read extraction (issue #307) ---
+
+
+CODEX_READ_COMMAND = (
+    "sed -n '1,240p' .daydream/exploration/summary.md && "
+    "sed -n '1,280p' .daydream/diff.patch; "
+    "rg -n -C 3 'cache_write_tokens|total_cache_write_tokens' "
+    "core/osprey-cli docs README.md 2>/dev/null && "
+    "cat some/file.rb; nl -ba pkg/services/cleanup.go"
+)
+
+
+def test_files_read_extracts_codex_shell_paths():
+    calls = [{"function_name": "shell", "arguments": {"command": CODEX_READ_COMMAND}}]
+
+    paths = _files_read(calls)
+
+    assert ".daydream/exploration/summary.md" in paths
+    assert ".daydream/diff.patch" in paths
+    assert "core/osprey-cli" in paths
+    assert "docs" in paths
+    assert "README.md" in paths
+    assert "some/file.rb" in paths
+    assert "pkg/services/cleanup.go" in paths
+    assert "1,240p" not in paths
+    assert "1,280p" not in paths
+    assert "cache_write_tokens|total_cache_write_tokens" not in paths
+    assert "2>/dev/null" not in paths
+
+
+def test_files_read_extracts_pi_read_and_bash_paths():
+    calls = [
+        {"function_name": "read", "arguments": {"path": "/repo/pkg/services/cleanup.go"}},
+        {"function_name": "bash", "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"}},
+    ]
+
+    paths = _files_read(calls)
+
+    assert "/repo/pkg/services/cleanup.go" in paths
+    assert "README.md" in paths
+    assert "core/osprey-cli" in paths
+
+
+def _shell_reads(command: str) -> set[str]:
+    """Extract read paths from a single codex ``shell`` call."""
+    return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
+
+
+def test_files_read_skips_separated_redirect_target():
+    paths = _shell_reads("cat source.txt > target.py")
+
+    assert "source.txt" in paths
+    assert "target.py" not in paths
+
+
+def test_files_read_skips_redirect_and_pattern_for_rg():
+    paths = _shell_reads("rg -n 'pat' a.py b.py 2>/dev/null")
+
+    assert "a.py" in paths
+    assert "b.py" in paths
+    assert "/dev/null" not in paths
+    assert "pat" not in paths
+
+
+def test_files_read_preserves_quoted_paths_with_spaces():
+    assert "my file.py" in _shell_reads("cat 'my file.py'")
+    assert "my file.py" in _shell_reads('cat "my file.py"')
+
+
+def test_files_read_skips_rg_option_values():
+    paths = _shell_reads("rg -C 3 --glob '*.py' 'needle' src/app.py")
+
+    assert paths == {"src/app.py"}
+    assert "3" not in paths
+    assert "*.py" not in paths
+    assert "needle" not in paths
+
+
+def test_files_read_claude_read_and_grep_unchanged():
+    calls = [
+        {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
+        {"function_name": "Grep", "arguments": {"path": "src/"}},
+    ]
+
+    paths = _files_read(calls)
+
+    assert paths == {"/repo/api.py", "src/"}
+
+
+def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(
+        "diff --git a/pkg/services/cleanup.go b/pkg/services/cleanup.go\n"
+        "diff --git a/core/osprey-cli b/core/osprey-cli\n"
+    )
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "steps": [
+                {
+                    "step_id": "m0",
+                    "extra": {"daydream_phase": "deep"},
+                    "tool_calls": [
+                        {"function_name": "shell", "arguments": {"command": "sed -n '1,240p' .daydream/diff.patch"}}
+                    ],
+                }
+            ],
+        },
+        "forked": [
+            {
+                "_source_file": "deep-python.json",
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {"function_name": "read", "arguments": {"path": "/repo/pkg/services/cleanup.go"}},
+                            {"function_name": "bash", "arguments": {"command": "cat core/osprey-cli"}},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = analyze_coverage(trajectories, daydream_dir)
+
+    assert result["coverage_ratio"] == 1.0
+    assert result["files_read_by_reviewers"] == 2
+    assert result["uncovered_files"] == []
+
+
+def test_analyze_grounding_counts_codex_and_pi_reads():
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-python.json",
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {"function_name": "shell", "arguments": {"command": "cat /repo/api.py"}},
+                            {"function_name": "read", "arguments": {"path": "/repo/api.py"}},
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    findings = [
+        {
+            "id": "py-1",
+            "_stack": "python",
+            "file": "api.py",
+            "rationale": "Read api.py; flag the missing validation.",
+            "confidence": "HIGH",
+        }
+    ]
+
+    result = analyze_grounding(trajectories, findings)
+
+    entry = result["grounded"][0]
+    assert entry["file_was_read"] is True
+    assert result["grounded_count"] == 1
+    assert result["ungrounded_count"] == 0
+    assert result["grounding_rate"] == 1.0

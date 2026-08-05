@@ -13,6 +13,7 @@ Usage::
 
 import json
 import re
+import shlex
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -163,17 +164,186 @@ def _files_from_diff(diff_path: Path) -> list[str]:
     return sorted(files)
 
 
+_READ_VERBS = ("sed", "nl", "cat", "rg")
+_SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
+_REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
+_SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
+_RG_LONG_VALUE_OPTS = frozenset(
+    {
+        "context",
+        "context-before",
+        "context-after",
+        "glob",
+        "ignore-file",
+        "engine",
+        "regexp",
+        "file",
+        "type",
+        "type-not",
+        "type-add",
+        "max-columns",
+        "max-count",
+        "max-filesize",
+        "threads",
+        "pre",
+        "pre-glob",
+        "replace",
+        "sort",
+        "sortr",
+    }
+)
+_RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
+
+
+def _tokenize_command(command: str) -> list[str]:
+    """Split a shell command into tokens, honoring quotes and separators.
+
+    ``shlex`` preserves quoted operands as single tokens (``'my file.py'``
+    stays intact) while punctuation mode keeps ``&&``/``;``/``&`` as distinct
+    separator tokens even without surrounding whitespace.
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    return list(lexer)
+
+
+def _rg_option_info(tok: str) -> tuple[int, bool]:
+    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern.
+
+    ``-C 3`` → (2, False); ``--glob=*.py`` → (1, False) (value attached);
+    ``-n`` → (1, False); ``-e PAT``/``--regexp=PAT`` → (…, True) because an
+    explicit pattern leaves the next positional operand as a path, not a
+    pattern. Combined short flags (``-ni``) skip only their own token; a
+    value-taking short flag with an attached value (``-C3``) also consumes one.
+    """
+    if tok.startswith("--"):
+        if "=" in tok:
+            name = tok[2:].split("=", 1)[0]
+            return 1, name in ("regexp", "file")
+        name = tok[2:]
+        if name in _RG_LONG_VALUE_OPTS:
+            return 2, name in ("regexp", "file")
+        return 1, False
+    body = tok[1:]
+    if body and body[0] in _RG_SHORT_VALUE_OPTS:
+        value_attached = len(body) > 1
+        return (1 if value_attached else 2), body[0] in ("e", "f")
+    return 1, False
+
+
+def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
+    """File-path operands of one command segment for a given read verb.
+
+    Redirection operators are consumed together with their targets (separated
+    ``> target`` or attached ``2>/dev/null``) so a redirect target is never
+    recorded as a read. Sed address ranges and flags are filtered, and ``rg``
+    skips option values plus the search pattern. ``cat`` operands pass through
+    verbatim.
+    """
+    paths: set[str] = set()
+    i = 0
+    n = len(operands)
+    seen_pattern = False
+    after_ddash = False
+    while i < n:
+        tok = operands[i]
+        m = _REDIRECT_RE.match(tok)
+        if m:
+            i += 1 if m.group(3) else 2
+            continue
+        if verb == "rg":
+            if tok == "--":
+                after_ddash = True
+                i += 1
+                continue
+            if not after_ddash and tok.startswith("-") and tok != "-":
+                skip, supplies_pattern = _rg_option_info(tok)
+                i += skip
+                if supplies_pattern:
+                    seen_pattern = True
+                continue
+            if not seen_pattern:
+                seen_pattern = True
+                i += 1
+                continue
+        elif verb in ("sed", "nl", "cat"):
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if verb == "sed" and _SED_RANGE_RE.fullmatch(tok):
+                i += 1
+                continue
+        paths.add(tok)
+        i += 1
+    return paths
+
+
+def _paths_from_command(command: str) -> set[str]:
+    """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
+
+    Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
+    ``cat``, and ``rg``. Commands may chain segments with ``&&``/``;`` and
+    redirect with ``2>/dev/null``. Tokenization is shell-aware: quoted paths
+    survive, redirection targets are consumed with their operator, and ``rg``
+    option values and the search pattern are filtered. Extraction is
+    deliberately permissive — ``_path_matches`` matches by ``endswith``, so a
+    stray operand simply never matches a diff file — but flags, redirect
+    targets, sed address ranges, and the ``rg`` search pattern are filtered.
+    """
+    paths: set[str] = set()
+    tokens = _tokenize_command(command)
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok in _SEGMENT_SEPARATORS:
+            i += 1
+            continue
+        m = _REDIRECT_RE.match(tok)
+        if m:
+            i += 1 if m.group(3) else 2
+            continue
+        verb = tok.split("/")[-1]
+        if verb not in _READ_VERBS:
+            i += 1
+            continue
+        i += 1
+        operands: list[str] = []
+        while i < n and tokens[i] not in _SEGMENT_SEPARATORS:
+            operands.append(tokens[i])
+            i += 1
+        paths.update(_read_paths_for_segment(verb, operands))
+    return paths
+
+
+def _read_paths_for_call(tc: dict) -> list[str]:
+    """All file paths a single tool call reads, across backends.
+
+    - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
+    - pi:     lowercase ``read`` → ``arguments.path``
+    - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
+    """
+    fn = tc["function_name"]
+    args = tc["arguments"]
+    if fn == "Read":
+        p = args.get("file_path", "")
+        return [p] if p else []
+    if fn == "Grep":
+        p = args.get("path", "")
+        return [p] if p else []
+    if fn == "read":
+        p = args.get("path", "")
+        return [p] if p else []
+    if fn in ("shell", "bash"):
+        return sorted(_paths_from_command(args.get("command", "")))
+    return []
+
+
 def _files_read(tool_calls: list[dict]) -> set[str]:
     paths: set[str] = set()
     for tc in tool_calls:
-        if tc["function_name"] == "Read":
-            p = tc["arguments"].get("file_path", "")
-            if p:
-                paths.add(p)
-        elif tc["function_name"] == "Grep":
-            p = tc["arguments"].get("path", "")
-            if p:
-                paths.add(p)
+        paths.update(_read_paths_for_call(tc))
     return paths
 
 
@@ -313,10 +483,7 @@ def analyze_coverage(trajectories: dict, daydream_dir: Path) -> dict:
     if trajectories["main"]:
         for tc in _extract_tool_calls(trajectories["main"]):
             if tc["phase"] in ("deep", "alternatives"):
-                if tc["function_name"] in ("Read", "Grep"):
-                    p = tc["arguments"].get("file_path") or tc["arguments"].get("path", "")
-                    if p:
-                        review_reads.add(p)
+                review_reads.update(_read_paths_for_call(tc))
 
     covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
     uncovered = sorted(set(diff_files) - covered)
