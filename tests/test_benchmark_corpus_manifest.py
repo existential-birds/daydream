@@ -151,20 +151,31 @@ _CORPUS_ROOT = Path(__file__).resolve().parents[1] / "benchmark" / "corpora" / "
 def test_real_osprey_coderabbit_manifest_loads():
     """Real-path check against the committed CodeRabbit-parity corpus.
 
-    Skipped until the orchestrator's harvest lands (index.json present). The
-    per-PR resolved counts are cross-checked against the harvest records so a
-    stale index cannot silently diverge from the payloads.
+    Validates the committed ``manifest.json`` — the artifact that ships
+    (``index.json`` + ``manifest.json`` are git-tracked; the ``harvest/``
+    payloads are gitignored, so CI has the manifest but not the payloads).
+    The per-PR resolved-count cross-check against the harvest records runs
+    only when the gitignored payloads are present locally, so a stale index
+    cannot silently diverge from the payloads on a full checkout.
     """
-    if not (_CORPUS_ROOT / "index.json").exists():
-        pytest.skip("osprey-coderabbit harvest has not landed yet (no index.json)")
+    manifest_path = _CORPUS_ROOT / "manifest.json"
+    if not manifest_path.exists():
+        pytest.skip("osprey-coderabbit manifest is not committed yet")
 
-    manifest = build_corpus_manifest(_CORPUS_ROOT)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["repo"] == "existential-birds/osprey"
     assert manifest["bot"] == "coderabbitai[bot]"
     assert manifest["state"] == "closed"
     assert manifest["pr_count"] >= 100  # real harvest: 142 PRs (of 400 scanned)
     assert manifest["comment_count"] > 0
+    assert len(manifest["prs"]) == manifest["pr_count"]
     assert manifest["comment_count"] == sum(pr["comment_count"] for pr in manifest["prs"])
+    assert manifest["resolved_count"] == sum(pr["resolved_count"] for pr in manifest["prs"])
+    assert all(pr["golden_comments"] for pr in manifest["prs"] if pr["comment_count"] > 0)
+
+    if not (_CORPUS_ROOT / "harvest").is_dir():
+        pytest.skip("gitignored harvest/ payloads absent on CI; skipping payload cross-check")
+
     for pr in manifest["prs"]:
         record = json.loads((_CORPUS_ROOT / "harvest" / f"pr-{pr['number']}.json").read_text(encoding="utf-8"))
         assert pr["resolved_count"] == sum(
