@@ -207,27 +207,30 @@ def test_hunk_change_line_count_excludes_headers() -> None:
 
 
 def test_filter_sweepable_files_caps_capacity_and_counts_small_hunks() -> None:
-    """Small hunks are skipped; excess sweepable files are counted, not dropped."""
+    """Small hunks are skipped; excess sweepable files are named, not dropped."""
     uncovered = ["api.py", "notes.txt"]
 
-    swept, small, capacity = filter_sweepable_files(
+    swept, small_files, capacity_files = filter_sweepable_files(
         uncovered, _DIFF, min_hunk_lines=5, max_files=10
     )
 
     assert swept == ["notes.txt"]
-    assert small == 1  # api.py has only 2 +/- lines
-    assert capacity == 0
+    assert small_files == ["api.py"]  # api.py has only 2 +/- lines
+    assert capacity_files == []
+    # Integer counts are derived from the lists (issue #309 finding 10).
+    assert len(small_files) == 1
+    assert len(capacity_files) == 0
 
 
 def test_filter_sweepable_files_skips_nonexistent_diff_files() -> None:
     """An uncovered file absent from the diff is skipped as non-sweepable."""
-    swept, small, capacity = filter_sweepable_files(
+    swept, small_files, capacity_files = filter_sweepable_files(
         ["ghost.txt"], _DIFF, min_hunk_lines=1, max_files=10
     )
 
     assert swept == []
-    assert small == 1
-    assert capacity == 0
+    assert small_files == ["ghost.txt"]
+    assert capacity_files == []
 
 
 def test_filter_sweepable_files_capacity_cap_keeps_diff_order() -> None:
@@ -240,13 +243,25 @@ def test_filter_sweepable_files_capacity_cap_keeps_diff_order() -> None:
         "+a\n+b\n+c\n+d\n+e\n+f\n"
     )
 
-    swept, small, capacity = filter_sweepable_files(
+    swept, small_files, capacity_files = filter_sweepable_files(
         ["notes.txt", "third.txt"], diff, min_hunk_lines=5, max_files=1
     )
 
     assert swept == ["notes.txt"]
-    assert small == 0
-    assert capacity == 1
+    assert small_files == []
+    assert capacity_files == ["third.txt"]
+    assert len(capacity_files) == 1
+
+
+def test_filter_sweepable_files_zero_max_files_sweeps_nothing() -> None:
+    """max_files=0 sweeps nothing; every sweepable file is capacity-skipped."""
+    swept, small_files, capacity_files = filter_sweepable_files(
+        ["api.py", "notes.txt"], _DIFF, min_hunk_lines=1, max_files=0
+    )
+
+    assert swept == []
+    assert small_files == []
+    assert capacity_files == ["api.py", "notes.txt"]
 
 
 def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Path) -> None:
@@ -269,6 +284,40 @@ def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Pat
     # Hunks are inlined (not a pointer to diff.patch).
     assert "+line6" in prompt
     assert "changed file notes.txt was NOT read" in prompt
-    # The verification gates are embedded, not a skill-file read instruction.
+    # The canonical prompt primitives are present, not reduced duplicates: the
+    # sweep reviewer is held to the same standard as per-stack reviewers
+    # (issue #309 finding 11).
+    assert "## Confidence and Convention Rules" in prompt
+    assert "Error Handling Semantics (QUAL-04)" in prompt
+    assert "## Dependency Impact" in prompt
     assert "Gate-0 anti-confabulation" in prompt
     assert "review-verification-protocol/SKILL.md" not in prompt
+
+
+def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> None:
+    """The exploration pointer is inlined only when a directory is supplied."""
+    intent = tmp_path / ".daydream" / "deep" / "intent.md"
+    output = tmp_path / ".daydream" / "deep" / "uncovered-0-review.md"
+    hunks = diff_block_for_file(_DIFF, "notes.txt") or ""
+    exploration = tmp_path / ".daydream" / "exploration"
+    prompt = build_uncovered_sweep_prompt(
+        file="notes.txt",
+        hunks=hunks,
+        intent_path=intent,
+        cwd=tmp_path,
+        output_path=output,
+        exploration_dir=exploration,
+    )
+
+    assert "Pre-scan exploration results are available" in prompt
+    assert str(exploration) in prompt
+
+    prompt_no_dir = build_uncovered_sweep_prompt(
+        file="notes.txt",
+        hunks=hunks,
+        intent_path=intent,
+        cwd=tmp_path,
+        output_path=output,
+        exploration_dir=None,
+    )
+    assert "Pre-scan exploration results" not in prompt_no_dir

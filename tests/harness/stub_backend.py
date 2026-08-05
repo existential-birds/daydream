@@ -201,6 +201,11 @@ class StubBackend:
         # (instead of the default api.py), so stack-uncovered-records.json names
         # the swept file.
         self.sweep_file: str | None = None
+        # When True, the uncovered-file-sweep branch returns success WITHOUT
+        # writing the review output file -- a backend can return normally while
+        # producing nothing (issue #309 finding 7). A successful return must
+        # NOT be recorded as completed coverage.
+        self.sweep_no_output: bool = False
         # When True, the uncovered-file-sweep branch raises -- exercising the
         # sweep's fail-open contract.
         self.fail_sweep: bool = False
@@ -365,14 +370,15 @@ class StubBackend:
                 raise RuntimeError("stub: uncovered-file sweep blew up")
             file_match = re.search(r"changed file (\S+) was NOT read", prompt)
             swept_file = file_match.group(1) if file_match else "notes.txt"
-            out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
-            if out_match is not None:
-                out_path = Path(out_match.group(1).rstrip("."))
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_text(
-                    f"# Review (uncovered)\n\n## Issues\n\n"
-                    f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
-                )
+            if not self.sweep_no_output:
+                out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
+                if out_match is not None:
+                    out_path = Path(out_match.group(1).rstrip("."))
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(
+                        f"# Review (uncovered)\n\n## Issues\n\n"
+                        f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
+                    )
             yield ToolStartEvent(
                 id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
             )

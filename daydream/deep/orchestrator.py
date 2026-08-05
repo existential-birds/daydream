@@ -1259,17 +1259,32 @@ def _clear_sweep_artifacts(dd: Path) -> None:
     behind, and a later merge resume would reload them as this run's coverage.
     Merge/fix resumes keep the artifacts (the sweep is a no-op there and the
     records must survive).
+
+    Fail-CLOSED: this cleanup is resume-safety-critical, not best-effort
+    diagnostics. When a targeted artifact cannot be removed (a ``OSError`` from
+    ``unlink()``, or an artifact that survives the loop), the function raises an
+    ``OSError`` with an actionable message and the per-stack resume stops --
+    it must never continue with a stale ``stack-uncovered-records.json`` in
+    place that a later merge resume would reload as current findings.
     """
-    for pattern in (
+    patterns = (
         "coverage-stats.json",
         "stack-uncovered-records.json",
         "uncovered-*-review.md",
-    ):
+    )
+    for pattern in patterns:
         for path in dd.glob(pattern):
             try:
                 path.unlink()
             except OSError:
                 pass
+    remaining = [p for pattern in patterns for p in dd.glob(pattern)]
+    if remaining:
+        names = ", ".join(sorted(p.name for p in remaining))
+        raise OSError(
+            f"stale sweep artifact(s) could not be removed: {names}; "
+            "refusing to resume per-stack"
+        )
 
 
 async def _step_uncovered_sweep(ctx: FlowContext) -> None:
@@ -1307,7 +1322,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
 
-    swept_files, skipped_small, skipped_capacity = filter_sweepable_files(
+    swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
         ctx.data["diff"],
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
@@ -1330,8 +1345,12 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "coverage_ratio": coverage_stats["coverage_ratio"],
         },
         "sweep_finding_count": 0,
-        "sweep_skipped_capacity": skipped_capacity,
-        "sweep_skipped_small_hunks": skipped_small,
+        # The integer skip counts are derived from the filename lists so the
+        # two views cannot diverge (issue #309 finding 10).
+        "sweep_skipped_capacity": len(skipped_capacity_files),
+        "sweep_skipped_small_hunks": len(skipped_small_files),
+        "sweep_skipped_capacity_files": skipped_capacity_files,
+        "sweep_skipped_small_hunks_files": skipped_small_files,
     }
     stats_p = dd / "coverage-stats.json"
 
@@ -1361,6 +1380,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                 intent_path=ctx.data["intent_path"],
                 cwd=ctx.work.repo,
                 output_path=output_path,
+                exploration_dir=ctx.data["exploration_dir"],
             )
 
             async def _sweep_one(
@@ -1382,8 +1402,15 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                             )
                             if budget_reason:
                                 sweep_failures[file] = f"budget exhausted: {budget_reason}"
-                            else:
+                            elif task_output.is_file():
+                                # A backend can return normally without writing
+                                # its output (phase_review guards the same
+                                # possibility); only an actual review file
+                                # counts as coverage, so the parse loop and
+                                # `completed_files` never see phantom outputs.
                                 review_outputs[file] = task_output
+                            else:
+                                sweep_failures[file] = "no review output written"
                         except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
                             sweep_failures[file] = f"{type(exc).__name__}: {exc}"
 
@@ -1393,9 +1420,12 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
     # Parse each sweep review into PER_STACK_RECORD_SCHEMA records (fail-open:
-    # unparseable or failed parses are dropped, never fatal).
+    # unparseable or failed parses are dropped, never fatal). Parse failures are
+    # tracked BY FILENAME into `sweep_failures`, not just the `parse_dropped`
+    # count, so coverage-stats.json names exactly which file's parse failed.
     parse_results: dict[str, list[dict[str, Any]]] = {}
     parse_dropped = 0
+    parse_failures: dict[str, str] = {}
 
     async def _parse_all() -> None:
         nonlocal parse_dropped
@@ -1417,8 +1447,11 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                                     output_schema=PER_STACK_RECORD_SCHEMA,
                                 )
                                 parse_results[file] = records
-                            except Exception:  # noqa: BLE001 -- fail-open drop
+                            except Exception as exc:  # noqa: BLE001 -- fail-open drop
                                 parse_dropped += 1
+                                parse_failures[file] = (
+                                    f"parse failed: {type(exc).__name__}: {exc}"
+                                )
 
                 tg.start_soon(_parse_one)
 
@@ -1448,7 +1481,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     for file in sorted(parse_results):
         sweep_records.extend(parse_results[file])
     stats["sweep_parse_dropped"] = parse_dropped
-    stats["sweep_failures"] = sweep_failures
+    stats["sweep_failures"] = {**sweep_failures, **parse_failures}
     stats["completed_files"] = sorted(review_outputs)
     if review_outputs:
         records_path = per_stack_records_path(dd, "uncovered")
@@ -1678,50 +1711,63 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
     landed); only files whose sweep review produced completed output are labeled
     covered. Failed sweep attempts are surfaced as failures, not claimed as
     coverage. A missing or malformed stats file is a silent no-op -- coverage
-    surfacing is advisory, never a gate.
+    surfacing is advisory, never a gate. ANY failure here (read error, invalid
+    JSON, structurally-malformed root, a non-dict shape) warns and returns; it
+    can never fail the merge step.
     """
     stats_p = dd / "coverage-stats.json"
     if not stats_p.is_file():
         return
     try:
         stats = json.loads(stats_p.read_text())
-    except json.JSONDecodeError:
-        return
-    pre_sweep = stats.get("pre_sweep")
-    if not isinstance(pre_sweep, dict):
-        return
-    files_in_diff = pre_sweep.get("files_in_diff")
-    if not isinstance(files_in_diff, int):
-        return
-    lines = [
-        "## Coverage",
-        f"- Files in diff: {files_in_diff}",
-    ]
-    # Prefer the POST-sweep numbers (the ratio the sweep actually achieved);
-    # fall back to the pre-sweep snapshot when the sweep did not recompute.
-    post_sweep = stats.get("post_sweep")
-    read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
-    files_read = read_source.get("files_read_by_reviewers")
-    if isinstance(files_read, int):
-        lines.append(f"- Files read by reviewers: {files_read}")
-    ratio = read_source.get("coverage_ratio")
-    if isinstance(ratio, (int, float)):
-        lines.append(f"- Coverage ratio: {ratio}")
-    completed = stats.get("completed_files")
-    if isinstance(completed, list) and completed:
-        lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in completed)}")
-    failures = stats.get("sweep_failures")
-    if isinstance(failures, dict) and failures:
-        lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
-    skipped = stats.get("sweep_skipped_capacity")
-    if isinstance(skipped, int) and skipped:
-        lines.append(f"- Sweep capacity-skipped files: {skipped}")
-    section = "\n".join(lines) + "\n"
-    for target in (report, deep_copy):
-        if target.is_file():
-            text = target.read_text(encoding="utf-8")
-            if "## Coverage" not in text:
-                target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+        if not isinstance(stats, dict):
+            print_warning(
+                console,
+                "Ignoring malformed coverage stats (expected a JSON object): "
+                f"{stats_p}",
+            )
+            return
+        pre_sweep = stats.get("pre_sweep")
+        if not isinstance(pre_sweep, dict):
+            return
+        files_in_diff = pre_sweep.get("files_in_diff")
+        if not isinstance(files_in_diff, int):
+            return
+        lines = [
+            "## Coverage",
+            f"- Files in diff: {files_in_diff}",
+        ]
+        # Prefer the POST-sweep numbers (the ratio the sweep actually achieved);
+        # fall back to the pre-sweep snapshot when the sweep did not recompute.
+        post_sweep = stats.get("post_sweep")
+        read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
+        files_read = read_source.get("files_read_by_reviewers")
+        if isinstance(files_read, int):
+            lines.append(f"- Files read by reviewers: {files_read}")
+        ratio = read_source.get("coverage_ratio")
+        if isinstance(ratio, (int, float)):
+            lines.append(f"- Coverage ratio: {ratio}")
+        completed = stats.get("completed_files")
+        if isinstance(completed, list) and completed:
+            lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in completed)}")
+        failures = stats.get("sweep_failures")
+        if isinstance(failures, dict) and failures:
+            lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
+        skipped = stats.get("sweep_skipped_capacity")
+        if isinstance(skipped, int) and skipped:
+            lines.append(f"- Sweep capacity-skipped files: {skipped}")
+        section = "\n".join(lines) + "\n"
+        for target in (report, deep_copy):
+            if target.is_file():
+                text = target.read_text(encoding="utf-8")
+                if "## Coverage" not in text:
+                    target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 -- advisory decoration: never fail the step
+        print_warning(
+            console,
+            "Skipping coverage stats render (advisory; run continues): "
+            f"{type(exc).__name__}: {exc}",
+        )
 
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:
@@ -2197,8 +2243,18 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             # finds nothing, or produces no output cannot leave stale records
             # that a later merge resume would reload. Merge/fix resumes keep
             # them (the sweep is a no-op there and the records must survive).
+            # Fail-CLOSED: an artifact that cannot be removed stops the resume
+            # (stale records reloaded as current findings would be worse than
+            # no resume); this call is at the resume boundary, OUTSIDE the
+            # sweep step's fail-open wrapper, so the raise cannot be swallowed.
             if config.start_at == "per-stack":
-                _clear_sweep_artifacts(dd)
+                try:
+                    _clear_sweep_artifacts(dd)
+                except OSError as exc:
+                    print_error(
+                        console, "Unusable Deep Artifacts", f"{exc}\n\nRe-run without --start-at to regenerate them."
+                    )
+                    return 1
 
         # Stack detection (from diff file list). Availability is resolved once in
         # runner.run and threaded via config; None flows through to detect_stacks'

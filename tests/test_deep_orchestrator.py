@@ -5176,6 +5176,11 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
     assert stats["completed_files"] == ["notes.txt"]
     assert stats["sweep_finding_count"] == len(records) >= 1
     assert stats["sweep_skipped_small_hunks"] == 0
+    # Finding 10: the skip filename lists are persisted alongside the counts
+    # (derived from the lists) so capacity/hunk skips stay auditable.
+    assert stats["sweep_skipped_small_hunks_files"] == []
+    assert stats["sweep_skipped_capacity"] == 0
+    assert stats["sweep_skipped_capacity_files"] == []
     # The POST-sweep ratio reflects the sweep fork's completed read of notes.txt.
     assert stats["post_sweep"]["files_read_by_reviewers"] == 4
     assert stats["post_sweep"]["coverage_ratio"] > pre_sweep["coverage_ratio"]  # 0.75 -> 1.0
@@ -5350,6 +5355,118 @@ async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records
     assert await _run_deep(target, start_at="per-stack") == 0
 
     assert json.loads((deep / "stack-uncovered-records.json").read_text()) == []
+
+
+async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A sweep backend that returns success WITHOUT writing its review output is
+    NOT recorded as completed coverage (issue #309 finding 7).
+
+    A backend can return normally while producing nothing; without a
+    ``task_output.is_file()`` guard the file would be claimed covered and the
+    parse would fail on a phantom output. The file must land in
+    ``sweep_failures`` (``"no review output written"``), never in
+    ``completed_files`` / the report's covered line.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.sweep_no_output = True  # backend returns normally but writes nothing
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["attempted_files"] == ["notes.txt"]
+    assert stats["completed_files"] == []  # no actual review output to parse
+    assert stats["sweep_finding_count"] == 0
+    assert stats["sweep_failures"] == {"notes.txt": "no review output written"}
+    # No review output, no records artifact on a fresh run.
+    assert not (deep / "stack-uncovered-records.json").exists()
+
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Second-pass sweep covered" not in report
+    assert "Best-effort sweep failures: notes.txt" in report
+
+
+async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-stack resume whose stale sweep artifact cannot be removed STOPS
+    with an actionable error instead of continuing (issue #309 finding 8).
+
+    The cleanup is resume-safety-critical (a stale ``stack-uncovered-records.json``
+    surviving would be reloaded by a later merge resume as current findings), so
+    an unremovable artifact aborts the resume at exit 1 before any new per-stack
+    work is dispatched.
+    """
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    assert await _run_deep(target) == 0
+
+    deep = target / ".daydream" / "deep"
+    assert (deep / "stack-uncovered-records.json").is_file()
+
+    # Make one artifact unremovable: a directory sharing the artifact name makes
+    # Path.unlink() raise IsADirectoryError, and the cleanup must fail closed.
+    (deep / "coverage-stats.json").unlink()
+    (deep / "coverage-stats.json").mkdir()
+
+    stub2 = _install_stub_backend(monkeypatch, target)
+    exit_code = await _run_deep(target, start_at="per-stack")
+    assert exit_code == 1
+    # The resume aborted BEFORE new per-stack work, so no backend call ran and
+    # the unremovable artifact is still present (it was NOT silently skipped).
+    assert stub2.calls == []
+    assert (deep / "coverage-stats.json").is_dir()
+
+
+async def test_uncovered_sweep_malformed_stats_does_not_fail_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structurally-malformed ``coverage-stats.json`` must NOT abort the run
+    (issue #309 finding 9).
+
+    ``[]`` is syntactically valid JSON but the wrong shape: without the
+    ``isinstance(stats, dict)`` guard + blanket advisory try/except, the
+    ``stats.get(...)`` in ``_append_coverage_section`` raises AttributeError and
+    kills an otherwise-completed review. The run must still complete (exit 0,
+    report written) with no Coverage section rendered.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(confidence="HIGH")],
+        react=[_record()],
+        generic=[_record()],
+        structure=[_record()],
+    )
+    # Malformed shape: valid JSON but a list, so stats.get(...) would raise
+    # AttributeError without the shape guard.
+    (deep / "coverage-stats.json").write_text("[]")
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "## Coverage" not in report
 
 
 def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:

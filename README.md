@@ -232,6 +232,20 @@ Supervisor settings are config-file-only:
 | `tool_supervisor` | `"off"` | Built-in tool policy mode: `"off"` or `"rules"`. |
 | `tool_bash_deny` | `[]` | Regular expressions for Bash commands the built-in policy vetoes. |
 
+The uncovered-diff-file sweep (a second-pass reviewer over diff files no
+per-stack reviewer read) is configured with file-config keys in the same two
+sources:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `uncovered_sweep` | `true` | Toggle the sweep. `false` disables the second pass entirely. |
+| `uncovered_sweep_max_files` | `10` | Cap on how many uncovered files are swept in one run; files beyond the cap are recorded in `coverage-stats.json` as `sweep_skipped_capacity` (and named in `sweep_skipped_capacity_files`) rather than silently dropped. `0` sweeps nothing. |
+| `uncovered_sweep_min_hunk_lines` | `5` | A file counts as sweepable only when its hunks contain at least this many added/removed lines. `0` removes the floor (every uncovered file is eligible). |
+
+Resolution precedence is the standard **CLI > config file > default**; a
+negative value (any tier) degrades to the named default, so an invalid floor can
+never make zero-change/trivial blocks eligible.
+
 The LLM supervisor uses one batched call. Configure its model under
 `[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).
 

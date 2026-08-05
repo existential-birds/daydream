@@ -20,12 +20,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
+from daydream.deep.prompts import (
+    _DIFF_BLOCK_SPLIT,
+    VERIFICATION_PROTOCOL_INSTRUCTION,
+    _diff_block_path,
+)
 from daydream.eval.analyzer import (
     _agent_label,
     _files_from_diff,
     _read_paths_for_call,
     load_trajectories,
+)
+from daydream.phases import (
+    _confidence_and_convention_instructions,
+    _dependency_impact_instructions,
+    _exploration_pointer,
 )
 
 
@@ -155,7 +164,7 @@ def filter_sweepable_files(
     *,
     min_hunk_lines: int,
     max_files: int,
-) -> tuple[list[str], int, int]:
+) -> tuple[list[str], list[str], list[str]]:
     """Budget-filter the uncovered list into the files actually swept.
 
     A file is sweepable only when its hunks contain at least ``min_hunk_lines``
@@ -165,34 +174,22 @@ def filter_sweepable_files(
     skipped-for-capacity rather than silently dropped.
 
     Returns:
-        ``(swept_files, skipped_small_hunks, skipped_capacity)``.
+        ``(swept_files, skipped_small_hunk_files, skipped_capacity_files)``.
+        The two skip lists name the omitted files in diff order (mirroring
+        ``swept_files``) so consumers can audit exactly which files the
+        hunk-size floor and the capacity cap left out; the integer skip counts
+        are ``len(...)`` of these lists.
     """
     swept: list[str] = []
-    skipped_small = 0
+    skipped_small: list[str] = []
     for file in uncovered_files:
         block = diff_block_for_file(diff, file)
         if block is None or hunk_change_line_count(block) < min_hunk_lines:
-            skipped_small += 1
+            skipped_small.append(file)
             continue
         swept.append(file)
-    total_sweepable = len(swept)
-    skipped_capacity = max(0, total_sweepable - max_files)
+    skipped_capacity = swept[max_files:]
     return swept[:max_files], skipped_small, skipped_capacity
-
-
-_SWEEP_VERIFICATION_GATES = (
-    "Before writing findings, apply the review-verification gates (stated "
-    "inline here -- no skill file read is required):\n"
-    "  Gate-0 anti-confabulation: echo the exact artifact you are judging -- "
-    "file:line plus the cited code, read freshly in THIS turn, not recalled.\n"
-    "  Gate 1 (anchor): read the full enclosing symbol/module, not just the "
-    "hunk; state the file path and line range you are judging.\n"
-    "  Gate 2 (evidence): produce an artifact for the finding's type -- pasted "
-    'tool output, a file:line citation, or an explicit "none" after a search.\n'
-    "  Gate 3 (severity): calibrate severity to impact; a request for net-new "
-    "code outside the diff is Informational only.\n"
-    "Do NOT report a finding that fails any gate."
-)
 
 
 def build_uncovered_sweep_prompt(
@@ -202,32 +199,49 @@ def build_uncovered_sweep_prompt(
     intent_path: Path,
     cwd: Path,
     output_path: Path,
+    exploration_dir: Path | None = None,
 ) -> str:
     """Build the second-pass sweep reviewer prompt for one uncovered file.
 
     The reviewer scopes itself to ``file``'s hunks only (no per-stack reviewer
     read this file), uses the TTT intent for authorial context, and writes its
-    findings to ``output_path``. The verification gates are embedded inline --
-    not routed through ``Backend.format_skill_invocation`` and NOT loaded from
-    a skill file -- because the reviewer runs with cwd set to the reviewed
-    repo, where a bare ``read review-verification-protocol/SKILL.md`` resolves
-    against that repo and silently drops the gates (same rationale as
-    ``VERIFICATION_PROTOCOL_INSTRUCTION`` in ``daydream.deep.prompts``).
+    findings to ``output_path``. The sweep reviewer is held to the same standard
+    as ordinary per-stack reviewers -- its findings are parsed into
+    ``PER_STACK_RECORD_SCHEMA`` and merged as ordinary findings -- so the prompt
+    is composed from the CANONICAL deep prompt primitives (imported from
+    ``daydream.phases`` / ``daydream.deep.prompts``, read-only): the exploration
+    pointer, the Confidence and Convention Rules (incl. QUAL-04 error
+    semantics), the Dependency Impact instructions, and the full
+    ``VERIFICATION_PROTOCOL_INSTRUCTION``. The gates are embedded inline -- not
+    routed through ``Backend.format_skill_invocation`` and NOT loaded from a
+    skill file -- because the reviewer runs with cwd set to the reviewed repo,
+    where a bare ``read review-verification-protocol/SKILL.md`` resolves against
+    that repo and silently drops the gates (same rationale as the canonical
+    constant).
     """
-    return "\n\n".join(
-        [
-            "You are the uncovered file sweep reviewer for the deep-review "
-            "pipeline (issue #309).\n"
-            f"The changed file {file} was NOT read by any per-stack reviewer, "
-            "so you are the second pass that covers it. Review ONLY this "
-            "file's hunks below -- correctness, error handling, test quality, "
-            "and maintainability. Do NOT review other files.",
-            f"TTT author intent is at {intent_path}. Read it before starting.",
-            f"Relevant diff hunks for {file} (inlined; do NOT re-read "
-            f"diff.patch for these):\n{hunks.rstrip()}",
-            "For whole-file context beyond these hunks you MAY Read the source "
-            "file directly.",
-            _SWEEP_VERIFICATION_GATES,
-            f"Work in {cwd}. Write your full review to {output_path}.",
-        ]
+    parts: list[str] = []
+    pointer = _exploration_pointer(exploration_dir)
+    if pointer:
+        parts.append(pointer)
+    parts.append(
+        "You are the uncovered file sweep reviewer for the deep-review "
+        "pipeline (issue #309).\n"
+        f"The changed file {file} was NOT read by any per-stack reviewer, "
+        "so you are the second pass that covers it. Review ONLY this "
+        "file's hunks below -- correctness, error handling, test quality, "
+        "and maintainability. Do NOT review other files."
     )
+    parts.append(f"TTT author intent is at {intent_path}. Read it before starting.")
+    parts.append(
+        f"Relevant diff hunks for {file} (inlined; do NOT re-read "
+        f"diff.patch for these):\n{hunks.rstrip()}"
+    )
+    parts.append(
+        "For whole-file context beyond these hunks you MAY Read the source "
+        "file directly."
+    )
+    parts.append(_confidence_and_convention_instructions())
+    parts.append(_dependency_impact_instructions())
+    parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(f"Work in {cwd}. Write your full review to {output_path}.")
+    return "\n\n".join(parts)
