@@ -258,6 +258,21 @@ def test_build_manifest_with_evaluation(tmp_path: Path):
     assert m.cost_per_finding_usd == 0.007
 
 
+def test_build_manifest_with_quality(tmp_path: Path):
+    m = _build(
+        tmp_path,
+        evaluation={
+            "quality": {"erosion": 0.34, "verbosity": 0.19},
+        },
+    )
+
+    assert m.erosion == 0.34
+    assert m.verbosity == 0.19
+    d = m.to_dict()
+    assert d["metrics"]["erosion"] == 0.34
+    assert d["metrics"]["verbosity"] == 0.19
+
+
 def test_build_manifest_without_evaluation(tmp_path: Path):
     m = _build(tmp_path)
 
@@ -265,6 +280,8 @@ def test_build_manifest_without_evaluation(tmp_path: Path):
     assert m.grounding_rate is None
     assert m.coverage_ratio is None
     assert m.cost_per_finding_usd is None
+    assert m.erosion is None
+    assert m.verbosity is None
 
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path):

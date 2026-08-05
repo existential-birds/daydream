@@ -10,6 +10,7 @@ undefined (zero-findings) case, which must not report a perfect score.
 """
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ from daydream.eval.analyzer import (
     analyze_costs,
     analyze_coverage,
     analyze_grounding,
+    analyze_quality,
+    analyze_session,
     load_trajectories,
 )
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
@@ -378,3 +381,281 @@ def test_analyze_grounding_counts_codex_and_pi_reads():
     assert result["grounded_count"] == 1
     assert result["ungrounded_count"] == 0
     assert result["grounding_rate"] == 1.0
+
+
+# --- quality metrics (issue #316) ---
+
+
+def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "workspace") -> Path:
+    """Create a temp workspace with the given ``{relative_path: content}`` files."""
+    ws = tmp_path / name
+    ws.mkdir(parents=True)
+    for rel, content in files.items():
+        target = ws / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    return ws
+
+
+def _big_function(max_x: int) -> str:
+    """A single-function if/elif chain reaching ``max_x``.
+
+    ``big`` has ``max_x + 1`` cyclomatic complexity (1 + the ``if`` + every
+    ``elif``) and ``2 * max_x + 2`` sloc lines.
+    """
+    lines = ["def big(x):", "    if x == 1:", "        return 1"]
+    for i in range(2, max_x + 1):
+        lines.append(f"    elif x == {i}:")
+        lines.append(f"        return {i}")
+    lines.append("    return 0")
+    return "\n".join(lines) + "\n"
+
+
+def _mass(cc: int, sloc: int) -> float:
+    return cc * math.sqrt(sloc)
+
+
+def test_quality_erosion_computes_cc_mass_share(tmp_path: Path):
+    """Pooled erosion is the high-CC mass share, hand-computed from the file."""
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    small_mass = _mass(1, 2)
+    big_mass = _mass(12, 24)
+    expected = round(big_mass / (small_mass + big_mass), 4)
+    assert result["erosion"] == pytest.approx(expected)
+    entry = result["per_file"]["app.py"]
+    assert entry["erosion"] == pytest.approx(expected)
+    assert entry["functions"] == 2
+    assert entry["high_cc_functions"] == 1
+
+
+def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def one(x):\n    return x + 1\n\ndef two(x, y):\n    return x + y\n"},
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["erosion"] == 0.0
+    assert result["per_file"]["app.py"]["erosion"] == 0.0
+    assert result["per_file"]["app.py"]["high_cc_functions"] == 0
+
+
+def test_quality_verbosity_flags_identity_comprehension(tmp_path: Path):
+    ws = _quality_workspace(tmp_path, {"app.py": "def f(items):\n    return [x for x in items]\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(1 / 2)
+
+
+def test_quality_verbosity_flags_empty_list_guard(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def process(items):\n"
+                "    for x in items:\n"
+                "        if len(items) == 0:\n"
+                "            return None\n"
+                "        print(x)\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(2 / 5)
+
+
+def test_quality_verbosity_flags_single_use_variable(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def compute(x):\n"
+                "    intermediate = x + 1\n"
+                "    return intermediate * 2\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(round(1 / 3, 4))
+
+
+def test_quality_verbosity_flags_trivial_wrapper(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def inner(x, y):\n"
+                "    return x + y\n"
+                "\n"
+                "def outer(x, y):\n"
+                "    return inner(x, y)\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(2 / 4)
+
+
+def test_quality_verbosity_flags_nested_ladder(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def f(a, b, c):\n"
+                "    if a:\n"
+                "        if b:\n"
+                "            if c:\n"
+                "                return 1\n"
+                "    return 0\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(round(2 / 6, 4))
+
+
+def test_quality_verbosity_flags_clone_block(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def a():\n"
+                "    if x > 1:\n"
+                "        return 1\n"
+                "    return 0\n"
+                "\n"
+                "def b():\n"
+                "    if x > 1:\n"
+                "        return 1\n"
+                "    return 0\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    entry = result["per_file"]["app.py"]
+    assert entry["verbosity"] > 0
+    assert entry["verbosity"] == pytest.approx(6 / 8)
+
+
+def test_quality_per_file_keyed_by_relative_path(tmp_path: Path):
+    ws = _quality_workspace(tmp_path, {"pkg/mod.py": "def f(x):\n    return x\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert "pkg/mod.py" in result["per_file"]
+    assert result["per_file"]["pkg/mod.py"]["functions"] == 1
+
+
+def test_quality_returns_none_when_no_python_files(tmp_path: Path):
+    ws = _quality_workspace(tmp_path, {"README.md": "# nothing here\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["erosion"] is None
+    assert result["verbosity"] is None
+    assert result["scoped_files"] == 0
+    assert result["per_file"] == {}
+    assert result["calibration"] == {
+        "human_verbosity": 0.19,
+        "human_erosion": 0.34,
+        "paper": "arXiv:2603.24755",
+    }
+
+
+def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path):
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def f(x):\n    return x\n",
+            ".daydream/deep/fixture.py": "def g(x):\n    return x\n",
+            "node_modules/pkg/index.py": "def h(x):\n    return x\n",
+            "sub/venv/lib/x.py": "def i(x):\n    return x\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
+
+
+def test_quality_monotone_across_eroding_fix(tmp_path: Path):
+    """An eroding fix to an already-large function raises erosion (verbosity holds)."""
+    clean_ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
+        name="clean",
+    )
+    eroded_ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(13)},
+        name="eroded",
+    )
+
+    clean = analyze_quality(clean_ws / ".daydream")
+    eroded = analyze_quality(eroded_ws / ".daydream")
+
+    assert eroded["erosion"] > clean["erosion"]
+    assert eroded["verbosity"] >= clean["verbosity"]
+
+
+def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path):
+    """Real-path: analyze_session computes quality on the live workspace tree."""
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
+    )
+    daydream_dir = ws / ".daydream"
+    run_dir = daydream_dir / "runs" / "quality-real"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.6",
+                "session_id": "quality-real",
+                "agent": {"name": "daydream", "model_name": "claude-sonnet-4-5"},
+                "steps": [],
+            }
+        )
+    )
+
+    result = analyze_session(daydream_dir, session_id="quality-real")
+
+    quality = result["quality"]
+    assert set(quality) == {"erosion", "verbosity", "per_file", "calibration", "scoped_files"}
+    assert quality["scoped_files"] == 1
+    assert quality["calibration"]["human_erosion"] == 0.34
+    assert quality["calibration"]["human_verbosity"] == 0.19
+    entry = quality["per_file"]["app.py"]
+    assert entry["functions"] == 2
+    assert entry["high_cc_functions"] == 1
+    expected = round(_mass(12, 24) / (_mass(1, 2) + _mass(12, 24)), 4)
+    assert quality["erosion"] == pytest.approx(expected)

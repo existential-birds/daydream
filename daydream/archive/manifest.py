@@ -90,6 +90,10 @@ class Manifest:
         grounding_rate: Grounding rate (from eval, if available).
         coverage_ratio: File coverage ratio (from eval, if available).
         cost_per_finding_usd: Cost per finding (from eval, if available).
+        erosion: Structural erosion ratio of the post-fix workspace (from eval,
+            if available).
+        verbosity: Line-flagging verbosity ratio of the post-fix workspace
+            (from eval, if available).
         outcome_labels: JSON-encoded list of outcome labels.
         labeled_at: ISO 8601 timestamp of last label update.
         composite_reward: Cached composite reward scalar mirrored from the
@@ -152,6 +156,8 @@ class Manifest:
     grounding_rate: float | None = None
     coverage_ratio: float | None = None
     cost_per_finding_usd: float | None = None
+    erosion: float | None = None
+    verbosity: float | None = None
 
     # Outcome labels (populated via `daydream harvest`)
     outcome_labels: str = field(default="[]")
@@ -213,6 +219,8 @@ class Manifest:
                 "grounding_rate": self.grounding_rate,
                 "coverage_ratio": self.coverage_ratio,
                 "cost_per_finding_usd": self.cost_per_finding_usd,
+                "erosion": self.erosion,
+                "verbosity": self.verbosity,
             },
             "outcome": {
                 "labels": json.loads(self.outcome_labels),
@@ -316,6 +324,10 @@ def build_manifest(
 
         coverage = evaluation.get("coverage", {})
         m.coverage_ratio = coverage.get("coverage_ratio")
+
+        quality = evaluation.get("quality", {})
+        m.erosion = quality.get("erosion")
+        m.verbosity = quality.get("verbosity")
 
         derived = evaluation.get("derived", {})
         m.cost_per_finding_usd = derived.get("cost_per_finding_usd")

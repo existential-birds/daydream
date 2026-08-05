@@ -12,11 +12,14 @@ Usage::
 """
 
 import json
+import math
 import re
 import shlex
 from collections import Counter
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
+from typing import Any, Iterator
 
 from daydream.timeutil import parse_iso_timestamp
 
@@ -739,6 +742,458 @@ def analyze_training_signals(
     }
 
 
+# Quality metrics (issue #316) ----------------------------------------------
+
+_QUALITY_EXCLUDED_DIRS = frozenset(
+    {".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees", "dist", "build"}
+)
+
+# Node types that add cyclomatic complexity (tree-sitter-python). ``else_clause``
+# is intentionally absent: an else adds no new path.
+_CC_DECISION_TYPES = frozenset(
+    {
+        "if_statement",
+        "elif_clause",
+        "for_statement",
+        "while_statement",
+        "except_clause",
+        "with_statement",
+        "assert_statement",
+        "conditional_expression",
+        "boolean_operator",
+        "case_clause",
+    }
+)
+
+_COMPREHENSION_TYPES = frozenset({"list_comprehension", "set_comprehension", "dictionary_comprehension"})
+
+_MIN_CLONE_BLOCK = 3
+_MAX_CLONE_BLOCK = 20
+
+_QUALITY_CALIBRATION = {
+    "human_verbosity": 0.19,
+    "human_erosion": 0.34,
+    "paper": "arXiv:2603.24755",
+}
+
+
+@lru_cache(maxsize=1)
+def _quality_python_parser():
+    """Cached tree-sitter Python parser.
+
+    Lazy factory mirroring ``daydream/tree_sitter_index.py``; returns ``None``
+    when tree-sitter-python is unavailable so quality analysis degrades to an
+    empty shape instead of crashing ``analyze_session``.
+    """
+    try:
+        import tree_sitter_python
+        from tree_sitter import Language, Parser
+
+        return Parser(Language(tree_sitter_python.language()))
+    except Exception:
+        return None
+
+
+def _iter_tree(node: Any) -> Iterator[Any]:
+    """Yield *node* and all descendants in a deterministic depth-first order."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(reversed(current.children))
+
+
+def _iter_function(func: Any) -> Iterator[Any]:
+    """Yield *func* and its descendants, skipping nested function definitions.
+
+    Nested ``def`` nodes are yielded but their subtrees are not descended into,
+    because each nested def is measured as its own function.
+    """
+    stack = [func]
+    while stack:
+        node = stack.pop()
+        yield node
+        if node is not func and node.type == "function_definition":
+            continue
+        stack.extend(reversed(node.children))
+
+
+def _count_decision_nodes(node: Any) -> int:
+    """Cyclomatic decision count of a subtree, skipping nested functions."""
+    total = 1 if node.type in _CC_DECISION_TYPES else 0
+    for child in node.children:
+        if child.type == "function_definition":
+            continue
+        total += _count_decision_nodes(child)
+    return total
+
+
+def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
+    """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel)``.
+
+    Excluded directories are matched on exact path components so a nested
+    ``node_modules_extra/`` or a sibling ``.worktrees`` checkout never shadows
+    real source.
+    """
+    files: list[tuple[Path, str]] = []
+    for path in workspace.rglob("*.py"):
+        try:
+            rel = path.relative_to(workspace)
+        except ValueError:
+            continue
+        if any(part in _QUALITY_EXCLUDED_DIRS for part in rel.parts):
+            continue
+        files.append((path, str(rel)))
+    return sorted(files, key=lambda item: item[1])
+
+
+def _file_quality(path: Path) -> dict | None:
+    """Erosion + verbosity metrics for one Python file, or ``None`` on parse failure.
+
+    A file that cannot be parsed is counted in ``scoped_files`` by the caller
+    but excluded from the aggregates — quality analysis never crashes.
+    """
+    parser = _quality_python_parser()
+    if parser is None:
+        return None
+    try:
+        source = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        tree = parser.parse(source)
+    except Exception:
+        return None
+    if tree is None:
+        return None
+    root = tree.root_node
+
+    # Erosion: pooled cyclomatic mass of functions with CC > 10.
+    functions = [node for node in _iter_tree(root) if node.type == "function_definition"]
+    metrics: list[tuple[int, int, float]] = []  # (cc, sloc, mass)
+    for func in functions:
+        body = func.child_by_field_name("body")
+        cc = 1 + _count_decision_nodes(body) if body is not None else 1
+        sloc = func.end_point.row - func.start_point.row + 1
+        if sloc < 1:
+            continue
+        metrics.append((cc, sloc, cc * math.sqrt(sloc)))
+
+    total_mass = sum(mass for _, _, mass in metrics)
+    high_mass = sum(mass for cc, _, mass in metrics if cc > 10)
+    erosion = high_mass / total_mass if total_mass > 0 else 0.0
+
+    # Verbosity: deterministic rule subset + clone detection over lines.
+    lines = source.decode("utf-8", errors="replace").splitlines()
+    sloc_file = sum(1 for line in lines if line.strip())
+    flagged = _verbosity_flagged_lines(root)
+    flagged |= _clone_flagged_lines(lines)
+    verbosity = len(flagged) / sloc_file if sloc_file > 0 else 0.0
+
+    return {
+        "entry": {
+            "erosion": round(erosion, 4),
+            "verbosity": round(verbosity, 4),
+            "sloc": sloc_file,
+            "functions": len(metrics),
+            "high_cc_functions": sum(1 for cc, _, _ in metrics if cc > 10),
+        },
+        "mass": total_mass,
+        "high_mass": high_mass,
+        "flagged": len(flagged),
+        "loc": sloc_file,
+    }
+
+
+def _verbosity_flagged_lines(root: Any) -> set[int]:
+    """Line rows (0-based) flagged by the deterministic taxonomy subset."""
+    flagged: set[int] = set()
+    flagged |= _identity_comprehension_lines(root)
+    flagged |= _empty_list_guard_lines(root)
+    flagged |= _single_use_variable_lines(root)
+    flagged |= _trivial_wrapper_lines(root)
+    flagged |= _nested_ladder_lines(root)
+    return flagged
+
+
+def _comprehension_body(node: Any) -> Any | None:
+    """The output expression of a comprehension (skipping brackets)."""
+    for child in node.children:
+        if child.type not in ("[", "]", "{", "}"):
+            return child
+    return None
+
+
+def _identity_comprehension_lines(root: Any) -> set[int]:
+    """``[x for x in items]``-style comprehensions whose output is the loop var."""
+    flagged: set[int] = set()
+    for node in _iter_tree(root):
+        if node.type not in _COMPREHENSION_TYPES:
+            continue
+        for_clauses = [child for child in node.children if child.type == "for_in_clause"]
+        if not for_clauses:
+            continue
+        target = for_clauses[0].child_by_field_name("left")
+        if target is None or target.type != "identifier":
+            continue
+        body = _comprehension_body(node)
+        if body is not None and body.text == target.text:
+            flagged.update(range(node.start_point.row, node.end_point.row + 1))
+    return flagged
+
+
+def _empty_guard_variable(if_node: Any) -> str | None:
+    """The variable tested by ``len(x) == 0`` or ``not x``, else ``None``."""
+    cond = if_node.child_by_field_name("condition")
+    if cond is None:
+        return None
+    if cond.type == "not_operator":
+        arg = cond.child_by_field_name("argument")
+        if arg is not None and arg.type == "identifier":
+            return arg.text.decode()
+        return None
+    if cond.type == "comparison_operator":
+        call = None
+        zero = None
+        for child in cond.children:
+            if child.type == "call":
+                call = child
+            elif child.type == "integer":
+                zero = child
+        if call is None or zero is None or zero.text.decode().strip() != "0":
+            return None
+        fn = call.child_by_field_name("function")
+        args = call.child_by_field_name("arguments")
+        if fn is None or fn.type != "identifier" or fn.text.decode() != "len" or args is None:
+            return None
+        arg_ids = [child for child in args.children if child.type == "identifier"]
+        if len(arg_ids) != 1:
+            return None
+        return arg_ids[0].text.decode()
+    return None
+
+
+def _tree_contains_identifier(node: Any, name: str) -> bool:
+    if node is None:
+        return False
+    return any(
+        n.type == "identifier" and n.text.decode() == name
+        for n in _iter_tree(node)
+    )
+
+
+def _empty_list_guard_lines(root: Any) -> set[int]:
+    """``if len(x) == 0`` / ``if not x`` guard directly inside a loop over ``x``."""
+    flagged: set[int] = set()
+    for node in _iter_tree(root):
+        if node.type not in ("for_statement", "while_statement"):
+            continue
+        body = node.child_by_field_name("body")
+        if body is None:
+            continue
+        for child in body.children:
+            if child.type != "if_statement":
+                continue
+            guard_var = _empty_guard_variable(child)
+            if guard_var is None:
+                continue
+            if node.type == "for_statement":
+                iterable = node.child_by_field_name("right")
+                if (
+                    iterable is not None
+                    and iterable.type == "identifier"
+                    and iterable.text.decode() == guard_var
+                ):
+                    flagged.update(range(child.start_point.row, child.end_point.row + 1))
+            elif _tree_contains_identifier(node.child_by_field_name("condition"), guard_var):
+                flagged.update(range(child.start_point.row, child.end_point.row + 1))
+    return flagged
+
+
+def _count_later_references(func: Any, name: str, after_row: int) -> int:
+    """Identifier occurrences of *name* after *after_row* inside *func*."""
+    return sum(
+        1
+        for node in _iter_function(func)
+        if node.type == "identifier"
+        and node.text.decode() == name
+        and node.start_point.row > after_row
+    )
+
+
+def _single_use_variable_lines(root: Any) -> set[int]:
+    """Assignments to a plain identifier referenced exactly once later in the fn.
+
+    Tuple unpacking, attribute, and subscript targets are excluded; names
+    starting with ``_`` are ignored.
+    """
+    flagged: set[int] = set()
+    for func in _iter_tree(root):
+        if func.type != "function_definition":
+            continue
+        for node in _iter_function(func):
+            if node.type != "assignment":
+                continue
+            target = node.child_by_field_name("left")
+            if target is None or target.type != "identifier":
+                continue
+            name = target.text.decode()
+            if name.startswith("_"):
+                continue
+            if _count_later_references(func, name, node.start_point.row) == 1:
+                flagged.add(node.start_point.row)
+    return flagged
+
+
+def _return_value(return_node: Any) -> Any | None:
+    """The expression a ``return`` yields (the ``return`` keyword is a token)."""
+    for child in return_node.children:
+        if child.type != "return":
+            return child
+    return None
+
+
+def _trivial_wrapper(func: Any) -> set[int] | None:
+    """Flag a function whose whole body is ``return other(same args)``."""
+    body = func.child_by_field_name("body")
+    if body is None:
+        return None
+    statements = list(body.children)
+    if len(statements) != 1 or statements[0].type != "return_statement":
+        return None
+    value = _return_value(statements[0])
+    if value is None or value.type != "call":
+        return None
+    fn_name = value.child_by_field_name("function")
+    args = value.child_by_field_name("arguments")
+    params = func.child_by_field_name("parameters")
+    if fn_name is None or fn_name.type != "identifier" or args is None or params is None:
+        return None
+    param_names = [child.text.decode() for child in params.children if child.type == "identifier"]
+    arg_names = [child.text.decode() for child in args.children if child.type == "identifier"]
+    if param_names == arg_names:
+        return set(range(func.start_point.row, func.end_point.row + 1))
+    return None
+
+
+def _trivial_wrapper_lines(root: Any) -> set[int]:
+    flagged: set[int] = set()
+    for func in _iter_tree(root):
+        if func.type != "function_definition":
+            continue
+        lines = _trivial_wrapper(func)
+        if lines is not None:
+            flagged.update(lines)
+    return flagged
+
+
+def _direct_nested_ifs(if_node: Any) -> list[Any]:
+    """Direct ``if`` children of *if_node*'s consequence/alternative blocks."""
+    nested: list[Any] = []
+    consequence = if_node.child_by_field_name("consequence")
+    if consequence is not None:
+        nested.extend(child for child in consequence.children if child.type == "if_statement")
+    alternative = if_node.child_by_field_name("alternative")
+    if alternative is not None and alternative.type in ("elif_clause", "else_clause"):
+        block = alternative.child_by_field_name("consequence") or alternative.child_by_field_name("body")
+        if block is not None:
+            nested.extend(child for child in block.children if child.type == "if_statement")
+    return nested
+
+
+def _nested_ladder_lines(root: Any) -> set[int]:
+    """Innermost ``if`` of any ≥3-deep directly-nested if ladder."""
+    flagged: set[int] = set()
+
+    def visit(if_node: Any, depth: int) -> None:
+        nested = _direct_nested_ifs(if_node)
+        if nested:
+            for child in nested:
+                visit(child, depth + 1)
+        elif depth >= 3:
+            flagged.update(range(if_node.start_point.row, if_node.end_point.row + 1))
+
+    for node in _iter_tree(root):
+        if node.type == "if_statement":
+            visit(node, 1)
+    return flagged
+
+
+def _clone_flagged_lines(lines: list[str]) -> set[int]:
+    """Line rows in ≥2 occurrences of an identical contiguous block (3..20 lines).
+
+    Lines are normalized by stripping; blocks containing blank lines are
+    skipped so whitespace runs are never counted as clones.
+    """
+    stripped = [line.strip() for line in lines]
+    n = len(stripped)
+    flagged: set[int] = set()
+    for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
+        if length > n:
+            break
+        by_first: dict[str, list[int]] = {}
+        for i in range(n - length + 1):
+            if any(not stripped[j] for j in range(i, i + length)):
+                continue
+            by_first.setdefault(stripped[i], []).append(i)
+        for starts in by_first.values():
+            if len(starts) < 2:
+                continue
+            by_block: dict[tuple[str, ...], list[int]] = {}
+            for i in starts:
+                by_block.setdefault(tuple(stripped[i : i + length]), []).append(i)
+            for occurrences in by_block.values():
+                if len(occurrences) < 2:
+                    continue
+                for i in occurrences:
+                    flagged.update(range(i, i + length))
+    return flagged
+
+
+def analyze_quality(daydream_dir: str | Path) -> dict:
+    """Structural erosion and verbosity of the post-fix workspace (issue #316).
+
+    Computes SlopCodeBench-style metrics (arXiv:2603.24755) over every scoped
+    ``*.py`` file in ``daydream_dir.parent`` — the live reviewed tree at eval
+    time, after daydream's fix phase ran. Pure and deterministic: no backend,
+    no network, no randomness. A file whose tree-sitter parse fails is counted
+    in ``scoped_files`` but excluded from the aggregates.
+
+    Returns:
+        ``{erosion, verbosity, per_file, calibration, scoped_files}``.
+        ``erosion``/``verbosity`` are ``None`` only when no functions / no
+        lines are in scope; ``per_file`` keys are workspace-relative paths.
+    """
+    daydream_dir = Path(daydream_dir)
+    workspace = daydream_dir.parent
+
+    per_file: dict[str, dict] = {}
+    total_mass = 0.0
+    high_mass = 0.0
+    total_flagged = 0
+    total_loc = 0
+    scoped = 0
+
+    for path, rel in _scoped_python_files(workspace):
+        scoped += 1
+        quality = _file_quality(path)
+        if quality is None:
+            continue
+        per_file[rel] = quality["entry"]
+        total_mass += quality["mass"]
+        high_mass += quality["high_mass"]
+        total_flagged += quality["flagged"]
+        total_loc += quality["loc"]
+
+    return {
+        "erosion": round(high_mass / total_mass, 4) if total_mass > 0 else None,
+        "verbosity": round(total_flagged / total_loc, 4) if total_loc > 0 else None,
+        "per_file": per_file,
+        "calibration": dict(_QUALITY_CALIBRATION),
+        "scoped_files": scoped,
+    }
+
+
 # Top-level entry point
 
 def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> dict:
@@ -774,6 +1229,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
     training = analyze_training_signals(
         trajectories, findings_data["findings"], grounding,
     )
+    quality = analyze_quality(daydream_dir)
 
     finding_count = findings_data["total"]
     cost_per_finding = (
@@ -801,6 +1257,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
         "grounding": grounding,
         "exploration_utilization": exploration,
         "training_signals": training,
+        "quality": quality,
         "derived": {
             "cost_per_finding_usd": cost_per_finding,
         },
