@@ -114,9 +114,12 @@ ANTI_SLOP_RUBRIC_INSTRUCTION = (
     "nested ladders.\n"
     "  3. Duplication: flag the same hunk structure repeated (e.g. N flags x 2 "
     "branches) that should be a loop/helper/template.\n"
-    "  4. Severity calibration: maintainability findings are medium/low -- not "
-    "high -- unless the erosion is pre-existing-and-growing; then flag the "
-    "growth, not the whole function."
+    "  4. Severity: maintainability findings are medium/low -- never high -- "
+    "under this rubric, full stop. The structural lens may flag real erosion, "
+    "but anti-slop findings never escalate to high.\n"
+    "  5. Scope: when erosion is pre-existing-and-growing, flag the growth, not "
+    "the whole function -- report only the newly introduced growth, scoped to "
+    "this diff's contribution."
 )
 
 

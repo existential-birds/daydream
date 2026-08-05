@@ -990,3 +990,24 @@ def test_anti_slop_rubric_severity_layering(tmp_path: Path) -> None:
     assert "pre-existing-and-growing" in out
     assert "flag the growth, not the whole function" in out
 
+
+def test_anti_slop_rubric_never_high_prohibition(tmp_path: Path) -> None:
+    """#314: the rubric separates severity from scope and prohibits high.
+
+    Anti-slop/maintainability findings are medium/low -- never high -- full
+    stop; the pre-existing-and-growing clause is NOT a severity-escalation
+    exception. It is a separate scope instruction: report only the growth the
+    diff introduces, not the whole function.
+    """
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+    assert "never high" in out
+    assert "unless the erosion is pre-existing-and-growing" not in out
+    assert "medium/low" in out
+    assert "pre-existing-and-growing" in out
+    assert "flag the growth, not the whole function" in out
