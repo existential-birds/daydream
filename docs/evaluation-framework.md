@@ -276,6 +276,36 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 
 ---
 
+## Quality Metrics (Erosion & Verbosity)
+
+Deterministic post-fix quality metrics computed on the reviewed workspace at
+archive/eval time, recorded under `quality` in `evaluation.json` and summarized
+as `erosion`/`verbosity` scalars in `manifest.json` metrics. Python stack only —
+the SlopCodeBench paper defines the metrics on Python code.
+
+**Erosion.** Cyclomatic mass share concentrated in high-complexity functions:
+
+```
+mass(f) = CC(f) × √SLOC(f)
+erosion = Σ_{f: CC(f) > 10} mass(f) / Σ_f mass(f)
+```
+
+CC counts decision nodes (if/elif, for, while, except, with, assert, ternary,
+boolean operators, match arms) via tree-sitter; SLOC is the function's raw line
+span. Per-file and per-run ratios; `None` when no functions are in scope.
+
+**Verbosity.** A deterministic subset of the 137-rule ast-grep taxonomy plus
+clone detection, implemented as a line-tagging pass: identity comprehensions,
+empty-list guards inside loops, single-use intermediate variables, trivial
+wrappers, nested if ladders (≥3 deep), and exact-duplicate contiguous line
+blocks (≥3 lines). `verbosity = flagged lines / non-blank lines`, pooled per
+file and per run; `None` when no lines are in scope.
+
+Human-panel calibration from the paper: verbosity 0.19, erosion 0.34. These are
+reference anchors, not thresholds.
+
+---
+
 ## Additional Benchmarks (Optional for v1)
 
 | Benchmark | Why | N | Source |

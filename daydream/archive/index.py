@@ -226,6 +226,8 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "coverage_ratio": manifest.coverage_ratio,
                 "cost_per_finding_usd": manifest.cost_per_finding_usd,
                 "wall_clock_seconds": manifest.wall_clock_seconds,
+                "erosion": manifest.erosion,
+                "verbosity": manifest.verbosity,
                 "total_prompt_tokens": manifest.total_prompt_tokens,
                 "total_completion_tokens": manifest.total_completion_tokens,
                 "total_cached_tokens": manifest.total_cached_tokens,
