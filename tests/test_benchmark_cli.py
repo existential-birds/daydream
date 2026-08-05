@@ -47,6 +47,18 @@ def test_bench_parser_accepts_direct_anthropic_judge_route(tmp_path, monkeypatch
     assert cfg.model == "claude-opus-4-5-20251101"
 
 
+def test_bench_parser_accepts_openai_compatible_judge_route(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv([
+        "--benchmark-repo", "/b",
+        "--judge-route", "openai-compatible",
+        "--model", "gpt-5.6-luna",
+        "--no-score",
+    ])
+    assert cfg.judge_route == "openai-compatible"
+    assert cfg.model == "gpt-5.6-luna"
+
+
 def test_bench_config_has_reviewer_defaults(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = _bench_config_from_argv(["--benchmark-repo", "/b", "--no-score"])
@@ -109,11 +121,14 @@ def test_harvest_dir_and_benchmark_repo_are_mutually_exclusive(tmp_path, monkeyp
 def test_harvest_dir_with_martian_route_errors(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # The martian route shells the withmartian step modules, which only exist
-    # inside that checkout; a harvested corpus must score anthropic-direct.
+    # inside that checkout; a harvested corpus must score in-process.
     with pytest.raises(SystemExit):
         _bench_config_from_argv(["--harvest-dir", "/h", "--score", "--judge-route", "martian"])
     cfg = _bench_config_from_argv(["--harvest-dir", "/h", "--score", "--judge-route", "anthropic-direct"])
     assert cfg.judge_route == "anthropic-direct"
+    # The in-process OpenAI-compatible route parses on a harvested corpus too.
+    cfg = _bench_config_from_argv(["--harvest-dir", "/h", "--score", "--judge-route", "openai-compatible"])
+    assert cfg.judge_route == "openai-compatible"
 
 
 def test_harvest_dir_config_file_fallback(tmp_path, monkeypatch):
@@ -295,6 +310,10 @@ def test_benchmark_docs_name_direct_anthropic_judge_route():
     assert "ANTHROPIC_API_KEY" in text
     assert "`MARTIAN_BASE_URL` is invalid" in text
     assert "--reviewer-backend" in text and "--model" in text
+    # The in-process OpenAI-compatible route is documented too.
+    assert "--judge-route openai-compatible" in text
+    assert "OPENAI_API_KEY" in text
+    assert "OPENAI_BASE_URL" in text
 
 
 def test_bench_dotenv_autoloads_credential_through_compiled_entrypoint(tmp_path):

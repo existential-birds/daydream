@@ -22,8 +22,10 @@ from typing import Any
 
 JUDGE_API_KEY_ENV = "MARTIAN_API_KEY"
 ANTHROPIC_JUDGE_API_KEY_ENV = "ANTHROPIC_API_KEY"
+OPENAI_JUDGE_API_KEY_ENV = "OPENAI_API_KEY"
 JUDGE_MODEL_ENV = "MARTIAN_MODEL"
 JUDGE_BASE_URL_ENV = "MARTIAN_BASE_URL"
+OPENAI_JUDGE_BASE_URL_ENV = "OPENAI_BASE_URL"
 
 #: OpenRouter API keys carry this prefix. The upstream judge defaults its base
 #: URL to the Martian host, which rejects an OpenRouter key with HTTP 401; such a
@@ -89,12 +91,15 @@ def preflight_judge_env(*, judge_route: str = "martian") -> None:
     are never logged.
 
     Args:
-        judge_route: ``"martian"`` for the existing OpenAI-compatible judge path,
-            or ``"anthropic-direct"`` for direct Anthropic scoring preflight.
+        judge_route: ``"martian"`` for the existing OpenAI-compatible subprocess
+            path, ``"anthropic-direct"`` for direct Anthropic Messages scoring,
+            or ``"openai-compatible"`` for the in-process OpenAI Chat
+            Completions judge.
 
     Raises:
         JudgeEnvError: If the route-specific credential is unset or the direct
-            Anthropic route is configured with proxy/OpenAI-compatible settings.
+            in-process routes are configured with the martian route's
+            ``MARTIAN_BASE_URL``.
     """
     if judge_route == "anthropic-direct":
         key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
@@ -109,6 +114,22 @@ def preflight_judge_env(*, judge_route: str = "martian") -> None:
             raise JudgeEnvError(
                 f"{JUDGE_BASE_URL_ENV} is invalid for direct Anthropic scoring; "
                 "unset it when --judge-route anthropic-direct is selected."
+            )
+        return
+
+    if judge_route == "openai-compatible":
+        key = os.environ.get(OPENAI_JUDGE_API_KEY_ENV)
+        if not key:
+            raise JudgeEnvError(
+                f"{OPENAI_JUDGE_API_KEY_ENV} is not set; export it before running "
+                "the OpenAI-compatible judge step."
+            )
+        # An OpenRouter (sk-or-) key is fine: it auto-routes to OpenRouter when
+        # OPENAI_BASE_URL is unset (mirroring the martian route's sk-or- routing).
+        if os.environ.get(JUDGE_BASE_URL_ENV):
+            raise JudgeEnvError(
+                f"{JUDGE_BASE_URL_ENV} is invalid for OpenAI-compatible scoring; "
+                "unset it when --judge-route openai-compatible is selected."
             )
         return
 
@@ -357,6 +378,22 @@ async def run_anthropic_scoring(
     )
 
 
+async def run_openai_scoring(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    golden_urls: Collection[str] | None = None,
+    tool: str = _TOOL,
+    client: Any | None = None,
+) -> DaydreamScores:
+    """Lazy bridge to the in-process OpenAI-compatible scorer, kept patchable for tests."""
+    from daydream.benchmark.openai_score import run_openai_scoring as direct_run_openai_scoring
+
+    return await direct_run_openai_scoring(
+        benchmark_repo, judge_model, golden_urls=golden_urls, tool=tool, client=client
+    )
+
+
 def run_scoring(
     benchmark_repo: Path,
     judge_model: str,
@@ -368,8 +405,10 @@ def run_scoring(
     """Run the selected benchmark scoring route and parse the tool's scores.
 
     The default ``"martian"`` route preserves the OpenAI-compatible subprocess
-    path. The ``"anthropic-direct"`` route runs extraction, deduplication, and
-    judging through Anthropic's Messages API.
+    path. The ``"anthropic-direct"`` and ``"openai-compatible"`` routes run
+    extraction, deduplication, and judging in-process through the shared
+    direct-scoring pipeline (Anthropic Messages vs. any OpenAI-compatible Chat
+    Completions endpoint).
 
     ``judge_model`` is the single source of truth for the per-model results dir.
     The Martian route also exports it into each step's environment so the harness
@@ -390,6 +429,8 @@ def run_scoring(
     """
     if judge_route == "anthropic-direct":
         return asyncio.run(run_anthropic_scoring(benchmark_repo, judge_model, golden_urls=golden_urls, tool=tool))
+    if judge_route == "openai-compatible":
+        return asyncio.run(run_openai_scoring(benchmark_repo, judge_model, golden_urls=golden_urls, tool=tool))
     if judge_route != "martian":
         raise BenchmarkStepError(f"Unknown judge route: {judge_route}")
 

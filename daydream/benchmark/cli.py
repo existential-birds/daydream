@@ -76,7 +76,8 @@ def _build_bench_parser() -> argparse.ArgumentParser:
         dest="harvest_dir",
         metavar="PATH",
         help="Root of a harvested bot-review corpus (see 'daydream bench harvest'); "
-        "mutually exclusive with --benchmark-repo and requires --judge-route anthropic-direct",
+        "mutually exclusive with --benchmark-repo and requires an in-process judge "
+        "route (anthropic-direct or openai-compatible)",
     )
     parser.add_argument(
         "--cache-dir",
@@ -106,7 +107,7 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--judge-route",
         type=str,
-        choices=["martian", "anthropic-direct"],
+        choices=["martian", "anthropic-direct", "openai-compatible"],
         default=None,
         dest="judge_route",
         help="Benchmark scoring route (default: martian, or [tool.daydream.bench] judge-route)",
@@ -271,8 +272,8 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
     )
     model = args.model if args.model is not None else bench.get("model")
     judge_route = args.judge_route if args.judge_route is not None else bench.get("judge-route", "martian")
-    if judge_route not in {"martian", "anthropic-direct"}:
-        parser.error("--judge-route must be one of: martian, anthropic-direct")
+    if judge_route not in {"martian", "anthropic-direct", "openai-compatible"}:
+        parser.error("--judge-route must be one of: martian, anthropic-direct, openai-compatible")
     min_confidence = args.min_confidence if args.min_confidence is not None else bench.get("min-confidence")
     min_severity = args.min_severity if args.min_severity is not None else bench.get("min-severity")
     trials = args.trials if args.trials is not None else bench.get("trials", 1)
@@ -302,7 +303,10 @@ def _bench_config_from_argv(argv: list[str]) -> "BenchConfig":
         # with cwd=<corpus root>; that package only exists inside the withmartian
         # checkout, so a harvested corpus can only be scored in-process. Gated on
         # --score because the route is never driven when scoring is off.
-        parser.error("--judge-route martian requires --benchmark-repo; score a harvested corpus with anthropic-direct")
+        parser.error(
+            "--judge-route martian requires --benchmark-repo; score a harvested corpus "
+            "with an in-process route (anthropic-direct or openai-compatible)"
+        )
     bench_root = corpus_root / ".daydream-bench"
     cache_dir = args.cache_dir if args.cache_dir is not None else bench_root / "cache"
     trajectory_dir = args.trajectory_dir if args.trajectory_dir is not None else bench_root / "trajectories"

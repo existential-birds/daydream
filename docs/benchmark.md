@@ -23,6 +23,12 @@ This runbook takes you from nothing to a scored result.
   - `--model`: the Anthropic judge model id, for example `claude-opus-4-5-20251101`. If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
   - `MARTIAN_BASE_URL` is invalid for direct Anthropic scoring. Unset it when selecting `--judge-route anthropic-direct`; `https://api.anthropic.com` is not an OpenAI Chat Completions-compatible endpoint.
 
+  `--judge-route openai-compatible` runs the same in-process pipeline (extraction → deduplication → per-pair judging) directly against any OpenAI Chat Completions-compatible endpoint — OpenAI direct, OpenRouter, or a compatible gateway. It is not a `MARTIAN_BASE_URL` setting.
+  - `OPENAI_API_KEY`: required for `--score` on this route.
+  - `OPENAI_BASE_URL`: the Chat Completions base URL. Defaults to `https://api.openai.com/v1`; an `sk-or-` OpenRouter key with no explicit `OPENAI_BASE_URL` auto-routes to `https://openrouter.ai/api/v1` (mirroring the martian route's OpenRouter handling). An explicit `OPENAI_BASE_URL` always wins.
+  - `--model`: the judge model id (e.g. `gpt-5.6-luna`, or `openai/gpt-5.6-luna` when routing through OpenRouter). If omitted, `MARTIAN_MODEL` is used as the judge model fallback and result-directory label.
+  - `MARTIAN_BASE_URL` is invalid for OpenAI-compatible scoring. Unset it when selecting `--judge-route openai-compatible`.
+
   These env vars may live in a `.env` file in the directory you run `daydream bench` from; it is auto-loaded at bench entry (`python-dotenv`, searching from the cwd upward). Already-exported shell variables win, so an inline `ANTHROPIC_API_KEY=... daydream bench ...` still overrides the `.env`; a missing or malformed `.env` is a silent no-op.
 
   ```bash
@@ -34,6 +40,11 @@ This runbook takes you from nothing to a scored result.
   # .env beside your invocation, direct Anthropic judge route
   ANTHROPIC_API_KEY=sk-ant-...
   MARTIAN_MODEL=claude-opus-4-5-20251101
+
+  # .env beside your invocation, in-process OpenAI-compatible judge route
+  OPENAI_API_KEY=sk-...
+  OPENAI_BASE_URL=https://openrouter.ai/api/v1   # optional; sk-or- keys auto-route without it
+  MARTIAN_MODEL=gpt-5.6-luna
   ```
 
 ## Configuration file (`[tool.daydream.bench]`)
@@ -44,7 +55,7 @@ Repeating `--benchmark-repo`, the scoring `--model`, and the full reviewer flag 
 [tool.daydream.bench]
 benchmark-repo = "../code-review-benchmark/offline"   # makes --benchmark-repo optional
 model = "anthropic/claude-opus-4-5-20251101"           # scoring model when --model is omitted
-judge-route = "martian"                               # or "anthropic-direct"
+judge-route = "martian"                               # or "anthropic-direct" / "openai-compatible"
 
 # Named reviewer presets: each expands to --reviewer-backend / -model / -provider.
 [tool.daydream.bench.reviewers.glm]
@@ -168,7 +179,7 @@ For each scored PR the harness writes a leaf (keyed by the reviewer's `--tool-la
 <benchmark-repo>/results/<sanitized-model>/evaluations.json
 ```
 
-`<sanitized-model>` is the resolved judge model id with `/` replaced by `_`; `--model` wins over the route-specific environment fallback. Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR. Leaves produced by `--judge-route anthropic-direct` also carry `judge_route: "anthropic-direct"`.
+`<sanitized-model>` is the resolved judge model id with `/` replaced by `_`; `--model` wins over the route-specific environment fallback. Inside each PR's entry the scores are filed under the reviewer's `--tool-label` (default `daydream`; e.g. `daydream-glm` for a GLM reviewer). Each leaf carries `tp`, `fp`, `fn`, `precision`, and `recall` for that PR. Every in-process leaf also carries `judge_model` and `judge_route` (`"anthropic-direct"` or `"openai-compatible"`), so trend reports can tell the routes apart.
 
 The command also prints to stdout:
 
@@ -238,11 +249,17 @@ daydream bench --harvest-dir ./cr-corpus \
   --judge-route anthropic-direct \
   --model claude-opus-4-5-20251101 \
   --score
+
+# or score the same corpus with any OpenAI-compatible judge endpoint
+daydream bench --harvest-dir ./cr-corpus \
+  --judge-route openai-compatible \
+  --model gpt-5.6-luna \
+  --score
 ```
 
 The two flags are mutually exclusive: a run has exactly one corpus, and exactly one of them must resolve — from the flag or from a `[tool.daydream.bench]` `harvest-dir` / `benchmark-repo` key. Everything else — `--only`/`--limit`, `--reviewer*`/`--tool-label`, `--trials`, `--force`, resumability — behaves identically, because both corpora share the same on-disk shape.
 
-**Scoring a harvested corpus requires `--judge-route anthropic-direct`.** This is a hard constraint, not a preference: the `martian` route does not judge in-process, it shells `python -m code_review_benchmark.step2/2.5/3` with the corpus root as the working directory, and that package only exists inside the withmartian checkout. Pairing `--harvest-dir` with `--judge-route martian` and `--score` is a usage error.
+**Scoring a harvested corpus requires an in-process judge route (`--judge-route anthropic-direct` or `--judge-route openai-compatible`).** This is a hard constraint, not a preference: the `martian` route does not judge in-process, it shells `python -m code_review_benchmark.step2/2.5/3` with the corpus root as the working directory, and that package only exists inside the withmartian checkout. Pairing `--harvest-dir` with `--judge-route martian` and `--score` is a usage error.
 
 **Golden semantics.** Golden comments are *all* of the bot's standalone inline comments on the PR — thread replies are excluded (they are follow-ups, not findings) and so are body-only review summaries. Each golden comment also carries a `resolved` flag derived from GitHub's review-thread resolution state. That flag is recorded metadata only: nothing scores on it today. It is the raw "acted upon" signal, on the assumption that a resolved thread is a finding the author acted on, and an unresolved one may be noise. Treat unfiltered bot comments as a noisy recall denominator when reading precision/recall from a harvested run.
 
@@ -285,13 +302,21 @@ benchmark/corpora/osprey-coderabbit/results/       # benchmark_data.json (gitign
 **Re-running the parity harness** against this corpus:
 
 ```bash
+# Anthropic judge (Anthropic spend)
 daydream bench --harvest-dir benchmark/corpora/osprey-coderabbit \
   --tool-label daydream-owl-alpha \
   --judge-route anthropic-direct \
   --score
+
+# OpenAI-compatible judge (no Anthropic spend — the #317 unblock)
+daydream bench --harvest-dir benchmark/corpora/osprey-coderabbit \
+  --tool-label daydream-owl-alpha \
+  --judge-route openai-compatible \
+  --model gpt-5.6-luna \
+  --score
 ```
 
-The command is the contract: it replays daydream at each bot snapshot and scores overlap against the golden set. **Baseline scoring is deferred — see [#317](https://github.com/existential-birds/daydream/issues/317)**; this PR ships the harness, corpus, and manifest only, and the one-liner must not be run until the #317 judge budget is allocated (it spends real Anthropic-judge money).
+The command is the contract: it replays daydream at each bot snapshot and scores overlap against the golden set. The one-liner runs through any in-process judge route, so it can score the corpus without Anthropic budget — see [#324](https://github.com/existential-birds/daydream/issues/324), the in-process OpenAI-compatible judge that unblocks the baseline scoring deferred in [#317](https://github.com/existential-birds/daydream/issues/317).
 
 ## The run report
 

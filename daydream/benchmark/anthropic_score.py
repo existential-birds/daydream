@@ -1,11 +1,18 @@
-"""Direct Anthropic JSON client for benchmark judge steps."""
+"""In-process JSON completers and the shared direct-scoring pipeline for benchmark judge steps.
+
+The pipeline (extraction → dedup → per-pair evaluation) is provider-agnostic: it
+runs against any ``complete_json``-shaped client. ``AnthropicJsonClient`` speaks
+the Anthropic Messages API; :mod:`daydream.benchmark.openai_score` supplies an
+OpenAI-compatible Chat Completions twin. :func:`run_direct_scoring` is the shared
+entry both in-process judge routes drive.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -138,9 +145,13 @@ class AnthropicJsonClient:
         }
 
         if self.http is not None:
-            return await _complete_json_with_http(self.http, payload=payload, headers=headers)
+            return await _complete_json_with_http(
+                self.http, url=_ANTHROPIC_MESSAGES_URL, payload=payload, headers=headers, content=_anthropic_content
+            )
         async with httpx.AsyncClient() as http:
-            return await _complete_json_with_http(http, payload=payload, headers=headers)
+            return await _complete_json_with_http(
+                http, url=_ANTHROPIC_MESSAGES_URL, payload=payload, headers=headers, content=_anthropic_content
+            )
 
 
 def _load_json_dict(path: Path, *, required: bool, missing_hint: str = "") -> dict[str, Any]:
@@ -161,7 +172,7 @@ async def run_anthropic_extraction(
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
 ) -> None:
-    """Extract Martian-compatible candidate issues using direct Anthropic JSON calls."""
+    """Extract Martian-compatible candidate issues using the injected JSON completer."""
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
     data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot extract benchmark candidates.")
 
@@ -200,7 +211,7 @@ async def run_anthropic_dedup(
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
 ) -> None:
-    """Write Martian-compatible dedup groups using direct Anthropic JSON calls."""
+    """Write Martian-compatible dedup groups using the injected JSON completer."""
     results_dir = model_results_dir(benchmark_repo, judge_model)
     candidates_file = results_dir / "candidates.json"
     all_candidates = _load_json_dict(
@@ -237,22 +248,30 @@ async def run_anthropic_dedup(
     groups_file.write_text(json.dumps(all_groups, indent=2))
 
 
-async def run_anthropic_scoring(
+async def run_direct_scoring(
     benchmark_repo: Path,
     judge_model: str,
     *,
     golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter | None = None,
+    judge_route: str = "anthropic-direct",
 ) -> DaydreamScores:
-    """Run direct Anthropic extraction, dedup, and evaluation for benchmark scores."""
+    """Run the shared in-process extraction, dedup, and evaluation pipeline.
+
+    The pipeline is provider-agnostic: ``client`` is any ``complete_json``-shaped
+    completer (Anthropic Messages or an OpenAI-compatible Chat Completions
+    endpoint). When ``client`` is omitted the Anthropic Messages client is built
+    from the environment, preserving the ``anthropic-direct`` default behavior.
+
+    ``judge_route`` is stamped onto every evaluation leaf so trend reports can
+    tell the in-process judge routes apart.
+    """
     benchmark_repo = benchmark_repo.resolve()
     if client is None:
         api_key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
         if not api_key:
-            raise BenchmarkStepError(
-                f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run Anthropic-direct scoring."
-            )
+            raise BenchmarkStepError(f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run direct scoring.")
         client = AnthropicJsonClient(api_key=api_key, model=judge_model)
 
     await run_anthropic_extraction(benchmark_repo, judge_model, tool=tool, client=client)
@@ -263,8 +282,28 @@ async def run_anthropic_scoring(
         golden_urls=golden_urls,
         tool=tool,
         client=client,
+        judge_route=judge_route,
     )
     return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)
+
+
+async def run_anthropic_scoring(
+    benchmark_repo: Path,
+    judge_model: str,
+    *,
+    golden_urls: Collection[str] | None = None,
+    tool: str = _TOOL,
+    client: _AnthropicJsonCompleter | None = None,
+) -> DaydreamScores:
+    """Back-compat entry: the ``anthropic-direct`` in-process scoring pipeline."""
+    return await run_direct_scoring(
+        benchmark_repo,
+        judge_model,
+        golden_urls=golden_urls,
+        tool=tool,
+        client=client,
+        judge_route="anthropic-direct",
+    )
 
 
 async def run_anthropic_evaluation(
@@ -274,12 +313,13 @@ async def run_anthropic_evaluation(
     golden_urls: Collection[str] | None = None,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
+    judge_route: str = "anthropic-direct",
 ) -> dict[str, dict[str, Any]]:
-    """Write Martian-compatible evaluations using direct Anthropic JSON calls.
+    """Write Martian-compatible evaluations using the injected JSON completer.
 
     ``golden_urls``, when given, restricts evaluation to those PR URLs; entries
     already present in a resumable `evaluations.json` for other PRs are left
-    untouched and unscored.
+    untouched and unscored. ``judge_route`` labels each leaf.
     """
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
     data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot evaluate benchmark candidates.")
@@ -317,7 +357,7 @@ async def run_anthropic_evaluation(
             result["tool"] = tool
             result["repo_name"] = review.get("repo_name")
             result["pr_url"] = review.get("pr_url")
-            result["judge_route"] = "anthropic-direct"
+            result["judge_route"] = judge_route
             result["judge_model"] = judge_model
 
             evals.setdefault(golden_url, {})[tool] = result
@@ -520,10 +560,10 @@ def _build_sibling_map(candidates: list[str], groups: list[list[int]] | None) ->
 
 def _extract_issues(response: dict[str, Any]) -> list[str]:
     if "issues" not in response:
-        raise BenchmarkStepError("Anthropic extraction response missing required 'issues' key.")
+        raise BenchmarkStepError("Extraction response missing required 'issues' key.")
     issues = response["issues"]
     if not isinstance(issues, list) or not all(isinstance(issue, str) for issue in issues):
-        raise BenchmarkStepError("Anthropic extraction response 'issues' must be a list of strings.")
+        raise BenchmarkStepError("Extraction response 'issues' must be a list of strings.")
     return issues
 
 
@@ -567,63 +607,67 @@ def _singleton_groups(n_candidates: int) -> list[list[int]]:
 
 
 async def _complete_json_with_http(
-    http: _AsyncHttpClient, *, payload: dict[str, Any], headers: dict[str, str]
+    http: _AsyncHttpClient,
+    *,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    content: Callable[[Any], str],
 ) -> dict[str, Any]:
     for attempt in range(_MAX_RETRIES):
         try:
             try:
-                response = await http.post(
-                    _ANTHROPIC_MESSAGES_URL, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
-                )
+                response = await http.post(url, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT)
             except Exception as exc:
-                raise BenchmarkStepError(f"Anthropic Messages request failed: {exc}") from exc
-            return _parse_json_response(response)
+                raise BenchmarkStepError(f"Judge request failed: {exc}") from exc
+            return _parse_json_response(response, content=content)
         except _NonRetryableError:
             raise  # 4xx (non-429) and malformed-JSON are permanent; never retry
         except BenchmarkStepError:
             if attempt == _MAX_RETRIES - 1:
                 raise
             await asyncio.sleep(2**attempt)
-    raise BenchmarkStepError("Anthropic Messages request failed after retries")
+    raise BenchmarkStepError("Judge request failed after retries")
 
 
-def _parse_json_response(response: Any) -> dict[str, Any]:
+def _parse_json_response(response: Any, *, content: Callable[[Any], str]) -> dict[str, Any]:
     status_code = getattr(response, "status_code", None)
     if status_code is None or not 200 <= int(status_code) < 300:
         body = getattr(response, "text", "")
         code = int(status_code) if status_code is not None else -1
         # 429 is retryable (rate-limit); all other 4xx are permanent client errors.
         if 400 <= code < 500 and code != 429:
-            raise _NonRetryableError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
-        raise BenchmarkStepError(f"Anthropic Messages request failed with HTTP {status_code}: {body}")
+            raise _NonRetryableError(f"Judge request failed with HTTP {status_code}: {body}")
+        raise BenchmarkStepError(f"Judge request failed with HTTP {status_code}: {body}")
 
     try:
-        body = response.json()
+        parsed_body = response.json()
     except Exception as exc:
-        raise _NonRetryableError(f"Anthropic Messages response was not valid JSON: {exc}") from exc
+        raise _NonRetryableError(f"Judge response was not valid JSON: {exc}") from exc
 
-    text = _first_text_block(body)
+    text = content(parsed_body)
     try:
         parsed = json.loads(_strip_markdown_fences(text))
     except json.JSONDecodeError as exc:
-        raise _NonRetryableError(f"Anthropic Messages text block was not valid JSON: {exc}") from exc
+        raise _NonRetryableError(f"Judge text content was not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
-        raise _NonRetryableError("Anthropic Messages text block JSON was not an object")
+        raise _NonRetryableError("Judge text content JSON was not an object")
     return parsed
 
 
-def _first_text_block(body: Any) -> str:
+def _anthropic_content(body: Any) -> str:
+    """Extract the first text block from an Anthropic Messages response body."""
     if not isinstance(body, dict):
-        raise BenchmarkStepError("Anthropic Messages response body was not an object")
+        raise BenchmarkStepError("Judge response body was not an object")
     content = body.get("content")
     if not isinstance(content, list):
-        raise BenchmarkStepError("Anthropic Messages response missing content blocks")
+        raise BenchmarkStepError("Judge response missing content blocks")
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
             text = block["text"].strip()
             if text:
                 return text
-    raise BenchmarkStepError("Anthropic Messages response contained no text block")
+    raise BenchmarkStepError("Judge response contained no text block")
 
 
 def _strip_markdown_fences(text: str) -> str:

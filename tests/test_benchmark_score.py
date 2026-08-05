@@ -88,6 +88,25 @@ def test_run_scoring_dispatches_to_anthropic_direct(tmp_path, monkeypatch):
     assert scores.scored_pr_count == 1
 
 
+def test_run_scoring_dispatches_to_openai_compatible(tmp_path, monkeypatch):
+    called = {}
+
+    async def fake_openai(repo, model, *, golden_urls, tool):
+        called.update(repo=repo, model=model, golden_urls=golden_urls, tool=tool)
+        return DaydreamScores(scored_pr_count=1, total_tp=1, precision=1.0, recall=1.0)
+
+    monkeypatch.setattr("daydream.benchmark.score.run_openai_scoring", fake_openai)
+    scores = run_scoring(
+        tmp_path,
+        "gpt-5.6-luna",
+        golden_urls=[URL],
+        tool="daydream",
+        judge_route="openai-compatible",
+    )
+    assert called == {"repo": tmp_path, "model": "gpt-5.6-luna", "golden_urls": [URL], "tool": "daydream"}
+    assert scores.scored_pr_count == 1
+
+
 def test_run_scoring_passes_custom_tool_and_judge_env_to_each_step(tmp_path, monkeypatch):
     monkeypatch.setenv("MARTIAN_API_KEY", "sk-or-x")
     monkeypatch.delenv(JUDGE_MODEL_ENV, raising=False)
@@ -175,6 +194,37 @@ def test_direct_anthropic_preflight_rejects(monkeypatch, anthropic_key, martian_
         monkeypatch.setenv("MARTIAN_BASE_URL", martian_base_url)
     with pytest.raises(JudgeEnvError, match=match):
         preflight_judge_env(judge_route="anthropic-direct")
+
+
+@pytest.mark.parametrize(
+    ("openai_key", "martian_base_url", "match"),
+    [
+        # Missing OpenAI key.
+        (None, None, "OPENAI_API_KEY"),
+        # A Martian base URL is invalid for OpenAI-compatible scoring.
+        ("sk-openai-direct", "https://api.openai.com/v1", "MARTIAN_BASE_URL is invalid for OpenAI-compatible scoring"),
+    ],
+    ids=["missing-key", "martian-base-url"],
+)
+def test_openai_compatible_preflight_rejects(monkeypatch, openai_key, martian_base_url, match):
+    """OpenAI-compatible preflight rejects a missing key and a Martian base URL."""
+    monkeypatch.setenv("MARTIAN_MODEL", "gpt-5.6-luna")
+    if openai_key is None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("OPENAI_API_KEY", openai_key)
+    if martian_base_url is not None:
+        monkeypatch.setenv("MARTIAN_BASE_URL", martian_base_url)
+    with pytest.raises(JudgeEnvError, match=match):
+        preflight_judge_env(judge_route="openai-compatible")
+
+
+def test_openai_compatible_preflight_accepts_openrouter_key(monkeypatch):
+    """An sk-or- OpenRouter key is a valid OpenAI-compatible credential; it
+    auto-routes to OpenRouter when OPENAI_BASE_URL is unset."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-or-v1-realkey")
+    monkeypatch.delenv("MARTIAN_BASE_URL", raising=False)
+    preflight_judge_env(judge_route="openai-compatible")
 
 
 _P_MIXED, _R_MIXED = 2 / 5, 2 / 6
