@@ -132,6 +132,8 @@ class StubBackend:
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
         self.fix_orphan_file: str | None = None
+        # Repo-relative generated path created by a successful fix turn.
+        self.fix_new_generated: str | None = None
         # When True, the fix branch yields a long burst of ToolStartEvents and
         # NEVER emits a ResultEvent -- simulating a runaway turn. Without the
         # in-loop tool-call budget in run_agent this stream never completes and
@@ -619,6 +621,10 @@ class StubBackend:
                 return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
+            if self.fix_new_generated is not None:
+                generated = cwd / self.fix_new_generated
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_text("-- new migration\n")
             if self.fix_edit_line is not None:
                 edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
                 if edit_target.exists():

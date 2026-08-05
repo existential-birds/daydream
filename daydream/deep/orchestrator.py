@@ -42,6 +42,7 @@ from daydream.deep.artifacts import (
     diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
+    generated_file_violations_path,
     merged_items_path,
     merged_report_path,
     per_stack_failures_path,
@@ -65,6 +66,7 @@ from daydream.deep.render import render_held_section, render_report
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
+from daydream.generated_files import is_generated_file
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -660,6 +662,80 @@ def _protect_tree_after_fix_failures(
                     file_path.unlink()
                 except OSError:
                     pass
+
+
+def _reject_generated_file_edits(
+    work: WorkContext,
+    target_dir: Path,
+    *,
+    snapshot: str | None,
+    pre_untracked: set[str],
+) -> list[str]:
+    """Restore changed generated files that existed before the fix pass."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+
+    repo = work.repo
+    ref = snapshot or "HEAD"
+    try:
+        changed = git_ops.changed_files(repo)
+    except GitError:
+        return []
+
+    violations: list[str] = []
+    recovery_dir = target_dir / ".daydream" / "partial-fixes"
+    for path in changed:
+        if not is_generated_file(path):
+            continue
+
+        slug = path.replace("/", "-").replace("\\", "-")
+        try:
+            patch = git_ops.diff_worktree_against(repo, ref, [path])
+        except GitError as exc:
+            patch = ""
+            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
+        if not patch and path not in pre_untracked:
+            continue
+        if path not in pre_untracked:
+            try:
+                git_ops.show(repo, ref, path)
+            except GitError:
+                continue
+        if patch:
+            try:
+                recovery_dir.mkdir(parents=True, exist_ok=True)
+                (recovery_dir / f"{slug}.patch").write_text(patch, encoding="utf-8")
+            except OSError as exc:
+                print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
+
+        file_path = repo / path
+        try:
+            git_ops.restore_paths_from_ref(repo, ref, [path])
+        except GitError as exc:
+            if path in pre_untracked and file_path.is_file():
+                try:
+                    file_path.unlink()
+                except OSError:
+                    pass
+            else:
+                print_warning(console, f"Could not restore generated file '{path}': {exc}")
+        violations.append(path)
+
+    if violations:
+        artifact = generated_file_violations_path(target_dir / ".daydream")
+        try:
+            artifact.write_text(
+                json.dumps({"violations": violations, "ref": ref}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print_warning(console, f"Could not record generated-file violations: {exc}")
+        print_warning(
+            console,
+            f"Reverted forbidden edits to existing generated files: {', '.join(violations)}. "
+            "Add a new migration file instead.",
+        )
+    return violations
 
 
 def _has_non_daydream_worktree_changes(status: str) -> bool:
@@ -1505,6 +1581,12 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     stale_leftover_p = fix_leftover_untracked_path(dd)
     if stale_leftover_p.exists():
         stale_leftover_p.unlink()
+    _reject_generated_file_edits(
+        work,
+        target_dir,
+        snapshot=pre_fix_snapshot,
+        pre_untracked=pre_fix_untracked,
+    )
     return None
 
 

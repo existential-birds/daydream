@@ -29,7 +29,9 @@ import pytest
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -804,6 +806,67 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     leftover = manifest["fix_leftover_untracked"]
     assert leftover, "manifest must enumerate untracked files left by the failed fix pass"
     assert "store/uuid.go" in leftover
+
+
+async def test_fix_guard_reverts_generated_migration_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    from daydream.runner import run
+
+    project = tmp_path / "migration_repo"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    (project / "README.md").write_text("# Project\n")
+    (project / "migrations").mkdir()
+    migration = project / "migrations" / "0001_init.sql"
+    migration.write_text("SELECT 1;\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    migration.write_text("SELECT 1;\nSELECT 2;\n")
+    _git(project, "add", ".")
+    _commit(project, "change")
+
+    pre_migration = migration.read_bytes()
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, project)
+    stub.merge_items = [
+        _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
+        _merge_item(2, "api.py", "high", desc="source fix"),
+    ]
+    stub.fix_edit_line = "\n-- FORBIDDEN EDIT\n"
+    stub.fix_new_generated = "migrations/0002_add_x.sql"
+
+    exit_code = await run(
+        make_config(
+            project,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+        )
+    )
+
+    assert exit_code == 0
+    assert migration.read_bytes() == pre_migration
+    assert b"FORBIDDEN EDIT" not in migration.read_bytes()
+    assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
+    assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
+    violations = project / ".daydream" / "generated-file-violations.json"
+    assert violations.exists()
+    assert "migrations/0001_init.sql" in violations.read_text()
+    patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
+    assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
 
 
 async def test_parallel_fix_commit_runs_once_after_all(

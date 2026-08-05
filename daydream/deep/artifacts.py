@@ -149,6 +149,11 @@ def fix_failures_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "fix-failures.json"
 
 
+def generated_file_violations_path(deep_dir_path: Path) -> Path:
+    """Generated-file edits rejected by the fix-phase runtime guard."""
+    return deep_dir_path / "generated-file-violations.json"
+
+
 def fix_leftover_untracked_path(deep_dir_path: Path) -> Path:
     """Untracked paths that newly appeared during a failed fix pass (JSON list).
 
