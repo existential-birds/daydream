@@ -156,7 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   `daydream bench` now supports `--trials N` to run the benchmark N times against the same PR set and report mean plus standard deviation for precision, recall, and F1. Surfaces variance so a single noisy run doesn't mask regressions or false improvements.
 
-- **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#232](https://github.com/existential-birds/daydream/pull/248))
+- **review:** Precision-mode arbiter suppression for evidenced-but-minor findings ([#248](https://github.com/existential-birds/daydream/pull/248))
 
   The arbiter now drops findings that are evidence-backed but below a severity/confidence threshold, reducing noise from technically-correct-but-trivial comments. Suppressed findings are logged to a sidecar audit file. Activated via `--precision` or automatically when the diff exceeds 500 lines.
 

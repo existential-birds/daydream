@@ -11,7 +11,7 @@ by hand.
 - **Command:** `echo "<prompt>" | codex exec --experimental-json --sandbox read-only`
   (prompt read from stdin, read-only sandbox so nothing mutates the sample repo).
 - **Model:** the account default at capture time (`gpt-5.5`).
-- **Sample repo:** `tests/fixtures/real_cli_sample_repo/` (a 2-file git repo:
+- **Sample repo:** `tests/fixtures/real_cli_sample_repo/` (a 2-file directory:
   `README.md` + `hello.py`).
 - **Prompt:** "Read README.md, then read hello.py, then describe both files in
   one sentence each."

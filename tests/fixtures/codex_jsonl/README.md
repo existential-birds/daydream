@@ -15,47 +15,55 @@ to end.
   construction they **cannot surprise the parser with real-CLI shapes** — a test
   that replays synthesized bytes proves the parser handles bytes *we invented*,
   not bytes `codex` actually emits.
-- **Recorded-real** fixtures would be captured from genuine `codex` CLI runs,
-  then redacted, to guard against the "Codex Backend Gotchas" the synthesizer
-  does not reproduce (agent/reasoning text via `item.updated` deltas with empty
+- **Recorded-real** fixtures are genuine `codex` CLI captures, redacted before
+  commit, guarding against real-CLI shapes the synthesizer's canonical scripts
+  may not cover (agent/reasoning text via `item.updated` deltas with empty
   `item.completed` content; `output_text` content blocks; structured payloads on
   `turn.completed.result`/`output`).
 
-> **There are currently NO recorded-real fixtures in this directory.** A prior
+> **There is one recorded-real fixture: `real/golden.jsonl`** — a genuine
+> capture of `codex exec --experimental-json` (CLI 0.139.0) against the tiny
+> sample repo, committed via the capture script (`scripts/capture-codex-golden.sh`)
+> and consumed by `tests/test_codex_real_cli_contract.py`. See
+> [`real/README.md`](real/README.md) for the capture details. A prior
 > `realpath_parse.jsonl` was committed and labelled "recorded-real" but was in
 > fact hand-authored (fake `th_REDACTED` thread id, mirrored the test's invented
 > repo content, used a `content:[{output_text}]` shape real `codex` does not
-> emit). It was removed. Real-path Codex coverage (#151) must be rebuilt on
-> genuinely captured streams — see the capture procedure below. Do not
-> reintroduce a synthesized fixture under a recorded-real name.
+> emit); it was removed. Do not reintroduce a synthesized fixture under a
+> recorded-real name — refresh `real/golden.jsonl` with the capture script
+> instead.
 
 ## Capturing a fresh fixture (genuine only)
 
 The backend launches the CLI as (see `daydream/backends/codex.py`):
 
 ```bash
-codex exec --experimental-json --skip-git-repo-check \
-  [--output-schema <schema.json>] -
+codex exec --experimental-json --model <model> \
+  --sandbox <read-only|danger-full-access> --cd <cwd> \
+  [-c <effort>] [--output-schema <schema.json>]
 ```
 
-Capture against a throwaway repo, prompt fed on stdin (closed immediately),
-JSONL on stdout:
+The prompt is fed on stdin (closed immediately), JSONL on stdout. The capture
+script (`scripts/capture-codex-golden.sh`) runs the simplest faithful form —
+`codex exec --experimental-json --sandbox read-only` with the prompt on stdin:
 
 ```bash
 printf '%s' "$PROMPT" | \
-  codex exec --experimental-json --skip-git-repo-check \
-    --output-schema /tmp/feedback_schema.json - \
+  codex exec --experimental-json --sandbox read-only \
+    --cd "$SAMPLE_REPO" \
   > /tmp/realpath_parse.jsonl   # capture to /tmp first, redact, then move into place
 ```
 
-- **Use the account default — omit `-m`.** Verified June 2026 against `codex`
+- **The backend always pins `--model`** (`codex.py:131-132`); daydream's
+  default is `gpt-5.6-sol` (`daydream/config.py`). A manual capture without
+  `--model` uses the account default, which is what `scripts/capture-codex-golden.sh`
+  relies on. Verified June 2026 against `codex`
   0.137.0 with a ChatGPT-account login: the configured default is `gpt-5.5`
   (`~/.codex/config.toml`), which returns a full turn. Explicitly supported IDs
   on a ChatGPT login are `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` (and
   `gpt-5.3-codex-spark` for ChatGPT Pro). The legacy `-m gpt-5-codex` / `-m
   gpt-5` are rejected (`model is not supported when using Codex with a ChatGPT
-  account`), as are `gpt-5.2` / `gpt-5.3-codex` (API-key auth only). Omitting
-  `-m` avoids pinning a stale id.
+  account`), as are `gpt-5.2` / `gpt-5.3-codex` (API-key auth only).
 - `--output-schema` is only for the PARSE phase (it constrains the agent to
   `FEEDBACK_SCHEMA`, defined in `daydream/phases.py`); omit it for
   REVIEW/FIX/TEST captures.
