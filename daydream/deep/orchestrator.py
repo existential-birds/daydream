@@ -38,6 +38,7 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
+from daydream.config_file import _coerce_non_negative_int
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     adjudication_complete_path,
@@ -266,29 +267,36 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
 def _uncovered_sweep_max_files(config: RunConfig) -> int:
     """Resolve the per-run uncovered-file sweep capacity cap (issue #309).
 
-    Non-negative only: an explicit ``0`` disables the sweep (nothing is
-    swept) while a negative value degrades to the named default -- mirroring
-    the file-config coercion in ``config_file._coerce_non_negative_int`` so a
-    directly-constructed ``RunConfig`` cannot smuggle an invalid capacity in.
+    Integer-only non-negative: an explicit ``0`` disables the sweep (nothing is
+    swept) while a negative value, a float, a bool, or any non-int degrades to
+    the named default -- the same integer-only predicate as the file-config
+    coercion ``config_file._coerce_non_negative_int`` (reused, import read-only)
+    so a directly-constructed ``RunConfig`` cannot smuggle an invalid capacity
+    in. ``filter_sweepable_files`` slices with ``max_files``, so a float here
+    would raise TypeError and the fail-open wrapper would discard the ENTIRE
+    sweep -- type validation lives at the resolver.
     """
     value = _resolve_config_value(
         config, "uncovered_sweep_max_files", DEFAULT_UNCOVERED_SWEEP_MAX_FILES
     )
-    return value if value is not None and value >= 0 else DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    coerced = _coerce_non_negative_int(value)
+    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MAX_FILES
 
 
 def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
     """Resolve the minimum hunk size for a file to be swept (issue #309).
 
-    Non-negative only: ``0`` removes the hunk-size floor (every uncovered file
-    is eligible) while a negative value degrades to the named default --
-    mirroring the file-config coercion so a negative floor can never make
-    zero-change/trivial blocks eligible.
+    Integer-only non-negative: ``0`` removes the hunk-size floor (every
+    uncovered file is eligible) while a negative value, a float, a bool, or any
+    non-int degrades to the named default -- mirroring
+    ``config_file._coerce_non_negative_int`` so a negative or malformed floor
+    can never make zero-change/trivial blocks eligible.
     """
     value = _resolve_config_value(
         config, "uncovered_sweep_min_hunk_lines", DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
     )
-    return value if value is not None and value >= 0 else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    coerced = _coerce_non_negative_int(value)
+    return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
@@ -303,6 +311,31 @@ def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
     if ctx.config.start_at in ("merge", "fix"):
         return False
     return _resolve_config_value(ctx.config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED)
+
+
+def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str]) -> str | None:
+    """Sweep additive for the pre-flight agent estimate (issue #309 finding 8).
+
+    The pre-flight total counts only the known phases; the uncovered files the
+    sweep will review are not known until after per-stack reviews + parse. Every
+    swept file adds one review invocation AND one parse invocation (parse per
+    stack file), so an honest estimate appends an upper-bound note: 2 agents per
+    file, capped by the configured capacity and the number of changed files that
+    could possibly be swept. Returns ``None`` when the sweep is disabled or
+    nothing could be swept.
+    """
+    if config.start_at in ("merge", "fix"):
+        return None
+    if not _resolve_config_value(config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED):
+        return None
+    max_files = _uncovered_sweep_max_files(config)
+    eligible = min(len(changed_files), max_files)
+    if eligible <= 0:
+        return None
+    return (
+        f"(+ up to {2 * eligible} sweep agents: review + parse per uncovered "
+        "file, capped by eligible changed files)"
+    )
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -1338,6 +1371,12 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         },
         "attempted_files": swept_files,
         "completed_files": [],
+        # Issue #309 finding 6: ``covered_files`` is filled from the POST-sweep
+        # recompute (verified completed reads of the swept files) and may be a
+        # strict subset of ``completed_files`` -- a review written without a
+        # Read of the file is an attempt, never coverage. Until the recompute
+        # runs it starts empty (fail-open: unverifiable means not claimed).
+        "covered_files": [],
         # POST-sweep ratio is recomputed below after the sweep forks land; this
         # pre-sweep snapshot is the fallback when the sweep produces no reads.
         "post_sweep": {
@@ -1460,13 +1499,20 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     # Recompute coverage AFTER the sweep so the report shows the ratio the
     # sweep actually achieved (the ``deep-uncovered-*`` forks' completed reads
     # now count), never the pre-sweep snapshot. The recompute is fail-open: a
-    # failure here falls back to the pre-sweep numbers already stored.
+    # failure here falls back to the pre-sweep numbers already stored. The same
+    # recompute drives ``covered_files`` (issue #309 finding 6): a swept file is
+    # covered only when the post-sweep uncovered list no longer contains it --
+    # i.e. a verified completed read of the file happened. A successful review
+    # output WITHOUT a read leaves the file in the uncovered list, so it is
+    # never claimed as covered.
+    post_uncovered: list[str] | None = None
     try:
-        _, post_coverage = compute_uncovered_files(dd.parent, session_id)
+        post_uncovered, post_coverage = compute_uncovered_files(dd.parent, session_id)
         stats["post_sweep"] = {
             "files_read_by_reviewers": post_coverage["files_read_by_reviewers"],
             "coverage_ratio": post_coverage["coverage_ratio"],
         }
+        stats["covered_files"] = sorted(f for f in review_outputs if f not in post_uncovered)
     except Exception:  # noqa: BLE001 -- fail-open: keep the pre-sweep fallback
         pass
 
@@ -1483,6 +1529,15 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     stats["sweep_parse_dropped"] = parse_dropped
     stats["sweep_failures"] = {**sweep_failures, **parse_failures}
     stats["completed_files"] = sorted(review_outputs)
+    # Issue #309 finding 6: per-file attempt status. A completed review output
+    # is a completed ATTEMPT; only files with a verified post-sweep completed
+    # read are "read". Anything else is "reviewed (hunks only)" and must not
+    # move files_read_by_reviewers / coverage_ratio.
+    covered_set = set(stats.get("covered_files") or [])
+    stats["sweep_attempt_status"] = {
+        file: ("read" if file in covered_set else "reviewed (hunks only)")
+        for file in sorted(review_outputs)
+    }
     if review_outputs:
         records_path = per_stack_records_path(dd, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
@@ -1747,9 +1802,22 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
         ratio = read_source.get("coverage_ratio")
         if isinstance(ratio, (int, float)):
             lines.append(f"- Coverage ratio: {ratio}")
+        # Issue #309 finding 6: only files with a verified completed read are
+        # labeled covered. A completed review output WITHOUT a read is a
+        # completed attempt -- rendered as "reviewed (hunks only)" -- and never
+        # appears on the covered line nor moves the ratio above.
+        covered = stats.get("covered_files")
+        if isinstance(covered, list) and covered:
+            lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in covered)}")
         completed = stats.get("completed_files")
-        if isinstance(completed, list) and completed:
-            lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in completed)}")
+        if isinstance(completed, list):
+            hunks_only = [
+                str(f) for f in completed if not (isinstance(covered, list) and f in covered)
+            ]
+            if hunks_only:
+                lines.append(
+                    f"- Second-pass sweep reviewed (hunks only): {', '.join(hunks_only)}"
+                )
         failures = stats.get("sweep_failures")
         if isinstance(failures, dict) and failures:
             lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
@@ -2286,6 +2354,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             stack_lines=stack_lines,
             agent_count=notice_agent_count,
             exploration_available=EXPLORATION_AVAILABLE,
+            sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
         )
 
         # Flow context (steps communicate through ctx.data); ctx shares

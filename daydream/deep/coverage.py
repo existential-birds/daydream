@@ -57,25 +57,28 @@ def _completed_read_paths(
     """Read paths from ``trajectory`` whose tool call carries a completed observation.
 
     A Read only covers a diff file when the read tool call is paired with a
-    ToolResult in the same step's observation: ``observation.results[].source_call_id``
-    must equal the tool call's ``tool_call_id``. An interrupted read
-    (ToolStartEvent with no ToolResultEvent) returns no content, so it must NOT
-    count as coverage — the sweep treats it as uncovered (fail-open: the file
-    gets swept, never skipped). ``phases``, when given, restricts the steps
-    considered to those whose ``extra.daydream_phase`` is in the set.
+    ToolResult in the SAME step's observation:
+    ``observation.results[].source_call_id`` must equal the tool call's
+    ``tool_call_id``. Tool-call IDs are scoped to individual invocations and
+    are NOT required to be trajectory-global, so the completed set is built per
+    step and never leaks across steps: an interrupted read whose ID collides
+    with a completed read in another step stays uncovered (fail-open: the file
+    gets swept, never skipped). An interrupted read (ToolStartEvent with no
+    ToolResultEvent) returns no content, so it must NOT count as coverage.
+    ``phases``, when given, restricts the steps considered to those whose
+    ``extra.daydream_phase`` is in the set.
     """
-    completed_call_ids: set[str] = set()
+    paths: set[str] = set()
     for step in trajectory.get("steps", []):
+        if phases is not None and ((step.get("extra") or {}).get("daydream_phase")) not in phases:
+            continue
+        completed_call_ids: set[str] = set()
         for result in (step.get("observation") or {}).get("results") or []:
             if not isinstance(result, dict):
                 continue
             call_id = result.get("source_call_id")
             if isinstance(call_id, str):
                 completed_call_ids.add(call_id)
-    paths: set[str] = set()
-    for step in trajectory.get("steps", []):
-        if phases is not None and ((step.get("extra") or {}).get("daydream_phase")) not in phases:
-            continue
         for tc in step.get("tool_calls") or []:
             if tc.get("tool_call_id") not in completed_call_ids:
                 continue
@@ -237,8 +240,8 @@ def build_uncovered_sweep_prompt(
         f"diff.patch for these):\n{hunks.rstrip()}"
     )
     parts.append(
-        "For whole-file context beyond these hunks you MAY Read the source "
-        "file directly."
+        "Read the source file FIRST; you may only comment on hunks you have "
+        "read. The inlined hunks are not a substitute for reading the file."
     )
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())

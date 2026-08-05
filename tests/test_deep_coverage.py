@@ -114,6 +114,51 @@ def _write_main(run_dir: Path) -> None:
     )
 
 
+def _write_colliding_read_id_fork(run_dir: Path) -> None:
+    """Write a two-step sibling trajectory that reuses one tool-call ID.
+
+    Tool-call IDs are scoped to individual invocations, not trajectory-global.
+    Step ``s0`` holds an interrupted Read of ``/repo/api.py`` whose ID collides
+    with the completed Read of ``/repo/notes.txt`` in step ``s1``. The
+    completed result in ``s1`` must NOT retroactively complete the interrupted
+    read in ``s0`` -- the sweep treats ``api.py`` as uncovered.
+    """
+    trajectories_dir = run_dir / "trajectories"
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    (trajectories_dir / "deep-python.json").write_text(
+        json.dumps(
+            {
+                "session_id": run_dir.name,
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {
+                                "tool_call_id": "read-0",
+                                "function_name": "Read",
+                                "arguments": {"file_path": "/repo/api.py"},
+                            }
+                        ],
+                    },
+                    {
+                        "step_id": "s1",
+                        "tool_calls": [
+                            {
+                                "tool_call_id": "read-0",
+                                "function_name": "Read",
+                                "arguments": {"file_path": "/repo/notes.txt"},
+                            }
+                        ],
+                        "observation": {
+                            "results": [{"source_call_id": "read-0", "content": "file content"}]
+                        },
+                    },
+                ],
+            }
+        )
+    )
+
+
 def test_compute_uncovered_files_reports_unread_diff_files(tmp_path: Path) -> None:
     """Files no ``deep-`` reviewer read land in the uncovered list."""
     daydream_dir = tmp_path / ".daydream"
@@ -200,6 +245,32 @@ def test_compute_uncovered_files_requires_completed_reads(tmp_path: Path) -> Non
     assert "api.py" in swept  # the unread file is swept, never skipped
 
 
+def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) -> None:
+    """A tool-call ID reused across steps must not leak completion state.
+
+    Regression (issue #309 finding 5): completion is matched WITHIN a step, so
+    a completed read in one step cannot mark an interrupted read in another
+    step (sharing the same ID) as completed. The interrupted read stays
+    uncovered and the file is swept, never skipped.
+    """
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-5"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_colliding_read_id_fork(run_dir)
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-5")
+
+    # The interrupted read of api.py (ID collision with s1's completed read of
+    # notes.txt) covers nothing: api.py stays uncovered and is swept.
+    assert "api.py" in uncovered
+    assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
+    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    assert "api.py" in swept
+
+
 def test_hunk_change_line_count_excludes_headers() -> None:
     """+++/--- file headers are not counted as added/removed lines."""
     assert hunk_change_line_count(diff_block_for_file(_DIFF, "api.py") or "") == 2
@@ -284,6 +355,10 @@ def test_build_uncovered_sweep_prompt_includes_context_and_markers(tmp_path: Pat
     # Hunks are inlined (not a pointer to diff.patch).
     assert "+line6" in prompt
     assert "changed file notes.txt was NOT read" in prompt
+    # Reading the source file is REQUIRED, not optional (issue #309 finding 6):
+    # a hunk-only review must not be reported as read coverage.
+    assert "Read the source file FIRST" in prompt
+    assert "you may only comment on hunks you have read" in prompt
     # The canonical prompt primitives are present, not reduced duplicates: the
     # sweep reviewer is held to the same standard as per-stack reviewers
     # (issue #309 finding 11).

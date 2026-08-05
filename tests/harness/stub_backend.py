@@ -206,6 +206,11 @@ class StubBackend:
         # producing nothing (issue #309 finding 7). A successful return must
         # NOT be recorded as completed coverage.
         self.sweep_no_output: bool = False
+        # When True, the uncovered-file-sweep branch writes its review output
+        # but emits NO Read tool call -- a successful hunk-only review (issue
+        # #309 finding 6). The file must be recorded as a completed ATTEMPT
+        # ("reviewed (hunks only)"), never as covered.
+        self.sweep_no_read: bool = False
         # When True, the uncovered-file-sweep branch raises -- exercising the
         # sweep's fail-open contract.
         self.fail_sweep: bool = False
@@ -379,12 +384,13 @@ class StubBackend:
                         f"# Review (uncovered)\n\n## Issues\n\n"
                         f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
                     )
-            yield ToolStartEvent(
-                id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
-            )
-            yield ToolResultEvent(
-                id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
-            )
+            if not self.sweep_no_read:
+                yield ToolStartEvent(
+                    id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
+                )
+                yield ToolResultEvent(
+                    id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
+                )
             yield TextEvent(text="")
             yield ResultEvent(structured_output=None, continuation=None)
             return

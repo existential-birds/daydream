@@ -1594,13 +1594,16 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     """D-30: pre-flight notice lists stages, stacks, skill per stack, total agent count."""
     captured: list[dict[str, Any]] = []
 
-    def _capture(console, *, stages, stack_lines, agent_count, exploration_available) -> None:
+    def _capture(
+        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+    ) -> None:
         captured.append(
             {
                 "stages": stages,
                 "stack_lines": stack_lines,
                 "agent_count": agent_count,
                 "exploration_available": exploration_available,
+                "sweep_note": sweep_note,
             }
         )
 
@@ -1619,6 +1622,41 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
     assert notice["agent_count"] == 12
     assert len(notice["stack_lines"]) >= 1
+    # Issue #309 finding 8: the sweep is enabled by default, so the pre-flight
+    # estimate appends an upper-bound note. The fixture changes 3 files, so the
+    # sweep could add up to 2 x min(3, max_files=10) = 6 review+parse agents.
+    assert notice["sweep_note"] == (
+        "(+ up to 6 sweep agents: review + parse per uncovered file, "
+        "capped by eligible changed files)"
+    )
+
+
+async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No sweep additive in the pre-flight estimate when the sweep is disabled."""
+    captured: list[dict[str, Any]] = []
+
+    def _capture(
+        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+    ) -> None:
+        captured.append(
+            {
+                "agent_count": agent_count,
+                "sweep_note": sweep_note,
+            }
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target, uncovered_sweep=False)
+    assert exit_code == 0
+    assert len(captured) == 1
+    assert captured[0]["sweep_note"] is None
 
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5174,6 +5212,8 @@ async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
     assert pre_sweep["uncovered_files"] == ["notes.txt"]
     assert stats["attempted_files"] == ["notes.txt"]
     assert stats["completed_files"] == ["notes.txt"]
+    assert stats["covered_files"] == ["notes.txt"]  # sweep fork's read is verified
+    assert stats["sweep_attempt_status"] == {"notes.txt": "read"}
     assert stats["sweep_finding_count"] == len(records) >= 1
     assert stats["sweep_skipped_small_hunks"] == 0
     # Finding 10: the skip filename lists are persisted alongside the counts
@@ -5399,6 +5439,54 @@ async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
     assert "Best-effort sweep failures: notes.txt" in report
 
 
+async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A successful sweep review WITHOUT a file Read is an attempt, not coverage
+    (issue #309 finding 6).
+
+    The sweep prompt now requires reading the file before reviewing hunks; a
+    backend that still writes a valid review without emitting a Read must not
+    move ``files_read_by_reviewers`` / ``coverage_ratio``. The file lands in
+    ``completed_files`` (completed attempt) but NOT ``covered_files``, and the
+    report labels it ``reviewed (hunks only)``.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.sweep_no_read = True  # review written, but no Read tool call emitted
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre_sweep = stats["pre_sweep"]
+    assert pre_sweep["uncovered_files"] == ["notes.txt"]
+    # The review output WAS written -> the file is a completed ATTEMPT.
+    assert stats["completed_files"] == ["notes.txt"]
+    # But no verified completed read of the file -> never "covered".
+    assert stats["covered_files"] == []
+    assert stats["sweep_attempt_status"] == {"notes.txt": "reviewed (hunks only)"}
+    # The coverage numbers are unchanged by the hunk-only review.
+    assert stats["post_sweep"]["files_read_by_reviewers"] == 3
+    assert stats["post_sweep"]["coverage_ratio"] == pre_sweep["coverage_ratio"] == 0.75
+
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Second-pass sweep covered" not in report
+    assert "Second-pass sweep reviewed (hunks only): notes.txt" in report
+    assert "Files read by reviewers: 3" in report
+    assert "Coverage ratio: 0.75" in report
+
+
 async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5550,3 +5638,56 @@ def test_uncovered_sweep_numeric_resolution_rejects_negatives(tmp_path: Path) ->
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _uncovered_sweep_max_files(cfg) == 0
     assert _uncovered_sweep_min_hunk_lines(cfg) == 0
+
+
+def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> None:
+    """RunConfig numeric overrides are type-validated, not just range-checked
+    (issue #309 finding 7).
+
+    Booleans subclass int and floats pass a ``>= 0`` check, but
+    ``filter_sweepable_files`` needs an int slice: ``max_files=1.5`` raises
+    TypeError and the fail-open wrapper discards the ENTIRE sweep. The resolver
+    accepts a value only when it is an int, not a bool, and >= 0; everything
+    else degrades to the named default.
+    """
+    from daydream.config import (
+        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
+        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    )
+    from daydream.deep.orchestrator import (
+        _uncovered_sweep_max_files,
+        _uncovered_sweep_min_hunk_lines,
+    )
+    from daydream.runner import RunConfig
+
+    # Bool overrides degrade to the defaults (True is not a meaningful count).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files=True,  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines=True,  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # Float overrides degrade to the defaults (an int slice is required).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files=1.5,  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines=1.5,  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # String overrides degrade to the defaults (never compared or sliced).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files="10",  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines="5",  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # Valid ints still pass through unchanged.
+    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
+    assert _uncovered_sweep_max_files(cfg) == 7
+    assert _uncovered_sweep_min_hunk_lines(cfg) == 2
