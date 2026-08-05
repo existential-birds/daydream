@@ -8,6 +8,40 @@ set -euo pipefail
 
 echo "Running pre-push checks..."
 
+# Reject unsigned commits: every pushed commit must carry an SSH signature.
+echo "→ Verifying commit signatures..."
+while read -r _local_ref local_sha remote_ref remote_sha; do
+    # Skip delete operations and empty refs
+    if [ -z "${local_sha:-}" ] || [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        continue
+    fi
+
+    # Range of commits to check, excluding those already on any remote branch
+    if [ -z "${remote_sha:-}" ] || [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+        range="$local_sha --not --remotes=origin"
+    else
+        range="$local_sha --not $remote_sha --remotes=origin"
+    fi
+
+    unsigned_commits=$(git log --format='%H %G?' $range 2>/dev/null | grep -E ' N$' | cut -d' ' -f1 || true)
+
+    if [ -n "$unsigned_commits" ]; then
+        echo "ERROR: The following commits are not signed:"
+        for commit in $unsigned_commits; do
+            echo "  - $(git log -1 --format='%h %s' "$commit")"
+        done
+        echo ""
+        echo "To sign commits, ensure:"
+        echo "  1. git config --global commit.gpgsign true"
+        echo "  2. Your SSH key is loaded: ssh-add -l"
+        echo ""
+        echo "To sign existing commits: git rebase --exec 'git commit --amend --no-edit -S' HEAD~N"
+        exit 1
+    fi
+done
+
+echo "All commits are signed."
+
 # Must run before any `uv run` below: `uv run`/`uv sync` silently re-lock a
 # drifted uv.lock, which would mask a release that bumped the version but forgot
 # `uv lock`. `--check` is read-only and errors on drift. CI re-runs this on a
