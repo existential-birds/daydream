@@ -72,7 +72,7 @@ line-length = 120
 select = ["E", "F", "I", "W"]
 
 [tool.ruff.lint.per-file-ignores]
-# Vendored from Harbor v0.5.0; see daydream/atif/NOTICE.
+# Vendored from Harbor v0.17.1-9; see daydream/atif/NOTICE.
 # Mechanical-only edit policy (D-03): no reformatting allowed.
 "daydream/atif/**" = ["E", "F", "I", "W"]
 # Re-exporting package facade: every import re-exports a submodule symbol onto

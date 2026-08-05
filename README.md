@@ -386,7 +386,7 @@ Posts are attributed to `<app-slug>[bot]`, and the active identity (bot or
 human) is displayed before any GitHub action.
 
 One-time setup: create a GitHub App (minimum permissions: Pull Requests
-read/write, Contents read, Metadata read), generate a private key from the
+read/write, Contents read, Metadata read, Actions read/write), generate a private key from the
 App settings page, and install the App on the target repository's org or user.
 
 In GitHub Actions:
@@ -401,7 +401,7 @@ Behavior notes:
 
 - Neither var set → ambient `gh` identity, exactly as before (the App identity is opt-in).
 - Setting only one of the two vars aborts with an error naming the missing one.
-- Posting runs (`--comment`, `--review`, `feedback`) abort if the owner/repo
+- Posting runs (`--comment`, `feedback`, and the default deep loop) abort if the owner/repo
   cannot be determined or token minting fails. daydream never silently falls
   back to posting under your personal identity. Non-posting runs fall back to
   the ambient identity and continue.
