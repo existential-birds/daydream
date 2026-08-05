@@ -21,6 +21,8 @@ GENERATED_FILE_GLOBS: tuple[str, ...] = (
 )
 
 _GENERATED_MARKER = re.compile(r"@generated|Code generated.*DO NOT EDIT\.", re.IGNORECASE)
+_GENERATED_MARKER_HEADER_LINES = 20
+_HEADER_COMMENT_PREFIXES = ("#", "//", "/*", "*", "--", ";")
 _LOCKFILE_MANIFESTS: dict[str, tuple[str, ...]] = {
     "Cargo.lock": ("Cargo.toml",),
     "package-lock.json": ("package.json",),
@@ -53,7 +55,19 @@ def is_generated_file(path: str, content: str | bytes | None = None) -> bool:
         return False
     if isinstance(content, bytes):
         content = content.decode("utf-8", errors="replace")
-    return bool(_GENERATED_MARKER.search(content[:8192]))
+    header_lines: list[str] = []
+    for line in content.splitlines()[:_GENERATED_MARKER_HEADER_LINES]:
+        stripped = line.strip()
+        if not stripped:
+            header_lines.append(line)
+        elif stripped.startswith(_HEADER_COMMENT_PREFIXES):
+            header_lines.append(line)
+        elif _GENERATED_MARKER.fullmatch(stripped):
+            header_lines.append(line)
+        else:
+            break
+    header = "\n".join(header_lines)
+    return bool(_GENERATED_MARKER.search(header))
 
 
 def related_manifest_paths(path: str) -> tuple[str, ...]:

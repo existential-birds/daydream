@@ -1150,6 +1150,40 @@ def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) 
     return names
 
 
+def changed_files_against(
+    repo: Path,
+    ref: str,
+    *,
+    preexisting_untracked: set[str] | None = None,
+) -> list[str]:
+    """Return paths changed from *ref*, raising when they cannot be enumerated.
+
+    This is the strict counterpart to :func:`changed_files` for destructive
+    recovery guards, where treating a Git failure as an empty change set would
+    make the guard's safety decision unreliable.
+    """
+    proc = _run_git(repo, ["diff", "--name-only", ref], timeout=10)
+    if proc.returncode != 0:
+        raise GitError(f"git diff --name-only {ref} failed in {repo}: {proc.stderr.strip()}")
+    untracked_proc = _run_git(
+        repo, ["ls-files", "--others", "--exclude-standard"], timeout=10,
+    )
+    if untracked_proc.returncode != 0:
+        raise GitError(f"git ls-files --others failed in {repo}: {untracked_proc.stderr.strip()}")
+
+    names: list[str] = []
+    seen: set[str] = set()
+    untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
+    if preexisting_untracked is not None:
+        untracked = [path for path in untracked if path not in preexisting_untracked]
+    for line in [*proc.stdout.splitlines(), *untracked]:
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
 def list_untracked(repo: Path) -> list[str]:
     """Return repo-relative paths of untracked, non-ignored files.
 

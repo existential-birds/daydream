@@ -690,21 +690,21 @@ def _reject_generated_file_edits(
 
     repo = work.repo
     ref = snapshot or "HEAD"
-    try:
-        changed = git_ops.changed_files(repo, preexisting_untracked=pre_untracked)
-    except GitError:
-        return []
+    changed = git_ops.changed_files_against(
+        repo, ref, preexisting_untracked=pre_untracked
+    )
 
     direct_violations: list[str] = []
     patches: dict[str, str] = {}
     recovery_dir = target_dir / ".daydream" / "partial-fixes"
     for path in changed:
-        file_path = repo / path
         try:
-            content = file_path.read_bytes()
-        except OSError:
-            content = None
-        if not is_generated_file(path, content):
+            baseline = git_ops.show(repo, ref, path)
+        except GitError:
+            # Newly-created generated files (notably new migrations) are
+            # deliberately allowed.
+            continue
+        if not is_generated_file(path, baseline):
             continue
         try:
             patch = git_ops.diff_worktree_against(repo, ref, [path])
@@ -714,10 +714,6 @@ def _reject_generated_file_edits(
         if not patch:
             # New generated files (notably new migrations) have no baseline
             # diff and are deliberately allowed.
-            continue
-        try:
-            git_ops.show(repo, ref, path)
-        except GitError:
             continue
         direct_violations.append(path)
         patches[path] = patch

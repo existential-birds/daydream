@@ -1,6 +1,7 @@
 """Phase functions for the review and fix loop."""
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -2244,20 +2245,32 @@ def _reject_test_healing_generated_file_edits(
     *,
     snapshot: str | None,
     pre_untracked: set[str],
+    snapshot_captured: bool = True,
 ) -> list[str]:
     """Restore existing generated files changed by one test-healing fix."""
+    if not snapshot_captured:
+        # HEAD is not a safe substitute when capturing the pre-fix state
+        # failed: it may discard edits that were present before this pass.
+        return []
+
     ref = snapshot or "HEAD"
     recovery_dir = repo / ".daydream" / "partial-fixes"
 
-    changed = git_ops.changed_files(repo, preexisting_untracked=pre_untracked)
+    try:
+        changed = git_ops.changed_files_against(
+            repo, ref, preexisting_untracked=pre_untracked,
+        )
+    except GitError:
+        return []
     direct_violations: list[str] = []
     paths_to_restore: list[str] = []
     for path in changed:
         try:
-            content = (repo / path).read_bytes()
-        except OSError:
-            content = None
-        if not is_generated_file(path, content):
+            baseline = git_ops.show(repo, ref, path)
+        except GitError:
+            # Paths absent from the pre-fix ref are newly created and allowed.
+            continue
+        if not is_generated_file(path, baseline):
             continue
         direct_violations.append(path)
         paths_to_restore.append(path)
@@ -2281,16 +2294,11 @@ def _reject_test_healing_generated_file_edits(
         if not patch and path not in pre_untracked:
             continue
 
-        if path not in pre_untracked:
-            try:
-                git_ops.show(repo, ref, path)
-            except GitError:
-                continue
-
         try:
             recovery_dir.mkdir(parents=True, exist_ok=True)
             slug = path.replace("/", "-").replace("\\", "-")
-            (recovery_dir / f"{slug}.patch").write_text(patch, encoding="utf-8")
+            digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+            (recovery_dir / f"{slug}-{digest}.patch").write_text(patch, encoding="utf-8")
         except OSError as exc:
             print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
 
@@ -2354,10 +2362,12 @@ async def phase_test_and_heal(
         try:
             snapshot = git_ops.stash_create(work.repo)
             pre_untracked = set(git_ops.list_untracked(work.repo))
+            snapshot_captured = True
         except GitError as exc:
             print_warning(console, f"Could not snapshot tree before test-healing fix: {exc}")
             snapshot = None
             pre_untracked = set()
+            snapshot_captured = False
         fix_prompt = get_registry().prompt("fix")(
             output, feedback_items, repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
@@ -2368,7 +2378,10 @@ async def phase_test_and_heal(
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
         _reject_test_healing_generated_file_edits(
-            work.repo, snapshot=snapshot, pre_untracked=pre_untracked,
+            work.repo,
+            snapshot=snapshot,
+            snapshot_captured=snapshot_captured,
+            pre_untracked=pre_untracked,
         )
         retries_used += 1
         continuation = None

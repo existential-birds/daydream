@@ -59,7 +59,7 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     new_migration.write_text("-- allowed new migration\n")
 
     violations = _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, pre_untracked=set(),
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
     )
 
     assert violations == ["migrations/0001_init.sql"]
@@ -68,6 +68,107 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     assert "migrations/0001_init.sql" in (
         tmp_path / ".daydream" / "deep" / "generated-file-violations.json"
     ).read_text()
+
+
+def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(tmp_path, silence_console):
+    """A healing edit cannot remove a marker and thereby evade the guard."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    generated = tmp_path / "client.py"
+    generated.write_text("# @generated\nORIGINAL = True\n")
+    git(tmp_path, "add", "client.py")
+    git_commit(tmp_path, "generated client")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    generated.write_text("MANUAL = True\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations == ["client.py"]
+    assert generated.read_text() == "# @generated\nORIGINAL = True\n"
+
+
+def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(tmp_path, silence_console):
+    """Without a pre-fix snapshot, recovery must not fall back to HEAD."""
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+    migration.write_text("-- user edit\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=None, snapshot_captured=False, pre_untracked=set(),
+    )
+
+    assert violations == []
+    assert migration.read_text() == "-- user edit\n"
+
+
+def test_test_healing_guard_uses_unique_recovery_patch_names(tmp_path, silence_console):
+    """Distinct paths with the same slug preserve both rejected edits."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    paths = ["migrations/a/b.sql", "migrations/a-b.sql"]
+    for path in paths:
+        file_path = tmp_path / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("-- original\n")
+    git(tmp_path, "add", *paths)
+    git_commit(tmp_path, "initial migrations")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    for path in paths:
+        (tmp_path / path).write_text(f"-- forbidden {path}\n")
+
+    _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    patches = list((tmp_path / ".daydream" / "partial-fixes").glob("*.patch"))
+    assert len(patches) == 2
+
+
+def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
+    tmp_path, monkeypatch, silence_console,
+):
+    """An unknown changed-path set cannot safely drive destructive recovery."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- healing edit\n")
+    monkeypatch.setattr(
+        "daydream.phases.git_ops.changed_files_against",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("unavailable")),
+    )
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations == []
+    assert migration.read_text() == "-- healing edit\n"
 
 
 @pytest.mark.asyncio
