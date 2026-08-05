@@ -156,8 +156,8 @@ async def terminate_process(
     """
     grace = TERMINATE_GRACE_S if timeout is None else timeout
     with anyio.CancelScope(shield=True):
+        _kill_process_group(proc, signal.SIGTERM)
         if proc.returncode is None:
-            _kill_process_group(proc, signal.SIGTERM)
             proc.terminate()
             try:
                 await asyncio.wait_for(proc.wait(), timeout=grace)
@@ -219,5 +219,4 @@ async def cancel_processes(processes: list[asyncio.subprocess.Process]) -> None:
     """
     snapshot = list(processes)
     with anyio.CancelScope(shield=True):
-        for process in snapshot:
-            await terminate_process(process)
+        await asyncio.gather(*(terminate_process(process) for process in snapshot))
