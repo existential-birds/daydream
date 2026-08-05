@@ -250,7 +250,19 @@ Each PR is reviewed at the bot's own snapshot — the commit its latest review w
 
 ### The CodeRabbit-parity corpus
 
-`benchmark/corpora/osprey-coderabbit/` is the standing daydream-vs-bot parity corpus for this repository's own PR history, harvested from [existential-birds/osprey](https://github.com/existential-birds/osprey). **Note: `existential-birds/osprey` is a private lab repository — it is not public (it will be open-sourced some day, but is not currently).** The corpus is therefore not publicly reproducible; it is an internal regression harness. It was built with:
+**Internal-only corpus. This section describes a lab-internal regression harness, not a
+publicly reproducible dataset.** The corpus is harvested from
+[existential-birds/osprey](https://github.com/existential-birds/osprey), which is a
+**private** lab repository — it is not public (it will be open-sourced some day, but is
+not currently). The committed `index.json`/`manifest.json` reference that private repo's
+PR history and comment IDs; a reader without access to `existential-birds/osprey` cannot
+regenerate or inspect the full payloads (`harvest/` and `results/` are gitignored). Treat
+every number below as internal lab state.
+
+The corpus is the standing daydream-vs-bot parity signal for daydream's own development:
+harvest the bot's review history on a private repo, score daydream against it, and trend
+parity across prompt changes. It was built with (maintainer-only, requires access to the
+private repo):
 
 ```bash
 daydream bench harvest --repo existential-birds/osprey --bot "coderabbitai[bot]" \
