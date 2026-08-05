@@ -35,6 +35,7 @@ Exports:
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -359,7 +360,13 @@ def run_harvest(repo: str, bot: str, out_dir: Path, *, limit: int = 200, state: 
     index.sort(key=lambda r: r["pr_number"], reverse=True)
     _write_json(
         out_dir / "index.json",
-        {"repo": repo, "bot": bot, "n_prs_with_bot_activity": len(index), "prs": index},
+        {
+            "repo": repo,
+            "bot": bot,
+            "harvested_at": datetime.now(UTC).date().isoformat(),
+            "n_prs_with_bot_activity": len(index),
+            "prs": index,
+        },
     )
     results_dir = out_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)

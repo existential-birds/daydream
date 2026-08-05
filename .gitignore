@@ -84,6 +84,12 @@ daydream_plans/
 # Machine-local daydream config (benchmark-repo, reviewer presets)
 .daydream.toml
 
+# Harvested bot-review corpora: track the committed manifest + index inventory,
+# never the full harvest payloads, results, or atomic-write lock files
+benchmark/corpora/*/harvest/
+benchmark/corpora/*/results/
+benchmark/corpora/*/*.lock
+
 # Per-developer agent tooling config and session transcripts
 .codex/
 .cursor/

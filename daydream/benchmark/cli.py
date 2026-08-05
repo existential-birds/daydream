@@ -5,10 +5,12 @@ first argv token. They live here rather than in the top-level ``daydream.cli``
 module to keep that file below the 1 000-line threshold and to co-locate the
 bench argument-parsing logic with the rest of the benchmark package.
 
-``bench`` carries one sub-verb: ``daydream bench harvest`` builds a corpus from
-a review bot's PR history (see :mod:`daydream.benchmark.harvest`). Every other
-argv shape is a benchmark run over one corpus — a withmartian checkout
-(``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
+``bench`` carries two sub-verbs: ``daydream bench harvest`` builds a corpus
+from a review bot's PR history (see :mod:`daydream.benchmark.harvest`) and
+``daydream bench manifest`` folds a harvested corpus into a compact,
+git-tracked ``manifest.json`` (see :mod:`daydream.benchmark.corpus_manifest`).
+Every other argv shape is a benchmark run over one corpus — a withmartian
+checkout (``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 """
 
 from __future__ import annotations
@@ -376,11 +378,52 @@ def _handle_bench_harvest_command(argv: list[str]) -> int:
     return run_harvest(args.repo, args.bot, args.out, limit=args.limit, state=args.state)
 
 
+def _build_bench_manifest_parser() -> argparse.ArgumentParser:
+    """Build the parser for the ``daydream bench manifest`` sub-verb."""
+    parser = argparse.ArgumentParser(
+        prog="daydream bench manifest",
+        description="Fold a harvested bot-review corpus into a compact, git-tracked manifest.json.",
+    )
+    parser.add_argument(
+        "--harvest-dir",
+        required=True,
+        type=Path,
+        metavar="DIR",
+        dest="harvest_dir",
+        help="Root of a harvested bot-review corpus (must contain index.json and harvest/)",
+    )
+    return parser
+
+
+def _handle_bench_manifest_command(argv: list[str]) -> int:
+    """Handle ``daydream bench manifest --harvest-dir DIR``.
+
+    Regenerates ``DIR/manifest.json`` from ``index.json`` + ``harvest/pr-*.json``.
+    Returns ``2`` (not an exception) when the corpus is incomplete or
+    internally inconsistent, mirroring the harvest sub-verb's failure
+    convention.
+    """
+    from daydream.agent import console
+    from daydream.benchmark.corpus_manifest import write_corpus_manifest
+    from daydream.ui import print_info, print_warning
+
+    parser = _build_bench_manifest_parser()
+    args = parser.parse_args(argv)
+    try:
+        path = write_corpus_manifest(args.harvest_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print_warning(console, f"cannot build manifest: {exc}")
+        return 2
+    print_info(console, f"Wrote {path}")
+    return 0
+
+
 def _handle_bench_command(argv: list[str]) -> int:
     """Handle ``daydream bench --benchmark-repo <path> [...]``.
 
-    ``daydream bench harvest [...]`` dispatches to
-    :func:`_handle_bench_harvest_command` instead.
+    ``daydream bench harvest [...]`` and ``daydream bench manifest [...]``
+    dispatch to :func:`_handle_bench_harvest_command` /
+    :func:`_handle_bench_manifest_command` instead.
 
     Parses argv into a :class:`BenchConfig` and drives
     :func:`daydream.benchmark.run_bench` synchronously. Returns an exit code
@@ -393,6 +436,9 @@ def _handle_bench_command(argv: list[str]) -> int:
 
     if argv and argv[0] == "harvest":
         return _handle_bench_harvest_command(argv[1:])
+
+    if argv and argv[0] == "manifest":
+        return _handle_bench_manifest_command(argv[1:])
 
     _load_bench_dotenv()
     config = _bench_config_from_argv(argv)

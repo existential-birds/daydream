@@ -1,0 +1,2828 @@
+{
+  "harvested_at": "2026-08-05",
+  "repo": "existential-birds/osprey",
+  "bot": "coderabbitai[bot]",
+  "state": "closed",
+  "pr_count": 142,
+  "comment_count": 342,
+  "resolved_count": 740,
+  "prs": [
+    {
+      "number": 516,
+      "snapshot_commit": "caac82427106e6369bef97120a12b53b392ac10e",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3720678922,
+          "path": "core/osprey-cli/src/cli.rs",
+          "line": 186
+        },
+        {
+          "id": 3720678925,
+          "path": "harbor_adapters/tests/test_atif_trajectory_valid.py",
+          "line": 153
+        }
+      ]
+    },
+    {
+      "number": 514,
+      "snapshot_commit": "f9bab0aab44b49150129b26a1e88a90c72a78eaa",
+      "comment_count": 1,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3719736807,
+          "path": "core/osprey-cli/tests/headless_dispatcher.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 511,
+      "snapshot_commit": "554c96f66c4a36c0d7db001a646ff547f7361306",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3717725435,
+          "path": "README.md",
+          "line": 236
+        }
+      ]
+    },
+    {
+      "number": 470,
+      "snapshot_commit": "8d292085aae75bc719e6e2abb8c2246e21282d8e",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3717521441,
+          "path": "core/osprey-agent/src/auxiliary.rs",
+          "line": 375
+        },
+        {
+          "id": 3717521444,
+          "path": "core/osprey-agent/src/compaction.rs",
+          "line": 1230
+        },
+        {
+          "id": 3717521446,
+          "path": "core/osprey-agent/src/moa/driver.rs",
+          "line": 926
+        },
+        {
+          "id": 3717521447,
+          "path": "core/osprey-agent/src/moa/investigate.rs",
+          "line": 330
+        },
+        {
+          "id": 3717521451,
+          "path": "core/osprey-agent/src/subagent/tests.rs",
+          "line": 245
+        }
+      ]
+    },
+    {
+      "number": 452,
+      "snapshot_commit": "4fe50e20d3340dc9cc48ac2b4e4b75f4345b9feb",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3717228688,
+          "path": "core/osprey-drivers/src/anthropic/stream.rs",
+          "line": 481
+        }
+      ]
+    },
+    {
+      "number": 451,
+      "snapshot_commit": "66d672b58d6c6e85a6943989fe4a50f1e00b00f6",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3716895575,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 2332
+        },
+        {
+          "id": 3716895580,
+          "path": "core/osprey-agent/src/auxiliary.rs",
+          "line": 344
+        },
+        {
+          "id": 3716895582,
+          "path": "core/osprey-agent/src/subagent/tests.rs",
+          "line": 27
+        },
+        {
+          "id": 3716895585,
+          "path": "core/osprey-agent/tests/suite/compaction_tests.rs",
+          "line": 1854
+        },
+        {
+          "id": 3716895588,
+          "path": "core/osprey-drivers/src/openai_compat/policy.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 450,
+      "snapshot_commit": "605bbd920a4536f6119c9f902f6e0cec764ce03a",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3715794522,
+          "path": "core/osprey-agent/src/moa/driver.rs",
+          "line": null
+        },
+        {
+          "id": 3715794533,
+          "path": "core/osprey-agent/src/session.rs",
+          "line": 1172
+        }
+      ]
+    },
+    {
+      "number": 449,
+      "snapshot_commit": "2e1a4b334f7df186c3650ed247ec901d5a7c792e",
+      "comment_count": 8,
+      "resolved_count": 8,
+      "golden_comments": [
+        {
+          "id": 3714807050,
+          "path": "core/migrations-sqlite/20260713000000_session_usage.sql",
+          "line": null
+        },
+        {
+          "id": 3714807063,
+          "path": "core/migrations/20260804000001_usage_cache_availability.sql",
+          "line": null
+        },
+        {
+          "id": 3714807068,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 2437
+        },
+        {
+          "id": 3714807077,
+          "path": "core/osprey-core/src/session_types.rs",
+          "line": null
+        },
+        {
+          "id": 3714807081,
+          "path": "core/osprey-core/tests/suite/sqlite_migrations_apply.rs",
+          "line": 382
+        },
+        {
+          "id": 3714807084,
+          "path": "core/osprey-drivers/tests/chat_completions_characterization.rs",
+          "line": 894
+        },
+        {
+          "id": 3714807088,
+          "path": "core/osprey-tui/src/widgets/footer.rs",
+          "line": null
+        },
+        {
+          "id": 3714807092,
+          "path": "core/osprey-types/src/driver.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 447,
+      "snapshot_commit": "6ac22f8bca294128ecb18d266cfa11f7efaeebe7",
+      "comment_count": 1,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 3714075280,
+          "path": "core/migrations/20260804000000_expand_subagent_outcome_check.sql",
+          "line": 5
+        }
+      ]
+    },
+    {
+      "number": 438,
+      "snapshot_commit": "e028b4879f27c5a5ce75ec39754768eb1e6f09d2",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3711348596,
+          "path": "core/osprey-agent/tests/suite/evidence_calibration_tests.rs",
+          "line": 55
+        }
+      ]
+    },
+    {
+      "number": 437,
+      "snapshot_commit": "0792d31fe31a45fa75d47ce384e47d1ff0933fd1",
+      "comment_count": 12,
+      "resolved_count": 12,
+      "golden_comments": [
+        {
+          "id": 3711066271,
+          "path": "core/osprey-tui/src/app/handlers/render.rs",
+          "line": null
+        },
+        {
+          "id": 3711066278,
+          "path": "core/osprey-tui/src/app/handlers/render.rs",
+          "line": 170
+        },
+        {
+          "id": 3711066287,
+          "path": "core/osprey-tui/src/app/handlers/render.rs",
+          "line": 928
+        },
+        {
+          "id": 3711066290,
+          "path": "core/osprey-tui/src/app/handlers/terminal.rs",
+          "line": 697
+        },
+        {
+          "id": 3711066294,
+          "path": "core/osprey-tui/src/app/handlers/terminal.rs",
+          "line": null
+        },
+        {
+          "id": 3711066298,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": 1075
+        },
+        {
+          "id": 3711066318,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": null
+        },
+        {
+          "id": 3711066326,
+          "path": "core/osprey-tui/src/app/modal.rs",
+          "line": null
+        },
+        {
+          "id": 3711066330,
+          "path": "core/osprey-tui/src/app/runtime.rs",
+          "line": 1532
+        },
+        {
+          "id": 3711066335,
+          "path": "core/osprey-tui/src/widgets/approval_panel.rs",
+          "line": null
+        },
+        {
+          "id": 3711066341,
+          "path": "core/osprey-tui/src/widgets/approval_panel.rs",
+          "line": null
+        },
+        {
+          "id": 3711066353,
+          "path": "core/osprey-tui/tests/suite/prompt_dock.rs",
+          "line": 179
+        }
+      ]
+    },
+    {
+      "number": 436,
+      "snapshot_commit": "a67f9a9dda34f09dc02e64408cd99ddd1e955f7b",
+      "comment_count": 1,
+      "resolved_count": 18,
+      "golden_comments": [
+        {
+          "id": 3709773790,
+          "path": "core/osprey-agent/src/prompt_composition.rs",
+          "line": 27
+        }
+      ]
+    },
+    {
+      "number": 433,
+      "snapshot_commit": "132285bfb8691218800cad553a0c18edd0434a81",
+      "comment_count": 9,
+      "resolved_count": 9,
+      "golden_comments": [
+        {
+          "id": 3706662823,
+          "path": "core/osprey-agent/src/persona.rs",
+          "line": null
+        },
+        {
+          "id": 3706662851,
+          "path": "core/osprey-cli/tests/extension_surface.rs",
+          "line": null
+        },
+        {
+          "id": 3706662856,
+          "path": "core/osprey-cli/tests/headless_dispatcher.rs",
+          "line": null
+        },
+        {
+          "id": 3706662860,
+          "path": "core/osprey-tui/src/launch.rs",
+          "line": 181
+        },
+        {
+          "id": 3706662869,
+          "path": "core/osprey-tui/src/launch.rs",
+          "line": null
+        },
+        {
+          "id": 3706662877,
+          "path": "core/osprey-tui/tests/suite/tab_persona_consequence_e2e.rs",
+          "line": 95
+        },
+        {
+          "id": 3706662879,
+          "path": "docs/plans/386-task-neutral-contract.md",
+          "line": null
+        },
+        {
+          "id": 3706662883,
+          "path": "docs/plans/386-task-neutral-contract.md",
+          "line": null
+        },
+        {
+          "id": 3706662890,
+          "path": "docs/plans/386-task-neutral-contract.md",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 432,
+      "snapshot_commit": "ea862006bbc659fc2f22272b08a3f6ba6e863736",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3705641129,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 69
+        },
+        {
+          "id": 3705641139,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": null
+        },
+        {
+          "id": 3705641146,
+          "path": "core/osprey-tui/src/widgets/moa_manager.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 423,
+      "snapshot_commit": "c4a7c6ca3c2f5d4903e30a829473242ccd5d8eac",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3704264293,
+          "path": "core/osprey-drivers/src/anthropic/stream.rs",
+          "line": null
+        },
+        {
+          "id": 3704264316,
+          "path": "core/osprey-drivers/src/openai/responses_stream.rs",
+          "line": null
+        },
+        {
+          "id": 3704264328,
+          "path": "core/osprey-drivers/src/openai/responses_stream.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 419,
+      "snapshot_commit": "5fed8b935ce77732631d1af581ba26dee2f4c552",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3703244696,
+          "path": "core/osprey-tui/src/widgets/composer/wrapping.rs",
+          "line": null
+        },
+        {
+          "id": 3703244705,
+          "path": "core/osprey-tui/tests/suite/composer_ctrl_u_visual_row.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 418,
+      "snapshot_commit": "10fc191b7c6657d4dc9d5b00104eae85a15acab2",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3701579061,
+          "path": "core/osprey-tui/src/transcript/tool_call.rs",
+          "line": 776
+        },
+        {
+          "id": 3701579066,
+          "path": "core/osprey-tui/tests/suite/parity_g0.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 417,
+      "snapshot_commit": "7c169122730485d40f4c51c2fa2d3c198e8e26d2",
+      "comment_count": 1,
+      "resolved_count": 14,
+      "golden_comments": [
+        {
+          "id": 3706166835,
+          "path": "tools/bench-dashboard/launch.py",
+          "line": 368
+        }
+      ]
+    },
+    {
+      "number": 416,
+      "snapshot_commit": "033a6af036b5101165c84055b8161eb586ec49e0",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3700956443,
+          "path": "core/osprey-tui/src/app/handlers/terminal.rs",
+          "line": 1116
+        },
+        {
+          "id": 3700956445,
+          "path": "core/osprey-tui/src/tui.rs",
+          "line": null
+        },
+        {
+          "id": 3700956446,
+          "path": "core/osprey-tui/src/tui.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 415,
+      "snapshot_commit": "38fd428a311c137e043419d5dbb6644febb440ad",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3700727667,
+          "path": "core/osprey-tools/src/bash/mod.rs",
+          "line": 67
+        },
+        {
+          "id": 3700727670,
+          "path": "core/osprey-tools/src/bash/mod.rs",
+          "line": null
+        },
+        {
+          "id": 3700727671,
+          "path": "core/osprey-tools/src/bash/mod.rs",
+          "line": 276
+        }
+      ]
+    },
+    {
+      "number": 413,
+      "snapshot_commit": "79f8515171f690118390963850c728ff9d9ebc39",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 411,
+      "snapshot_commit": "facca081a0a5633408fad6821e506c26419efc73",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3699534600,
+          "path": "Makefile",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 409,
+      "snapshot_commit": "6ccdde55e448fe5fa6ac4246c896137e4f4914d7",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 408,
+      "snapshot_commit": "8ef808278ca9df437c6cf2524e8eae691fd92b58",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 407,
+      "snapshot_commit": "2d43c3db623f0097e4786b8f0976d59118e89b67",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3698693084,
+          "path": "core/osprey-tui/src/app/handlers/render.rs",
+          "line": 884
+        },
+        {
+          "id": 3698693090,
+          "path": "core/osprey-tui/src/widgets/composer.rs",
+          "line": 927
+        },
+        {
+          "id": 3698693092,
+          "path": "core/osprey-tui/src/widgets/toast.rs",
+          "line": 124
+        },
+        {
+          "id": 3698693095,
+          "path": "core/osprey-tui/src/widgets/which_key.rs",
+          "line": 156
+        },
+        {
+          "id": 3698693097,
+          "path": "core/osprey-tui/tests/suite/degenerate_render.rs",
+          "line": 38
+        }
+      ]
+    },
+    {
+      "number": 404,
+      "snapshot_commit": "218266c6bda796bd95d66d517565c36a66abc38a",
+      "comment_count": 2,
+      "resolved_count": 23,
+      "golden_comments": [
+        {
+          "id": 3694432787,
+          "path": "core/osprey-tui/src/widgets/interactive_pane.rs",
+          "line": 217
+        },
+        {
+          "id": 3694432790,
+          "path": "core/osprey-tui/src/widgets/interactive_pane.rs",
+          "line": 426
+        }
+      ]
+    },
+    {
+      "number": 400,
+      "snapshot_commit": "30ae7ad61bbc904a92b5ef4cd107253159d1b74a",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3687286054,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": null
+        },
+        {
+          "id": 3687286061,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 399,
+      "snapshot_commit": "b2c2281d5222471f9c7756aa964d07f169544b31",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3681233890,
+          "path": "core/osprey-agent/src/completion_domain.rs",
+          "line": 768
+        },
+        {
+          "id": 3681233901,
+          "path": "core/osprey-test-utils/src/mock_driver.rs",
+          "line": 496
+        }
+      ]
+    },
+    {
+      "number": 398,
+      "snapshot_commit": "114b2d593b5b6e66452855ad93deba8660b77dd5",
+      "comment_count": 1,
+      "resolved_count": 13,
+      "golden_comments": [
+        {
+          "id": 3682552115,
+          "path": "core/osprey-tui/tests/suite/agent_message_render.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 395,
+      "snapshot_commit": "82a5f9e5c47241311d43daebf4bde29f1e564252",
+      "comment_count": 1,
+      "resolved_count": 14,
+      "golden_comments": [
+        {
+          "id": 3663476492,
+          "path": "harbor_adapters/tests/test_bench_invocation.py",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 394,
+      "snapshot_commit": "edeada0208ba3b8ec33278dbe461df1e39388b17",
+      "comment_count": 2,
+      "resolved_count": 0,
+      "golden_comments": [
+        {
+          "id": 3653534652,
+          "path": "core/osprey-agent/src/workflow/runtime.rs",
+          "line": 1239
+        },
+        {
+          "id": 3653534653,
+          "path": "core/osprey-cli/src/lib.rs",
+          "line": 367
+        }
+      ]
+    },
+    {
+      "number": 390,
+      "snapshot_commit": "01c286afd34c0429206d10b7685c8874e9a52d98",
+      "comment_count": 2,
+      "resolved_count": 13,
+      "golden_comments": [
+        {
+          "id": 3653249993,
+          "path": "core/osprey-agent/src/workflow/runtime.rs",
+          "line": null
+        },
+        {
+          "id": 3653249994,
+          "path": "core/osprey-agent/src/workflow/runtime.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 389,
+      "snapshot_commit": "455968fad4d943c56c5c7f61b7689cb7a5a9701f",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3626710568,
+          "path": "core/osprey-agent/src/subagent/tests.rs",
+          "line": null
+        },
+        {
+          "id": 3626710570,
+          "path": "core/osprey-agent/tests/suite/loop_tests.rs",
+          "line": 24
+        },
+        {
+          "id": 3626710571,
+          "path": "core/osprey-agent/tests/suite/retry_recovery_tests.rs",
+          "line": 22
+        },
+        {
+          "id": 3626710574,
+          "path": "core/osprey-cli/tests/headless_dispatcher.rs",
+          "line": null
+        },
+        {
+          "id": 3626710575,
+          "path": "core/osprey-tui/tests/suite/parity_g4.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 372,
+      "snapshot_commit": "6328e6826ddeedb4ac3fdcbec30debf5c269ea7e",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3611658807,
+          "path": "core/osprey-tui/src/app/selection.rs",
+          "line": 295
+        }
+      ]
+    },
+    {
+      "number": 371,
+      "snapshot_commit": "72417aac31287013ce1cb378730afb4cd8fb737e",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3611445281,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": 1400
+        },
+        {
+          "id": 3611445283,
+          "path": "core/osprey-tui/src/commands/builtins.rs",
+          "line": 1525
+        }
+      ]
+    },
+    {
+      "number": 370,
+      "snapshot_commit": "6877cca6e6b53eed6dd3295de7f9f6016c599e9c",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3611226972,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": 1893
+        },
+        {
+          "id": 3611226975,
+          "path": "core/osprey-tui/src/transcript/tool_call.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 348,
+      "snapshot_commit": "808dfd4c477be2e927264d1a96cf1a0317a8d43c",
+      "comment_count": 3,
+      "resolved_count": 21,
+      "golden_comments": [
+        {
+          "id": 3609497493,
+          "path": "core/osprey-agent/tests/suite/loop_tests.rs",
+          "line": 497
+        },
+        {
+          "id": 3609497496,
+          "path": "core/osprey-drivers/src/driver.rs",
+          "line": null
+        },
+        {
+          "id": 3609497498,
+          "path": "core/osprey-tui/src/app/handlers/render.rs",
+          "line": 774
+        }
+      ]
+    },
+    {
+      "number": 344,
+      "snapshot_commit": "d4efe87dc830f755a1fda0d6e000a7c5bb68d151",
+      "comment_count": 1,
+      "resolved_count": 20,
+      "golden_comments": [
+        {
+          "id": 3607363454,
+          "path": "core/osprey-cli/tests/headless_dispatcher.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 332,
+      "snapshot_commit": "088f071f7b0ea443f4dc7c3240abe369dd517fcb",
+      "comment_count": 6,
+      "resolved_count": 17,
+      "golden_comments": [
+        {
+          "id": 3577001315,
+          "path": "core/migrations-sqlite/20260713000000_session_usage.sql",
+          "line": null
+        },
+        {
+          "id": 3577001380,
+          "path": "core/osprey-tools/Cargo.toml",
+          "line": null
+        },
+        {
+          "id": 3577001385,
+          "path": "core/osprey-tui/src/app/handlers/agent.rs",
+          "line": null
+        },
+        {
+          "id": 3577001414,
+          "path": "core/osprey-tui/tests/suite/parity_g5.rs",
+          "line": null
+        },
+        {
+          "id": 3577135208,
+          "path": "core/osprey-core/tests/suite/migrations_apply.rs",
+          "line": 103
+        },
+        {
+          "id": 3577135218,
+          "path": "core/osprey-core/tests/suite/sqlite_migrations_apply.rs",
+          "line": 116
+        }
+      ]
+    },
+    {
+      "number": 331,
+      "snapshot_commit": "b1cdf6836ba2b28e1f3ad8abf43dc1d0451e2a94",
+      "comment_count": 8,
+      "resolved_count": 16,
+      "golden_comments": [
+        {
+          "id": 3576149089,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 1646
+        },
+        {
+          "id": 3576149093,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 1819
+        },
+        {
+          "id": 3576149097,
+          "path": "core/osprey-drivers/src/driver.rs",
+          "line": 254
+        },
+        {
+          "id": 3576149102,
+          "path": "harbor_adapters/osprey.py",
+          "line": 375
+        },
+        {
+          "id": 3576149122,
+          "path": "tools/bench_results/loader.py",
+          "line": 429
+        },
+        {
+          "id": 3576149125,
+          "path": "tools/bench_results/phases.py",
+          "line": 21
+        },
+        {
+          "id": 3576149136,
+          "path": "tools/run-report/build.py",
+          "line": 647
+        },
+        {
+          "id": 3576149140,
+          "path": "tools/run-report/build.py",
+          "line": 681
+        }
+      ]
+    },
+    {
+      "number": 329,
+      "snapshot_commit": "ebc2ace0d735d7802776d1f4df7ed539e07a09db",
+      "comment_count": 0,
+      "resolved_count": 4,
+      "golden_comments": []
+    },
+    {
+      "number": 325,
+      "snapshot_commit": "a05c57ec3f2472af2bc35cd57b624686719b2b9b",
+      "comment_count": 4,
+      "resolved_count": 6,
+      "golden_comments": [
+        {
+          "id": 3567485573,
+          "path": "core/osprey-agent/src/process_group.rs",
+          "line": 65
+        },
+        {
+          "id": 3567485585,
+          "path": "core/osprey-agent/src/process_group.rs",
+          "line": 103
+        },
+        {
+          "id": 3567485590,
+          "path": "core/osprey-agent/src/process_group.rs",
+          "line": 162
+        },
+        {
+          "id": 3567485593,
+          "path": "core/osprey-agent/src/process_ledger.rs",
+          "line": 262
+        }
+      ]
+    },
+    {
+      "number": 323,
+      "snapshot_commit": "37d1d91c82dd00cb9d14d1c7a7bb201bac96161f",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 322,
+      "snapshot_commit": "fe20bf9d84f69697058ecb65a5fc36e3c20ab5c7",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3566589597,
+          "path": "core/osprey-tui/tests/suite/session_switch_activated_at.rs",
+          "line": 135
+        }
+      ]
+    },
+    {
+      "number": 321,
+      "snapshot_commit": "12fccc022d6c2c0ecc6e11228231476c50d7869d",
+      "comment_count": 2,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3566490268,
+          "path": "core/osprey-drivers/src/anthropic/format.rs",
+          "line": 32
+        },
+        {
+          "id": 3566490272,
+          "path": "core/osprey-tui/src/widgets/help_dialog.rs",
+          "line": 53
+        }
+      ]
+    },
+    {
+      "number": 311,
+      "snapshot_commit": "0910d76b2eb4a59161795e7206844ab2c546b532",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3565227849,
+          "path": "core/osprey-tui/tests/suite/new_command_e2e.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 309,
+      "snapshot_commit": "349d6c3e0c0b59bdfc7eb22987a5ffd29fd256b2",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3564874411,
+          "path": "core/osprey-agent/src/memory/mod.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 308,
+      "snapshot_commit": "1f4a5f57071243945dfe56a7f0902b5d83109b9a",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3564884565,
+          "path": "core/osprey-agent/tests/suite/driver_retry_arc.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 306,
+      "snapshot_commit": "16cd0e081f91aad3c5621c6db7e24a7d27a5859f",
+      "comment_count": 4,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 3564660871,
+          "path": "docs/presentations/architecture-map.md",
+          "line": 114
+        },
+        {
+          "id": 3564660872,
+          "path": "docs/presentations/runtime-execution-flow.md",
+          "line": null
+        },
+        {
+          "id": 3564660873,
+          "path": "docs/presentations/runtime-execution-flow.md",
+          "line": null
+        },
+        {
+          "id": 3564660874,
+          "path": "docs/presentations/runtime-execution-flow.md",
+          "line": 114
+        }
+      ]
+    },
+    {
+      "number": 305,
+      "snapshot_commit": "470503c178960ad32d2fd4229a65a3c7e55ff4b4",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3564668562,
+          "path": "core/osprey-tools/tests/lsp_live.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 304,
+      "snapshot_commit": "3d21c09e46547e29df61467cbbff35b67e877656",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3562907940,
+          "path": "core/osprey-agent/tests/suite/retry_recovery_tests.rs",
+          "line": null
+        },
+        {
+          "id": 3562907942,
+          "path": "core/osprey-test-utils/src/canonical.rs",
+          "line": 119
+        },
+        {
+          "id": 3562907943,
+          "path": "core/osprey-tui/tests/suite/support.rs",
+          "line": 185
+        }
+      ]
+    },
+    {
+      "number": 303,
+      "snapshot_commit": "54b3b4682bf14e00a9250bfea6cd39161a4b22b6",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 300,
+      "snapshot_commit": "d56d65795a36176218a9ebbf8e271d60d6c9008a",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3556247478,
+          "path": ".github/workflows/release.yml",
+          "line": 131
+        },
+        {
+          "id": 3556247486,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 1440
+        },
+        {
+          "id": 3556247489,
+          "path": "scripts/install-e2e.sh",
+          "line": 99
+        },
+        {
+          "id": 3556247520,
+          "path": "scripts/install.sh",
+          "line": 394
+        },
+        {
+          "id": 3556247524,
+          "path": "scripts/install.sh",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 298,
+      "snapshot_commit": "4b6eb1704c9afc61476c21633ae037b79de40d22",
+      "comment_count": 9,
+      "resolved_count": 9,
+      "golden_comments": [
+        {
+          "id": 3555917691,
+          "path": "core/osprey-agent/src/auxiliary.rs",
+          "line": 22
+        },
+        {
+          "id": 3555917696,
+          "path": "core/osprey-agent/src/lib.rs",
+          "line": null
+        },
+        {
+          "id": 3555917699,
+          "path": "core/osprey-agent/tests/suite/auxiliary_cassette.rs",
+          "line": null
+        },
+        {
+          "id": 3555917703,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 645
+        },
+        {
+          "id": 3555917706,
+          "path": "core/osprey-cli/tests/real_launcher/helpers.rs",
+          "line": null
+        },
+        {
+          "id": 3555917709,
+          "path": "core/osprey-drivers/tests/cassettes/anthropic/vision_describe.json",
+          "line": 24
+        },
+        {
+          "id": 3555917713,
+          "path": "core/osprey-tools/src/image.rs",
+          "line": null
+        },
+        {
+          "id": 3555917720,
+          "path": "core/osprey-tools/src/local_dispatcher/mod.rs",
+          "line": 185
+        },
+        {
+          "id": 3555917725,
+          "path": "core/osprey-tools/src/local_dispatcher/read.rs",
+          "line": 82
+        }
+      ]
+    },
+    {
+      "number": 295,
+      "snapshot_commit": "02b299c0a0d0d120f5adc716df61aa89ade671dd",
+      "comment_count": 1,
+      "resolved_count": 17,
+      "golden_comments": [
+        {
+          "id": 3555167263,
+          "path": "core/osprey-tools/src/web/search.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 285,
+      "snapshot_commit": "e78a74b04dd45466f14bdc2f93031bdf03157c6b",
+      "comment_count": 1,
+      "resolved_count": 12,
+      "golden_comments": [
+        {
+          "id": 3546526466,
+          "path": "core/osprey-agent/skills/bug-report.md",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 272,
+      "snapshot_commit": "56b6258c14a526f8406b3bc272fd62a8cd840088",
+      "comment_count": 3,
+      "resolved_count": 11,
+      "golden_comments": [
+        {
+          "id": 3532838198,
+          "path": "core/osprey-agent/src/workflow/api.rs",
+          "line": 127
+        },
+        {
+          "id": 3532838202,
+          "path": "core/osprey-agent/src/workflow/runtime.rs",
+          "line": null
+        },
+        {
+          "id": 3532838205,
+          "path": "core/osprey-agent/src/workflow/runtime.rs",
+          "line": 1181
+        }
+      ]
+    },
+    {
+      "number": 271,
+      "snapshot_commit": "20cec2ce18a7ae38bfd10ac7a00e32c9f4204dfd",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3524000920,
+          "path": "core/osprey-agent/src/extensions/reload.rs",
+          "line": 314
+        }
+      ]
+    },
+    {
+      "number": 270,
+      "snapshot_commit": "fafa8f0491abab7b8d6645756c1c0fe8363c46a2",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3523235554,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 813
+        },
+        {
+          "id": 3523235557,
+          "path": "core/osprey-tools/src/local_dispatcher/bash.rs",
+          "line": 265
+        }
+      ]
+    },
+    {
+      "number": 257,
+      "snapshot_commit": "08f26b5b6f0e262275bee30b24b1ad27d951e2bb",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3522388068,
+          "path": "core/osprey-tools/src/local_dispatcher/bash.rs",
+          "line": 70
+        }
+      ]
+    },
+    {
+      "number": 255,
+      "snapshot_commit": "1b31cce744254ea8a134de3749a5b7c1d65e004e",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3522237918,
+          "path": "harbor_adapters/osprey.py",
+          "line": 358
+        },
+        {
+          "id": 3522237921,
+          "path": "harbor_adapters/osprey.py",
+          "line": 417
+        }
+      ]
+    },
+    {
+      "number": 246,
+      "snapshot_commit": "3adfcc50856f30af836a5a9f534781ba62ed1840",
+      "comment_count": 1,
+      "resolved_count": 7,
+      "golden_comments": [
+        {
+          "id": 3515683987,
+          "path": "core/osprey-cli/tests/real_launcher/moa_manager.rs",
+          "line": 254
+        }
+      ]
+    },
+    {
+      "number": 244,
+      "snapshot_commit": "1935ba6ac36efbe9d7c8b86cfc4186a044323e3f",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3509954542,
+          "path": "core/osprey-sandbox/src/runner/exec.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 243,
+      "snapshot_commit": "6f0b444b93f7d32a5bf3465366db596bb7579bba",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3508846277,
+          "path": "core/osprey-agent/src/compress/mod.rs",
+          "line": null
+        },
+        {
+          "id": 3508846288,
+          "path": "core/osprey-agent/src/compress/mod.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 242,
+      "snapshot_commit": "304df9b988b5e569e6cbbe85299c44c14bbd26f4",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3507544085,
+          "path": "core/osprey-agent/src/session.rs",
+          "line": null
+        },
+        {
+          "id": 3507544093,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 76
+        },
+        {
+          "id": 3507544102,
+          "path": "core/osprey-drivers/src/openrouter/mod.rs",
+          "line": 16
+        }
+      ]
+    },
+    {
+      "number": 241,
+      "snapshot_commit": "b90cc7a03570973d609d7e73cda9239a3ea77ee3",
+      "comment_count": 3,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3506021858,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 119
+        },
+        {
+          "id": 3506021874,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 659
+        },
+        {
+          "id": 3506021882,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 647
+        }
+      ]
+    },
+    {
+      "number": 240,
+      "snapshot_commit": "e602a29f54152554c9159b7666b6ee3a7d03acc9",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3505576549,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": null
+        },
+        {
+          "id": 3505576559,
+          "path": "harbor_adapters/osprey.py",
+          "line": 241
+        }
+      ]
+    },
+    {
+      "number": 239,
+      "snapshot_commit": "3fc8a5155ecc2cca3cf1dfa394fba113f713c48b",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 233,
+      "snapshot_commit": "22eb39f6952b3f7eb594934a7a1755b0acd73fcb",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 231,
+      "snapshot_commit": "b36696a9b77f54c0a3a3fb25622f66178839d5da",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3502692908,
+          "path": "core/osprey-tui/src/app/effect.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 230,
+      "snapshot_commit": "645cdd1fa363a06af0b31de45f995a0408b3a651",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3502577093,
+          "path": "core/osprey-drivers/src/openrouter/mod.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 226,
+      "snapshot_commit": "632d60f53841ef75c0708084bd71f4010e6c2713",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3488850168,
+          "path": "core/osprey-drivers/src/openai/stream.rs",
+          "line": 119
+        }
+      ]
+    },
+    {
+      "number": 225,
+      "snapshot_commit": "058ae58ca484a70af33eb048c73391d1213fa0ac",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 208,
+      "snapshot_commit": "0f029625968b8821602d772e4a30d1b48cf3a923",
+      "comment_count": 13,
+      "resolved_count": 22,
+      "golden_comments": [
+        {
+          "id": 3487368572,
+          "path": "bench/optimize/baseline.py",
+          "line": 61
+        },
+        {
+          "id": 3487368575,
+          "path": "bench/optimize/dataset_ref.py",
+          "line": 25
+        },
+        {
+          "id": 3487368577,
+          "path": "bench/optimize/tests/test_slice.py",
+          "line": 38
+        },
+        {
+          "id": 3488345532,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 1010
+        },
+        {
+          "id": 3488345538,
+          "path": "core/osprey-drivers/src/driver_set.rs",
+          "line": 264
+        },
+        {
+          "id": 3488760802,
+          "path": "core/osprey-cli/src/config.rs",
+          "line": 563
+        },
+        {
+          "id": 3488760806,
+          "path": "harbor_adapters/osprey.py",
+          "line": 202
+        },
+        {
+          "id": 3488760808,
+          "path": "harbor_adapters/tests/test_adapter_model_resolution.py",
+          "line": 60
+        },
+        {
+          "id": 3489115639,
+          "path": "core/osprey-tools/src/local_dispatcher/write.rs",
+          "line": 99
+        },
+        {
+          "id": 3498516440,
+          "path": "tools/run-report/build.py",
+          "line": 262
+        },
+        {
+          "id": 3498516452,
+          "path": "tools/run-report/template.html",
+          "line": 6
+        },
+        {
+          "id": 3498516458,
+          "path": "tools/run-report/template.html",
+          "line": 326
+        },
+        {
+          "id": 3498516462,
+          "path": "tools/run-report/template.html",
+          "line": 361
+        }
+      ]
+    },
+    {
+      "number": 207,
+      "snapshot_commit": "0789abd449d29eedbe440e0cacacf0f064a438ce",
+      "comment_count": 2,
+      "resolved_count": 6,
+      "golden_comments": [
+        {
+          "id": 3486633490,
+          "path": "core/osprey-drivers/src/openai/mod.rs",
+          "line": 818
+        },
+        {
+          "id": 3486633491,
+          "path": "core/osprey-types/src/driver.rs",
+          "line": 352
+        }
+      ]
+    },
+    {
+      "number": 206,
+      "snapshot_commit": "cf9deb014d5a4bf22d9adfa46d324c36ba6b07ac",
+      "comment_count": 6,
+      "resolved_count": 0,
+      "golden_comments": [
+        {
+          "id": 3483631991,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 174
+        },
+        {
+          "id": 3483632001,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": 593
+        },
+        {
+          "id": 3483632016,
+          "path": "core/osprey-agent/src/agent_loop.rs",
+          "line": null
+        },
+        {
+          "id": 3483632019,
+          "path": "core/osprey-drivers/src/anthropic/format.rs",
+          "line": 308
+        },
+        {
+          "id": 3483632025,
+          "path": "core/osprey-drivers/src/driver.rs",
+          "line": 65
+        },
+        {
+          "id": 3483632029,
+          "path": "core/osprey-drivers/src/driver.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 205,
+      "snapshot_commit": "debebeb0a76662d38e100c8c156634b9c770bed8",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 203,
+      "snapshot_commit": "73d90ff9c835fb31666ed9dc8b5f8665b5a26b88",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3463259817,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 514
+        },
+        {
+          "id": 3463259821,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 757
+        }
+      ]
+    },
+    {
+      "number": 202,
+      "snapshot_commit": "8c19cb4d9a1c04bf508034f19c1ceeb5c8dafcfd",
+      "comment_count": 1,
+      "resolved_count": 0,
+      "golden_comments": [
+        {
+          "id": 3461626560,
+          "path": "core/osprey-sandbox/tests/integration.rs",
+          "line": 696
+        }
+      ]
+    },
+    {
+      "number": 200,
+      "snapshot_commit": "789c59edb6b3fa2848b44775c447ff14425a6abf",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3456072350,
+          "path": "README.md",
+          "line": 215
+        }
+      ]
+    },
+    {
+      "number": 199,
+      "snapshot_commit": "f67d56ec4ef2f2e64022c649b18103d30e1bf668",
+      "comment_count": 0,
+      "resolved_count": 10,
+      "golden_comments": []
+    },
+    {
+      "number": 196,
+      "snapshot_commit": "69acb211aeffeb7f1cb059791e3b9f8c061db301",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3438219295,
+          "path": "core/osprey-cli/src/headless.rs",
+          "line": 911
+        }
+      ]
+    },
+    {
+      "number": 194,
+      "snapshot_commit": "be48e7078e381127138d341cbabfa1ec797dbcda",
+      "comment_count": 7,
+      "resolved_count": 7,
+      "golden_comments": [
+        {
+          "id": 3429796684,
+          "path": ".github/workflows/daydream-command.yml",
+          "line": null
+        },
+        {
+          "id": 3429796706,
+          "path": ".github/workflows/daydream-command.yml",
+          "line": 70
+        },
+        {
+          "id": 3429796752,
+          "path": ".github/workflows/daydream-post.yml",
+          "line": null
+        },
+        {
+          "id": 3429796776,
+          "path": ".github/workflows/daydream-post.yml",
+          "line": null
+        },
+        {
+          "id": 3429796781,
+          "path": ".github/workflows/daydream-post.yml",
+          "line": 109
+        },
+        {
+          "id": 3429796789,
+          "path": ".github/workflows/daydream-review.yml",
+          "line": 45
+        },
+        {
+          "id": 3429796819,
+          "path": ".github/workflows/daydream-review.yml",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 193,
+      "snapshot_commit": "626806bbbe2b87aa8005da6c32aaf847bf2cd8e6",
+      "comment_count": 4,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 3429582564,
+          "path": "core/.sqlx/query-88da1022de0e337eb2bdddd9470995d535b2abd50df982c4bca3f465d06c1ad1.json",
+          "line": 3
+        },
+        {
+          "id": 3429582584,
+          "path": "core/osprey-core/src/session/memory.rs",
+          "line": 461
+        },
+        {
+          "id": 3429582593,
+          "path": "core/osprey-tui/src/app/runtime.rs",
+          "line": 212
+        },
+        {
+          "id": 3429582597,
+          "path": "core/osprey-tui/src/launch.rs",
+          "line": 492
+        }
+      ]
+    },
+    {
+      "number": 191,
+      "snapshot_commit": "bd175271caae9b67856ab8e86874a27a35bdd8fd",
+      "comment_count": 3,
+      "resolved_count": 0,
+      "golden_comments": [
+        {
+          "id": 3427685102,
+          "path": "core/osprey-core/src/session/sqlite.rs",
+          "line": 852
+        },
+        {
+          "id": 3427685130,
+          "path": "core/osprey-tui/src/app/runtime.rs",
+          "line": 215
+        },
+        {
+          "id": 3427685133,
+          "path": "scripts/sqlx-prepare.sh",
+          "line": 170
+        }
+      ]
+    },
+    {
+      "number": 186,
+      "snapshot_commit": "729cc6ade803e452d00b40076f2eac05f7e9e080",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3391944210,
+          "path": "core/osprey-agent/src/subagent/mod.rs",
+          "line": 278
+        },
+        {
+          "id": 3391944221,
+          "path": "core/osprey-agent/src/subagent/mod.rs",
+          "line": 255
+        },
+        {
+          "id": 3391944223,
+          "path": "core/osprey-agent/src/subagent/tools.rs",
+          "line": null
+        },
+        {
+          "id": 3391944224,
+          "path": "core/osprey-core/src/session/store.rs",
+          "line": 103
+        },
+        {
+          "id": 3391944229,
+          "path": "core/osprey-test-utils/src/mock_driver.rs",
+          "line": 35
+        }
+      ]
+    },
+    {
+      "number": 179,
+      "snapshot_commit": "19640df385547bd924eeb0373c891d5fc9d0e2fd",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3373012618,
+          "path": "core/osprey-agent/src/tool_dispatch.rs",
+          "line": 103
+        },
+        {
+          "id": 3373012629,
+          "path": "core/osprey-agent/src/tool_dispatch.rs",
+          "line": null
+        },
+        {
+          "id": 3373012638,
+          "path": "core/osprey-agent/src/tool_dispatch.rs",
+          "line": 508
+        },
+        {
+          "id": 3373012652,
+          "path": "core/osprey-cli/tests/real_launcher/interrupt.rs",
+          "line": 214
+        },
+        {
+          "id": 3373012660,
+          "path": "core/osprey-tui/src/app/handlers/agent.rs",
+          "line": 285
+        }
+      ]
+    },
+    {
+      "number": 177,
+      "snapshot_commit": "53ee193013a7cf604158561f0ca0733c9841dff4",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 171,
+      "snapshot_commit": "ce2b3ce740d3e587cdf1f194526742ef3e43abf0",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3368040666,
+          "path": "core/osprey-cli/tests/session_subcommand.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 170,
+      "snapshot_commit": "cf6f70d35f8805f3331c088c141ee86427056069",
+      "comment_count": 2,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3367610758,
+          "path": "core/osprey-tui/tests/suite/session_list_tree_e2e.rs",
+          "line": 122
+        },
+        {
+          "id": 3367610760,
+          "path": "core/osprey-tui/tests/suite/session_list_tree_e2e.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 168,
+      "snapshot_commit": "4160e0a841fd2f359babce2f0c2a553bddc9a9a3",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3367143752,
+          "path": "core/osprey-tui/tests/suite/tool_approval_render.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 167,
+      "snapshot_commit": "ac27e9b165cd7d305c0daca68acdbb8d8210a112",
+      "comment_count": 1,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3367401203,
+          "path": "scripts/test.sh",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 165,
+      "snapshot_commit": "e33730e0c46681abfc29afe18e7d1ffe49114e36",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 162,
+      "snapshot_commit": "c876a827dcc211e6c7a827b97e53af00b1c73d8c",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3359396900,
+          "path": "bench/optimize/automate.py",
+          "line": 229
+        }
+      ]
+    },
+    {
+      "number": 160,
+      "snapshot_commit": "d0064d3362209f3e73f8b441131d13f7b2a2917a",
+      "comment_count": 5,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3357627833,
+          "path": "bench/optimize/automate.py",
+          "line": 155
+        },
+        {
+          "id": 3357627852,
+          "path": "bench/optimize/baseline.py",
+          "line": 176
+        },
+        {
+          "id": 3357627863,
+          "path": "bench/optimize/scripts/run-baseline.sh",
+          "line": 27
+        },
+        {
+          "id": 3357627870,
+          "path": "bench/optimize/tests/test_automate.py",
+          "line": 693
+        },
+        {
+          "id": 3357627875,
+          "path": "bench/optimize/tests/test_model_default_drift.py",
+          "line": 41
+        }
+      ]
+    },
+    {
+      "number": 157,
+      "snapshot_commit": "dd75803e7ffc2c6d003c74db019d4df74f5800bb",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 156,
+      "snapshot_commit": "f558f2d02464499382c292619b65941e9f445767",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 154,
+      "snapshot_commit": "185d57d933bc95d1c030578175681a26020f9a6a",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3329714765,
+          "path": "core/osprey-cli/tests/real_launcher/smoke_walk.rs",
+          "line": 320
+        }
+      ]
+    },
+    {
+      "number": 138,
+      "snapshot_commit": "5826764dc20112d25c9fd8773004bb178bd58302",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 136,
+      "snapshot_commit": "91b5ad243d170f86b098684c0ffe1caa6efbeb37",
+      "comment_count": 0,
+      "resolved_count": 2,
+      "golden_comments": []
+    },
+    {
+      "number": 134,
+      "snapshot_commit": "a02e36a8324544dcdd883b0887ff2de4f9566190",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 132,
+      "snapshot_commit": "6d6434e5507c9a31f3d6aa4efe588dfc9946a50b",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3306684992,
+          "path": "core/osprey-tui/src/commands/builtins.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 128,
+      "snapshot_commit": "c38f3f78f348bc8aad13bd08b59b4419f955f391",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3299323213,
+          "path": "core/osprey-tui/src/widgets/approval.rs",
+          "line": 221
+        }
+      ]
+    },
+    {
+      "number": 122,
+      "snapshot_commit": "fab66620e93a92530fed6504d7890ec9a674277c",
+      "comment_count": 3,
+      "resolved_count": 5,
+      "golden_comments": [
+        {
+          "id": 3292967989,
+          "path": "core/osprey-tui/src/commands/builtins.rs",
+          "line": 124
+        },
+        {
+          "id": 3292967991,
+          "path": "core/osprey-tui/src/commands/skill_invocation.rs",
+          "line": 13
+        },
+        {
+          "id": 3292967994,
+          "path": "scripts/setup.sh",
+          "line": 45
+        }
+      ]
+    },
+    {
+      "number": 120,
+      "snapshot_commit": "185bfeb75c9a44d89c66ab4e1ce4ff7b228ba8b4",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3291981628,
+          "path": "core/osprey-tui/tests/suite/session_slash_command.rs",
+          "line": 52
+        }
+      ]
+    },
+    {
+      "number": 118,
+      "snapshot_commit": "51263b308d20f3581806b2c4c167e00ee667173e",
+      "comment_count": 1,
+      "resolved_count": 6,
+      "golden_comments": [
+        {
+          "id": 3255502760,
+          "path": "README.md",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 116,
+      "snapshot_commit": "c4dd4d0a8a5ab6bdf101a9169c2808af6ca4561e",
+      "comment_count": 2,
+      "resolved_count": 14,
+      "golden_comments": [
+        {
+          "id": 3253374824,
+          "path": "scripts/sqlx-prepare.sh",
+          "line": 67
+        },
+        {
+          "id": 3253374831,
+          "path": "scripts/test.sh",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 111,
+      "snapshot_commit": "a4d1acd1001f254b99e97057aeeb9f308985f352",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 110,
+      "snapshot_commit": "18a97d52b64fee5d9d6744750287054585be4ab4",
+      "comment_count": 2,
+      "resolved_count": 7,
+      "golden_comments": [
+        {
+          "id": 3221874056,
+          "path": "core/osprey-cli/tests/agent_persona_flag.rs",
+          "line": 37
+        },
+        {
+          "id": 3221874068,
+          "path": "core/osprey-cli/tests/agent_persona_flag.rs",
+          "line": 122
+        }
+      ]
+    },
+    {
+      "number": 108,
+      "snapshot_commit": "d2ad413756e7c85e399cb9165fe5a1e187359a64",
+      "comment_count": 1,
+      "resolved_count": 7,
+      "golden_comments": [
+        {
+          "id": 3214653199,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 107,
+      "snapshot_commit": "804722452b981a4db6587b054de198eff554cfc5",
+      "comment_count": 2,
+      "resolved_count": 7,
+      "golden_comments": [
+        {
+          "id": 3211447383,
+          "path": "core/osprey-test-utils/src/pg_fixture.rs",
+          "line": null
+        },
+        {
+          "id": 3212331464,
+          "path": "core/osprey-test-utils/src/pg_fixture.rs",
+          "line": 54
+        }
+      ]
+    },
+    {
+      "number": 106,
+      "snapshot_commit": "fe20225c41722e94c788b599db914c57372a5325",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3208635468,
+          "path": "core/osprey-tui/tests/suite/session_switch_midturn_e2e.rs",
+          "line": 70
+        }
+      ]
+    },
+    {
+      "number": 104,
+      "snapshot_commit": "4a7a2d6cfac726cbcb236f99d9b641dd1e44f5cb",
+      "comment_count": 1,
+      "resolved_count": 2,
+      "golden_comments": [
+        {
+          "id": 3192568769,
+          "path": "CLAUDE.md",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 100,
+      "snapshot_commit": "4ec3843566e367a666143e26ceadb7b232c7a70e",
+      "comment_count": 3,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 3185826120,
+          "path": "core/osprey-core/tests/suite/paths_env.rs",
+          "line": 1
+        },
+        {
+          "id": 3185826129,
+          "path": "core/osprey-core/tests/suite/paths_env.rs",
+          "line": null
+        },
+        {
+          "id": 3185826131,
+          "path": "core/osprey-core/tests/suite/paths_env.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 95,
+      "snapshot_commit": "9a5289ce0d11c336cf6ca5851668d45de3184a59",
+      "comment_count": 8,
+      "resolved_count": 10,
+      "golden_comments": [
+        {
+          "id": 3179061597,
+          "path": "core/osprey-tui/src/app/handlers/tick.rs",
+          "line": 40
+        },
+        {
+          "id": 3179061598,
+          "path": "core/osprey-tui/src/app/mod.rs",
+          "line": 288
+        },
+        {
+          "id": 3179061599,
+          "path": "core/osprey-tui/src/launch.rs",
+          "line": 720
+        },
+        {
+          "id": 3179061603,
+          "path": "core/osprey-tui/tests/suite/session_list_tree_e2e.rs",
+          "line": 295
+        },
+        {
+          "id": 3179061609,
+          "path": "core/osprey-tui/tests/suite/tool_approval_pipeline.rs",
+          "line": 200
+        },
+        {
+          "id": 3179061611,
+          "path": "core/osprey-tui/tests/suite/tool_approval_render.rs",
+          "line": 297
+        },
+        {
+          "id": 3182466984,
+          "path": "core/osprey-tui/tests/suite/tool_approval_pipeline.rs",
+          "line": 158
+        },
+        {
+          "id": 3182466992,
+          "path": "core/osprey-tui/tests/suite/tool_approval_pipeline.rs",
+          "line": 280
+        }
+      ]
+    },
+    {
+      "number": 92,
+      "snapshot_commit": "6f5949b3424fd8c8d1b8a9e3dfa8358896d2c4e7",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 86,
+      "snapshot_commit": "d65a159e16901e366eb298b30705c5c97993343e",
+      "comment_count": 3,
+      "resolved_count": 8,
+      "golden_comments": [
+        {
+          "id": 3165112759,
+          "path": "core/volant-tui/src/app/handlers/terminal.rs",
+          "line": 61
+        },
+        {
+          "id": 3165379355,
+          "path": "core/volant-tui/src/app/mod.rs",
+          "line": 358
+        },
+        {
+          "id": 3165379356,
+          "path": "core/volant-tui/src/app/transcript.rs",
+          "line": 69
+        }
+      ]
+    },
+    {
+      "number": 85,
+      "snapshot_commit": "378ccc8f28a4c06f4ff6100e02f0bbfef0116583",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 81,
+      "snapshot_commit": "7fbb4291d5357a4ac1f1fb8d2bb86259fcecba26",
+      "comment_count": 4,
+      "resolved_count": 6,
+      "golden_comments": [
+        {
+          "id": 3146820314,
+          "path": "core/volant-agent/src/config.rs",
+          "line": 109
+        },
+        {
+          "id": 3146820320,
+          "path": "core/volant-drivers/src/openai/responses_format.rs",
+          "line": 142
+        },
+        {
+          "id": 3146820356,
+          "path": "core/volant-drivers/src/openai/responses_stream.rs",
+          "line": 209
+        },
+        {
+          "id": 3146820366,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 313
+        }
+      ]
+    },
+    {
+      "number": 79,
+      "snapshot_commit": "241af376132156861019a9ef419868c100188782",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3143147695,
+          "path": "core/volant-tui-testing/src/harness.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 72,
+      "snapshot_commit": "554108ee2aa52b13239e418d83fd5692fa4b8911",
+      "comment_count": 0,
+      "resolved_count": 1,
+      "golden_comments": []
+    },
+    {
+      "number": 71,
+      "snapshot_commit": "2aa6b763681f46ed930a45a803645deb7d89da3e",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3132335290,
+          "path": "core/volant-tui/src/launch.rs",
+          "line": 484
+        }
+      ]
+    },
+    {
+      "number": 70,
+      "snapshot_commit": "4c3d71327a0a8c47ca6af877e63291e81799f369",
+      "comment_count": 0,
+      "resolved_count": 2,
+      "golden_comments": []
+    },
+    {
+      "number": 60,
+      "snapshot_commit": "814e09731472fa5721f5f2b7ce34c954ef852ecc",
+      "comment_count": 0,
+      "resolved_count": 22,
+      "golden_comments": []
+    },
+    {
+      "number": 47,
+      "snapshot_commit": "65d73bb89f7b017b523cf7bd0e7e73f7b6c2787b",
+      "comment_count": 1,
+      "resolved_count": 1,
+      "golden_comments": [
+        {
+          "id": 3105502725,
+          "path": "core/volant-core/src/lib.rs",
+          "line": 8
+        }
+      ]
+    },
+    {
+      "number": 45,
+      "snapshot_commit": "509e700eaf89a9e7f55b7752e4d4a6c63aacbb95",
+      "comment_count": 3,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 3102507330,
+          "path": "core/volant-tui/src/launch.rs",
+          "line": 156
+        },
+        {
+          "id": 3102507339,
+          "path": "core/volant-tui/src/test_backend.rs",
+          "line": 180
+        },
+        {
+          "id": 3102507350,
+          "path": "core/volant-tui/src/test_backend.rs",
+          "line": 212
+        }
+      ]
+    },
+    {
+      "number": 43,
+      "snapshot_commit": "6a3a353edea0deca2b5273dfd7d94de23d9325e8",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 41,
+      "snapshot_commit": "be89bf09eb283363c0b183bdc3c625a89cc2a2ed",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 40,
+      "snapshot_commit": "a89e07e844098f4ef581a553939c2d1d49391ce7",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 37,
+      "snapshot_commit": "3750cb3b83027184f4c64159b30b2654270903fd",
+      "comment_count": 0,
+      "resolved_count": 0,
+      "golden_comments": []
+    },
+    {
+      "number": 36,
+      "snapshot_commit": "bd86e28eb39da790f08ebb6604b32fc095d12ab2",
+      "comment_count": 1,
+      "resolved_count": 3,
+      "golden_comments": [
+        {
+          "id": 3076684838,
+          "path": "core/volant-tools/src/skill_tool.rs",
+          "line": 137
+        }
+      ]
+    },
+    {
+      "number": 26,
+      "snapshot_commit": "0654442c475667d62f5b80bfd3e6e3d48c092640",
+      "comment_count": 10,
+      "resolved_count": 16,
+      "golden_comments": [
+        {
+          "id": 3068956346,
+          "path": "examples/workflows/approval_gate.toml",
+          "line": 39
+        },
+        {
+          "id": 3068956349,
+          "path": "harbor_adapters/volant.py",
+          "line": 97
+        },
+        {
+          "id": 3068956350,
+          "path": "harbor_adapters/volant.py",
+          "line": 141
+        },
+        {
+          "id": 3068956353,
+          "path": "scripts/prepull-terminal-bench-images.sh",
+          "line": 80
+        },
+        {
+          "id": 3068956355,
+          "path": "scripts/tb-dataset-tool.py",
+          "line": 38
+        },
+        {
+          "id": 3068956356,
+          "path": "scripts/tb-dataset-tool.py",
+          "line": 50
+        },
+        {
+          "id": 3068996053,
+          "path": "Makefile",
+          "line": 31
+        },
+        {
+          "id": 3068996054,
+          "path": "Makefile",
+          "line": 44
+        },
+        {
+          "id": 3069020806,
+          "path": "Makefile",
+          "line": 80
+        },
+        {
+          "id": 3069425534,
+          "path": "Makefile",
+          "line": 79
+        }
+      ]
+    },
+    {
+      "number": 22,
+      "snapshot_commit": "beb85e6fc7ac87cd9de6127fbfac4dc1c6752473",
+      "comment_count": 2,
+      "resolved_count": 31,
+      "golden_comments": [
+        {
+          "id": 3068774133,
+          "path": "bench/optimize/eval.py",
+          "line": 82
+        },
+        {
+          "id": 3068774134,
+          "path": "bench/optimize/eval.py",
+          "line": 148
+        }
+      ]
+    },
+    {
+      "number": 20,
+      "snapshot_commit": "ebdea33a50fd4bf424364a22ea3d31ec4e501599",
+      "comment_count": 4,
+      "resolved_count": 32,
+      "golden_comments": [
+        {
+          "id": 3070213817,
+          "path": "core/volant-agent/src/retry_detector.rs",
+          "line": null
+        },
+        {
+          "id": 3070213835,
+          "path": "Makefile",
+          "line": null
+        },
+        {
+          "id": 3070316038,
+          "path": "core/volant-agent/src/retry_detector.rs",
+          "line": 129
+        },
+        {
+          "id": 3070316039,
+          "path": "core/volant-agent/src/spill.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 13,
+      "snapshot_commit": "0946bf1084cee8ee366fd3f4dd687b019f55fbf2",
+      "comment_count": 11,
+      "resolved_count": 17,
+      "golden_comments": [
+        {
+          "id": 3035083253,
+          "path": "core/volant-agent/src/agent_loop.rs",
+          "line": 224
+        },
+        {
+          "id": 3035083254,
+          "path": "core/volant-agent/src/approval/persistence.rs",
+          "line": 50
+        },
+        {
+          "id": 3035083255,
+          "path": "core/volant-agent/src/approval/store.rs",
+          "line": 90
+        },
+        {
+          "id": 3035083258,
+          "path": "core/volant-agent/src/context.rs",
+          "line": 203
+        },
+        {
+          "id": 3035083265,
+          "path": "core/volant-cli/src/context.rs",
+          "line": 101
+        },
+        {
+          "id": 3035083266,
+          "path": "core/volant-core/src/events/taxonomy.rs",
+          "line": 199
+        },
+        {
+          "id": 3035083269,
+          "path": "core/volant-core/src/workflow/config.rs",
+          "line": 128
+        },
+        {
+          "id": 3035109040,
+          "path": "core/volant-agent/src/parsing/json.rs",
+          "line": 108
+        },
+        {
+          "id": 3035109042,
+          "path": "core/volant-core/src/workflow/resolve.rs",
+          "line": 43
+        },
+        {
+          "id": 3035109046,
+          "path": "core/volant-core/src/workflow/resolve.rs",
+          "line": 137
+        },
+        {
+          "id": 3035439401,
+          "path": "core/volant-cli/src/main.rs",
+          "line": 700
+        }
+      ]
+    },
+    {
+      "number": 9,
+      "snapshot_commit": "323e2c4c552bb673382bc4a6f30f2a449ba2cae8",
+      "comment_count": 14,
+      "resolved_count": 14,
+      "golden_comments": [
+        {
+          "id": 3003734089,
+          "path": "core/volant-agent-architect/Cargo.toml",
+          "line": null
+        },
+        {
+          "id": 3003734095,
+          "path": "core/volant-agent-architect/src/dispatcher.rs",
+          "line": 45
+        },
+        {
+          "id": 3003734098,
+          "path": "core/volant-agent-architect/src/lib.rs",
+          "line": 70
+        },
+        {
+          "id": 3003734102,
+          "path": "core/volant-agent-architect/src/prompts.rs",
+          "line": 79
+        },
+        {
+          "id": 3003734114,
+          "path": "core/volant-agent-verifier/src/prompts.rs",
+          "line": 54
+        },
+        {
+          "id": 3003734121,
+          "path": "core/volant-agent/Cargo.toml",
+          "line": null
+        },
+        {
+          "id": 3003734122,
+          "path": "core/volant-agent/src/agent_loop.rs",
+          "line": null
+        },
+        {
+          "id": 3003734127,
+          "path": "core/volant-agent/src/agent_loop.rs",
+          "line": 351
+        },
+        {
+          "id": 3003734134,
+          "path": "core/volant-agent/src/agent_loop.rs",
+          "line": 570
+        },
+        {
+          "id": 3003734136,
+          "path": "core/volant-agent/src/agent_loop.rs",
+          "line": 599
+        },
+        {
+          "id": 3003734139,
+          "path": "core/volant-agent/src/dispatch.rs",
+          "line": 122
+        },
+        {
+          "id": 3003734141,
+          "path": "core/volant-agent/src/events.rs",
+          "line": 9
+        },
+        {
+          "id": 3003734147,
+          "path": "core/volant-agent/src/factory.rs",
+          "line": null
+        },
+        {
+          "id": 3003734149,
+          "path": "core/volant-agent/src/rate_limit.rs",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 8,
+      "snapshot_commit": "1a747eba67c11c785947012359a5965edb3c4be3",
+      "comment_count": 2,
+      "resolved_count": 4,
+      "golden_comments": [
+        {
+          "id": 2972113698,
+          "path": ".github/workflows/musl.yml",
+          "line": 13
+        },
+        {
+          "id": 2972113704,
+          "path": ".github/workflows/musl.yml",
+          "line": 33
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "snapshot_commit": "ed73ae7b6cf6080328c8fd4c3c51f57e706a1418",
+      "comment_count": 1,
+      "resolved_count": 19,
+      "golden_comments": [
+        {
+          "id": 2969106356,
+          "path": "README.md",
+          "line": null
+        }
+      ]
+    },
+    {
+      "number": 4,
+      "snapshot_commit": "a6094c3d08e871e3537067646862aa8df6c6f89d",
+      "comment_count": 14,
+      "resolved_count": 17,
+      "golden_comments": [
+        {
+          "id": 2935655654,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-02-PLAN.md",
+          "line": 191
+        },
+        {
+          "id": 2935655658,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-RESEARCH.md",
+          "line": 33
+        },
+        {
+          "id": 2935655660,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-RESEARCH.md",
+          "line": 76
+        },
+        {
+          "id": 2935655661,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-RESEARCH.md",
+          "line": 96
+        },
+        {
+          "id": 2935655664,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-VALIDATION.md",
+          "line": 33
+        },
+        {
+          "id": 2935655668,
+          "path": ".planning/phases/06-postgresql-checkpointing/06-VALIDATION.md",
+          "line": 67
+        },
+        {
+          "id": 2935655669,
+          "path": ".planning/phases/07-architect-agent/07-CONTEXT.md",
+          "line": 21
+        },
+        {
+          "id": 2935655671,
+          "path": ".planning/phases/07-architect-agent/07-CONTEXT.md",
+          "line": 36
+        },
+        {
+          "id": 2935655673,
+          "path": ".planning/ROADMAP.md",
+          "line": 116
+        },
+        {
+          "id": 2935655675,
+          "path": ".planning/STATE.md",
+          "line": 14
+        },
+        {
+          "id": 2935655678,
+          "path": ".planning/STATE.md",
+          "line": 62
+        },
+        {
+          "id": 2935655679,
+          "path": "core/volant-core/src/checkpoint/migration.rs",
+          "line": 29
+        },
+        {
+          "id": 2935836286,
+          "path": "core/volant-core/src/checkpoint/pg.rs",
+          "line": 84
+        },
+        {
+          "id": 2935836290,
+          "path": "core/volant-core/src/checkpoint/pg.rs",
+          "line": 334
+        }
+      ]
+    },
+    {
+      "number": 3,
+      "snapshot_commit": "120f0f0875d601fdac2d6e5b5f9d02a96b0f9f8b",
+      "comment_count": 9,
+      "resolved_count": 13,
+      "golden_comments": [
+        {
+          "id": 2934483356,
+          "path": ".planning/REQUIREMENTS.md",
+          "line": 35
+        },
+        {
+          "id": 2934483360,
+          "path": "core/volant-drivers/src/driver.rs",
+          "line": 44
+        },
+        {
+          "id": 2934483361,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 121
+        },
+        {
+          "id": 2934483364,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 244
+        },
+        {
+          "id": 2934483372,
+          "path": "core/volant-drivers/src/openrouter/retry.rs",
+          "line": 67
+        },
+        {
+          "id": 2934483375,
+          "path": "core/volant-drivers/src/openrouter/stream.rs",
+          "line": 195
+        },
+        {
+          "id": 2935104392,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 111
+        },
+        {
+          "id": 2935132719,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 66
+        },
+        {
+          "id": 2935132720,
+          "path": "core/volant-drivers/src/openrouter/mod.rs",
+          "line": 130
+        }
+      ]
+    },
+    {
+      "number": 2,
+      "snapshot_commit": "b21abc9ff5cf7da75935ded06f3f3b761ac0fd65",
+      "comment_count": 2,
+      "resolved_count": 15,
+      "golden_comments": [
+        {
+          "id": 2933930289,
+          "path": "core/volant-core/src/events/bus.rs",
+          "line": 40
+        },
+        {
+          "id": 2933930295,
+          "path": "core/volant-core/src/events/bus.rs",
+          "line": 129
+        }
+      ]
+    },
+    {
+      "number": 1,
+      "snapshot_commit": "87d3b5bc517e206f9bc9bae5d8caf3b18386dffa",
+      "comment_count": 0,
+      "resolved_count": 4,
+      "golden_comments": []
+    }
+  ]
+}

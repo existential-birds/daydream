@@ -248,6 +248,51 @@ The two flags are mutually exclusive: a run has exactly one corpus, and exactly 
 
 Each PR is reviewed at the bot's own snapshot — the commit its latest review was made against, which is often an ancestor of the final PR head — so daydream sees the same code the bot saw.
 
+### The CodeRabbit-parity corpus
+
+**Internal-only corpus. This section describes a lab-internal regression harness, not a
+publicly reproducible dataset.** The corpus is harvested from
+[existential-birds/osprey](https://github.com/existential-birds/osprey), which is a
+**private** lab repository — it is not public (it will be open-sourced some day, but is
+not currently). The committed `index.json`/`manifest.json` reference that private repo's
+PR history and comment IDs; a reader without access to `existential-birds/osprey` cannot
+regenerate or inspect the full payloads (`harvest/` and `results/` are gitignored). Treat
+every number below as internal lab state.
+
+The corpus is the standing daydream-vs-bot parity signal for daydream's own development:
+harvest the bot's review history on a private repo, score daydream against it, and trend
+parity across prompt changes. It was built with (maintainer-only, requires access to the
+private repo):
+
+```bash
+daydream bench harvest --repo existential-birds/osprey --bot "coderabbitai[bot]" \
+  --state closed --limit 400 --out benchmark/corpora/osprey-coderabbit
+```
+
+The corpus holds **142 closed PRs** with CodeRabbit activity, **342 golden comments** (the bot's standalone inline comments — the recall denominator), and **740 resolved threads** (read from `index.json`; do not invent these — regenerate them). `resolved` is recorded metadata only, a genuine-finding proxy: it aggregates GitHub review-thread resolution and is not 1:1 with golden comments, so the resolved count deliberately exceeds the comment count.
+
+**What is committed.** Only the compact inventory and manifest are tracked:
+
+```text
+benchmark/corpora/osprey-coderabbit/index.json     # PR inventory (committed)
+benchmark/corpora/osprey-coderabbit/manifest.json  # corpus summary + golden-set ids (committed)
+benchmark/corpora/osprey-coderabbit/harvest/       # full per-PR payloads (gitignored)
+benchmark/corpora/osprey-coderabbit/results/       # benchmark_data.json (gitignored)
+```
+
+`.gitignore` covers `benchmark/corpora/*/harvest/` and `benchmark/corpora/*/results/`, so a re-harvest cannot dirty the tree; `manifest.json` and `index.json` stay tracked. Regenerate the manifest after a re-harvest with `daydream bench manifest --harvest-dir benchmark/corpora/osprey-coderabbit` (see `daydream bench manifest --help`).
+
+**Re-running the parity harness** against this corpus:
+
+```bash
+daydream bench --harvest-dir benchmark/corpora/osprey-coderabbit \
+  --tool-label daydream-owl-alpha \
+  --judge-route anthropic-direct \
+  --score
+```
+
+The command is the contract: it replays daydream at each bot snapshot and scores overlap against the golden set. **Baseline scoring is deferred — see [#317](https://github.com/existential-birds/daydream/issues/317)**; this PR ships the harness, corpus, and manifest only, and the one-liner must not be run until the #317 judge budget is allocated (it spends real Anthropic-judge money).
+
 ## The run report
 
 Every run — either corpus, with or without `--score`, single-shot or multi-trial — writes a JSON report to `<corpus-root>/.daydream-bench/report-<tool-label>.json`. It is the canonical machine-readable artifact of a sweep:
