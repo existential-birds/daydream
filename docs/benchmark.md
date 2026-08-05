@@ -71,7 +71,7 @@ daydream bench --reviewer glm --only grafana --limit 1
 
 Wire the pipeline cheaply before spending on the paid judge. Run two Grafana PRs with scoring off:
 
-> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 60 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting the sweep. If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
+> **Note:** On first run each PR repo is blobless-cloned from GitHub. The clone is subject to a 300 s timeout; on a slow connection a large repo (Grafana, Sentry) can hit that limit and surface as a `GitError`, aborting that PR (the sweep continues, but the run exits non-zero). If you see a clone timeout, retry once the network is faster, or pre-clone the repos manually and point `--benchmark-repo` at a local mirror.
 
 ```bash
 daydream bench --benchmark-repo ../code-review-benchmark/offline --only grafana --limit 2 --no-score
@@ -299,5 +299,5 @@ Caveats:
 
 - **Single sweep.** No variance band; the LLM judge runs at `temperature: 0.0` but is not fully deterministic.
 - **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
-- **Precision gap.** 36 TP against 139 FP. Precision (0.206) sits below the README's 50% target. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
+- **Precision gap.** 36 TP against 139 FP. Precision (0.206) is the weakest metric of the three. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
 - **Tied to this setup.** Reviewer pipeline, date both move the number.

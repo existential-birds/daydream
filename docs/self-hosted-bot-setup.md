@@ -24,7 +24,10 @@ names and the bot-handle variable are present (note: it can confirm the secret
 names exist but cannot read or validate their values), the App's permissions
 are sufficient, and the three workflow files exist — and it exits non-zero,
 naming each missing piece, if anything is wrong. It works for installs done by
-**either** path.
+**either** path. With `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` exported
+locally it also verifies the App is actually installed and its permissions are
+sufficient; without them those two checks are skipped (reported as passing,
+non-required notes).
 
 ---
 
@@ -62,8 +65,8 @@ merge that PR.
 Two steps remain manual no matter the path, because GitHub forces them:
 
 - **Clicking "Install"** on the freshly-created App — GitHub never lets an App
-  grant itself access to your repositories. `daydream setup` opens the install
-  page and waits for you.
+  grant itself access to your repositories. `daydream setup` prints the install
+  page URL and waits for you to click Install.
 - (Browser path only) **downloading the PEM** — see the limits note below.
 
 Supply your Anthropic key via the `ANTHROPIC_API_KEY` environment variable, or
@@ -110,10 +113,11 @@ On the App's settings page:
   `-----BEGIN ... PRIVATE KEY-----` / `-----END ... PRIVATE KEY-----` lines)
   are your `DAYDREAM_APP_PRIVATE_KEY`.
 
-  > **Accepted limit:** the PEM **must be downloaded and pasted by hand**, even
-  > on the CLI path. Auto-retrieving it would require a maintainer-hosted
-  > redirect server, which is deliberately ruled out (the maintainer hosts
-  > nothing). This manual PEM download is the irreducible floor of the
+  > **Accepted limit:** on the **browser-only** path the PEM must be downloaded
+  > and pasted by hand. The CLI path auto-captures it: the App-from-manifest
+  > flow exchanges the callback code for the App ID and PEM directly
+  > (`POST /app-manifests/{code}/conversions`), with no maintainer-hosted
+  > redirect server. This manual PEM download is the irreducible floor of the
   > browser-only path.
 
 ### 3. Install the App on your repository (or org)
