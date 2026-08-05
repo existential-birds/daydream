@@ -9,6 +9,7 @@ partial output is returned without cancelling sibling backend invocations.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -319,3 +320,44 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(
         "abort_iterator_closed": True,
     }
     assert backend.cancel_calls == 0
+
+
+class _RecordingCancelBackend:
+    """Minimal Backend that records cancel() calls and blocks forever in execute."""
+
+    model = "stub"
+
+    def __init__(self) -> None:
+        self.cancelled = False
+        self.entered = asyncio.Event()
+
+    async def execute(self, *args, **kwargs):
+        self.entered.set()
+        yield TextEvent(text="started")
+        await asyncio.sleep(3600)
+
+    async def cancel(self) -> None:
+        self.cancelled = True
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return skill_key
+
+
+async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> None:
+    """Task cancellation (SIGINT unwind) deterministically cancels the backend."""
+    backend = _RecordingCancelBackend()
+
+    task = asyncio.create_task(
+        run_agent(
+            backend,
+            tmp_path,
+            "hi",
+            phase=DaydreamPhase.REVIEW,
+        )
+    )
+    await backend.entered.wait()  # run_agent is inside the invocation
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert backend.cancelled is True
