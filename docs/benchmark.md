@@ -250,7 +250,7 @@ Each PR is reviewed at the bot's own snapshot — the commit its latest review w
 
 ### The CodeRabbit-parity corpus
 
-`benchmark/corpora/osprey-coderabbit/` is the standing daydream-vs-bot parity corpus for this repository's own PR history, harvested from [existential-birds/osprey](https://github.com/existential-birds/osprey). It was built with:
+`benchmark/corpora/osprey-coderabbit/` is the standing daydream-vs-bot parity corpus for this repository's own PR history, harvested from [existential-birds/osprey](https://github.com/existential-birds/osprey). **Note: `existential-birds/osprey` is a private lab repository — it is not public (it will be open-sourced some day, but is not currently).** The corpus is therefore not publicly reproducible; it is an internal regression harness. It was built with:
 
 ```bash
 daydream bench harvest --repo existential-birds/osprey --bot "coderabbitai[bot]" \
