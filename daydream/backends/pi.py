@@ -858,14 +858,7 @@ class PiBackend:
 
         finally:
             if proc is not None:
-                if proc.returncode is None:
-                    await terminate_process(proc)
-                # Close the transport even when the CLI already exited: a
-                # grandchild holding the pipe write end keeps EOF from arriving,
-                # so the pipe fds are only released by an explicit close.
-                transport = getattr(proc, "_transport", None)
-                if transport is not None:
-                    transport.close()
+                await terminate_process(proc)
             self._processes = [active for active in self._processes if active is not proc]
 
     async def cancel(self) -> None:

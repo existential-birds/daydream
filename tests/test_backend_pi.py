@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import daydream.backends.pi as pi
 from daydream.backends import (
     ContinuationToken,
     CostEvent,
@@ -344,24 +345,34 @@ async def test_spawn_uses_start_new_session() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_finally_closes_transport_after_process_exit() -> None:
-    """Even when the CLI already exited, the finally closes the transport.
+    """Even when the CLI already exited, the finally reaps the process group.
 
-    A grandchild holding the pipe write end means the stream never reaches EOF,
-    so the fd is only released by an explicit transport close.
+    The helper runs unconditionally when ``proc`` is not ``None``: its first
+    group signal fires regardless of ``returncode``, so a grandchild that
+    outlived the CLI is still signalled and the pipe fds are still released by
+    the transport close.
     """
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
     mock_proc.returncode = 0  # process already exited
     mock_proc._transport = MagicMock()
+    terminated: list[asyncio.subprocess.Process] = []
 
-    with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
+    real_terminate = pi.terminate_process
+
+    async def recording_terminate(proc: asyncio.subprocess.Process, timeout: float | None = None) -> None:
+        terminated.append(proc)
+        await real_terminate(proc, timeout)
+
+    with (
+        patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch("daydream.backends.pi.terminate_process", side_effect=recording_terminate),
     ):
         events = []
         async for event in backend.execute(Path("/tmp"), "hello"):
             events.append(event)
 
+    assert terminated == [mock_proc]
     mock_proc._transport.close.assert_called_once()
 
 
