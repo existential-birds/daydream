@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import math
 import os
 import random
@@ -50,6 +51,8 @@ from daydream.ui import (
     print_warning,
     prompt_user,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class MissingSkillError(Exception):
@@ -748,6 +751,16 @@ async def run_agent(
         # Error messages can embed secrets (a leaked env var, an API key in a
         # provider error); redact at this host boundary like every other surfaced text.
         print_error(console, "Backend Execution Error", redact_text(diagnostic))
+        raise
+    except BaseException:
+        # Shutdown path: SIGINT (KeyboardInterrupt) / task cancellation
+        # (CancelledError) are BaseException, so the generic `except Exception`
+        # above never sees them. Deterministically reap the tracked subprocesses
+        # via backend.cancel() before unwinding.
+        try:
+            await backend.cancel()
+        except Exception:  # cancel() must not mask the original signal
+            _logger.exception("backend.cancel() failed during shutdown")
         raise
     finally:
         _state.current_backends.remove(backend)

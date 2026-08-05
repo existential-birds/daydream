@@ -202,6 +202,7 @@ class CodexBackend:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
+                start_new_session=True,
             )
             self._processes.append(proc)
 
@@ -462,7 +463,7 @@ class CodexBackend:
             await proc.wait()
 
         finally:
-            if proc is not None and proc.returncode is None:
+            if proc is not None:
                 await terminate_process(proc)
             self._processes = [active for active in self._processes if active is not proc]
             if schema_path:
