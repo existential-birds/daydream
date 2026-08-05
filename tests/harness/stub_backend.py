@@ -34,6 +34,7 @@ from daydream.backends import (
     MaxTurnsError,
     ResultEvent,
     TextEvent,
+    ToolResultEvent,
     ToolStartEvent,
 )
 
@@ -375,6 +376,9 @@ class StubBackend:
             yield ToolStartEvent(
                 id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
             )
+            yield ToolResultEvent(
+                id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
+            )
             yield TextEvent(text="")
             yield ResultEvent(structured_output=None, continuation=None)
             return
@@ -398,6 +402,11 @@ class StubBackend:
                         continue
                     yield ToolStartEvent(
                         id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
+                    )
+                    # Completed read: a ToolResultEvent paired with the start,
+                    # so the sweep's coverage computation counts the file as read.
+                    yield ToolResultEvent(
+                        id=f"read-{scope_file}", output="file content", is_error=False
                     )
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:

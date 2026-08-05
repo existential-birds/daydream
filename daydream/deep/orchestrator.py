@@ -31,6 +31,7 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_UNCOVERED_SWEEP_ENABLED,
     DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
     DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
     DEFAULT_WALL_BUDGET_S,
@@ -263,30 +264,45 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
 
 
 def _uncovered_sweep_max_files(config: RunConfig) -> int:
-    """Resolve the per-run uncovered-file sweep capacity cap (issue #309)."""
-    return _resolve_config_value(
+    """Resolve the per-run uncovered-file sweep capacity cap (issue #309).
+
+    Non-negative only: an explicit ``0`` disables the sweep (nothing is
+    swept) while a negative value degrades to the named default -- mirroring
+    the file-config coercion in ``config_file._coerce_non_negative_int`` so a
+    directly-constructed ``RunConfig`` cannot smuggle an invalid capacity in.
+    """
+    value = _resolve_config_value(
         config, "uncovered_sweep_max_files", DEFAULT_UNCOVERED_SWEEP_MAX_FILES
     )
+    return value if value is not None and value >= 0 else DEFAULT_UNCOVERED_SWEEP_MAX_FILES
 
 
 def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
-    """Resolve the minimum hunk size for a file to be swept (issue #309)."""
-    return _resolve_config_value(
+    """Resolve the minimum hunk size for a file to be swept (issue #309).
+
+    Non-negative only: ``0`` removes the hunk-size floor (every uncovered file
+    is eligible) while a negative value degrades to the named default --
+    mirroring the file-config coercion so a negative floor can never make
+    zero-change/trivial blocks eligible.
+    """
+    value = _resolve_config_value(
         config, "uncovered_sweep_min_hunk_lines", DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
     )
+    return value if value is not None and value >= 0 else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
     """Resolve the uncovered-file sweep toggle (issue #309).
 
     Precedence mirrors ``_precision_mode``: ``RunConfig`` field > file-config
-    scalar > built-in default ``True``. Resume at ``merge``/``fix`` disables the
-    step outright -- the per-stack records are already finalized on disk, so a
-    sweep would re-review stale coverage.
+    scalar > built-in default (:data:`DEFAULT_UNCOVERED_SWEEP_ENABLED`, the
+    single source of configuration defaults). Resume at ``merge``/``fix``
+    disables the step outright -- the per-stack records are already finalized
+    on disk, so a sweep would re-review stale coverage.
     """
     if ctx.config.start_at in ("merge", "fix"):
         return False
-    return _resolve_config_value(ctx.config, "uncovered_sweep", True)
+    return _resolve_config_value(ctx.config, "uncovered_sweep", DEFAULT_UNCOVERED_SWEEP_ENABLED)
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -1232,6 +1248,30 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _clear_sweep_artifacts(dd: Path) -> None:
+    """Delete the uncovered-file sweep's owned artifacts from ``dd``.
+
+    ``coverage-stats.json``, ``stack-uncovered-records.json``, and every
+    ``uncovered-*-review.md`` are the sweep's outputs. A ``--start-at per-stack``
+    resume re-runs the sweep, so any artifact left from the prior run must be
+    removed BEFORE new per-stack work: otherwise a rerun whose sweep is
+    disabled / finds nothing / produces no output would leave stale records
+    behind, and a later merge resume would reload them as this run's coverage.
+    Merge/fix resumes keep the artifacts (the sweep is a no-op there and the
+    records must survive).
+    """
+    for pattern in (
+        "coverage-stats.json",
+        "stack-uncovered-records.json",
+        "uncovered-*-review.md",
+    ):
+        for path in dd.glob(pattern):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 async def _step_uncovered_sweep(ctx: FlowContext) -> None:
     """Issue #309: fail-open second-pass sweep over diff files no reviewer read.
 
@@ -1275,11 +1315,20 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     )
 
     stats: dict[str, Any] = {
-        "files_in_diff": coverage_stats["files_in_diff"],
-        "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
-        "coverage_ratio": coverage_stats["coverage_ratio"],
-        "uncovered_files": uncovered_files,
-        "swept_files": swept_files,
+        "pre_sweep": {
+            "files_in_diff": coverage_stats["files_in_diff"],
+            "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
+            "coverage_ratio": coverage_stats["coverage_ratio"],
+            "uncovered_files": uncovered_files,
+        },
+        "attempted_files": swept_files,
+        "completed_files": [],
+        # POST-sweep ratio is recomputed below after the sweep forks land; this
+        # pre-sweep snapshot is the fallback when the sweep produces no reads.
+        "post_sweep": {
+            "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
+            "coverage_ratio": coverage_stats["coverage_ratio"],
+        },
         "sweep_finding_count": 0,
         "sweep_skipped_capacity": skipped_capacity,
         "sweep_skipped_small_hunks": skipped_small,
@@ -1287,6 +1336,11 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     stats_p = dd / "coverage-stats.json"
 
     if not swept_files:
+        # A re-run that finds nothing to sweep must still refresh the records
+        # artifact to a current empty list so a stale prior file (from the run
+        # being resumed) cannot linger and be reloaded by a later merge resume.
+        if config.start_at == "per-stack":
+            per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
         stats_p.write_text(json.dumps(stats, indent=2))
         return
 
@@ -1370,16 +1424,32 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     await _parse_all()
 
+    # Recompute coverage AFTER the sweep so the report shows the ratio the
+    # sweep actually achieved (the ``deep-uncovered-*`` forks' completed reads
+    # now count), never the pre-sweep snapshot. The recompute is fail-open: a
+    # failure here falls back to the pre-sweep numbers already stored.
+    try:
+        _, post_coverage = compute_uncovered_files(dd.parent, session_id)
+        stats["post_sweep"] = {
+            "files_read_by_reviewers": post_coverage["files_read_by_reviewers"],
+            "coverage_ratio": post_coverage["coverage_ratio"],
+        }
+    except Exception:  # noqa: BLE001 -- fail-open: keep the pre-sweep fallback
+        pass
+
     # Merge the sweep records into the per-stack record set exactly like the
     # per-stack parse loop does, so arbiter/merge consume them as ordinary
     # per-stack records (no separate score path). The records file is written
     # whenever at least one sweep review produced output -- an emptied sweep
-    # stack is ``[]``, mirroring ``_rewrite_stack_records`` semantics.
+    # stack is ``[]``, mirroring ``_rewrite_stack_records`` semantics. When NO
+    # review produced output, a current empty records artifact is still written
+    # so a stale file from a prior run cannot linger.
     sweep_records: list[dict[str, Any]] = []
     for file in sorted(parse_results):
         sweep_records.extend(parse_results[file])
     stats["sweep_parse_dropped"] = parse_dropped
     stats["sweep_failures"] = sweep_failures
+    stats["completed_files"] = sorted(review_outputs)
     if review_outputs:
         records_path = per_stack_records_path(dd, "uncovered")
         records_path.write_text(json.dumps(sweep_records, indent=2))
@@ -1387,6 +1457,11 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
         ctx.data["records"].extend(sweep_records)
         ctx.data["record_sources"].extend("uncovered" for _ in sweep_records)
         stats["sweep_finding_count"] = len(sweep_records)
+    else:
+        # No review produced output: on a re-run, write a current empty records
+        # artifact so a stale file from the resumed run cannot linger.
+        if config.start_at == "per-stack":
+            per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
 
 
@@ -1597,10 +1672,13 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
 def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
     """Append a short ``## Coverage`` section when the sweep produced stats.
 
-    Reads ``deep/coverage-stats.json`` and appends files_read / files_in_diff /
-    ratio / swept files to both the canonical report and its deep-dir copy. A
-    missing or malformed stats file is a silent no-op -- coverage surfacing is
-    advisory, never a gate.
+    Reads ``deep/coverage-stats.json`` and appends files_in_diff / files read /
+    ratio / swept files to both the canonical report and its deep-dir copy. The
+    ratio rendered is the POST-sweep value (recomputed after the sweep's forks
+    landed); only files whose sweep review produced completed output are labeled
+    covered. Failed sweep attempts are surfaced as failures, not claimed as
+    coverage. A missing or malformed stats file is a silent no-op -- coverage
+    surfacing is advisory, never a gate.
     """
     stats_p = dd / "coverage-stats.json"
     if not stats_p.is_file():
@@ -1609,19 +1687,35 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
         stats = json.loads(stats_p.read_text())
     except json.JSONDecodeError:
         return
-    files_in_diff = stats.get("files_in_diff")
-    files_read = stats.get("files_read_by_reviewers")
-    if not isinstance(files_in_diff, int) or not isinstance(files_read, int):
+    pre_sweep = stats.get("pre_sweep")
+    if not isinstance(pre_sweep, dict):
+        return
+    files_in_diff = pre_sweep.get("files_in_diff")
+    if not isinstance(files_in_diff, int):
         return
     lines = [
         "## Coverage",
         f"- Files in diff: {files_in_diff}",
-        f"- Files read by reviewers: {files_read}",
-        f"- Coverage ratio: {stats.get('coverage_ratio')}",
     ]
-    swept = stats.get("swept_files")
-    if isinstance(swept, list) and swept:
-        lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in swept)}")
+    # Prefer the POST-sweep numbers (the ratio the sweep actually achieved);
+    # fall back to the pre-sweep snapshot when the sweep did not recompute.
+    post_sweep = stats.get("post_sweep")
+    read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
+    files_read = read_source.get("files_read_by_reviewers")
+    if isinstance(files_read, int):
+        lines.append(f"- Files read by reviewers: {files_read}")
+    ratio = read_source.get("coverage_ratio")
+    if isinstance(ratio, (int, float)):
+        lines.append(f"- Coverage ratio: {ratio}")
+    completed = stats.get("completed_files")
+    if isinstance(completed, list) and completed:
+        lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in completed)}")
+    failures = stats.get("sweep_failures")
+    if isinstance(failures, dict) and failures:
+        lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
+    skipped = stats.get("sweep_skipped_capacity")
+    if isinstance(skipped, int) and skipped:
+        lines.append(f"- Sweep capacity-skipped files: {skipped}")
     section = "\n".join(lines) + "\n"
     for target in (report, deep_copy):
         if target.is_file():
@@ -1980,7 +2074,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
     FlowStep(name="per-stack-reviews", run=_step_wonder_and_per_stack, config_phase="per_stack_review"),
     FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
-    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled),
+    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled, config_phase="parse"),
     FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(
         name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
@@ -2097,6 +2191,14 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             except FileNotFoundError as exc:
                 print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
+            # Issue #309: a per-stack resume re-runs the sweep, so the prior
+            # run's sweep artifacts are about to be superseded. Clear them now
+            # (before new per-stack work) so a rerun whose sweep is disabled,
+            # finds nothing, or produces no output cannot leave stale records
+            # that a later merge resume would reload. Merge/fix resumes keep
+            # them (the sweep is a no-op there and the records must survive).
+            if config.start_at == "per-stack":
+                _clear_sweep_artifacts(dd)
 
         # Stack detection (from diff file list). Availability is resolved once in
         # runner.run and threaded via config; None flows through to detect_stacks'

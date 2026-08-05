@@ -41,7 +41,49 @@ _DIFF = (
 
 
 def _write_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
-    """Write one sibling trajectory whose tool calls read *read_paths*."""
+    """Write one sibling trajectory whose *completed* reads cover *read_paths*.
+
+    Each read tool call carries a matching ``observation.results[].source_call_id``
+    so the sweep counts it as coverage (a read without a ToolResult observation
+    is treated as interrupted and does NOT cover the file).
+    """
+    trajectories_dir = run_dir / "trajectories"
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    tool_calls = []
+    results = []
+    for i, path in enumerate(read_paths):
+        call_id = f"read-{i}"
+        tool_calls.append(
+            {
+                "tool_call_id": call_id,
+                "function_name": "Read",
+                "arguments": {"file_path": path},
+            }
+        )
+        results.append({"source_call_id": call_id, "content": "file content"})
+    (trajectories_dir / name).write_text(
+        json.dumps(
+            {
+                "session_id": run_dir.name,
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": tool_calls,
+                        "observation": {"results": results},
+                    }
+                ],
+            }
+        )
+    )
+
+
+def _write_interrupted_read_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
+    """Write a sibling trajectory whose reads carry NO ToolResult observation.
+
+    Models an interrupted Read (a ToolStartEvent with no matching
+    ToolResultEvent): the file was not actually read, so the sweep must treat
+    it as uncovered (fail-open: it gets swept, never skipped).
+    """
     trajectories_dir = run_dir / "trajectories"
     trajectories_dir.mkdir(parents=True, exist_ok=True)
     (trajectories_dir / name).write_text(
@@ -53,10 +95,11 @@ def _write_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
                         "step_id": "s0",
                         "tool_calls": [
                             {
+                                "tool_call_id": f"read-{i}",
                                 "function_name": "Read",
                                 "arguments": {"file_path": path},
                             }
-                            for path in read_paths
+                            for i, path in enumerate(read_paths)
                         ],
                     }
                 ],
@@ -106,6 +149,55 @@ def test_compute_uncovered_files_empty_when_everything_read(tmp_path: Path) -> N
 
     assert uncovered == []
     assert stats["coverage_ratio"] == 1.0
+
+
+def test_compute_uncovered_files_boundary_ignores_suffix_collisions(tmp_path: Path) -> None:
+    """A read of ``notapi.py`` must NOT cover the changed file ``api.py``.
+
+    Regression for the suffix-collision false positive: coverage is matched at
+    a path-component boundary (``endswith("/" + relative)``), so
+    ``/repo/notapi.py`` never counts as a read of ``api.py`` and the file stays
+    in the sweep.
+    """
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-3"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_fork(run_dir, "deep-python.json", ["/repo/notapi.py"])
+    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-3")
+
+    assert "api.py" in uncovered  # /repo/notapi.py must not cover api.py
+    assert stats["files_read_by_reviewers"] == 1  # only notes.txt covered
+    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    assert "api.py" in swept  # api.py is swept, not silently skipped
+
+
+def test_compute_uncovered_files_requires_completed_reads(tmp_path: Path) -> None:
+    """An interrupted Read (no ToolResult observation) leaves the file uncovered.
+
+    A reviewer that starts a Read but never receives a result has not read the
+    file; counting it as coverage would let the sweep skip a genuinely unread
+    file. Fail-open: the file stays uncovered and is swept.
+    """
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-4"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_interrupted_read_fork(run_dir, "deep-python.json", ["/repo/api.py"])
+    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-4")
+
+    assert "api.py" in uncovered  # the interrupted read covers nothing
+    assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
+    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    assert "api.py" in swept  # the unread file is swept, never skipped
 
 
 def test_hunk_change_line_count_excludes_headers() -> None:

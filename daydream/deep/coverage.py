@@ -6,6 +6,10 @@ reviewer per uncovered file above a small budget threshold. This module holds
 the pure, deterministic pieces: coverage computation, budget filtering
 (hunk-size + capacity cap), and the sweep prompt builder.
 
+The sweep's coverage set is computed HERE, not via ``analyzer.analyze_coverage``:
+a read covers a diff file only at a path-component boundary (a read of
+``notapi.py`` never covers ``api.py``) and only when the read tool call
+carries a completed observation (an interrupted read never covers anything).
 ``daydream.eval.analyzer`` is imported read-only -- issue #316 owns that
 module. The sweep prompt builder lives here, NOT in ``daydream.deep.prompts``
 (issue #314 owns that module).
@@ -17,13 +21,70 @@ from pathlib import Path
 from typing import Any
 
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
-from daydream.eval.analyzer import analyze_coverage, load_trajectories
+from daydream.eval.analyzer import (
+    _agent_label,
+    _files_from_diff,
+    _read_paths_for_call,
+    load_trajectories,
+)
+
+
+def _path_component_matches(absolute: str, relative: str) -> bool:
+    """Whether an absolute read path corresponds to ``relative`` at a path boundary.
+
+    ``absolute == relative`` (the read path is already repo-relative) or
+    ``absolute`` ends with ``"/" + relative`` — the basename boundary. A bare
+    ``endswith(relative)`` would let a read of ``/repo/notapi.py`` cover the
+    changed file ``api.py``; the component boundary excludes suffix
+    collisions. The sweep uses this matcher instead of ``analyzer._path_matches``
+    so it never inherits that false positive (issue #316 owns the analyzer).
+    """
+    return absolute == relative or absolute.endswith("/" + relative)
+
+
+def _completed_read_paths(
+    trajectory: dict[str, Any], phases: set[str] | None = None
+) -> set[str]:
+    """Read paths from ``trajectory`` whose tool call carries a completed observation.
+
+    A Read only covers a diff file when the read tool call is paired with a
+    ToolResult in the same step's observation: ``observation.results[].source_call_id``
+    must equal the tool call's ``tool_call_id``. An interrupted read
+    (ToolStartEvent with no ToolResultEvent) returns no content, so it must NOT
+    count as coverage — the sweep treats it as uncovered (fail-open: the file
+    gets swept, never skipped). ``phases``, when given, restricts the steps
+    considered to those whose ``extra.daydream_phase`` is in the set.
+    """
+    completed_call_ids: set[str] = set()
+    for step in trajectory.get("steps", []):
+        for result in (step.get("observation") or {}).get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            call_id = result.get("source_call_id")
+            if isinstance(call_id, str):
+                completed_call_ids.add(call_id)
+    paths: set[str] = set()
+    for step in trajectory.get("steps", []):
+        if phases is not None and ((step.get("extra") or {}).get("daydream_phase")) not in phases:
+            continue
+        for tc in step.get("tool_calls") or []:
+            if tc.get("tool_call_id") not in completed_call_ids:
+                continue
+            paths.update(_read_paths_for_call(tc))
+    return paths
 
 
 def compute_uncovered_files(
     daydream_dir: Path, session_id: str | None
 ) -> tuple[list[str], dict[str, Any]]:
-    """Return the diff files no reviewer read, plus the full coverage stats.
+    """Return the diff files no reviewer read, plus the coverage stats.
+
+    Mirrors ``analyzer.analyze_coverage``'s shape but applies the sweep's own
+    matching rules: reads are counted only when the tool call is completed
+    (paired ToolResult observation) and a read path covers a diff file only at
+    a path-component boundary. A read of ``/repo/notapi.py`` therefore never
+    covers ``api.py``, and an interrupted read never covers anything. Both
+    rules fail open — a genuinely unread file is swept, never skipped.
 
     Args:
         daydream_dir: The run's ``.daydream`` directory (parent of the
@@ -32,13 +93,32 @@ def compute_uncovered_files(
             most recent trajectory.
 
     Returns:
-        ``(uncovered_files, stats)`` where ``stats`` is the full
-        ``analyze_coverage`` dict and ``uncovered_files`` is its sorted list of
-        diff files no review agent read.
+        ``(uncovered_files, stats)`` where ``stats`` is the coverage dict
+        (``files_in_diff`` / ``files_read_by_reviewers`` / ``coverage_ratio`` /
+        ``uncovered_files``) and ``uncovered_files`` is its sorted list of diff
+        files no review agent read.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
-    stats = analyze_coverage(trajectories, daydream_dir)
-    return stats["uncovered_files"], stats
+    diff_files = _files_from_diff(daydream_dir / "diff.patch")
+
+    review_reads: set[str] = set()
+    for traj in trajectories["forked"]:
+        if _agent_label(traj["_source_file"]).startswith("deep-"):
+            review_reads.update(_completed_read_paths(traj))
+    if trajectories["main"]:
+        review_reads.update(
+            _completed_read_paths(trajectories["main"], phases={"deep", "alternatives"})
+        )
+
+    covered = {df for df in diff_files if any(_path_component_matches(r, df) for r in review_reads)}
+    uncovered = sorted(set(diff_files) - covered)
+
+    return uncovered, {
+        "files_in_diff": len(diff_files),
+        "files_read_by_reviewers": len(covered),
+        "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
+        "uncovered_files": uncovered,
+    }
 
 
 def diff_block_for_file(diff: str, file: str) -> str | None:

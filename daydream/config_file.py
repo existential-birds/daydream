@@ -60,11 +60,14 @@ class DaydreamFileConfig:
             ``None`` falls through to the RunConfig field / orchestrator default
             (``True``); ``False`` disables the pass.
         uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
-            are swept in one run. ``None`` falls through to the RunConfig field /
+            are swept in one run. Non-negative only: ``0`` disables the sweep;
+            a negative value degrades to ``None`` (the named default applies).
+            ``None`` falls through to the RunConfig field /
             ``config.DEFAULT_UNCOVERED_SWEEP_MAX_FILES`` (10).
         uncovered_sweep_min_hunk_lines: Issue #309. Minimum added/removed lines
-            a file's hunks must contain to warrant a sweep. ``None`` falls
-            through to the RunConfig field /
+            a file's hunks must contain to warrant a sweep. Non-negative only:
+            ``0`` removes the floor; a negative value degrades to ``None`` (the
+            named default applies). ``None`` falls through to the RunConfig field /
             ``config.DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
         supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
             ``"llm"``), or None when unset/invalid.
@@ -218,6 +221,20 @@ def _coerce_int(raw: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
+def _coerce_non_negative_int(raw: Any) -> int | None:
+    """Return ``raw`` as a non-negative int, or None otherwise (degrade to default).
+
+    Unlike :func:`_coerce_int`, a negative value degrades to ``None`` so the
+    named default applies (issue #309): a negative sweep capacity cap or hunk
+    floor is never a meaningful count. Explicit ``0`` is preserved — ``0`` max
+    files means "sweep nothing" and ``0`` min hunk lines means "no hunk-size
+    floor".
+    """
+    if isinstance(raw, bool):
+        return None
+    return raw if isinstance(raw, int) and raw >= 0 else None
+
+
 def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
     """Return a positive int bound from ``key``, accepting its hyphenated spelling.
 
@@ -307,8 +324,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
         uncovered_sweep=uncovered_sweep,
-        uncovered_sweep_max_files=_coerce_int(merged.get("uncovered_sweep_max_files")),
-        uncovered_sweep_min_hunk_lines=_coerce_int(merged.get("uncovered_sweep_min_hunk_lines")),
+        uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
+        uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),
