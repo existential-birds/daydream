@@ -1053,3 +1053,177 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path):
     assert result["scoped_files"] == 2
     assert list(result["per_file"]) == ["good.py"]
     assert result["verbosity"] == 0.0
+
+
+# --- review round 3 fix regressions (#316) ---
+
+
+def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path):
+    """A malformed file's lines must never flag matching blocks in valid files.
+
+    ``analyze_quality`` indexes the cross-file clone pass over successfully
+    parsed files only. A broken file holding a block that also appears in a
+    valid file would otherwise be a second occurrence and flag the valid
+    file, shifting its verbosity (Finding #1).
+    """
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    clean_ws = _quality_workspace(tmp_path, {"app.py": "def a():\n" + block}, name="clean")
+    dirty_ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block},
+        name="dirty",
+    )
+
+    clean = analyze_quality(clean_ws / ".daydream")
+    dirty = analyze_quality(dirty_ws / ".daydream")
+
+    assert dirty["scoped_files"] == 2
+    assert list(dirty["per_file"]) == ["app.py"]
+    assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
+    assert clean["verbosity"] == dirty["verbosity"]
+
+
+def test_quality_per_file_erosion_none_without_functions(tmp_path: Path):
+    """A module with no functions has no mass, so its erosion ratio is None.
+
+    Zero is a meaningful value (no high-CC mass), so undefined must be None;
+    the workspace aggregate pools mass across files and stays numeric.
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "m.py": "import os\nX = 1\n",
+            "app.py": "def f(x):\n    return x\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["m.py"]["erosion"] is None
+    assert result["per_file"]["m.py"]["functions"] == 0
+    assert result["per_file"]["app.py"]["erosion"] == 0.0
+    assert result["erosion"] == 0.0
+
+
+def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path):
+    """A file with no non-blank lines has an undefined verbosity ratio.
+
+    ``None`` signals the undefined denominator; the workspace aggregate keeps
+    pooling the zero lines harmlessly and stays ``None`` for verbosity too.
+    """
+    ws = _quality_workspace(tmp_path, {"blank.py": "\n\n\n"})
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["blank.py"]["verbosity"] is None
+    assert result["per_file"]["blank.py"]["sloc"] == 0
+    assert result["verbosity"] is None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "label"),
+    [
+        ("        item = items.pop()\n", "pop"),
+        ("        items.clear()\n", "clear"),
+    ],
+)
+def test_quality_verbosity_guard_after_mutation_not_flagged(
+    tmp_path: Path, mutation: str, label: str
+):
+    """A post-mutation empty check is a necessary termination guard.
+
+    ``while items:`` proves nonemptiness only at the header; once the body
+    mutates the collection, ``if not items:`` is meaningful and must not be
+    counted as redundant slop (Finding #3).
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def f(items):\n    while items:\n" + mutation + "        if not items:\n            break\n"},
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
+
+
+def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path):
+    """A non-mutating statement between header and guard keeps it redundant.
+
+    ``while items: x = f(); if not items: break`` — nothing touches ``items``,
+    so the header's nonemptiness proof still holds at the guard, which stays
+    flagged (Finding #3).
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def f(items):\n"
+                "    while items:\n"
+                "        x = f()\n"
+                "        if not items:\n"
+                "            break\n"
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["app.py"]["verbosity"] > 0
+
+
+@pytest.mark.parametrize(
+    ("wrapper_body", "label"),
+    [
+        ('    """Pass through."""\n    return inner(x, y)\n', "documented"),
+        ("    return inner(x, y)\n", "undocumented"),
+    ],
+)
+def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(
+    tmp_path: Path, wrapper_body: str, label: str
+):
+    """A leading docstring is not an executable statement for wrapper detection.
+
+    ``_trivial_wrapper`` must count only the real body statement, so a
+    documented pass-through wrapper is flagged exactly like an undocumented
+    one (Finding #4).
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": (
+                "def inner(x, y):\n"
+                "    return x + y\n"
+                "\n"
+                "def outer(x, y):\n"
+                + wrapper_body
+            )
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["per_file"]["app.py"]["verbosity"] > 0, label
+
+
+def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path):
+    """A vendored dir whose basename is not vendor/third_party is still excluded.
+
+    ``daydream/atif/`` is explicitly vendored from Harbor (see
+    daydream/atif/NOTICE) but its basename ``atif`` is not in the obvious
+    vendored set — it must not reach ``per_file`` or the aggregates
+    (Finding #5).
+    """
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def f(x):\n    return x\n",
+            "daydream/atif/models.py": "def g(x):\n    return x\n",
+            "daydream/atif/validator.py": "def h(x):\n    return x\n",
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream")
+
+    assert result["scoped_files"] == 1
+    assert list(result["per_file"]) == ["app.py"]
+    assert result["erosion"] == 0.0

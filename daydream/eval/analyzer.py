@@ -749,6 +749,9 @@ _QUALITY_EXCLUDED_DIRS = frozenset(
     {
         ".git", ".daydream", "node_modules", ".venv", "venv", "__pycache__", ".worktrees",
         "dist", "build", "vendor", "third_party", "migrations",
+        # ``atif`` is daydream/atif, explicitly vendored from Harbor
+        # (see daydream/atif/NOTICE) — out of metric scope (Finding #5).
+        "atif",
     }
 )
 
@@ -870,7 +873,9 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
 
     Excluded directories are matched on exact path components so a nested
     ``node_modules_extra/`` or a sibling ``.worktrees`` checkout never shadows
-    real source. Generated files are also out of scope: path-based rules
+    real source. Vendored subtrees with non-obvious basenames (``atif``, see
+    ``daydream/atif/NOTICE``) are excluded by name too. Generated files are
+    also out of scope: path-based rules
     (``*_generated.py``, ``*.pb.py``, ``migrations/*.py``, …) and the
     generated-file header marker are both applied via ``is_generated_file``,
     so vendor/third_party trees and generated artifacts never reach the
@@ -894,21 +899,14 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
     return sorted(files, key=lambda item: item[1])
 
 
-def _file_quality(
-    path: Path,
-    cross_file_flagged: set[int] | None = None,
-) -> dict | None:
-    """Erosion + verbosity metrics for one Python file, or ``None`` on parse failure.
+def _parse_python_file(path: Path) -> tuple[Any, list[str]] | None:
+    """Parse *path* once; return ``(root, lines)`` or ``None`` on any failure.
 
     A file that cannot be parsed is counted in ``scoped_files`` by the caller
-    but excluded from the aggregates — quality analysis never crashes. Tree-sitter
-    returns a PARTIAL tree with ERROR/missing nodes for malformed Python, so a
-    root whose tree carries any error is treated as a parse failure instead of
-    aggregating garbage (Finding #9).
-
-    *cross_file_flagged* carries line rows (0-based) that duplicate a block also
-    present in another scoped file; they are OR'd into the verbosity set before
-    the ratio is computed (Finding #6).
+    but excluded from the aggregates — quality analysis never crashes.
+    Tree-sitter returns a PARTIAL tree with ERROR/missing nodes for malformed
+    Python, so a root whose tree carries any error is treated as a parse
+    failure instead of aggregating garbage (Finding #9).
     """
     parser = _quality_python_parser()
     if parser is None:
@@ -926,7 +924,26 @@ def _file_quality(
     root = tree.root_node
     if root.has_error:
         return None
+    lines = source.decode("utf-8", errors="replace").splitlines()
+    return root, lines
 
+
+def _file_quality_from_tree(
+    root: Any,
+    lines: list[str],
+    cross_file_flagged: set[int] | None = None,
+) -> dict:
+    """Erosion + verbosity metrics from an already-parsed file.
+
+    *cross_file_flagged* carries line rows (0-based) that duplicate a block also
+    present in another scoped file; they are OR'd into the verbosity set before
+    the ratio is computed (Finding #6).
+
+    Per-file ratios are ``None`` when their denominator is zero: ``erosion``
+    with no functions, ``verbosity`` with no non-blank lines. The numeric mass
+    and line counts are still returned so the caller can pool them for the
+    workspace aggregate (Finding #2).
+    """
     # Erosion: pooled cyclomatic mass of functions with CC > 10.
     functions = [node for node in _iter_tree(root) if node.type == "function_definition"]
     metrics: list[tuple[int, int, float]] = []  # (cc, sloc, mass)
@@ -940,22 +957,21 @@ def _file_quality(
 
     total_mass = sum(mass for _, _, mass in metrics)
     high_mass = sum(mass for cc, _, mass in metrics if cc > 10)
-    erosion = high_mass / total_mass if total_mass > 0 else 0.0
+    erosion = high_mass / total_mass if total_mass > 0 else None
 
     # Verbosity: deterministic rule subset + clone detection over lines.
-    lines = source.decode("utf-8", errors="replace").splitlines()
     sloc_file = sum(1 for line in lines if line.strip())
     flagged = _verbosity_flagged_lines(root)
     flagged |= _clone_flagged_lines(lines)
     if cross_file_flagged:
         flagged |= cross_file_flagged
     flagged &= {i for i, line in enumerate(lines) if line.strip()}
-    verbosity = len(flagged) / sloc_file if sloc_file > 0 else 0.0
+    verbosity = len(flagged) / sloc_file if sloc_file > 0 else None
 
     return {
         "entry": {
-            "erosion": round(erosion, 4),
-            "verbosity": round(verbosity, 4),
+            "erosion": round(erosion, 4) if erosion is not None else None,
+            "verbosity": round(verbosity, 4) if verbosity is not None else None,
             "sloc": sloc_file,
             "functions": len(metrics),
             "high_cc_functions": sum(1 for cc, _, _ in metrics if cc > 10),
@@ -1054,22 +1070,22 @@ def _empty_guard_variable(if_node: Any) -> str | None:
     return None
 
 
-def _is_len_call(node: Any, name: str) -> bool:
-    """``len(name)`` — a ``len`` call with exactly the single argument *name*."""
+def _len_call_argument(node: Any) -> str | None:
+    """The single argument name of a ``len(x)`` call, else ``None``."""
     if node is None or node.type != "call":
-        return False
+        return None
     fn = node.child_by_field_name("function")
     args = node.child_by_field_name("arguments")
-    if fn is None or fn.type != "identifier" or fn.text.decode() != "len":
-        return False
-    if args is None:
-        return False
+    if fn is None or fn.type != "identifier" or fn.text.decode() != "len" or args is None:
+        return None
     arg_ids = [child for child in args.children if child.type == "identifier"]
-    return len(arg_ids) == 1 and arg_ids[0].text.decode() == name
+    if len(arg_ids) == 1:
+        return arg_ids[0].text.decode()
+    return None
 
 
-def _while_condition_proves_nonempty(condition: Any, name: str) -> bool:
-    """Does the *condition* prove *name* is a nonempty collection?
+def _empty_guard_collection(condition: Any) -> str | None:
+    """The collection a ``while`` condition proves nonempty, else ``None``.
 
     Only exact shapes prove it: the bare collection (``while items:``), a
     bare ``len`` call (``while len(items):``), or a positive length
@@ -1078,25 +1094,51 @@ def _while_condition_proves_nonempty(condition: Any, name: str) -> bool:
     may be required.
     """
     if condition is None:
-        return False
+        return None
     if condition.type == "identifier":
-        return condition.text.decode() == name
-    if _is_len_call(condition, name):
-        return True
+        return condition.text.decode()
+    name = _len_call_argument(condition)
+    if name is not None:
+        return name
     if condition.type == "comparison_operator":
         operands = list(condition.children)
         if len(operands) == 3 and operands[1].type == ">":
             left, _, right = operands
-            return (
-                _is_len_call(left, name)
-                and right.type == "integer"
-                and right.text.decode().strip() == "0"
-            )
+            if right.type == "integer" and right.text.decode().strip() == "0":
+                return _len_call_argument(left)
+    return None
+
+
+def _statement_mutates(node: Any, name: str) -> bool:
+    """May *node* mutate the collection *name*?
+
+    A method call on the collection (``items.pop()``, ``items.clear()``,
+    ``items.remove()``, …) or a reassignment of *name* invalidates the
+    loop-header's nonemptiness proof, so a later empty guard is meaningful.
+    """
+    for sub in _iter_tree(node):
+        if sub.type in ("assignment", "augmented_assignment"):
+            target = sub.child_by_field_name("left")
+            if target is not None and target.type == "identifier" and target.text.decode() == name:
+                return True
+        if sub.type == "call":
+            fn = sub.child_by_field_name("function")
+            if fn is not None and fn.type == "attribute":
+                obj = fn.child_by_field_name("object")
+                if obj is not None and obj.type == "identifier" and obj.text.decode() == name:
+                    return True
     return False
 
 
 def _empty_list_guard_lines(root: Any) -> set[int]:
-    """``if len(x) == 0`` / ``if not x`` guard directly inside a loop over ``x``."""
+    """``if len(x) == 0`` / ``if not x`` guard directly inside a loop over ``x``.
+
+    The guard is redundant only at a program point where the loop header's
+    nonemptiness proof still holds. A statement between the header and the
+    guard that may mutate the collection (``items.pop()``, ``items.clear()``,
+    reassignment) invalidates that proof, so the guard is a necessary
+    post-mutation termination check and is not flagged (Finding #3).
+    """
     flagged: set[int] = set()
     for node in _iter_tree(root):
         if node.type not in ("for_statement", "while_statement"):
@@ -1104,22 +1146,23 @@ def _empty_list_guard_lines(root: Any) -> set[int]:
         body = node.child_by_field_name("body")
         if body is None:
             continue
+        if node.type == "for_statement":
+            iterable = node.child_by_field_name("right")
+            if iterable is None or iterable.type != "identifier":
+                continue
+            guarded = iterable.text.decode()
+        else:
+            guarded = _empty_guard_collection(node.child_by_field_name("condition"))
+            if guarded is None:
+                continue
+        mutated = False
         for child in body.children:
-            if child.type != "if_statement":
-                continue
-            guard_var = _empty_guard_variable(child)
-            if guard_var is None:
-                continue
-            if node.type == "for_statement":
-                iterable = node.child_by_field_name("right")
-                if (
-                    iterable is not None
-                    and iterable.type == "identifier"
-                    and iterable.text.decode() == guard_var
-                ):
+            if child.type == "if_statement":
+                guard_var = _empty_guard_variable(child)
+                if guard_var == guarded and not mutated:
                     flagged.update(range(child.start_point.row, child.end_point.row + 1))
-            elif _while_condition_proves_nonempty(node.child_by_field_name("condition"), guard_var):
-                flagged.update(range(child.start_point.row, child.end_point.row + 1))
+            if _statement_mutates(child, guarded):
+                mutated = True
     return flagged
 
 
@@ -1220,12 +1263,26 @@ def _forwarded_argument_names(args: Any) -> list[str] | None:
     return names
 
 
+def _is_docstring_statement(node: Any) -> bool:
+    """An ``expression_statement`` whose whole content is a string literal."""
+    if node.type != "expression_statement":
+        return False
+    contents = [child for child in node.children if child.type != ";"]
+    return len(contents) == 1 and contents[0].type == "string"
+
+
 def _trivial_wrapper(func: Any) -> set[int] | None:
-    """Flag a function whose whole body is ``return other(same args)``."""
+    """Flag a function whose whole body is ``return other(same args)``.
+
+    A leading function-docstring is not an executable statement, so a
+    pass-through wrapper with a docstring is still a wrapper (Finding #4).
+    """
     body = func.child_by_field_name("body")
     if body is None:
         return None
     statements = list(body.children)
+    if statements and _is_docstring_statement(statements[0]):
+        statements = statements[1:]
     if len(statements) != 1 or statements[0].type != "return_statement":
         return None
     value = _return_value(statements[0])
@@ -1370,12 +1427,16 @@ def analyze_quality(daydream_dir: str | Path) -> dict:
     ``*.py`` file in ``daydream_dir.parent`` — the live reviewed tree at eval
     time, after daydream's fix phase ran. Pure and deterministic: no backend,
     no network, no randomness. A file whose tree-sitter parse fails is counted
-    in ``scoped_files`` but excluded from the aggregates.
+    in ``scoped_files`` but excluded from the aggregates and from the
+    cross-file clone index, so malformed source never shifts valid files'
+    verbosity (Finding #1).
 
     Returns:
         ``{erosion, verbosity, per_file, calibration, scoped_files}``.
         ``erosion``/``verbosity`` are ``None`` only when no functions / no
-        lines are in scope; ``per_file`` keys are workspace-relative paths.
+        lines are in scope; per-file entries use ``None`` for a ratio whose
+        denominator is zero (no functions / no non-blank lines). ``per_file``
+        keys are workspace-relative paths.
     """
     daydream_dir = Path(daydream_dir)
     workspace = daydream_dir.parent
@@ -1383,17 +1444,27 @@ def analyze_quality(daydream_dir: str | Path) -> dict:
     scoped_files = _scoped_python_files(workspace)
     scoped = len(scoped_files)
 
-    # Cross-file clone pass: read every scoped file's lines once and find
-    # blocks duplicated verbatim across >=2 files, then feed each file's
-    # cross-file line rows into its per-file verbosity below (Finding #6).
-    # Within-file duplicates are still handled per file inside _file_quality.
+    # Parse and validate every scoped file ONCE. Only successfully parsed
+    # files feed the cross-file clone index and the per-file aggregates; a
+    # malformed file stays in ``scoped_files`` but its lines can no longer
+    # flag matching blocks in valid files (Finding #1). The parse results are
+    # reused below, so no file is ever parsed twice.
+    parsed: dict[Path, Any] = {}
+    parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
     for path, _rel in scoped_files:
-        try:
-            source = path.read_bytes()
-        except OSError:
+        result = _parse_python_file(path)
+        if result is None:
             continue
-        file_lines.append((path, source.decode("utf-8", errors="replace").splitlines()))
+        root, lines = result
+        parsed[path] = root
+        parsed_lines[path] = lines
+        file_lines.append((path, lines))
+
+    # Cross-file clone pass over successfully parsed files only: find blocks
+    # duplicated verbatim across >=2 files, then feed each file's cross-file
+    # line rows into its per-file verbosity below (Finding #6). Within-file
+    # duplicates are still handled per file inside _file_quality_from_tree.
     cross_file_flagged = _cross_file_clone_flagged_lines(file_lines)
 
     per_file: dict[str, dict] = {}
@@ -1403,9 +1474,14 @@ def analyze_quality(daydream_dir: str | Path) -> dict:
     total_loc = 0
 
     for path, rel in scoped_files:
-        quality = _file_quality(path, cross_file_flagged=cross_file_flagged.get(path))
-        if quality is None:
+        root = parsed.get(path)
+        if root is None:
             continue
+        quality = _file_quality_from_tree(
+            root,
+            parsed_lines[path],
+            cross_file_flagged=cross_file_flagged.get(path),
+        )
         per_file[rel] = quality["entry"]
         total_mass += quality["mass"]
         high_mass += quality["high_mass"]
