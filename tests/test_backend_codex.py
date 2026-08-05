@@ -240,6 +240,29 @@ async def test_spawn_uses_start_new_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_finally_closes_transport_after_process_exit() -> None:
+    """Even when the CLI already exited, the finally closes the transport.
+
+    A grandchild holding the pipe write end means the stream never reaches EOF,
+    so the fd is only released by an explicit transport close.
+    """
+    backend = CodexBackend(model="gpt-5.1-codex")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    mock_proc.returncode = 0  # process already exited
+    mock_proc._transport = MagicMock()
+
+    with patch(
+        "daydream.backends.codex.asyncio.create_subprocess_exec",
+        return_value=mock_proc,
+    ):
+        events = []
+        async for event in backend.execute(Path("/tmp"), "hello"):
+            events.append(event)
+
+    mock_proc._transport.close.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_codex_stdout_limit_allows_large_jsonl_events() -> None:
     backend = CodexBackend(model="fixture-model")
     large_text = "x" * (70 * 1024)
