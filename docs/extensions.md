@@ -251,23 +251,28 @@ an existing config key.
 | 2 | `intent` | `intent` |
 | 3 | `per-stack-reviews` | `per_stack_review` |
 | 4 | `per-stack-parse` | `parse` |
-| 5 | `arbiter` | `arbiter` |
-| 6 | `cross-stack-merge` | `merge` |
-| 7 | `single-stack-merge` | `single-stack-merge` |
-| 8 | `load-items` | `load-items` |
-| 9 | `supervise` | `supervise` |
-| 10 | `findings-out` | `findings-out` |
-| 11 | `post-review` | `post-review` |
-| 12 | `fix-gate` | `fix-gate` |
-| 13 | `verify` | `verify` |
-| 14 | `fix` | `fix` |
-| 15 | `test` | `test` |
-| 16 | `commit` | `fix` |
+| 5 | `uncovered-sweep` | `parse` |
+| 6 | `arbiter` | `arbiter` |
+| 7 | `cross-stack-merge` | `merge` |
+| 8 | `single-stack-merge` | `single-stack-merge` |
+| 9 | `load-items` | `load-items` |
+| 10 | `supervise` | `supervise` |
+| 11 | `findings-out` | `findings-out` |
+| 12 | `post-review` | `post-review` |
+| 13 | `fix-gate` | `fix-gate` |
+| 14 | `verify` | `verify` |
+| 15 | `fix` | `fix` |
+| 16 | `test` | `test` |
+| 17 | `commit` | `fix` |
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder no longer has
 a step of its own. Its per-phase config key is still `wonder`
 (`[tool.daydream.phases.wonder]`), resolved inside the step.
+
+`uncovered-sweep` (issue #309) re-reviews diff files no per-stack reviewer read
+with a cheap second-pass agent; it resolves its backend via the `parse` phase
+key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 
 #### `shallow` (`--shallow` single-skill loop)
 

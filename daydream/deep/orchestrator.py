@@ -25,11 +25,15 @@ from typing import TYPE_CHECKING, Any
 import anyio
 from rich.markup import escape as escape_markup
 
-from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
+from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt, run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_TOOL_CALL_BUDGET,
+    DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
+    DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
@@ -55,6 +59,12 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.artifacts import (
     intent_path as _intent_path,
+)
+from daydream.deep.coverage import (
+    build_uncovered_sweep_prompt,
+    compute_uncovered_files,
+    diff_block_for_file,
+    filter_sweepable_files,
 )
 from daydream.deep.dedup import (
     CandidatePair,
@@ -191,7 +201,7 @@ def _single_stack_agent_count(stack_count: int) -> int:
     return 2 + stack_count + stack_count
 
 
-def _resolve_config_value[T: (int, float)](config: RunConfig, attr: str, default: T) -> T:
+def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, default: T) -> T:
     """Resolve a scalar setting: ``RunConfig`` attr (when present) > file config > default.
 
     Precedence mirrors ``_resolve_backend`` / ``_resolved_model`` at
@@ -250,6 +260,33 @@ def _supervisor_mode(config: RunConfig) -> str:
 def _supervise_enabled(ctx: FlowContext) -> bool:
     """Run supervision on fresh flows, not on a fix-only resume."""
     return _supervisor_mode(ctx.config) in {"rules", "llm"} and ctx.config.start_at != "fix"
+
+
+def _uncovered_sweep_max_files(config: RunConfig) -> int:
+    """Resolve the per-run uncovered-file sweep capacity cap (issue #309)."""
+    return _resolve_config_value(
+        config, "uncovered_sweep_max_files", DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    )
+
+
+def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
+    """Resolve the minimum hunk size for a file to be swept (issue #309)."""
+    return _resolve_config_value(
+        config, "uncovered_sweep_min_hunk_lines", DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+    )
+
+
+def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
+    """Resolve the uncovered-file sweep toggle (issue #309).
+
+    Precedence mirrors ``_precision_mode``: ``RunConfig`` field > file-config
+    scalar > built-in default ``True``. Resume at ``merge``/``fix`` disables the
+    step outright -- the per-stack records are already finalized on disk, so a
+    sweep would re-review stale coverage.
+    """
+    if ctx.config.start_at in ("merge", "fix"):
+        return False
+    return _resolve_config_value(ctx.config, "uncovered_sweep", True)
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -1085,6 +1122,13 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                 + ", ".join(sorted(missing_stacks)),
             )
             return Stop(1)
+        # Issue #309: a prior run's uncovered-file sweep records are
+        # per-stack-style findings already finalized on disk (the sweep itself
+        # is a no-op on resume). Load them so a merge resume keeps the sweep's
+        # findings instead of silently dropping them.
+        sweep_path = per_stack_records_path(dd, "uncovered")
+        if sweep_path.is_file():
+            expected_paths.append(sweep_path)
         for records_path in sorted(expected_paths):
             records = json.loads(records_path.read_text())
             per_stack_records_paths.append(records_path)
@@ -1186,6 +1230,164 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     ctx.data["record_sources"] = record_sources
     ctx.data["structural_records_path"] = structural_records_path
     return None
+
+
+async def _step_uncovered_sweep(ctx: FlowContext) -> None:
+    """Issue #309: fail-open second-pass sweep over diff files no reviewer read.
+
+    After per-stack reviews + parse, computes which diff files no ``deep-``
+    reviewer read (via ``analyze_coverage``), budget-filters them (hunk size +
+    capacity cap), dispatches one cheap reviewer per surviving file, parses the
+    findings into ordinary ``PER_STACK_RECORD_SCHEMA`` records, and appends
+    them to ``ctx.data`` so the arbiter/merge consume them exactly like any
+    per-stack stack's records. Coverage stats land in ``deep/coverage-stats.json``.
+
+    Fail-open: any exception here is caught, logged as a warning, and the step
+    returns normally -- the sweep must NEVER fail the run.
+    """
+    if ctx.config.start_at in ("merge", "fix"):
+        # Resume: records are already finalized on disk; a sweep would
+        # re-review stale coverage against a diff that already ran.
+        return None
+    try:
+        await _run_uncovered_sweep(ctx)
+    except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
+        print_warning(
+            console,
+            f"Uncovered-file sweep failed (fail-open): {type(exc).__name__}: {exc}",
+        )
+
+
+async def _run_uncovered_sweep(ctx: FlowContext) -> None:
+    """Run the uncovered-file sweep body (issue #309)."""
+    config = ctx.config
+    dd = ctx.data["dd"]
+    recorder = get_current_recorder()
+    session_id = recorder.session_id if recorder is not None else None
+
+    uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
+
+    swept_files, skipped_small, skipped_capacity = filter_sweepable_files(
+        uncovered_files,
+        ctx.data["diff"],
+        min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
+        max_files=_uncovered_sweep_max_files(config),
+    )
+
+    stats: dict[str, Any] = {
+        "files_in_diff": coverage_stats["files_in_diff"],
+        "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
+        "coverage_ratio": coverage_stats["coverage_ratio"],
+        "uncovered_files": uncovered_files,
+        "swept_files": swept_files,
+        "sweep_finding_count": 0,
+        "sweep_skipped_capacity": skipped_capacity,
+        "sweep_skipped_small_hunks": skipped_small,
+    }
+    stats_p = dd / "coverage-stats.json"
+
+    if not swept_files:
+        stats_p.write_text(json.dumps(stats, indent=2))
+        return
+
+    # Cheap-tier dispatch (parse tier), parallel, in diff order. Each sweep
+    # fork is `deep-uncovered-<n>` so post-run analyze_coverage counts its
+    # reads (the coverage-ratio-improves acceptance criterion).
+    parse_backend = ctx.backend_for("parse")
+    limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
+    review_outputs: dict[str, Path] = {}
+    sweep_failures: dict[str, str] = {}
+
+    async with anyio.create_task_group() as tg:
+        for n, file in enumerate(swept_files):
+            output_path = dd / f"uncovered-{n}-review.md"
+            prompt = build_uncovered_sweep_prompt(
+                file=file,
+                hunks=diff_block_for_file(ctx.data["diff"], file) or "",
+                intent_path=ctx.data["intent_path"],
+                cwd=ctx.work.repo,
+                output_path=output_path,
+            )
+
+            async def _sweep_one(
+                file: str = file,
+                task_prompt: str = prompt,
+                task_output: Path = output_path,
+                n: int = n,
+            ) -> None:
+                async with limiter:
+                    async with maybe_fork(recorder, f"deep-uncovered-{n}"):
+                        try:
+                            _, _, budget_reason = await run_agent(
+                                parse_backend,
+                                ctx.work.repo,
+                                task_prompt,
+                                phase=DaydreamPhase.DEEP,
+                                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                            )
+                            if budget_reason:
+                                sweep_failures[file] = f"budget exhausted: {budget_reason}"
+                            else:
+                                review_outputs[file] = task_output
+                        except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
+                            sweep_failures[file] = f"{type(exc).__name__}: {exc}"
+
+            tg.start_soon(_sweep_one)
+
+    if recorder is not None:
+        recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
+
+    # Parse each sweep review into PER_STACK_RECORD_SCHEMA records (fail-open:
+    # unparseable or failed parses are dropped, never fatal).
+    parse_results: dict[str, list[dict[str, Any]]] = {}
+    parse_dropped = 0
+
+    async def _parse_all() -> None:
+        nonlocal parse_dropped
+        async with anyio.create_task_group() as tg:
+            for i, (file, output_path) in enumerate(sorted(review_outputs.items())):
+                async def _parse_one(
+                    file: str = file,
+                    input_path: Path = output_path,
+                    i: int = i,
+                ) -> None:
+                    nonlocal parse_dropped
+                    async with limiter:
+                        async with maybe_fork(recorder, f"parse-uncovered-{i}"):
+                            try:
+                                records = await phase_parse_feedback(
+                                    parse_backend,
+                                    ctx.work,
+                                    input_path=input_path,
+                                    output_schema=PER_STACK_RECORD_SCHEMA,
+                                )
+                                parse_results[file] = records
+                            except Exception:  # noqa: BLE001 -- fail-open drop
+                                parse_dropped += 1
+
+                tg.start_soon(_parse_one)
+
+    await _parse_all()
+
+    # Merge the sweep records into the per-stack record set exactly like the
+    # per-stack parse loop does, so arbiter/merge consume them as ordinary
+    # per-stack records (no separate score path). The records file is written
+    # whenever at least one sweep review produced output -- an emptied sweep
+    # stack is ``[]``, mirroring ``_rewrite_stack_records`` semantics.
+    sweep_records: list[dict[str, Any]] = []
+    for file in sorted(parse_results):
+        sweep_records.extend(parse_results[file])
+    stats["sweep_parse_dropped"] = parse_dropped
+    stats["sweep_failures"] = sweep_failures
+    if review_outputs:
+        records_path = per_stack_records_path(dd, "uncovered")
+        records_path.write_text(json.dumps(sweep_records, indent=2))
+        ctx.data["records_paths"].append(records_path)
+        ctx.data["records"].extend(sweep_records)
+        ctx.data["record_sources"].extend("uncovered" for _ in sweep_records)
+        stats["sweep_finding_count"] = len(sweep_records)
+    stats_p.write_text(json.dumps(stats, indent=2))
 
 
 async def _step_arbiter(ctx: FlowContext) -> None:
@@ -1375,15 +1577,57 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     # the exit message when the canonical file is absent (e.g. a --start-at fix
     # resume where the copy to the canonical path never ran). Non-fatal.
     if not merged_report.exists():
-        from daydream.deep.artifacts import merged_report_path
+        from daydream.deep.artifacts import merged_report_path as _deep_report_path
 
-        deep_copy = merged_report_path(dd)
+        deep_copy = _deep_report_path(dd)
         if deep_copy.exists():
             merged_report.write_text(deep_copy.read_text())
+
+    # Issue #309: surface the uncovered-sweep coverage stats on the rendered
+    # report. The sweep runs BEFORE the merge writes review-output.md, so the
+    # section is appended here, once the report exists, to both the canonical
+    # report and its deep-dir copy.
+    _append_coverage_section(dd, merged_report, merged_report_path(dd))
 
     ctx.data["merged_report"] = merged_report
     ctx.data["items_file"] = items_file
     return None
+
+
+def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
+    """Append a short ``## Coverage`` section when the sweep produced stats.
+
+    Reads ``deep/coverage-stats.json`` and appends files_read / files_in_diff /
+    ratio / swept files to both the canonical report and its deep-dir copy. A
+    missing or malformed stats file is a silent no-op -- coverage surfacing is
+    advisory, never a gate.
+    """
+    stats_p = dd / "coverage-stats.json"
+    if not stats_p.is_file():
+        return
+    try:
+        stats = json.loads(stats_p.read_text())
+    except json.JSONDecodeError:
+        return
+    files_in_diff = stats.get("files_in_diff")
+    files_read = stats.get("files_read_by_reviewers")
+    if not isinstance(files_in_diff, int) or not isinstance(files_read, int):
+        return
+    lines = [
+        "## Coverage",
+        f"- Files in diff: {files_in_diff}",
+        f"- Files read by reviewers: {files_read}",
+        f"- Coverage ratio: {stats.get('coverage_ratio')}",
+    ]
+    swept = stats.get("swept_files")
+    if isinstance(swept, list) and swept:
+        lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in swept)}")
+    section = "\n".join(lines) + "\n"
+    for target in (report, deep_copy):
+        if target.is_file():
+            text = target.read_text(encoding="utf-8")
+            if "## Coverage" not in text:
+                target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
 
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:
@@ -1721,8 +1965,8 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
 # The deep pipeline as a registered flow (D-07):
 #
 #     exploration pre-scan -> TTT intent -> TTT alternative-review ->
-#     per-stack reviews -> per-stack parse + dedup -> arbiter ->
-#     cross-stack merge (or the tiny-diff single-stack bypass) ->
+#     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
+#     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
 #     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
 #     test -> commit.
 #
@@ -1736,6 +1980,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
     FlowStep(name="per-stack-reviews", run=_step_wonder_and_per_stack, config_phase="per_stack_review"),
     FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
+    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled),
     FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(
         name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled

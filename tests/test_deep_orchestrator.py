@@ -5087,3 +5087,172 @@ async def test_structural_finding_reported_medium_severity_survives_merge(
         "structural anti-slop finding must keep its reported medium severity, "
         f"got {structural[0].get('severity')!r}:\n{structural}"
     )
+
+
+def _uncovered_sweep_target(tmp_path: Path) -> Path:
+    """Git repo whose diff has one file NO per-stack reviewer reads.
+
+    ``notes.txt`` is an ambiguous-extension file routed to the generic stack;
+    the stub leaves it unread (``per_stack_unread``) and its hunk is large
+    enough (6 added lines) to clear the sweep's ``uncovered_sweep_min_hunk_lines``
+    budget, so it is the single file the sweep covers. The other files' hunks
+    are trivially small (<5 changed lines), so the sweep has exactly one target.
+    """
+    project = tmp_path / "sweep_target"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    (project / "README.md").write_text("# Project\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    (project / "notes.txt").write_text("".join(f"line{i}\n" for i in range(1, 7)))
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
+async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """AC (issue #309): the sweep reviews an uncovered file, its finding is an
+    ordinary merged finding, coverage stats improve, and the report surfaces
+    coverage.
+
+    Real path: ``runner.run`` through the deep flow with a real temp git repo,
+    real filesystem, and real event loop; only the backend is stubbed. The
+    stub per-stack reviewers read their own files (leaving ``notes.txt`` the
+    single uncovered file), and the sweep branch emits a read + a finding for
+    it.
+    """
+    from daydream.eval.analyzer import analyze_coverage, load_trajectories
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+
+    # (a) The sweep records file exists and its finding is a MERGED finding.
+    records_file = deep / "stack-uncovered-records.json"
+    assert records_file.is_file()
+    records = json.loads(records_file.read_text())
+    assert any(r.get("file") == "notes.txt" for r in records)
+    merged_items = json.loads((deep / "merged-items.json").read_text())
+    merged_files = {item.get("file") for item in merged_items["items"]}
+    assert "notes.txt" in merged_files
+
+    # (b) coverage-stats records the pre-sweep state and the swept file.
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["files_in_diff"] == 4
+    assert stats["files_read_by_reviewers"] == 3  # api.py, App.tsx, README.md read pre-sweep
+    assert stats["uncovered_files"] == ["notes.txt"]
+    assert stats["swept_files"] == ["notes.txt"]
+    assert stats["sweep_finding_count"] == len(records) >= 1
+    assert stats["sweep_skipped_small_hunks"] == 0
+
+    # (c) post-run analyze_coverage sees the sweep fork's read: ratio improves.
+    trajectories = load_trajectories(target / ".daydream")
+    post = analyze_coverage(trajectories, target / ".daydream")
+    assert post["files_read_by_reviewers"] == 4
+    assert post["coverage_ratio"] == 1.0
+    assert post["coverage_ratio"] > stats["coverage_ratio"]  # 0.75 -> 1.0
+
+    # (d) the merged report carries the Coverage section (the pre-sweep
+    # snapshot from coverage-stats.json plus the swept-file line).
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Files in diff: 4" in report
+    assert "Files read by reviewers: 3" in report
+    assert "Second-pass sweep covered: notes.txt" in report
+
+
+async def test_run_deep_uncovered_sweep_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A broken sweep (backend raise) never fails the run: exit 0, the failure
+    is recorded in coverage-stats.json, and merged-items.json is still written.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.fail_sweep = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["swept_files"] == ["notes.txt"]
+    assert stats["sweep_finding_count"] == 0
+    assert "notes.txt" in stats["sweep_failures"]
+    assert (deep / "merged-items.json").is_file()
+    assert not (deep / "stack-uncovered-records.json").exists()  # no review output to parse
+
+
+async def test_uncovered_sweep_disabled_by_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Setting ``uncovered_sweep = false`` (CLI tier) skips the sweep entirely."""
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+
+    exit_code = await run(
+        make_config(target, assume="yes", output_mode="loop", uncovered_sweep=False)
+    )
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    assert not (deep / "coverage-stats.json").exists()
+    assert not (deep / "stack-uncovered-records.json").exists()
+    merged_items = json.loads((deep / "merged-items.json").read_text())
+    assert all(item.get("file") != "notes.txt" for item in merged_items["items"])
+
+
+async def test_uncovered_sweep_noop_on_merge_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--start-at merge`` resume is a sweep no-op: no sweep artifacts are
+    created and the resume still succeeds.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(confidence="HIGH")],
+        react=[_record()],
+        generic=[_record()],
+        structure=[_record()],
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert not (deep / "stack-uncovered-records.json").exists()
+    assert not (deep / "coverage-stats.json").exists()
