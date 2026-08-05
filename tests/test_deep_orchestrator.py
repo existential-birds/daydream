@@ -29,7 +29,10 @@ import pytest
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from tests.harness.git_helpers import bare_remote as _bare_remote
+from tests.harness.git_helpers import commit as _commit
 from tests.harness.git_helpers import git as _git
+from tests.harness.git_helpers import init_repo as _init_repo
 from tests.harness.stub_backend import (
     PARTIAL_FIX_MARKER,
     StubBackend,
@@ -115,6 +118,29 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
         "rationale": "rationale",
         "evidence": f"{file}:1",
     }
+
+
+def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    """Build a feature-branch fixture with one historical migration."""
+    project = tmp_path / name
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    (project / "README.md").write_text("# Project\n")
+    (project / "migrations").mkdir()
+    migration = project / "migrations" / "0001_init.sql"
+    migration.write_text("SELECT 1;\n")
+    _init_repo(project)
+    _git(project, "add", "api.py", "App.tsx", "README.md", "migrations/0001_init.sql")
+    _commit(project, "test: initialize migration fixture")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    migration.write_text("SELECT 1;\nSELECT 2;\n")
+    _git(project, "add", "api.py", "App.tsx", "README.md", "migrations/0001_init.sql")
+    _commit(project, "test: prepare migration change")
+    return project, migration
 
 
 def _record(**overrides: Any) -> dict[str, Any]:
@@ -804,6 +830,162 @@ async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     leftover = manifest["fix_leftover_untracked"]
     assert leftover, "manifest must enumerate untracked files left by the failed fix pass"
     assert "store/uuid.go" in leftover
+
+
+async def test_fix_guard_reverts_generated_migration_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    import daydream
+    from daydream.runner import run
+
+    project, migration = _migration_project(tmp_path, "migration_repo")
+    bare = _bare_remote(tmp_path / "remote.git")
+    _git(project, "remote", "add", "origin", str(bare))
+
+    pre_migration = migration.read_bytes()
+    head_before = _git(project, "rev-parse", "HEAD")
+    preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
+    preexisting_untracked.write_bytes(b"-- local draft\r\n")
+    untouched_untracked = project / "migrations" / "0000_untouched.sql"
+    untouched_untracked.write_bytes(b"-- untouched draft\r\n")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    mute_side_effects(heal=False, commit=False)
+    stub = _PushingCommittingStubBackend(project)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub.merge_items = [
+        _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
+        _merge_item(2, "api.py", "high", desc="source fix"),
+        _merge_item(3, "migrations/0000_local_draft.sql", "high", desc="local schema fix"),
+    ]
+    stub.fix_edit_line = "\n-- FORBIDDEN EDIT\n"
+    stub.fix_new_generated = "migrations/0002_add_x.sql"
+
+    exit_code = await run(
+        make_config(
+            project,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+
+    assert exit_code == 0
+    assert migration.read_bytes() == pre_migration
+    assert b"FORBIDDEN EDIT" not in migration.read_bytes()
+    assert preexisting_untracked.read_bytes() == b"-- local draft\r\n"
+    assert untouched_untracked.read_bytes() == b"-- untouched draft\r\n"
+    assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
+    assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
+    violations = project / ".daydream" / "deep" / "generated-file-violations.json"
+    assert violations.exists()
+    assert json.loads(violations.read_text()) == {
+        "violations": ["migrations/0001_init.sql", "migrations/0000_local_draft.sql"],
+        "ref": "HEAD",
+    }
+    patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
+    assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
+    head_after = _git(project, "rev-parse", "HEAD")
+    assert head_after != head_before
+    committed_paths = _git(project, "show", "--name-only", "--format=", "HEAD").split()
+    assert "api.py" in committed_paths
+    assert "migrations/0002_add_x.sql" in committed_paths
+    commit_message = _git(project, "log", "-1", "--format=%B")
+    assert "Daydream-Run: " in commit_message
+    assert f"Daydream-Version: {daydream.__version__}" in commit_message
+    assert head_after in _git(project, "ls-remote", "--heads", "origin", "feature")
+
+
+async def test_test_healing_guard_reverts_generated_migration_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """The runner snapshots and restores a forbidden edit made by a heal turn."""
+    from daydream.runner import run
+
+    project, migration = _migration_project(tmp_path, "heal_migration_repo")
+    pre_migration = migration.read_bytes()
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    mute_side_effects(heal=False)
+    stub = _StubBackend(project)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
+    stub.fail_first_test_run = True
+    stub.heal_fix_generated = "migrations/0001_init.sql"
+    stub.heal_fix_new_generated = "migrations/0002_add_x.sql"
+
+    exit_code = await run(
+        make_config(
+            project,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+
+    assert exit_code == 0
+    assert migration.read_bytes() == pre_migration
+    new_migration = project / "migrations" / "0002_add_x.sql"
+    assert new_migration.is_file()
+    assert new_migration.read_text() == "-- new healing migration\n"
+    assert (project / ".daydream-heal-fix-applied").is_file()
+    violations = project / ".daydream" / "deep" / "generated-file-violations.json"
+    assert json.loads(violations.read_text()) == {
+        "violations": ["migrations/0001_init.sql"],
+        "ref": "HEAD",
+    }
+
+
+async def test_fix_guard_restore_failure_aborts_before_commit(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A forbidden generated edit cannot reach commit when restoration fails."""
+    from daydream.git_ops import GitError
+    from daydream.runner import run
+
+    migration = multi_stack_target / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("SELECT 1;\n")
+    _git(multi_stack_target, "add", "migrations/0001_init.sql")
+    head_before = _git(multi_stack_target, "rev-parse", "HEAD")
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(heal=True, commit=False)
+    stub = _CommittingStubBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
+    stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
+    monkeypatch.setattr(
+        "daydream.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+        )
+    )
+
+    assert exit_code == 1
+    assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
 
 
 async def test_parallel_fix_commit_runs_once_after_all(
@@ -4445,6 +4627,49 @@ class _CommittingStubBackend(_StubBackend):
             _git(cwd, "add", "--all")
             _git(cwd, "commit", "-m", "fix: align greeting copy")
             yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+class _PushingCommittingStubBackend(_StubBackend):
+    """Stub commit agent that writes required trailers before pushing."""
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ) -> Any:
+        if prompt.startswith("Stage all changes and commit"):
+            run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
+            version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
+            assert run_id is not None
+            assert version is not None
+            message = (
+                "fix: align migration and source changes\n\n"
+                f"Daydream-Run: {run_id.group(1)}\n"
+                f"Daydream-Version: {version.group(1)}"
+            )
+            _git(cwd, "add", "--all")
+            _git(cwd, "commit", "-m", message)
+            branch = _git(cwd, "branch", "--show-current")
+            _git(cwd, "push", "-u", "origin", branch)
+            yield TextEvent(text="Committed and pushed.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
 

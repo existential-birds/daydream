@@ -1114,14 +1114,15 @@ def status_porcelain(repo: Path) -> str:
     return proc.stdout
 
 
-def changed_files(repo: Path) -> list[str]:
+def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Return repo-relative paths of files changed in the working tree.
 
     Best-effort: combines staged + unstaged changes (``git diff --name-only
     HEAD``) with new untracked files (``git ls-files --others
-    --exclude-standard``).  Files created during a daydream fix are still
-    untracked at abort time, so the diff alone would omit them and leave the
-    handoff missing critical context.
+    --exclude-standard``). When ``preexisting_untracked`` is supplied, only
+    untracked paths absent from that pre-fix snapshot are included. Files
+    created during a daydream fix are still untracked at abort time, so the
+    diff alone would omit them and leave the handoff missing critical context.
 
     Soft-failure semantics: returns an empty list when git is unavailable, the
     repo has no commits yet, or either subcommand fails.  Individual
@@ -1138,7 +1139,44 @@ def changed_files(repo: Path) -> list[str]:
         tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
     except GitError:
         tracked = []
-    for line in [*tracked, *list_untracked(repo)]:
+    untracked = list_untracked(repo)
+    if preexisting_untracked is not None:
+        untracked = [path for path in untracked if path not in preexisting_untracked]
+    for line in [*tracked, *untracked]:
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def changed_files_against(
+    repo: Path,
+    ref: str,
+    *,
+    preexisting_untracked: set[str] | None = None,
+) -> list[str]:
+    """Return paths changed from *ref*, raising when they cannot be enumerated.
+
+    This is the strict counterpart to :func:`changed_files` for destructive
+    recovery guards, where treating a Git failure as an empty change set would
+    make the guard's safety decision unreliable.
+    """
+    proc = _run_git(repo, ["diff", "--name-only", ref], timeout=10)
+    if proc.returncode != 0:
+        raise GitError(f"git diff --name-only {ref} failed in {repo}: {proc.stderr.strip()}")
+    untracked_proc = _run_git(
+        repo, ["ls-files", "--others", "--exclude-standard"], timeout=10,
+    )
+    if untracked_proc.returncode != 0:
+        raise GitError(f"git ls-files --others failed in {repo}: {untracked_proc.stderr.strip()}")
+
+    names: list[str] = []
+    seen: set[str] = set()
+    untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
+    if preexisting_untracked is not None:
+        untracked = [path for path in untracked if path not in preexisting_untracked]
+    for line in [*proc.stdout.splitlines(), *untracked]:
         name = line.strip()
         if name and name not in seen:
             seen.add(name)

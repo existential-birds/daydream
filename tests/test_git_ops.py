@@ -408,6 +408,28 @@ def test_diff_name_only_returns_empty_list_on_bad_ref(tmp_path: Path) -> None:
     assert result == []
 
 
+def test_changed_files_against_compares_tracked_changes_to_snapshot(tmp_path: Path) -> None:
+    """A pre-fix snapshot, rather than HEAD, is the guard's tracked baseline."""
+    repo = _make_repo_with_main(tmp_path)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("committed\n")
+    _git(repo, "add", "tracked.txt")
+    _commit(repo, "add tracked file")
+    tracked.write_text("pre-fix edit\n")
+    snapshot = git_ops.stash_create(repo)
+    assert snapshot is not None
+
+    tracked.write_text("post-fix edit\n")
+
+    assert git_ops.changed_files_against(repo, snapshot) == ["tracked.txt"]
+
+
+def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> None:
+    """Safety guards must not mistake a failed enumeration for a clean tree."""
+    with pytest.raises(GitError):
+        git_ops.changed_files_against(tmp_path, "HEAD")
+
+
 def test_log_returns_oneline_commits(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     _git(repo, "checkout", "-b", "topic")

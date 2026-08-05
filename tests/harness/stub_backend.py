@@ -132,6 +132,12 @@ class StubBackend:
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
         self.fix_orphan_file: str | None = None
+        # Repo-relative generated path created by a successful fix turn.
+        self.fix_new_generated: str | None = None
+        # Repo-relative historical generated path modified by a test-healing
+        # fix turn, plus an optional new generated path created by that turn.
+        self.heal_fix_generated: str | None = None
+        self.heal_fix_new_generated: str | None = None
         # When True, the fix branch yields a long burst of ToolStartEvents and
         # NEVER emits a ResultEvent -- simulating a runaway turn. Without the
         # in-loop tool-call budget in run_agent this stream never completes and
@@ -619,6 +625,10 @@ class StubBackend:
                 return
             (cwd / ".daydream-fix-applied").write_text("applied\n")  # legacy sentinel
             (cwd / f".fixed-{fixed_name.replace('.', '_')}").write_text("applied\n")
+            if self.fix_new_generated is not None:
+                generated = cwd / self.fix_new_generated
+                generated.parent.mkdir(parents=True, exist_ok=True)
+                generated.write_text("-- new migration\n")
             if self.fix_edit_line is not None:
                 edit_target = Path(fixed_file) if Path(fixed_file).is_absolute() else (cwd / fixed_file)
                 if edit_target.exists():
@@ -663,6 +673,14 @@ class StubBackend:
         # before any fix turn ran (AC#6b).
         if pl.startswith("the tests failed"):
             (cwd / ".daydream-heal-fix-applied").write_text("healed\n")
+            if self.heal_fix_generated is not None:
+                generated = cwd / self.heal_fix_generated
+                if generated.exists():
+                    generated.write_text(generated.read_text() + "\n-- FORBIDDEN HEAL EDIT\n")
+            if self.heal_fix_new_generated is not None:
+                new_generated = cwd / self.heal_fix_new_generated
+                new_generated.parent.mkdir(parents=True, exist_ok=True)
+                new_generated.write_text("-- new healing migration\n")
             yield TextEvent(text="Attempted to fix the test failures.")
             yield ResultEvent(structured_output=None, continuation=None)
             return

@@ -40,6 +40,226 @@ class _HealBackend(ScriptedBackend):
         return [call["read_only"] for call in self.calls]
 
 
+def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(tmp_path, silence_console):
+    """The per-healing guard protects historical migrations after a fix agent runs."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- forbidden rewrite\n")
+    new_migration = tmp_path / "migrations" / "0002_add_users.sql"
+    new_migration.write_text("-- allowed new migration\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations == ["migrations/0001_init.sql"]
+    assert migration.read_text() == "-- original\n"
+    assert new_migration.read_text() == "-- allowed new migration\n"
+    assert "migrations/0001_init.sql" in (
+        tmp_path / ".daydream" / "deep" / "generated-file-violations.json"
+    ).read_text()
+
+
+def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(tmp_path, silence_console):
+    """A healing edit cannot remove a marker and thereby evade the guard."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    generated = tmp_path / "client.py"
+    generated.write_text("# @generated\nORIGINAL = True\n")
+    git(tmp_path, "add", "client.py")
+    git_commit(tmp_path, "generated client")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    generated.write_text("MANUAL = True\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations == ["client.py"]
+    assert generated.read_text() == "# @generated\nORIGINAL = True\n"
+
+
+def test_test_healing_guard_skips_restoration_when_snapshot_capture_failed(tmp_path, silence_console):
+    """Without a pre-fix snapshot, recovery must not fall back to HEAD."""
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+    migration.write_text("-- user edit\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=None, snapshot_captured=False, pre_untracked=set(),
+    )
+
+    assert violations == []
+    assert migration.read_text() == "-- user edit\n"
+
+
+def test_test_healing_guard_uses_unique_recovery_patch_names(tmp_path, silence_console):
+    """Distinct paths with the same slug preserve both rejected edits."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    paths = ["migrations/a/b.sql", "migrations/a-b.sql"]
+    for path in paths:
+        file_path = tmp_path / path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("-- original\n")
+    git(tmp_path, "add", *paths)
+    git_commit(tmp_path, "initial migrations")
+
+    snapshot = git_ops.stash_create(tmp_path)
+    for path in paths:
+        (tmp_path / path).write_text(f"-- forbidden {path}\n")
+
+    _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    patches = list((tmp_path / ".daydream" / "partial-fixes").glob("*.patch"))
+    assert len(patches) == 2
+
+
+def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
+    tmp_path, monkeypatch, silence_console,
+):
+    """An unknown changed-path set cannot safely drive destructive recovery."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "initial migration")
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- healing edit\n")
+    monkeypatch.setattr(
+        "daydream.phases.git_ops.changed_files_against",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("unavailable")),
+    )
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations == []
+    assert migration.read_text() == "-- healing edit\n"
+
+
+def test_test_healing_guard_reports_restoration_failure(tmp_path, monkeypatch, silence_console):
+    """A forbidden edit remains unsafe when Git cannot restore its baseline."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    migration = tmp_path / "migrations" / "0001_init.sql"
+    migration.parent.mkdir()
+    migration.write_text("-- original\n")
+    git(tmp_path, "add", "migrations/0001_init.sql")
+    git_commit(tmp_path, "test: initialize migration fixture")
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_text("-- healing edit\n")
+    monkeypatch.setattr(
+        "daydream.phases.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+    )
+
+    assert violations is None
+    assert migration.read_text() == "-- healing edit\n"
+
+
+def test_test_healing_guard_restores_preexisting_untracked_generated_bytes(tmp_path, silence_console):
+    """A healing edit to an untracked migration is restored byte-for-byte."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    (tmp_path / "README.md").write_text("# Fixture\n")
+    git(tmp_path, "add", "README.md")
+    git_commit(tmp_path, "test: initialize healing fixture")
+    migration = tmp_path / "migrations" / "0000_local_draft.sql"
+    migration.parent.mkdir()
+    original = b"-- local draft\r\n"
+    migration.write_bytes(original)
+    pre_untracked = {"migrations/0000_local_draft.sql"}
+    pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
+    snapshot = git_ops.stash_create(tmp_path)
+    migration.write_bytes(b"-- forbidden healing edit\n")
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path,
+        snapshot=snapshot,
+        snapshot_captured=True,
+        pre_untracked=pre_untracked,
+        pre_untracked_contents=pre_untracked_contents,
+    )
+
+    assert violations == ["migrations/0000_local_draft.sql"]
+    assert migration.read_bytes() == original
+
+
+def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(tmp_path, silence_console):
+    """An untouched untracked migration remains byte-identical."""
+    from daydream import git_ops
+    from daydream.phases import _reject_test_healing_generated_file_edits
+
+    silence_console("daydream.phases")
+    init_repo(tmp_path)
+    (tmp_path / "README.md").write_text("# Fixture\n")
+    git(tmp_path, "add", "README.md")
+    git_commit(tmp_path, "test: initialize healing fixture")
+    migration = tmp_path / "migrations" / "0000_local_draft.sql"
+    migration.parent.mkdir()
+    original = b"-- local draft\r\n"
+    migration.write_bytes(original)
+    pre_untracked = {"migrations/0000_local_draft.sql"}
+    pre_untracked_contents = {"migrations/0000_local_draft.sql": migration.read_bytes()}
+    snapshot = git_ops.stash_create(tmp_path)
+
+    violations = _reject_test_healing_generated_file_edits(
+        tmp_path,
+        snapshot=snapshot,
+        snapshot_captured=True,
+        pre_untracked=pre_untracked,
+        pre_untracked_contents=pre_untracked_contents,
+    )
+
+    assert violations == []
+    assert migration.read_bytes() == original
+
+
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch, make_work, silence_console):
     """Test that fix-and-retry starts fresh (no continuation) with enriched prompt."""
@@ -77,6 +297,27 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
     assert "src/handler.py" in fix_prompt
     assert "src/utils.py" in fix_prompt
     assert "Analyze the failures and fix them" in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
+    tmp_path, monkeypatch, make_work, silence_console,
+):
+    """A failed generated-file restore stops healing before another test run."""
+    from daydream.phases import phase_test_and_heal
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend(script=[_FAIL_TURN, _FIX_TURN, _PASS_TURN])
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "2")
+    monkeypatch.setattr(
+        "daydream.phases._reject_test_healing_generated_file_edits",
+        lambda *args, **kwargs: None,
+    )
+
+    result = await phase_test_and_heal(backend, make_work(tmp_path))
+
+    assert result == (False, 1, False)
+    assert backend.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -312,6 +553,23 @@ def test_build_fix_prompt_concise_mode():
 
     prompt_default = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
     assert "CONCISE MODE" not in prompt_default
+
+
+def test_fix_guardrails_forbid_generated_file_edits():
+    from daydream.phases import _FIX_GUARDRAILS
+
+    assert "generated" in _FIX_GUARDRAILS.lower()
+    assert "migration" in _FIX_GUARDRAILS.lower()
+
+
+def test_build_fix_prompt_carries_generated_file_rule():
+    from daydream.phases import _build_fix_prompt
+
+    prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
+    assert "generated" in prompt.lower()
+    assert "migration" in prompt.lower()
+    assert "package manifests" in prompt.lower()
+    assert "lockfile update" in prompt.lower()
 
 
 @pytest.mark.asyncio

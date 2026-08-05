@@ -14,6 +14,7 @@ phase primitive (D-39).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -42,6 +43,7 @@ from daydream.deep.artifacts import (
     diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
+    generated_file_violations_path,
     merged_items_path,
     merged_report_path,
     per_stack_failures_path,
@@ -65,6 +67,13 @@ from daydream.deep.render import render_held_section, render_report
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
+from daydream.generated_files import (
+    _changed_untracked_generated_files,
+    _restore_untracked_generated_file,
+    _snapshot_untracked_generated_files,
+    is_generated_file,
+    related_manifest_paths,
+)
 from daydream.phases import (
     FEEDBACK_SCHEMA,
     PER_STACK_RECORD_SCHEMA,
@@ -599,6 +608,7 @@ def _protect_tree_after_fix_failures(
     fix_failures: dict[str, str],
     *,
     snapshot: str | None,
+    snapshot_captured: bool,
     pre_untracked: set[str],
 ) -> None:
     """Roll each failed fix group's file back to its pre-fix content.
@@ -623,6 +633,11 @@ def _protect_tree_after_fix_failures(
     """
     from daydream import git_ops
     from daydream.git_ops import GitError
+
+    if not snapshot_captured:
+        # HEAD is not a safe substitute when capturing the pre-fix state
+        # failed: it may discard edits that were present before this pass.
+        return
 
     repo = work.repo
     ref = snapshot or "HEAD"
@@ -660,6 +675,126 @@ def _protect_tree_after_fix_failures(
                     file_path.unlink()
                 except OSError:
                     pass
+
+
+def _reject_generated_file_edits(
+    work: WorkContext,
+    target_dir: Path,
+    *,
+    snapshot: str | None,
+    snapshot_captured: bool,
+    pre_untracked: set[str],
+    pre_untracked_contents: dict[str, bytes] | None = None,
+) -> list[str] | None:
+    """Restore changed generated files, returning ``None`` if restoration fails."""
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+
+    if not snapshot_captured:
+        # A failed snapshot has no trustworthy pre-fix baseline.  In
+        # particular, falling back to HEAD could erase a user's existing edit.
+        return []
+
+    repo = work.repo
+    ref = snapshot or "HEAD"
+    changed = git_ops.changed_files_against(
+        repo, ref, preexisting_untracked=pre_untracked
+    )
+
+    tracked_violations: list[str] = []
+    patches: dict[str, str] = {}
+    recovery_dir = target_dir / ".daydream" / "partial-fixes"
+    for path in changed:
+        try:
+            baseline = git_ops.show(repo, ref, path)
+        except GitError:
+            # Newly-created generated files (notably new migrations) are
+            # deliberately allowed.
+            continue
+        if not is_generated_file(path, baseline):
+            continue
+        try:
+            patch = git_ops.diff_worktree_against(repo, ref, [path])
+        except GitError as exc:
+            patch = ""
+            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
+        if not patch:
+            # New generated files (notably new migrations) have no baseline
+            # diff and are deliberately allowed.
+            continue
+        tracked_violations.append(path)
+        patches[path] = patch
+
+    untracked_baselines = pre_untracked_contents or {}
+    untracked_violations = _changed_untracked_generated_files(repo, untracked_baselines)
+    direct_violations = [*tracked_violations, *untracked_violations]
+    paths_to_restore = list(tracked_violations)
+    for path in direct_violations:
+        for manifest_path in related_manifest_paths(path):
+            if manifest_path in paths_to_restore:
+                continue
+            try:
+                manifest_patch = git_ops.diff_worktree_against(repo, ref, [manifest_path])
+                if not manifest_patch:
+                    continue
+                git_ops.show(repo, ref, manifest_path)
+            except GitError:
+                continue
+            paths_to_restore.append(manifest_path)
+            patches[manifest_path] = manifest_patch
+
+    for path, patch in patches.items():
+        slug = path.replace("/", "-").replace("\\", "-")
+        digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+        try:
+            recovery_dir.mkdir(parents=True, exist_ok=True)
+            (recovery_dir / f"{slug}-{digest}.patch").write_text(patch, encoding="utf-8")
+        except OSError as exc:
+            print_warning(console, f"Could not write recovery patch for '{path}': {exc}")
+
+    for path in untracked_violations:
+        file_path = repo / path
+        if not file_path.is_file():
+            continue
+        slug = path.replace("/", "-").replace("\\", "-")
+        digest = hashlib.sha256(path.encode("utf-8", errors="surrogateescape")).hexdigest()[:12]
+        try:
+            recovery_dir.mkdir(parents=True, exist_ok=True)
+            (recovery_dir / f"{slug}-{digest}.orphan").write_bytes(file_path.read_bytes())
+        except OSError as exc:
+            print_warning(console, f"Could not save forbidden generated-file edit for '{path}': {exc}")
+
+    restoration_failed = False
+    if paths_to_restore:
+        try:
+            git_ops.restore_paths_from_ref(repo, ref, paths_to_restore)
+        except GitError as exc:
+            print_warning(console, f"Could not restore generated files: {exc}")
+            restoration_failed = True
+
+    for path in untracked_violations:
+        try:
+            _restore_untracked_generated_file(repo, path, untracked_baselines[path])
+        except OSError as exc:
+            print_warning(console, f"Could not restore generated file '{path}': {exc}")
+            restoration_failed = True
+
+    if direct_violations:
+        artifact = generated_file_violations_path(deep_dir(target_dir))
+        try:
+            artifact.write_text(
+                json.dumps({"violations": direct_violations, "ref": ref}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            print_warning(console, f"Could not record generated-file violations: {exc}")
+        if not restoration_failed:
+            print_warning(
+                console,
+                f"Reverted forbidden edits to existing generated files: {', '.join(direct_violations)}. "
+                "Add a new migration file instead.",
+            )
+    return None if restoration_failed else direct_violations
 
 
 def _has_non_daydream_worktree_changes(status: str) -> bool:
@@ -1418,10 +1553,15 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     try:
         pre_fix_snapshot = git_ops.stash_create(work.repo)
         pre_fix_untracked = set(git_ops.list_untracked(work.repo))
-    except git_ops.GitError as exc:
+        pre_fix_untracked_contents = _snapshot_untracked_generated_files(work.repo, pre_fix_untracked)
+    except (git_ops.GitError, OSError) as exc:
         print_warning(console, f"Could not snapshot tree before fixes: {exc}")
         pre_fix_snapshot = None
         pre_fix_untracked = set()
+        pre_fix_untracked_contents = {}
+        pre_fix_snapshot_captured = False
+    else:
+        pre_fix_snapshot_captured = True
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is
     # the base and HEAD is unused, so skip the rev-parse. Captured now
@@ -1477,7 +1617,16 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             target_dir,
             exception_failures,
             snapshot=pre_fix_snapshot,
+            snapshot_captured=pre_fix_snapshot_captured,
             pre_untracked=pre_fix_untracked,
+        )
+        _reject_generated_file_edits(
+            work,
+            target_dir,
+            snapshot=pre_fix_snapshot,
+            snapshot_captured=pre_fix_snapshot_captured,
+            pre_untracked=pre_fix_untracked,
+            pre_untracked_contents=pre_fix_untracked_contents,
         )
         # Enumerate every untracked path that appeared during the fix
         # pass and survived protection. Attribution to a specific group
@@ -1505,6 +1654,16 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     stale_leftover_p = fix_leftover_untracked_path(dd)
     if stale_leftover_p.exists():
         stale_leftover_p.unlink()
+    generated_guard_result = _reject_generated_file_edits(
+        work,
+        target_dir,
+        snapshot=pre_fix_snapshot,
+        snapshot_captured=pre_fix_snapshot_captured,
+        pre_untracked=pre_fix_untracked,
+        pre_untracked_contents=pre_fix_untracked_contents,
+    )
+    if generated_guard_result is None:
+        return Stop(1)
     return None
 
 
