@@ -57,7 +57,7 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
     # ``pr_repo`` supplies owner/repo so installation-token minting resolves
     # without a real git remote (the temp repo has none).
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="review", shallow=True, skill="python", quiet=False,
+                       output_mode="comment", shallow=True, skill="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
     # Pin a wide recording console so the identity line is captured at the
@@ -144,7 +144,7 @@ async def test_minting_failure_aborts_run(feature_branch_repo, monkeypatch, caps
     monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----")
 
     config = RunConfig(target=str(feature_branch_repo), non_interactive=True,
-                       output_mode="review", shallow=True, skill="python", quiet=False,
+                       output_mode="comment", shallow=True, skill="python", quiet=False,
                        pr_repo="myorg/myrepo")
 
     with patch("daydream.github_app._mint_installation_token",

@@ -190,6 +190,13 @@ daydream --no-archive /path/to/project        # skip run archival
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
+`--start-at` refuses to resume onto stale artifacts. A fresh run records the
+diff it reviewed in `.daydream/deep/diff-key`; if the diff has changed since,
+the resume exits 1 rather than adjudicating stale findings against changed code
+— re-run without `--start-at` to regenerate. An artifact directory produced
+before diff tracking existed has no key and is refused for the same reason: it
+cannot be verified.
+
 `--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
 
 Per-phase model and backend overrides are no longer CLI flags. Set them in the config file (see [Configuration](#configuration)).
@@ -299,7 +306,7 @@ and plan repair — the phases whose output is executed
 later by a weaker agent with no context beyond the plan file, so every
 ambiguity left in a plan is paid for downstream.
 
-The improve flow runs with **no wall-clock or tool-call budget**. Its turns are
+The improve flow runs with **no wall-clock budget**. Its turns are
 long by design and a budget abort returns partial output that reads as
 complete.
 
@@ -324,9 +331,9 @@ standard and deep workflows; quick improve remains serial. Set
 Pi hint. Each workflow still applies its own ceiling, so this setting is not a
 process-global Pi limit.
 
-Claude and Codex share a hint of four, overridden the same way with
+Claude and Codex share a hint of eight, overridden the same way with
 `DAYDREAM_FANOUT_CONCURRENCY`. A non-integer or non-positive value warns and
-falls back to four. Pi keeps its own variable because its default differs; the
+falls back to eight. Pi keeps its own variable because its default differs; the
 value is a property of the endpoint serving the turns, not of daydream, so
 swapping `--backend` must not silently change how many turns it asks for.
 
@@ -412,9 +419,19 @@ Daydream can run as a self-hosted PR review bot in your own repository's GitHub 
 | `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report |
+| `.daydream/exploration/` | Cached pre-scan grounding; survives the run and is reused by the next one |
+| `.daydream/exploration/cache-key` | Key the cached pre-scan was produced from (head SHA + diff + tier + depth) |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
+
+`.daydream/exploration/` is reused on an **exact** key match regardless of
+uncommitted worktree edits: the key intentionally excludes uncommitted edits
+(head SHA + diff + tier + depth), so an exact-key hit on a dirty tree serves
+exploration computed before those edits. Near-matches never count — a stale hit
+would misground every review prompt. The `--shallow` and `--review` flows still
+delete the directory, so alternating flows degrades to a cache miss (never to
+stale grounding — the key file is deleted with the directory).
 
 ## Development
 

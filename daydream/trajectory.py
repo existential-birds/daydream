@@ -69,6 +69,41 @@ def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
     """Metrics ``extra`` carrier for reasoning_tokens (#192), or None when absent."""
     return {"reasoning_tokens": reasoning_tokens} if reasoning_tokens is not None else None
 
+
+def _add(left: Any, right: Any) -> Any:
+    """Sum two optional numbers, treating None as absent (not zero)."""
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left + right
+
+
+def _merge_metrics(existing: "Metrics", incoming: "Metrics") -> "Metrics":
+    """Additively merge a later MetricsEvent into a Step's running metrics.
+
+    A multi-turn invocation reports usage once per turn; every one of those
+    turns is billed, so a Step spanning them carries their sum rather than the
+    last turn's snapshot. reasoning_tokens rides in ``extra`` (#192) and sums
+    the same way; other ``extra`` keys are carried forward.
+    """
+    merged_extra: dict[str, Any] | None = None
+    if existing.extra is not None or incoming.extra is not None:
+        merged_extra = {**(existing.extra or {}), **(incoming.extra or {})}
+        reasoning = _add(
+            (existing.extra or {}).get("reasoning_tokens"),
+            (incoming.extra or {}).get("reasoning_tokens"),
+        )
+        if reasoning is not None:
+            merged_extra["reasoning_tokens"] = reasoning
+    return existing.model_copy(update={
+        "prompt_tokens": _add(existing.prompt_tokens, incoming.prompt_tokens),
+        "completion_tokens": _add(existing.completion_tokens, incoming.completion_tokens),
+        "cached_tokens": _add(existing.cached_tokens, incoming.cached_tokens),
+        "cost_usd": _add(existing.cost_usd, incoming.cost_usd),
+        "extra": merged_extra,
+    })
+
 # Redaction patterns (REDA-01..04). Order in _REDACTION_RULES matters: URL-credential
 # before bare API-key (so the captured credential isn't re-matched), PEM before env-var
 # (so `VAR=<PEM>` collapses whole instead of leaking the key body), env-var before bare
@@ -405,16 +440,20 @@ def _reset_recorder_for_tests() -> None:
 
 @dataclass
 class Invocation:
-    """Per-``run_agent()`` recording scope; closes one Step per assistant turn.
+    """Per-``run_agent()`` recording scope for one model conversation.
 
     Owns the Step buffer for one model conversation and the in-flight
     ``tool_call_id -> host-step`` map (CORE-06). ``parent`` linkage lives on
     ``TrajectoryRecorder`` (Phase 3, D-02), not on ``Invocation``.
 
-    Each ``TurnEndEvent`` from the backend closes the open Step so multi-turn
-    invocations produce N Steps (not a single collapsed Step). ``ResultEvent``
-    also closes the open Step at the end of the invocation; ``finish()``
-    performs a final idempotent close so partial turns are not dropped.
+    A ``TurnEndEvent`` closes the open Step, so a backend that emits one per
+    turn produces N Steps. ``run_agent``'s normal loop does not forward
+    TurnEndEvents, so in practice an invocation is usually a single Step
+    spanning every turn; its ``metrics`` accumulate additively across the
+    turns' MetricsEvents rather than holding the last turn's snapshot.
+    ``ResultEvent`` also closes the open Step at the end of the invocation;
+    ``finish()`` performs a final idempotent close so partial turns are not
+    dropped.
 
     Tool-result-after-close: a ``ToolStartEvent`` followed by a
     ``TurnEndEvent`` and then a ``ToolResultEvent`` is legal — the result
@@ -444,6 +483,16 @@ class Invocation:
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     _stop_reason: str | None = None
     _error_subtype: str | None = None
+    # Set-once per invocation: did any MetricsEvent already carry tokens / cost?
+    # A trailing CostEvent that re-states what MetricsEvents reported must not
+    # accumulate again (codex re-states per turn, pi re-states the summed
+    # totals). Each retry attempt mints a fresh Invocation (agent.py opens
+    # `recorder.invocation(...)` inside the attempt loop), so these flags start
+    # False per attempt and each attempt's MetricsEvent/CostEvent de-dupe
+    # independently while the recorder-level tally still sums every billed
+    # attempt.
+    _tokens_from_metrics: bool = False
+    _cost_from_metrics: bool = False
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -606,17 +655,27 @@ class Invocation:
             # #192: reasoning_tokens is a SUBSET of completion_tokens (not
             # additive). Vendored Metrics has no dedicated field (D-03), so
             # carry it via the documented extension carrier ``extra``.
-            target["_metrics"] = Metrics(
+            #
+            # Accumulate-or-assign: a Step spanning several turns carries the
+            # sum of those turns' usage, not the last turn's snapshot — every
+            # turn was billed. Keeps ``final == Σ steps`` (the recorder-level
+            # tally below accumulates every event too).
+            incoming = Metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
                 cached_tokens=event.cached_tokens,
                 cost_usd=event.cost_usd,
                 extra=_reasoning_extra(event.reasoning_tokens),
             )
+            prior = target["_metrics"]
+            target["_metrics"] = incoming if prior is None else _merge_metrics(prior, incoming)
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
             # Aggregate into recorder-level totals for FinalMetrics (MAP-07).
+            self._tokens_from_metrics = True
+            if event.cost_usd is not None:
+                self._cost_from_metrics = True
             self.recorder._accumulate_metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
@@ -662,13 +721,16 @@ class Invocation:
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
-            # Aggregate into recorder-level totals so FinalMetrics reflects
-            # per-step cost_usd from the backend.
+            # Aggregate into recorder-level totals, but only for the dimensions
+            # no MetricsEvent already reported this invocation — codex re-states
+            # each turn's tokens/cost here and pi re-states the summed totals,
+            # so unconditional accumulation double-counts. A CostEvent-only
+            # backend still accumulates fully.
             self.recorder._accumulate_metrics(
-                prompt_tokens=event.input_tokens,
-                completion_tokens=event.output_tokens,
-                cached_tokens=event.cached_tokens,
-                cost_usd=event.cost_usd,
+                prompt_tokens=None if self._tokens_from_metrics else event.input_tokens,
+                completion_tokens=None if self._tokens_from_metrics else event.output_tokens,
+                cached_tokens=None if self._tokens_from_metrics else event.cached_tokens,
+                cost_usd=None if self._cost_from_metrics else event.cost_usd,
             )
         elif isinstance(event, ResultEvent):
             self._close_open_step()
@@ -895,6 +957,7 @@ class TrajectoryRecorder:
     pr_repo: str | None = None
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
+    _folded_fork_totals: bool = False
     _previous_token: Any = None
     _registered_siblings: list[tuple[Path, str]] = field(default_factory=list)
     # Active invocations whose in-flight steps haven't been flushed yet.
@@ -1096,7 +1159,18 @@ class TrajectoryRecorder:
         return self._step_id_counter
 
     def _extend_steps(self, steps: list[Step]) -> None:
+        """Merge a finished Invocation's steps back in ``step_id`` order.
+
+        ``step_id`` is allocated when a step opens but flushed here when its
+        Invocation closes, so append-order only equals id-order while at most
+        one Invocation is open. Concurrent siblings on one recorder (wonder
+        alongside the per-stack fan-out, whose ``create_dispatch_step`` appends
+        straight to ``self.steps``) break that: the run then dies at write time
+        on ATIF's "sequential from 1" check. Sorting on insert keeps the
+        documented ``steps: step_id 1..N`` invariant true by construction.
+        """
         self.steps.extend(steps)
+        self.steps.sort(key=lambda s: s.step_id)
 
     def _upgrade_model_name(self, candidate: str) -> None:
         """Promote *candidate* over a generic backend label.
@@ -1290,6 +1364,15 @@ class TrajectoryRecorder:
         if steps is None:
             steps = self.steps
         version = daydream.__version__
+        final_metrics_extra: dict[str, Any] | None = None
+        if self._folded_fork_totals:
+            # Token and cost totals include successful fork trajectories, but
+            # total_steps remains scoped to this document's own step list.
+            # Cached tokens remain a subset of prompt tokens, not an addition.
+            final_metrics_extra = {
+                "daydream_metric_scope": "whole_run_including_forks",
+                "total_steps_scope": "local_trajectory",
+            }
 
         final_metrics = FinalMetrics(
             total_prompt_tokens=self._final_totals["prompt"] or None,
@@ -1299,6 +1382,7 @@ class TrajectoryRecorder:
                 self._final_totals["cost"] if self._final_totals["any_cost_seen"] else None
             ),
             total_steps=len(steps),
+            extra=final_metrics_extra,
         )
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
         if self.pr_number is not None:
@@ -1348,7 +1432,10 @@ class TrajectoryRecorder:
         been flushed back to ``self.steps`` (the flush happens in
         ``_InvocationCM.__aexit__`` via ``Invocation.finish``). For a partial
         flush we want those in-flight steps too; this helper concatenates
-        them in registration order without mutating either buffer.
+        them in ``step_id`` order without mutating either buffer — an active
+        invocation's unflushed steps can predate an already-flushed one (see
+        :meth:`_extend_steps`), and the partial file has to satisfy the same
+        sequential-ids check as the final write.
         """
         if not self._active_invocations:
             return list(self.steps)
@@ -1358,6 +1445,7 @@ class TrajectoryRecorder:
             snapshot.extend(inv.snapshot_steps(snapshot_step_id=next_id))
             if inv._open_step_dict is not None:
                 next_id += 1
+        snapshot.sort(key=lambda s: s.step_id)
         return snapshot
 
     def write_partial(self) -> None:
@@ -1451,6 +1539,18 @@ class _ForkCM:
             pass
         self._exited_at = now_iso()
         if write_ok and child.parent is not None:
+            # The root trajectory's final_metrics is whole-run truth: fold the
+            # fork's totals in so manifest/eval consumers read one number
+            # instead of re-summing sibling files. The fork file keeps its own
+            # share. A failed child write folds nothing (the error already
+            # degrades the record, D-11).
+            child.parent._accumulate_metrics(
+                prompt_tokens=child._final_totals["prompt"],
+                completion_tokens=child._final_totals["completion"],
+                cached_tokens=child._final_totals["cached"],
+                cost_usd=child._final_totals["cost"] if child._final_totals["any_cost_seen"] else None,
+            )
+            child.parent._folded_fork_totals = True
             child.parent._register_sibling(child.path, self._descriptor)
             try:
                 sibling_ref = str(child.path.relative_to(child.parent.target_dir / ".daydream"))

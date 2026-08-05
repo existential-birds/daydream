@@ -195,45 +195,68 @@ def _all_trajectories(trajectories: dict) -> list[dict]:
 def analyze_costs(trajectories: dict) -> dict:
     """Cost and token breakdown across all agents.
 
-    Sums costs across all trajectory files.  The ATIF spec says
-    ``total_cost_usd`` should include subagent costs, but in practice the
-    daydream recorder emits per-agent costs separately in forked files, so we
-    sum everything to get the true total.
+    Run totals come from the root trajectory's ``final_metrics`` alone: the
+    recorder folds each fork's totals into the parent at fork close, so the
+    root is already whole-run truth and re-summing the sibling files would
+    double-count. ``by_agent`` rows keep fork-level detail by listing each
+    fork separately, with cost and token rows excluding their direct children.
+    Step counts remain document-local.
 
-    The recorder also stores only *non-cached* tokens in ``prompt_tokens``
-    (despite the spec saying it should include cached).  We detect this when
-    ``cached_tokens > prompt_tokens`` and compute ``total_input_tokens`` as
-    ``prompt + cached`` in that case.
+    ``cached_tokens`` is a subset of ``prompt_tokens``, so
+    ``total_input_tokens`` is the prompt-token total without adding the cache
+    hit subset again.
     """
     agents: list[dict] = []
+    forked = trajectories.get("forked") or []
+    forks_by_source = {fork["_source_file"]: fork for fork in forked}
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         fm = traj.get("final_metrics") or {}
+        child_sources = {
+            Path(ref).name
+            for subtrajectory in (traj.get("extra") or {}).get("subtrajectories") or []
+            if isinstance(subtrajectory, dict)
+            for ref in [subtrajectory.get("sibling_trajectory_ref")]
+            if isinstance(ref, str)
+        }
+        direct_forks = [forks_by_source[source] for source in child_sources if source in forks_by_source]
+        fold_cost = sum((f.get("final_metrics") or {}).get("total_cost_usd") or 0.0 for f in direct_forks)
+        fold_prompt = sum((f.get("final_metrics") or {}).get("total_prompt_tokens") or 0 for f in direct_forks)
+        fold_completion = sum((f.get("final_metrics") or {}).get("total_completion_tokens") or 0 for f in direct_forks)
+        fold_cached = sum((f.get("final_metrics") or {}).get("total_cached_tokens") or 0 for f in direct_forks)
         agents.append({
             "agent": label,
-            "cost_usd": fm.get("total_cost_usd") or 0.0,
-            "prompt_tokens": fm.get("total_prompt_tokens") or 0,
-            "completion_tokens": fm.get("total_completion_tokens") or 0,
-            "cached_tokens": fm.get("total_cached_tokens") or 0,
+            "cost_usd": (fm.get("total_cost_usd") or 0.0) - fold_cost,
+            "prompt_tokens": (fm.get("total_prompt_tokens") or 0) - fold_prompt,
+            "completion_tokens": (fm.get("total_completion_tokens") or 0) - fold_completion,
+            "cached_tokens": (fm.get("total_cached_tokens") or 0) - fold_cached,
             "steps": fm.get("total_steps") or len(traj.get("steps", [])),
             "model": traj.get("agent", {}).get("model_name", "unknown"),
         })
 
-    total_cost = sum(a["cost_usd"] for a in agents)
-    total_prompt = sum(a["prompt_tokens"] for a in agents)
-    total_completion = sum(a["completion_tokens"] for a in agents)
-    total_cached = sum(a["cached_tokens"] for a in agents)
-
-    # Detect recorder quirk: prompt_tokens = non-cached only
-    if total_cached > total_prompt:
-        total_input = total_prompt + total_cached
-        cache_hit_rate = total_cached / total_input if total_input > 0 else 0.0
+    # Marked roots have fork-inclusive final_metrics. Older trajectories lack
+    # the marker and retain their legacy per-file aggregation.
+    root = trajectories.get("main")
+    root_metrics_include_forks = (
+        ((root or {}).get("final_metrics") or {}).get("extra") or {}
+    ).get("daydream_metric_scope") == "whole_run_including_forks"
+    if root and root_metrics_include_forks:
+        root_fm = root.get("final_metrics") or {}
+        total_cost = root_fm.get("total_cost_usd") or 0.0
+        total_prompt = root_fm.get("total_prompt_tokens") or 0
+        total_completion = root_fm.get("total_completion_tokens") or 0
+        total_cached = root_fm.get("total_cached_tokens") or 0
     else:
-        total_input = total_prompt
-        cache_hit_rate = total_cached / total_prompt if total_prompt > 0 else 0.0
+        total_cost = sum(a["cost_usd"] for a in agents)
+        total_prompt = sum(a["prompt_tokens"] for a in agents)
+        total_completion = sum(a["completion_tokens"] for a in agents)
+        total_cached = sum(a["cached_tokens"] for a in agents)
+
+    total_input = total_prompt
+    cache_hit_rate = total_cached / total_input if total_input > 0 else 0.0
 
     return {
-        "total_cost_usd": round(total_cost, 4),
+        "total_cost_usd": total_cost,
         "total_input_tokens": total_input,
         "total_prompt_tokens_raw": total_prompt,
         "total_completion_tokens": total_completion,

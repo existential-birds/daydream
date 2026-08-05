@@ -124,6 +124,21 @@ def _record(**overrides: Any) -> dict[str, Any]:
     return record
 
 
+def _write_matching_diff_key(target: Path, deep: Path) -> None:
+    """Write ``diff-key`` for *target*'s current diff into *deep*.
+
+    These primed artifacts stand in for a prior run over the same diff, so the
+    key must match what ``run_deep``'s preamble computes.
+    """
+    from daydream import git_ops
+    from daydream.deep.artifacts import diff_key, diff_key_path
+    from daydream.workspace import _resolve_base
+
+    base = _resolve_base(target, None, None)
+    diff = git_ops.diff(target, base)
+    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+
+
 def _prime_merge_resume(
     target: Path,
     *,
@@ -141,6 +156,9 @@ def _prime_merge_resume(
     """
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
+    # Mirror a fresh run: the key marks the beginning of artifact production, so
+    # every primed prerequisite must be newer than it.
+    _write_matching_diff_key(target, deep)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
     for stack, records in (
@@ -528,6 +546,60 @@ async def test_parallel_fix_applies_all_disjoint_files(
     assert exit_code == 0
     for f in files:
         assert (multi_stack_target / f".fixed-{f.replace('.', '_')}").exists()
+
+
+async def test_long_fix_is_not_turn_capped(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path: a fix that needs many turns lands instead of dying on max_turns.
+
+    Root bug: every fix turn carried a hard 40-turn ceiling (80 for a 2-finding
+    batch), so a real fix on a large file came back as
+    ``MaxTurnsError: error_max_turns``, the group was recorded in
+    ``fix-failures.json``, and the tree protection reverted the work.
+
+    The stub models the CLI contract -- it raises ``MaxTurnsError`` when the
+    ceiling it is handed is below the turns the fix needs. Both group shapes are
+    exercised: ``api.py`` has ONE finding (the un-scaled single-fix path) and
+    ``App.tsx`` has TWO (the batched path, formerly scaled to 40 x count). At 200
+    turns needed, both ceilings would have tripped.
+
+    Fails if any turn ceiling comes back: the sentinels vanish, the manifest goes
+    ``partial`` with fix_failures, and the run exits 1.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fix_turns_needed = 200
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high"),
+        _merge_item(2, "App.tsx", "high"),
+        _merge_item(3, "App.tsx", "medium"),
+    ]
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop",
+            non_interactive=False, archive=True,
+        )
+    )
+
+    assert exit_code == 0
+    assert (multi_stack_target / ".fixed-api_py").exists()
+    assert (multi_stack_target / ".fixed-App_tsx").exists()
+
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert not manifest["fix_failures"]
 
 
 async def test_parallel_fix_same_file_no_race(
@@ -974,7 +1046,10 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
     first = {name: order.index(name) for name in set(order)}
     assert first["intent"] < first["alternatives"]
-    assert first["alternatives"] < first["per-stack"]
+    # Wonder now runs CONCURRENTLY with the per-stack fan-out on a multi-stack
+    # run, so it no longer strictly precedes it; the guarantee is that it joins
+    # before parse consumes alternatives.json.
+    assert first["alternatives"] < first["parse"]
     assert first["per-stack"] < first["parse"]
     assert first["parse"] < first["merge"]
 
@@ -1019,7 +1094,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert per_stack_prompts
     for p in per_stack_prompts:
         assert "intent.md" in p
-        assert "alternatives.json" in p
+        # Multi-stack: wonder runs alongside this fan-out, so alternatives.json
+        # does not exist yet and its pointer is deliberately omitted.
+        assert "alternatives.json" not in p
 
     # The fixture's diff is mixed, so the generic bucket is NOT docs-only (no
     # notice). Contract: a generic-fallback prompt is emitted for README.md.
@@ -1129,12 +1206,14 @@ async def test_pr_body_reaches_intent_prompt(
 async def test_no_pr_body_degrades_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
-    """No PR body -> intent prompt is byte-for-byte today's behavior.
+    """No PR body -> intent prompt carries no PR-description section.
 
     Also asserts the diff-is-the-target directives: the intent prompt must
-    point at the on-disk diff file, tell the agent the run is not tied to a
-    GitHub pull request (so it never hunts for or asks about open PRs), and
-    forbid skill/slash-command invocation.
+    ground the agent in the diff, tell it the run is not tied to a GitHub pull
+    request (so it never hunts for or asks about open PRs), and forbid
+    skill/slash-command invocation. This fixture's diff is under
+    ``INLINE_DIFF_BUDGET_BYTES``, so the diff arrives inlined with a
+    do-not-re-Read clause rather than as a bare pointer.
     """
     from daydream.runner import run
 
@@ -1148,7 +1227,8 @@ async def test_no_pr_body_degrades_cleanly(
     intent = _intent_prompt(stub)
     assert PR_SENTINEL not in intent
     assert "pull request description" not in intent.lower()
-    assert "Read the diff file at" in intent
+    assert "diff --git" in intent  # inlined, not pointed at
+    assert "do NOT re-Read" in intent
     assert ".daydream/diff.patch" in intent
     assert "not tied to a GitHub pull request" in intent
     assert "Do not invoke any skills or slash commands" in intent
@@ -4440,3 +4520,204 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     assert stub.test_suite_calls == 1, (
         f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
     )
+
+
+async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
+    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    intent_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    )
+    wonder_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "evaluate the implementation" in c["prompt"].lower()
+    )
+
+    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "diff --git" in prompt, f"{name} prompt did not inline the diff"
+        assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
+    assert "Read the diff file at" not in intent_prompt
+
+
+async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    # Push the diff over the byte budget with a large committed file.
+    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
+    (multi_stack_target / "big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "big.py")
+    _git(multi_stack_target, "commit", "-m", "add big file")
+
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    intent_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    )
+    wonder_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "evaluate the implementation" in c["prompt"].lower()
+    )
+
+    assert "Read the diff file at" in intent_prompt
+    assert "diff.patch" in wonder_prompt
+    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
+
+
+# --- Task 12b: each TTT step writes its own artifact -------------------------
+
+
+async def test_intent_artifact_survives_wonder_failure(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """intent.md is on disk even when the wonder step dies.
+
+    Discriminating: both files used to be written together AFTER the wonder
+    agent, so a wonder failure discarded the intent artifact too.
+    """
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fail_alternatives = True
+
+    with pytest.raises(RuntimeError, match="alternatives blew up"):
+        await _run_deep(multi_stack_target)
+
+    intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
+    assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
+    # The wonder half never ran, so its artifact is legitimately absent.
+    assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
+
+
+async def test_both_ttt_artifacts_written_on_the_happy_path(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relocating the writer leaves contents and ctx.data pointers unchanged."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert (deep / "intent.md").read_text().strip()
+    assert json.loads((deep / "alternatives.json").read_text())
+
+
+async def test_skip_tier_writes_empty_alternatives(
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both artifacts exist even when the diff is small enough to run wonder."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tiny_diff_target)
+
+    assert await _run_deep(tiny_diff_target) == 0
+
+    deep = tiny_diff_target / ".daydream" / "deep"
+    assert (deep / "intent.md").read_text().strip()
+    assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+
+
+def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
+    from daydream.deep.orchestrator import STEPS
+    from daydream.extensions.api import EXTENSION_API_VERSION
+
+    assert EXTENSION_API_VERSION == 4
+    names = [s.name for s in STEPS]
+    assert "alternatives" not in names
+    assert "per-stack-reviews" in names
+
+
+# --- Task 15: --start-at refuses artifacts produced from a different diff -----
+
+
+async def test_start_at_merge_refuses_after_the_diff_changes(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh run writes diff-key; changing the diff then blocks the resume."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    deep = multi_stack_target / ".daydream" / "deep"
+    key_file = deep / "diff-key"
+    original_key = key_file.read_text().strip()
+    assert original_key, "a fresh run must record the diff key"
+
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    _git(multi_stack_target, "add", "api.py")
+    _git(multi_stack_target, "commit", "-m", "change again")
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    # The run bailed before any agent turn.
+    assert stub2.calls == []
+    # A refused resume must NOT rewrite the key it is checked against.
+    assert key_file.read_text().strip() == original_key
+
+
+async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_key(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh run cannot certify a new diff key alongside old deep outputs."""
+    _silence(monkeypatch)
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    stale = deep / "obsolete-artifact.txt"
+    stale.write_text("stale")
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+    assert not stale.exists()
+    assert (deep / "diff-key").is_file()
+
+
+async def test_start_at_merge_refuses_after_an_uncommitted_worktree_change(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resumes reject review artifacts once the worktree is no longer clean."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert stub2.calls == []
+
+
+async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The freshness gate is not a blanket refusal: same diff still resumes."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    assert any("cross-stack merge agent" in c["prompt"].lower() for c in stub2.calls)
+
+
+async def test_pre_upgrade_artifacts_without_a_key_refuse_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An artifact dir from before diff tracking is treated as unverifiable."""
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    (multi_stack_target / ".daydream" / "deep" / "diff-key").unlink()
+
+    stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert stub2.calls == []

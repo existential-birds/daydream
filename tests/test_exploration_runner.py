@@ -290,6 +290,7 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path):
 
     # Pattern scanner failed, but others should have run
     assert call_count == 3
+    assert not ctx.completed
     assert ctx.conventions == []  # pattern scanner failed
     assert any(f.path == "daydream/extra.py" for f in ctx.affected_files)
 

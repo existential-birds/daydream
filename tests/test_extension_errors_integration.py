@@ -40,7 +40,6 @@ async def test_broken_flow_ref_fails_before_any_agent(
     outcome through ``runner.run``: exit 1, zero agents, named broken piece.
     """
     ext_dir.write_module(
-        "DAYDREAM_EXT_API = 2\n"
         "def register(r):\n"
         "    r.insert_after('deep', anchor='intent', step='ghost_phase')\n"
     )
@@ -63,7 +62,7 @@ async def test_version_mismatch_exits_1_naming_versions(
 ) -> None:
     """A DAYDREAM_EXT_API mismatch exits 1 naming both versions, before any git work."""
     # 99 is above the ceiling.
-    ext_dir.write_module("DAYDREAM_EXT_API = 99\ndef register(r): ...\n")
+    ext_dir.write_module("def register(r): ...\n", api_version=99)
     install_backend(ScriptedBackend())
 
     rc = await runner.run(make_config(multi_stack_target))

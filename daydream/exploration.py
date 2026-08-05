@@ -7,6 +7,7 @@ exploration failures.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,7 @@ class ExplorationContext:
         dependencies: Dependency relationships between files.
         guidelines: Project guideline snippets (from CLAUDE.md etc).
         raw_notes: Unstructured exploration notes.
+        completed: Whether exploration ran to completion rather than degrading.
     """
 
     affected_files: list[FileInfo] = field(default_factory=list)
@@ -80,6 +82,7 @@ class ExplorationContext:
     dependencies: list[Dependency] = field(default_factory=list)
     guidelines: list[str] = field(default_factory=list)
     raw_notes: str = ""
+    completed: bool = True
 
     def to_prompt_section(self) -> str:
         """Render exploration context as text for prompt injection.
@@ -215,7 +218,7 @@ async def safe_explore(
 ) -> ExplorationContext:
     """Run exploration with graceful degradation.
 
-    Catches any exception from explore_fn and returns an empty
+    Catches any exception from explore_fn and returns an incomplete empty
     ExplorationContext instead. Displays a warning banner via Rich UI.
     """
     try:
@@ -225,7 +228,7 @@ async def safe_explore(
 
         console = create_console()
         print_warning(console, "Exploration failed -- proceeding with review only")
-        return ExplorationContext()
+        return ExplorationContext(completed=False)
 
 
 def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
@@ -287,3 +290,36 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
         guidelines=guidelines,
         raw_notes=raw_notes,
     )
+
+
+CACHE_KEY_FILENAME = "cache-key"
+
+
+def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str) -> str:
+    """Content key identifying one exploration pre-scan result.
+
+    Exact-match only: a stale hit misgrounds every downstream review prompt, so
+    a near-match must never count. The HEAD sha closes the live-file-drift hole
+    left by ``git_ops.diff`` being committed-only three-dot, at no cost to the
+    real reuse cases (bot re-review, --start-at resume, and an immediate re-run
+    all share HEAD).
+
+    An exact key match is reused even with uncommitted worktree edits: the key
+    intentionally excludes uncommitted edits because reuse is exact-match-only
+    on head SHA + diff + tier + depth.
+    """
+    payload = f"{head_sha}\n{diff}\n{tier}\n{depth}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def cache_key_path(exploration_dir: Path) -> Path:
+    """Sibling file holding the key the directory's contents were produced from."""
+    return exploration_dir / CACHE_KEY_FILENAME
+
+
+def read_cache_key(exploration_dir: Path) -> str | None:
+    """The stored key, or None when absent/unreadable."""
+    try:
+        return cache_key_path(exploration_dir).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None

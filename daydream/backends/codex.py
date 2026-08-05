@@ -81,7 +81,7 @@ class CodexBackend:
     def __init__(self, model: str, reasoning_effort: str | None = None):
         self.model = model
         self.reasoning_effort = reasoning_effort
-        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 4)
+        self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
         self._processes: list[asyncio.subprocess.Process] = []
 
     async def execute(

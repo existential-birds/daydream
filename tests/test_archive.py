@@ -1228,3 +1228,46 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path):
 
     hist = label_observation_history(tmp_path, "sess-legacy")
     assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
+
+
+async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path):
+    """Manifest totals are whole-run: the fork's tokens/cost are folded in."""
+    from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+    from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
+
+    recorder = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "runs" / "sess-fold" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="sess-fold",
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent"))
+            inv.observe(MetricsEvent(
+                message_id="m-1", prompt_tokens=100, completion_tokens=50,
+                cached_tokens=20, cost_usd=0.05,
+            ))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("deep-python") as child:
+            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
+                cinv.observe(TextEvent(text="child"))
+                cinv.observe(MetricsEvent(
+                    message_id="m-2", prompt_tokens=400, completion_tokens=25,
+                    cached_tokens=5, cost_usd=0.20,
+                ))
+                cinv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    m = build_manifest(
+        recorder=recorder,
+        config=cast(RunConfig, _MockConfig()),
+        git_ctx=GitContext(),
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+    assert m.total_prompt_tokens == 500  # 100 main + 400 fork
+    assert m.total_completion_tokens == 75
+    assert m.total_cached_tokens == 25
+    assert m.total_cost_usd == pytest.approx(0.25)

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from daydream.backends import (
+    ContinuationToken,
     CostEvent,
     ResultEvent,
     TextEvent,
@@ -770,14 +771,14 @@ def test_unsupported_reasoning_effort_fails_at_construction():
 # ---------------------------------------------------------------------------
 
 
-def test_claude_fanout_concurrency_defaults_to_four(monkeypatch):
+def test_claude_fanout_concurrency_defaults_to_eight(monkeypatch):
     monkeypatch.delenv("DAYDREAM_FANOUT_CONCURRENCY", raising=False)
-    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 4
-
-
-def test_claude_fanout_concurrency_env_raises_the_hint(monkeypatch):
-    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "8")
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 8
+
+
+def test_claude_fanout_concurrency_env_overrides_the_default(monkeypatch):
+    monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", "3")
+    assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == 3
 
 
 def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
@@ -789,14 +790,116 @@ def test_claude_fanout_concurrency_never_exceeds_workflow_ceiling(monkeypatch):
     ("env_value", "expected"),
     [
         ("6", 6),
-        ("0", 4),
-        ("-1", 4),
-        ("notanint", 4),
-        ("", 4),
+        ("0", 8),
+        ("-1", 8),
+        ("notanint", 8),
+        ("", 8),
     ],
 )
 def test_claude_fanout_concurrency_env_validation(monkeypatch, caplog, env_value, expected):
     monkeypatch.setenv("DAYDREAM_FANOUT_CONCURRENCY", env_value)
     assert effective_fanout_concurrency(10, ClaudeBackend(model="opus")) == expected
-    if expected == 4:
-        assert "using default 4" in caplog.text
+    if expected == 8:
+        assert "using default 8" in caplog.text
+
+
+# --- Session continuation via SDK resume --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_continuation_token_sets_resume(monkeypatch):
+    """A claude-minted token becomes ``options.resume`` on the next call."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client(
+            [MockResultMessage(total_cost_usd=0.01, session_id="sess-123")],
+            captured=captured,
+        ),
+    )
+    backend = ClaudeBackend(model="opus")
+    token = ContinuationToken(backend="claude", data={"session_id": "sess-123"})
+
+    async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
+        pass
+
+    assert captured["options"].resume == "sess-123"
+
+
+@pytest.mark.asyncio
+async def test_result_event_mints_session_token(monkeypatch):
+    """The terminal ResultMessage's session_id is minted into the ResultEvent."""
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")]),
+    )
+    backend = ClaudeBackend(model="opus")
+
+    results = [
+        e
+        async for e in backend.execute(Path("/tmp"), "p")
+        if isinstance(e, ResultEvent)
+    ]
+
+    assert len(results) == 1
+    assert results[0].continuation is not None
+    assert results[0].continuation.backend == "claude"
+    assert results[0].continuation.data["session_id"] == "sess-9"
+
+
+@pytest.mark.asyncio
+async def test_no_token_without_persist_session(monkeypatch):
+    """persist_session=False disables SDK session persistence and suppresses the token."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")], captured=captured),
+    )
+    backend = ClaudeBackend(model="opus")
+
+    results = [
+        e
+        async for e in backend.execute(Path("/tmp"), "p", persist_session=False)
+        if isinstance(e, ResultEvent)
+    ]
+
+    assert results[0].continuation is None
+    assert captured["options"].extra_args == {"no-session-persistence": None}
+
+
+@pytest.mark.asyncio
+async def test_foreign_backend_token_is_ignored(monkeypatch):
+    """A token minted by another backend starts cold instead of raising."""
+    captured: dict[str, Any] = {}
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client(
+            [MockResultMessage(total_cost_usd=0.01, session_id="sess-1")],
+            captured=captured,
+        ),
+    )
+    backend = ClaudeBackend(model="opus")
+    token = ContinuationToken(backend="codex", data={"thread_id": "th-1"})
+
+    async for _ in backend.execute(Path("/tmp"), "p", continuation=token):
+        pass
+
+    assert captured["options"].resume is None
+
+
+@pytest.mark.asyncio
+async def test_no_session_id_mints_no_token(monkeypatch):
+    """A ResultMessage without a session id yields continuation=None."""
+    patch_claude_sdk(
+        monkeypatch,
+        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id=None)]),
+    )
+    backend = ClaudeBackend(model="opus")
+
+    results = [
+        e
+        async for e in backend.execute(Path("/tmp"), "p")
+        if isinstance(e, ResultEvent)
+    ]
+
+    assert results[0].continuation is None

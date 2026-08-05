@@ -686,7 +686,7 @@ def _prefer_remote_base(repo: Path, base: str) -> str:
 
 
 def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None = None) -> str:
-    """Return the unified diff between *base* and *head*.
+    """Return the unified diff between *base* and *head*, plus tracked worktree changes.
 
     Uses three-dot syntax (``base...head``) so the diff reflects changes on
     *head* since it diverged from *base*.  When ``origin/<base>`` exists the
@@ -712,7 +712,22 @@ def diff(repo: Path, base: str, head: str = "HEAD", *, exclude: list[str] | None
     proc = _run_git(repo, args, timeout=30)
     if proc.returncode != 0:
         raise GitError(f"git diff {base}...{head} failed: {proc.stderr.strip()}")
-    return proc.stdout
+    result = proc.stdout
+
+    # The range above is committed-only. Include tracked index/worktree changes
+    # as well so callers that persist a diff fingerprint can reject resumes
+    # after the live workspace has changed.
+    worktree_args = ["diff", head]
+    if exclude:
+        worktree_args.append("--")
+        worktree_args.append(".")
+        worktree_args.extend(f":(exclude){p.rstrip('/')}" for p in exclude)
+    proc = _run_git(repo, worktree_args, timeout=30)
+    if proc.returncode != 0:
+        raise GitError(f"git diff {head} failed: {proc.stderr.strip()}")
+    result += proc.stdout
+
+    return result
 
 
 def diff_name_only(repo: Path, base: str, head: str = "HEAD") -> list[str]:

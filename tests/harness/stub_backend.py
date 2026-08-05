@@ -29,7 +29,13 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.backends import (
+    ContinuationToken,
+    MaxTurnsError,
+    ResultEvent,
+    TextEvent,
+    ToolStartEvent,
+)
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -118,6 +124,10 @@ class StubBackend:
         # the tree before exhausting its turn budget, so a test can assert the
         # orchestrator reverts that partial edit and saves a recovery patch.
         self.fix_partial_then_maxturns: str | None = None
+        # Turns this stub's fix agent needs to finish. Models the CLI contract:
+        # a turn ceiling below this raises MaxTurnsError instead of applying the
+        # edit. Set above a former ceiling to prove the fix is no longer capped.
+        self.fix_turns_needed: int = 0
         # Repo-relative path of a stray untracked file the failing group creates
         # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
         # it survives tree-protection and must surface in fix_leftover_untracked.
@@ -141,6 +151,56 @@ class StubBackend:
         # (in addition to the sentinels), producing a real tracked-tree change so
         # a test can assert the recommended-change patch captures daydream's edit.
         self.fix_edit_line: str | None = None
+        # Runaway knobs mirroring ``runaway_fix`` for the deep-review phases: an
+        # unbounded ToolStartEvent burst with no ResultEvent, so run_agent's
+        # tool-call budget trips and returns a budget_reason.
+        # ``runaway_alternatives``: the wonder turn.
+        # ``runaway_stack``: the per-stack review turn for that stack name.
+        # ``runaway_parse``: the parse turn for that stack name.
+        self.runaway_alternatives: bool = False
+        self.runaway_stack: str | None = None
+        self.runaway_parse: str | None = None
+        # ``runaway_test``: the test-suite turn (a hung suite, never a result).
+        self.runaway_test: bool = False
+        # When >0, the wonder turn emits this many ToolStartEvents and THEN its
+        # normal structured result -- a long but terminating turn, unlike the
+        # runaway knobs. Set above a tool-call ceiling to prove the ceiling does
+        # (or no longer does) truncate a legitimately exploratory pass.
+        self.alternatives_tool_calls: int = 0
+        # When True, the alternatives branch raises instead of answering.
+        self.fail_alternatives: bool = False
+        # When set, the arbiter branch mints a ContinuationToken carrying this
+        # session id, so a test can assert the merge call resumes it.
+        self.arbiter_session_id: str | None = None
+        # When set, the pattern-scanner specialist names this convention, so a
+        # test can prove WHICH run produced the on-disk exploration artifacts.
+        self.exploration_sentinel: str | None = None
+        # When True, the exploration specialists raise instead of answering, so
+        # the real pre_scan degrade path runs: specialist_failed -> completed
+        # False -> exploration dir materialized without a cache-key.
+        self.fail_exploration: bool = False
+
+    def _is_runaway(self, prompt: str, pl: str) -> bool:
+        """Whether this turn should emit the unbounded budget-tripping burst."""
+        if self.runaway_alternatives and (
+            "would you have done this differently" in pl or "evaluate the implementation" in pl
+        ):
+            return True
+        stack_match = re.search(r"stack-(\S+?)-review\.md", prompt)
+        stack_name = stack_match.group(1) if stack_match else None
+        if (
+            self.runaway_stack is not None
+            and "you are reviewing the" in pl
+            and f"you are reviewing the {self.runaway_stack} stack" in pl
+        ):
+            return True
+        if self.runaway_test and "run the project's test suite" in pl:
+            return True
+        return (
+            self.runaway_parse is not None
+            and "extract only actionable issues" in pl
+            and stack_name == self.runaway_parse
+        )
 
     async def execute(
         self,
@@ -158,15 +218,30 @@ class StubBackend:
             "output_schema": output_schema,
             "agents": agents,
             "model": self.model,
+            "continuation": continuation,
+            "max_turns": max_turns,
         }
         self.calls.append(call)
         if self._shared is not None:
             self._shared.append(call)
         pl = prompt.lower()
 
+        if self._is_runaway(prompt, pl):
+            # Unbounded burst, never a ResultEvent -- run_agent's tool-call
+            # budget is the only thing that ends this stream.
+            for n in range(500):
+                yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
+                await anyio.sleep(0)
+            return
+
         # TTT alternative-review -> structured output. Checked BEFORE intent: the
         # alt prompt embeds the intent summary, defeating a naive substring check.
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
+            if self.fail_alternatives:
+                raise RuntimeError("alternatives blew up")
+            for n in range(self.alternatives_tool_calls):
+                yield ToolStartEvent(id=f"alt-tc-{n}", name="Read", input={"file_path": "api.py"})
+                await anyio.sleep(0)
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={
@@ -189,10 +264,12 @@ class StubBackend:
         # structured_output (keyed into results[name] by _run_specialist) plus a
         # TextEvent of raw JSON the production gate must suppress from the terminal.
         if "you are the **pattern-scanner** specialist" in pl:
+            if self.fail_exploration:
+                raise RuntimeError("exploration unavailable")
             payload = {
                 "conventions": [
                     {
-                        "name": "OpenAPI First",
+                        "name": self.exploration_sentinel or "OpenAPI First",
                         "description": "openapi.yaml is the HTTP contract",
                         "source": "CLAUDE.md",
                     }
@@ -203,10 +280,16 @@ class StubBackend:
             yield ResultEvent(structured_output=payload, continuation=None)
             return
         if "you are the **dependency-tracer** specialist" in pl:
+            if self.fail_exploration:
+                raise RuntimeError("exploration unavailable")
             payload = {
                 "affected_files": [],
                 "dependencies": [
-                    {"source": "App.tsx", "target": "api.py", "relationship": "calls"}
+                    {
+                        "source": "App.tsx",
+                        "target": "api.py",
+                        "relationship": self.exploration_sentinel or "calls",
+                    }
                 ],
             }
             yield TextEvent(text=json.dumps(payload))
@@ -341,7 +424,16 @@ class StubBackend:
                         }
                     )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"findings": findings}, continuation=None)
+            yield ResultEvent(
+                structured_output={"findings": findings},
+                continuation=(
+                    ContinuationToken(
+                        backend="claude", data={"session_id": self.arbiter_session_id}
+                    )
+                    if self.arbiter_session_id
+                    else None
+                ),
+            )
             return
 
         # Precision-mode suppression reviewer (#232). Reads suppression-input.json,
@@ -509,6 +601,10 @@ class StubBackend:
                 raise MaxTurnsError(f"stub: max turns exhausted mid-fix for {fixed_name}")
             if self.fix_fail_file is not None and fixed_name == self.fix_fail_file:
                 raise RuntimeError(f"stub fix failure for {fixed_name}")
+            if max_turns is not None and self.fix_turns_needed > max_turns:
+                raise MaxTurnsError(
+                    f"stub: fix for {fixed_name} needs {self.fix_turns_needed} turns, capped at {max_turns}"
+                )
             if self.deferred_write_pairs is not None:
                 for index, path in enumerate(self.deferred_write_pairs, start=1):
                     edit_target = Path(path) if Path(path).is_absolute() else cwd / path
@@ -539,11 +635,12 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Recommendation verifier (#83). Discriminator is the schema constant name
-        # embedded by build_verification_prompt — structural, so rewording won't
-        # break this branch. The stub only emits a well-formed payload; the phase
-        # persists it to recommendation-verdicts.json itself.
-        if "RECOMMENDATION_VERDICTS_SCHEMA" in prompt:
+        # Recommendation verifier (#83). Discriminator is the verifier's role
+        # sentence — the schema dump it used to key off was removed from the
+        # prompt (the schema reaches backends via output_schema). The stub only
+        # emits a well-formed payload; the phase persists it to
+        # recommendation-verdicts.json itself.
+        if "you are the recommendation-verifier agent" in pl:
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={

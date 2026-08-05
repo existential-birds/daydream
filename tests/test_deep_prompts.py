@@ -696,3 +696,130 @@ def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     """#279: the precedence rule appears only when a fresh PR body was ingested."""
     assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
+
+
+def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: Path) -> None:
+    """The verify prompt carries neither the schema dump nor a write instruction.
+
+    The schema reaches every backend via ``output_schema``, and the host writes
+    the verdicts file, so both blocks were pure duplication.
+    """
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [
+        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+         "line": 10, "description": "x", "rationale": "y"}
+    ]
+    prompt = build_verification_prompt(
+        items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
+    )
+
+    assert "conforming EXACTLY to this schema" not in prompt
+    assert "RECOMMENDATION_VERDICTS_SCHEMA" not in prompt
+    assert "Write your JSON verdicts" not in prompt
+    # The read-only clause no longer dangles an exception for the output path.
+    assert "Do NOT write, edit, or move files." in prompt
+    assert "except the JSON output" not in prompt
+    # output_path is accepted-but-ignored: it must not appear in the prompt.
+    assert "verdicts.json" not in prompt
+    # The substantive instructions survive.
+    assert "recommendation-verifier agent" in prompt
+    assert "unverified_assumptions" in prompt
+
+
+def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
+    """Two different output_path values produce byte-identical prompts."""
+    from daydream.deep.prompts import build_verification_prompt
+
+    items = [
+        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+         "line": 10, "description": "x", "rationale": "y"}
+    ]
+    a = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "a.json")
+    b = build_verification_prompt(items=items, cwd=tmp_path, output_path=tmp_path / "b.json")
+    assert a == b
+
+
+# --- Task 12a: the per-stack prompt path can omit the alternatives pointer ----
+
+
+def test_per_stack_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_per_stack_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, include_alternatives=True,
+    )
+    without = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, include_alternatives=False,
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without  # ONLY the alternatives paragraph is dropped
+    assert build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p,
+    ) == with_alts  # default is True
+
+
+def test_structural_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_structural_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        include_alternatives=True,
+    )
+    without = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        include_alternatives=False,
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without
+    assert build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+    ) == with_alts
+
+
+def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
+    from daydream.deep.prompts import build_generic_fallback_prompt
+
+    p = _paths(tmp_path)
+    with_alts = build_generic_fallback_prompt(
+        files=["config.yaml"], **p, include_alternatives=True
+    )
+    without = build_generic_fallback_prompt(
+        files=["config.yaml"], **p, include_alternatives=False
+    )
+    assert "alternatives.json" in with_alts
+    assert "alternatives.json" not in without
+    assert "intent.md" in without
+    assert build_generic_fallback_prompt(files=["config.yaml"], **p) == with_alts
+
+
+def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
+    """The authoritative-intent upgrade survives include_alternatives=False."""
+    from daydream.deep.prompts import build_per_stack_prompt
+
+    p = _paths(tmp_path)
+    without = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p, intent_authoritative=True, include_alternatives=False,
+    )
+    assert "alternatives.json" not in without
+    assert "author's stated intent from the pull-request description" in without
+    assert AUTHORITATIVE_INTENT_RULE in without
+
+
+def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:
+    """Arbiter/supervise/suppression/merge take no kwarg and always point at alts."""
+    import inspect
+
+    from daydream.deep import prompts as dp
+
+    for name in ("build_arbiter_prompt", "build_merge_prompt"):
+        sig = inspect.signature(getattr(dp, name))
+        assert "include_alternatives" not in sig.parameters, name

@@ -21,9 +21,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from rich.markup import escape as escape_markup
 
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt
+from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
@@ -36,6 +38,8 @@ from daydream.deep.artifacts import (
     check_deep_artifacts,
     dedup_candidates_path,
     deep_dir,
+    diff_key,
+    diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
     merged_items_path,
@@ -88,6 +92,7 @@ from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
     get_current_recorder,
+    maybe_fork,
     phase_scope,
 )
 from daydream.ui import (
@@ -398,17 +403,6 @@ def _stack_preflight_line(stack: StackAssignment) -> str:
     return f"{stack.stack_name}: {skill} -- {len(stack.files)} file(s){docs_suffix}"
 
 
-def _write_ttt_artifacts(
-    deep_dir_path: Path, *, intent_summary: str, alt_issues: list[dict[str, Any]]
-) -> tuple[Path, Path]:
-    """Persist TTT intent + alternatives to the deep artifact directory."""
-    intent_p = _intent_path(deep_dir_path)
-    alts_p = _alternatives_path(deep_dir_path)
-    intent_p.write_text(intent_summary)
-    alts_p.write_text(json.dumps(alt_issues, indent=2))
-    return intent_p, alts_p
-
-
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
 
@@ -668,8 +662,23 @@ def _protect_tree_after_fix_failures(
                     pass
 
 
+def _has_non_daydream_worktree_changes(status: str) -> bool:
+    """Whether porcelain output names a path outside Daydream-owned artifacts."""
+    for line in status.splitlines():
+        paths = line[3:].split(" -> ")
+        if not all(
+            path == ".daydream"
+            or path.startswith(".daydream/")
+            or path == REVIEW_OUTPUT_FILE
+            for path in paths
+        ):
+            return True
+    return False
+
+
 async def _step_exploration(ctx: FlowContext) -> None:
-    """Exploration pre-scan (D-43)."""
+    """Exploration pre-scan (D-43), reused on an exact key match."""
+    from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
     from daydream.runner import _compute_diff_ref
 
     config = ctx.config
@@ -677,6 +686,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
     daydream_dir = target_dir / ".daydream"
     diff = ctx.data["diff"]
     tier = ctx.data["tier"]
+    exploration_path = daydream_dir / "exploration"
 
     exploration_dir: Path | None = None
     if not EXPLORATION_AVAILABLE:
@@ -686,6 +696,27 @@ async def _step_exploration(ctx: FlowContext) -> None:
             "without pre-scan grounding",
         )
     elif config.exploration_context is None:
+        # The in-process context short-circuits first; the disk cache is only
+        # consulted when there is no in-memory context to reuse.
+        cache_key = exploration_cache_key(
+            ctx.work.head_sha or "", diff, tier, config.exploration_depth
+        )
+        if (
+            exploration_path.is_dir()
+            and read_cache_key(exploration_path) == cache_key
+        ):
+            # Early return BEFORE the pre_scan/write_to_dir block below: routing
+            # a hit through it with an empty in-memory context would overwrite
+            # the cached files with "No data collected" stubs.
+            print_dim(console, f"Reusing exploration pre-scan from {exploration_path}")
+            ctx.data["exploration_dir"] = exploration_path
+            return
+
+        # Miss: drop any stale directory so a partial previous result cannot be
+        # read as this run's grounding.
+        if exploration_path.is_dir():
+            shutil.rmtree(exploration_path, ignore_errors=True)
+
         if tier == "skip":
             print_dim(console, "Skipping exploration -- trivial diff")
             config.exploration_context = ExplorationContext()
@@ -703,10 +734,14 @@ async def _step_exploration(ctx: FlowContext) -> None:
                     diff_ref=_compute_diff_ref(target_dir),
                 )
             console.print(render_exploration_summary(config.exploration_context))
+        if config.exploration_context is not None:
+            exploration_dir = config.exploration_context.write_to_dir(exploration_path)
+            if config.exploration_context.completed:
+                cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
+            ctx.data["exploration_dir"] = exploration_dir
+            return
     if EXPLORATION_AVAILABLE and config.exploration_context is not None:
-        exploration_dir = config.exploration_context.write_to_dir(
-            daydream_dir / "exploration"
-        )
+        exploration_dir = config.exploration_context.write_to_dir(exploration_path)
     ctx.data["exploration_dir"] = exploration_dir
 
 
@@ -760,11 +795,17 @@ async def _step_intent(ctx: FlowContext) -> None:
             ctx.data["branch"],
             exploration_dir=ctx.data["exploration_dir"],
             pr_description=pr_description,
+            diff_text=ctx.data["diff"],
         )
+    # Each TTT step persists its own half, so a later step's failure cannot
+    # discard an artifact this one already produced.
+    intent_p = _intent_path(ctx.data["dd"])
+    intent_p.write_text(ctx.data["intent_summary"])
+    ctx.data["intent_path"] = intent_p
 
 
-async def _step_alternatives(ctx: FlowContext) -> None:
-    """TTT alternative-review (tier-gated) + TTT artifact writes."""
+async def _wonder(ctx: FlowContext) -> None:
+    """TTT alternative-review (tier-gated) + its artifact write."""
     intent_summary = ctx.data["intent_summary"]
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
@@ -779,14 +820,53 @@ async def _step_alternatives(ctx: FlowContext) -> None:
                 ctx.data["diff_path"],
                 intent_summary,
                 exploration_dir=ctx.data["exploration_dir"],
+                diff_text=ctx.data["diff"],
             )
 
-    ctx.data["intent_path"], ctx.data["alts_path"] = _write_ttt_artifacts(
-        ctx.data["dd"], intent_summary=intent_summary, alt_issues=alt_issues
-    )
+    alts_p = _alternatives_path(ctx.data["dd"])
+    alts_p.write_text(json.dumps(alt_issues, indent=2))
+    ctx.data["alts_path"] = alts_p
 
 
-async def _step_per_stack_reviews(ctx: FlowContext) -> None:
+async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
+    """Wonder (TTT alternative-review) alongside the per-stack review fan-out.
+
+    On a fresh multi-stack run the two are siblings in one task group: wonder
+    only feeds the merge agent and the dedup pre-filter, so the reviewers do not
+    need to wait for it. Their prompts drop the ``alternatives.json`` pointer,
+    since the file does not exist yet.
+
+    Single-stack mode and every ``--start-at`` resume keep today's serial order
+    and the pointer — in single-stack mode there is no merge agent, so the
+    reviewer pointer is the ONLY path wonder findings take into the report.
+    """
+    # A resume (--start-at per-stack/merge/fix) skips wonder entirely — its
+    # artifact is already on disk, which is also why the pointer stays on.
+    run_wonder = _fresh_ttt(ctx)
+    concurrent = run_wonder and not ctx.data["single_stack_mode"]
+    holder: dict[str, BaseException | None] = {"exc": None}
+
+    async def _wonder_guarded() -> None:
+        # Held, not degraded: a wonder failure must fail the run, but only after
+        # the fan-out's outputs are on disk for a later resume.
+        try:
+            await _wonder(ctx)
+        except Exception as exc:  # noqa: BLE001 -- re-raised after the join
+            holder["exc"] = exc
+
+    if run_wonder and not concurrent:
+        await _wonder(ctx)
+
+    async with anyio.create_task_group() as tg:
+        if concurrent:
+            tg.start_soon(_wonder_guarded)
+        await _per_stack_body(ctx, include_alternatives=not concurrent)
+
+    if holder["exc"] is not None:
+        raise holder["exc"]
+
+
+async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> None:
     """Per-stack review fan-out, with failure persistence and resume reconstruction."""
     config = ctx.config
     dd = ctx.data["dd"]
@@ -806,6 +886,7 @@ async def _step_per_stack_reviews(ctx: FlowContext) -> None:
                 exploration_dir=ctx.data["exploration_dir"],
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
+                include_alternatives=include_alternatives,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -877,28 +958,69 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             all_records.extend(records)
             record_sources.extend(source_name for _ in records)
     else:
-        # Pre-merge parse pass (D-21). Sort by stack_name so merge input
-        # order is independent of parallel-task completion order, keeping
-        # the merge prompt and global issue numbering reproducible.
-        for stack_name, output_path in sorted(per_stack_outputs.items()):
-            # Language stacks carry severity so the scoped arbiter can
-            # select high/contested findings (#168). The structural
-            # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
-            # high-conviction by construction and is partitioned out of
-            # arbitration/dedup below, defaulting to high at merge.
-            record_schema = (
-                FEEDBACK_SCHEMA if stack_name == STRUCTURE_STACK_NAME else PER_STACK_RECORD_SCHEMA
-            )
-            async with phase_scope(DaydreamPhase.PARSE):
-                records = await phase_parse_feedback(
-                    ctx.backend_for("parse"),
-                    ctx.work,
-                    input_path=output_path,
-                    output_schema=record_schema,
-                )
-            records_path = per_stack_records_path(dd, stack_name)
-            records_path.write_text(json.dumps(records, indent=2))
-            per_stack_records_paths.append(records_path)
+        # Pre-merge parse pass (D-21). The N parse calls run concurrently;
+        # results are consumed in stack_name order below so merge input order
+        # is independent of task completion order, keeping the merge prompt
+        # and global issue numbering reproducible.
+        parse_backend = ctx.backend_for("parse")
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
+        recorder = get_current_recorder()
+        parse_results: dict[str, list[dict[str, Any]]] = {}
+        parse_failures: dict[str, BaseException] = {}
+
+        async with phase_scope(DaydreamPhase.PARSE):
+            async with anyio.create_task_group() as tg:
+                for stack_name, output_path in sorted(per_stack_outputs.items()):
+                    # Language stacks carry severity so the scoped arbiter can
+                    # select high/contested findings (#168). The structural
+                    # meta-stack keeps the severity-free FEEDBACK_SCHEMA: it is
+                    # high-conviction by construction and is partitioned out of
+                    # arbitration/dedup below, defaulting to high at merge.
+                    record_schema = (
+                        FEEDBACK_SCHEMA
+                        if stack_name == STRUCTURE_STACK_NAME
+                        else PER_STACK_RECORD_SCHEMA
+                    )
+
+                    # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
+                    async def _parse_one(
+                        stack_name: str = stack_name,
+                        input_path: Path = output_path,
+                        schema: dict[str, Any] = record_schema,
+                    ) -> None:
+                        async with limiter:
+                            async with maybe_fork(recorder, f"parse-{stack_name}"):
+                                try:
+                                    records = await phase_parse_feedback(
+                                        parse_backend,
+                                        ctx.work,
+                                        input_path=input_path,
+                                        output_schema=schema,
+                                    )
+                                except Exception as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
+                                    parse_failures[stack_name] = exc
+                                    return
+                                # Written per task, not after the join, so a
+                                # sibling's failure cannot discard records that
+                                # already succeeded (they survive for --start-at).
+                                per_stack_records_path(dd, stack_name).write_text(
+                                    json.dumps(records, indent=2)
+                                )
+                                parse_results[stack_name] = records
+
+                    tg.start_soon(_parse_one)
+
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.PARSE)
+        # Fail the run on the first failure by stack name — same semantics and
+        # exception type as the serial loop, just deferred past the join so
+        # sibling records that completed are already on disk.
+        if parse_failures:
+            raise parse_failures[sorted(parse_failures)[0]]
+
+        for stack_name in sorted(parse_results):
+            records = parse_results[stack_name]
+            per_stack_records_paths.append(per_stack_records_path(dd, stack_name))
             all_records.extend(records)
             record_sources.extend(stack_name for _ in records)
 
@@ -970,8 +1092,9 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         arbitrated_ids = {id(all_records[i]) for i in arbiter_targets}
         if arbiter_targets:
             async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                verdicts = await phase_arbiter_review(
-                    ctx.backend_for("arbiter"),
+                arbiter_backend = ctx.backend_for("arbiter")
+                verdicts, arbiter_continuation = await phase_arbiter_review(
+                    arbiter_backend,
                     ctx.work,
                     selected_records=[all_records[i] for i in arbiter_targets],
                     diff_path=ctx.data["diff_path"],
@@ -980,6 +1103,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     exploration_dir=ctx.data["exploration_dir"],
                     intent_authoritative=ctx.data.get("intent_authoritative", False),
                 )
+                # Identity gate: only resume when merge runs on the very same
+                # backend instance. A per-phase override that resolves a
+                # different backend gets the cold path.
+                if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
+                    ctx.data["arbiter_continuation"] = arbiter_continuation
             all_records, record_sources = _apply_adjudication_verdicts(
                 all_records, record_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
@@ -1067,6 +1195,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> None:
         failed_stacks=failed_stacks or None,
         structural_records_path=ctx.data["structural_records_path"],
         intent_authoritative=ctx.data.get("intent_authoritative", False),
+        continuation=ctx.data.get("arbiter_continuation"),
     )
 
 
@@ -1446,8 +1575,7 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
 STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="exploration", run=_step_exploration),
     FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
-    FlowStep(name="alternatives", run=_step_alternatives, config_phase="wonder", enabled=_fresh_ttt),
-    FlowStep(name="per-stack-reviews", run=_step_per_stack_reviews, config_phase="per_stack_review"),
+    FlowStep(name="per-stack-reviews", run=_step_wonder_and_per_stack, config_phase="per_stack_review"),
     FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
     FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(
@@ -1532,6 +1660,13 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
     dd = deep_dir(target_dir)
+    current_diff_sha = diff_key(diff)
+    if config.start_at not in ("per-stack", "merge", "fix"):
+        # Fresh run only: a resume must NOT rewrite the key it is checked
+        # against, or the staleness gate would self-heal and pass every time.
+        shutil.rmtree(dd, ignore_errors=True)
+        dd.mkdir(parents=True, exist_ok=True)
+        diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.DEEP,
@@ -1544,12 +1679,19 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
-        # Resume gate (D-34, D-36, D-37).
+        # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
-                check_deep_artifacts(config.start_at, dd)
+                check_deep_artifacts(config.start_at, dd, current_diff_sha=current_diff_sha)
+                if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
+                    raise FileNotFoundError(
+                        f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
+                        "since the review artifacts were generated.\n\n"
+                        "Resuming would review stale findings against changed code.\n"
+                        "Re-run without --start-at to regenerate them."
+                    )
             except FileNotFoundError as exc:
-                print_error(console, "Missing Deep Artifact", str(exc))
+                print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
 
         # Stack detection (from diff file list). Availability is resolved once in
@@ -1606,20 +1748,9 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             _backend_cache=backend_cache,
         )
 
-        try:
-            return await run_flow(ctx.registry, "deep", ctx)
-        finally:
-            exploration_cleanup = target_dir / ".daydream" / "exploration"
-            if exploration_cleanup.is_dir():
-                # Best-effort: a raised rmtree here would escape the finally and
-                # replace the run's real exit code with a cleanup exception.
-                try:
-                    shutil.rmtree(exploration_cleanup)
-                except OSError as exc:
-                    print_warning(
-                        console,
-                        f"Failed to clean up exploration artifacts at "
-                        f"{exploration_cleanup}: {exc}",
-                    )
-            # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
-            # subsequent --start-at resumes can find the artifacts they need.
+        # Nothing is torn down after the flow. .daydream/exploration/ is a
+        # content-keyed cache (see ``exploration_cache_key``) the next run reuses
+        # on an exact head+diff+tier+depth match and rewrites on a miss, and
+        # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
+        # subsequent --start-at resumes can find the artifacts they need.
+        return await run_flow(ctx.registry, "deep", ctx)

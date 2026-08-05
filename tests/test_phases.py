@@ -80,16 +80,18 @@ async def test_phase_test_and_heal_fix_uses_fresh_context(tmp_path, monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
+async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(
     tmp_path, monkeypatch, make_work, silence_console,
 ):
-    """Driving the heal loop to a fix attempt passes an absolute path + FIX_MAX_TURNS.
+    """Driving the heal loop to a fix attempt passes an absolute path and no turn cap.
 
     Root bug being guarded: the heal fix prompt listed repo-relative paths so the
     fix agent's first Read missed and it flailed globbing $HOME unbounded. The fix
-    maps listed files to absolute under the repo and caps the run at FIX_MAX_TURNS.
+    maps listed files to absolute under the repo. The turn count is deliberately
+    uncapped — wall-clock is the bound; a turn ceiling killed real fixes with
+    ``error_max_turns`` and lost the partial edit.
     """
-    from daydream.phases import FIX_MAX_TURNS, phase_test_and_heal
+    from daydream.phases import phase_test_and_heal
 
     silence_console("daydream.phases")
 
@@ -120,8 +122,8 @@ async def test_phase_test_and_heal_fix_prompt_absolute_path_and_turn_budget(
     abs_path = str(tmp_path / "src" / "handler.py")
     assert abs_path in fix_prompt, "Fix prompt must list the absolute path so the first Read hits"
     assert "- src/handler.py" not in fix_prompt
-    # The FIX run_agent call (2nd execute) carries the turn budget; test runs do not.
-    assert backend.max_turns[1] == FIX_MAX_TURNS
+    # No turn ceiling on any call, including the FIX run_agent call (2nd execute).
+    assert backend.max_turns == [None, None, None]
 
 
 @pytest.mark.asyncio
@@ -351,9 +353,9 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_passes_turn_budget(tmp_path, make_work, silence_console):
-    """phase_fix caps a flailing agent with the FIX_MAX_TURNS turn budget."""
-    from daydream.phases import FIX_MAX_TURNS, phase_fix
+async def test_phase_fix_passes_no_turn_cap(tmp_path, make_work, silence_console):
+    """phase_fix sends no turn ceiling: a real fix is bounded by wall-clock only."""
+    from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
 
@@ -362,8 +364,7 @@ async def test_phase_fix_passes_turn_budget(tmp_path, make_work, silence_console
 
     await phase_fix(backend, make_work(tmp_path), item, 1, 1)
 
-    assert backend.max_turns == [FIX_MAX_TURNS]
-    assert FIX_MAX_TURNS == 40
+    assert backend.max_turns == [None]
 
 
 @pytest.mark.asyncio
@@ -838,6 +839,36 @@ async def test_phase_understand_intent_confirmed_first_try(tmp_path, monkeypatch
     )
 
     assert "login" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_phase_understand_intent_rejects_budget_truncated_summary(
+    tmp_path, monkeypatch, make_work, silence_console,
+):
+    """A partial intent response is never returned for downstream persistence."""
+    from daydream.phases import phase_understand_intent
+
+    silence_console("daydream.phases")
+
+    async def _truncated_run_agent(*args, **kwargs):
+        return "partial intent", None, "wall_budget_exceeded"
+
+    monkeypatch.setattr("daydream.phases.run_agent", _truncated_run_agent)
+    monkeypatch.setattr(
+        "daydream.phases.prompt_user",
+        lambda *args, **kwargs: pytest.fail("a truncated response must not reach confirmation"),
+    )
+
+    diff_file = tmp_path / "diff.patch"
+    diff_file.write_text("diff --git a/login.py ...")
+
+    with pytest.raises(RuntimeError, match="Intent analysis hit its budget: wall_budget_exceeded"):
+        await phase_understand_intent(
+            ScriptedBackend(), make_work(tmp_path),
+            diff_path=diff_file,
+            log="abc1234 add login page",
+            branch="feat/login",
+        )
 
 
 @pytest.mark.asyncio
@@ -2800,3 +2831,98 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
     assert batched_calls == ["a.py"]
     assert sorted(fix_calls) == ["b.py"]
     assert set(failures) == {"boom.py"} and "RuntimeError" in failures["boom.py"]
+
+
+# --- Issue #172 Fix B extended: inline small diffs into intent / wonder ------
+
+
+_INLINE_TEST_DIFF = (
+    "diff --git a/x.py b/x.py\n"
+    "--- a/x.py\n"
+    "+++ b/x.py\n"
+    "@@ -1 +1 @@\n"
+    "-old\n"
+    "+new\n"
+)
+
+
+def test_intent_prompt_inlines_small_diff() -> None:
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(
+        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+        inline_diff=_INLINE_TEST_DIFF,
+    )
+    assert "+++ b/x.py" in prompt
+    assert "+new" in prompt
+    assert "Read the diff file at" not in prompt
+    assert "do NOT re-Read" in prompt
+
+
+def test_intent_prompt_pointer_when_diff_is_none() -> None:
+    from daydream.phases import build_intent_prompt
+
+    prompt = build_intent_prompt(
+        diff_path=".daydream/diff.patch", branch="feature", log="abc commit",
+    )
+    assert "Read the diff file at .daydream/diff.patch" in prompt
+    assert "+++ b/x.py" not in prompt
+
+
+def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
+    """Passing inline_diff=None reproduces today's prompt exactly."""
+    from daydream.phases import build_intent_prompt
+
+    explicit_none = build_intent_prompt(
+        diff_path="d.patch", branch="b", log="l", inline_diff=None
+    )
+    omitted = build_intent_prompt(diff_path="d.patch", branch="b", log="l")
+    assert explicit_none == omitted
+
+
+def test_alternatives_prompt_inlines_small_diff() -> None:
+    from daydream.phases import build_alternative_review_prompt
+
+    prompt = build_alternative_review_prompt(
+        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+        inline_diff=_INLINE_TEST_DIFF,
+    )
+    assert "+++ b/x.py" in prompt
+    assert "in the diff at .daydream/diff.patch" not in prompt
+    assert "do NOT re-Read" in prompt
+
+
+def test_alternatives_prompt_pointer_when_diff_is_none() -> None:
+    from daydream.phases import build_alternative_review_prompt
+
+    prompt = build_alternative_review_prompt(
+        intent_summary="does a thing", diff_path=".daydream/diff.patch",
+    )
+    assert "in the diff at .daydream/diff.patch" in prompt
+    assert "+++ b/x.py" not in prompt
+
+
+def test_inlineable_diff_budget_boundaries() -> None:
+    """Under and exactly-at budget inline; over budget falls back to the pointer."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.phases import _inlineable_diff
+
+    assert _inlineable_diff(None) is None
+    assert _inlineable_diff("") == ""  # empty diff is under budget
+    exactly = "x" * INLINE_DIFF_BUDGET_BYTES
+    assert _inlineable_diff(exactly) == exactly
+    over = "x" * (INLINE_DIFF_BUDGET_BYTES + 1)
+    assert _inlineable_diff(over) is None
+
+
+def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
+    """A multi-byte diff just over the byte budget is not inlined."""
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+    from daydream.phases import _inlineable_diff
+
+    # 3 bytes per char in UTF-8, so this is ~3x the budget in bytes while
+    # being under it in characters.
+    multibyte = "あ" * (INLINE_DIFF_BUDGET_BYTES // 2)
+    assert len(multibyte) < INLINE_DIFF_BUDGET_BYTES
+    assert len(multibyte.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES
+    assert _inlineable_diff(multibyte) is None

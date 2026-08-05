@@ -9,6 +9,7 @@ The check_deep_artifacts() helper mirrors check_review_file_exists()
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 # Stage prerequisites -- single source of truth.
@@ -178,13 +179,36 @@ def test_verdict_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "test-verdict.json"
 
 
-def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
-    """Validate predecessor artifacts exist for the given resume stage.
+def diff_key_path(deep_dir_path: Path) -> Path:
+    """Sibling file recording which diff the deep artifacts were produced from."""
+    return deep_dir_path / "diff-key"
+
+
+def diff_key(diff: str) -> str:
+    """Content key for a diff: sha256 hex of its UTF-8 bytes."""
+    return hashlib.sha256(diff.encode("utf-8")).hexdigest()
+
+
+def check_deep_artifacts(
+    stage: str, deep_dir_path: Path, *, current_diff_sha: str | None = None
+) -> None:
+    """Validate predecessor artifacts exist, and are fresh, for a resume stage.
+
+    Args:
+        stage: The ``--start-at`` stage being resumed into.
+        deep_dir_path: The run's ``.daydream/deep`` directory.
+        current_diff_sha: When given, the artifacts must have been produced from
+            this diff. A missing key file (a pre-upgrade artifact directory) or a
+            mismatched one refuses the resume: an unverifiable artifact set is
+            treated as stale, because resuming onto artifacts from a different
+            diff silently reviews the wrong code. Safety over back-compat — the
+            message says how to regenerate.
 
     Raises:
         ValueError: If stage is not a known deep-mode stage.
         FileNotFoundError: With an actionable multi-line message naming missing
-            files and the --start-at value that would produce them.
+            files and the --start-at value that would produce them, or naming the
+            staleness when the diff key does not match.
     """
     if stage not in _DEEP_STAGE_PREREQS:
         raise ValueError(f"Unknown deep stage: {stage!r}")
@@ -225,3 +249,42 @@ def check_deep_artifacts(stage: str, deep_dir_path: Path) -> None:
             f"  daydream --start-at {earlier}"
         )
         raise FileNotFoundError(msg)
+
+    if current_diff_sha is not None:
+        key_file = diff_key_path(deep_dir_path)
+        try:
+            stored = key_file.read_text(encoding="utf-8").strip()
+        except OSError:
+            stored = ""
+        prerequisites = [deep_dir_path / name for name in _DEEP_STAGE_PREREQS[stage]]
+        if stage == "merge":
+            prerequisites.extend(records)
+        if stage == "fix":
+            prerequisites.append(merged_items_path(deep_dir_path))
+
+        try:
+            key_mtime = key_file.stat().st_mtime_ns
+            has_stale_prerequisite = any(
+                artifact.stat().st_mtime_ns < key_mtime for artifact in prerequisites
+            )
+        except OSError:
+            has_stale_prerequisite = True
+
+        if stored != current_diff_sha or has_stale_prerequisite:
+            detail = (
+                f"  - {key_file} is missing (produced before diff tracking)"
+                if not stored
+                else (
+                    f"  - prerequisite artifacts predate {key_file}"
+                    if has_stale_prerequisite
+                    else f"  - {key_file} records a different diff"
+                )
+            )
+            raise FileNotFoundError(
+                f"Cannot resume at stage '{stage}' -- the artifacts in\n"
+                f"  {deep_dir_path}\n"
+                f"were produced from a different diff than the current one:\n\n"
+                f"{detail}\n\n"
+                f"Resuming would review stale findings against changed code.\n"
+                f"Re-run without --start-at to regenerate them."
+            )

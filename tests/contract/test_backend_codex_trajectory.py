@@ -208,3 +208,46 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {rs.step_id}: reasoning_tokens ({rt}) exceeds "
             f"completion_tokens ({metrics.completion_tokens}) — subset invariant"
         )
+
+
+@pytest.mark.asyncio
+async def test_codex_final_metrics_equal_step_sum(tmp_path: Path) -> None:
+    """Codex restates each turn's usage on both a MetricsEvent and a CostEvent.
+
+    ``final_metrics`` must equal the per-step sum, not twice it.
+    """
+    await _drive_codex_through_recorder(
+        tmp_path, fixture="turn_completed_with_usage.jsonl"
+    )
+
+    traj = json.loads((tmp_path / "trajectory.json").read_text())
+    step_prompt = sum(
+        s["metrics"]["prompt_tokens"]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get("prompt_tokens")
+    )
+    step_completion = sum(
+        s["metrics"]["completion_tokens"]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get("completion_tokens")
+    )
+    assert step_prompt == 200, f"fixture step-sum drifted: {step_prompt}"
+
+    final = traj["final_metrics"]
+    assert final["total_prompt_tokens"] == step_prompt  # not 400
+    assert final["total_completion_tokens"] == step_completion  # not 200
+
+
+@pytest.mark.asyncio
+async def test_codex_multi_turn_final_metrics_equal_step_sum(tmp_path: Path) -> None:
+    """Same invariant across the two-turn fixture (34594+36000 in, 168+200 out)."""
+    await _drive_codex_through_recorder(tmp_path)
+
+    traj = json.loads((tmp_path / "trajectory.json").read_text())
+    step_prompt = sum(
+        s["metrics"]["prompt_tokens"]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get("prompt_tokens")
+    )
+    assert step_prompt == 34594 + 36000
+    assert traj["final_metrics"]["total_prompt_tokens"] == step_prompt

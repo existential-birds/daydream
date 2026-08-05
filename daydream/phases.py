@@ -35,6 +35,7 @@ from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.trajectory import (
     DaydreamPhase,
@@ -52,6 +53,7 @@ from daydream.config import (
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
+    TEST_WALL_BUDGET_S,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -74,12 +76,6 @@ _logger = logging.getLogger(__name__)
 
 TEST_OUTPUT_TAIL_LINES = 100
 
-# Generous for a real fix yet bounds a flailing agent that's globbing $HOME after a missed Read.
-FIX_MAX_TURNS = 40
-
-
-# Verify re-reads the fixed files and runs checks; same generous bound as fix.
-VERIFY_MAX_TURNS = 40
 _PR_BODY_MAX_CHARS = 8000
 
 
@@ -1135,6 +1131,19 @@ def build_review_prompt(
     return "\n".join(parts)
 
 
+def _inlineable_diff(diff_text: str | None) -> str | None:
+    """The diff to inline, or ``None`` when it is absent or over budget.
+
+    Uses the shared prompt-size policy. An empty diff is under budget and
+    inlines as-is.
+    """
+    if diff_text is None:
+        return None
+    if not fits_inline_diff_budget(diff_text):
+        return None
+    return diff_text
+
+
 def build_intent_prompt(
     *,
     diff_path: str = "",
@@ -1142,6 +1151,7 @@ def build_intent_prompt(
     log: str = "",
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
+    inline_diff: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
 
@@ -1154,6 +1164,10 @@ def build_intent_prompt(
             present (non-empty after strip), an authoritative-intent section is
             prepended ahead of the diff-reading instructions. When ``None`` or
             empty, the prompt is byte-identical to the no-PR-body case.
+        inline_diff: When supplied, the whole diff is inlined and the
+            read-the-file instruction is dropped. ``None`` (the default, and
+            what every over-budget caller passes) keeps the ``diff_path``
+            pointer text byte-identical.
     """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
@@ -1175,9 +1189,21 @@ def build_intent_prompt(
             f"{safe_body}\n"
             "</pr_description>\n"
         )
+    if inline_diff is not None:
+        diff_section = (
+            "The complete diff under review is inlined below (do NOT re-Read "
+            f"{diff_path} — it is already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "You have full access to explore the codebase. Examine it alongside "
+            "the diff above to understand the intent of these changes. "
+        )
+    else:
+        diff_section = (
+            f"You have full access to explore the codebase. Read the diff file at {diff_path} "
+            f"and examine the codebase to understand the intent of these changes. "
+        )
     body = (
-        f"You have full access to explore the codebase. Read the diff file at {diff_path} "
-        f"and examine the codebase to understand the intent of these changes. "
+        f"{diff_section}"
         f"That diff is the complete review target, already computed against the "
         f"repository's base branch — this run is not tied to a GitHub pull request, so "
         f"do not look up, list, or ask about pull requests. Do not invoke any skills or "
@@ -1195,18 +1221,37 @@ def build_alternative_review_prompt(
     intent_summary: str = "",
     diff_path: str = "",
     exploration_dir: Path | None = None,
+    inline_diff: str | None = None,
 ) -> str:
-    """Assemble the prompt for `phase_alternative_review`."""
+    """Assemble the prompt for `phase_alternative_review`.
+
+    Args:
+        inline_diff: When supplied, the whole diff is inlined and the
+            read-the-file instruction is dropped. ``None`` (the default, and
+            what every over-budget caller passes) keeps the ``diff_path``
+            pointer text byte-identical.
+    """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
     parts.append(_confidence_and_convention_instructions())
+    if inline_diff is not None:
+        diff_clause = (
+            "in the diff inlined below (do NOT re-Read "
+            f"{diff_path} — it is already here):\n\n"
+            f"{inline_diff.rstrip()}\n\n"
+            "Report only concrete problems you can substantiate "
+        )
+    else:
+        diff_clause = (
+            f"in the diff at {diff_path}. Report only concrete problems you can substantiate "
+        )
     body = (
         f"The intent of this PR has been confirmed as:\n\n"
         f"{intent_summary}\n\n"
         f"Given this intent, explore the codebase and evaluate the implementation "
-        f"in the diff at {diff_path}. Report only concrete problems you can substantiate "
+        f"{diff_clause}"
         f"with evidence — correctness bugs, design decisions that will cause a real "
         f"failure, or violations of a Codebase Convention above. Do NOT list stylistic "
         f"preferences, speculative 'nice to have' opinions, or alternatives you cannot "
@@ -1473,7 +1518,21 @@ For each issue found, return a JSON object with this structure:
 If there are no actionable issues, return: {{"issues": []}}
 """
 
-    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=schema, phase=DaydreamPhase.PARSE)
+    result, _, budget_reason = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=schema,
+        phase=DaydreamPhase.PARSE,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+    )
+
+    # A truncated parse would silently drop the whole stack's findings, so it
+    # fails the run. The degrade path below stays for genuinely unparseable
+    # model output only.
+    if budget_reason:
+        raise RuntimeError(f"Feedback parse hit its budget: {budget_reason}")
 
     if not isinstance(result, dict) or "issues" not in result:
         # When structured output and JSON fallback both fail (e.g. empty
@@ -1610,7 +1669,6 @@ async def phase_verify_recommendations(
         work.repo,
         prompt,
         output_schema=RECOMMENDATION_VERDICTS_SCHEMA,
-        max_turns=VERIFY_MAX_TURNS,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
@@ -1788,7 +1846,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
     await run_agent(
         backend, work.repo, prompt,
-        phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+        phase=DaydreamPhase.FIX,
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         progress_callback=progress_cb,
@@ -1876,8 +1934,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     # Scale budgets linearly with the number of findings so a batched group of N
     # findings gets the same per-finding headroom as a single-finding turn.
-    scaled_max_turns = FIX_MAX_TURNS * count
-    scaled_tool_budget = DEFAULT_TOOL_CALL_BUDGET * count
+    scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
     progress_cb: Callable[[Text], Any] | None = None
@@ -1892,7 +1949,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
     _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
-        phase=DaydreamPhase.FIX, max_turns=scaled_max_turns,
+        phase=DaydreamPhase.FIX,
         tool_call_budget=scaled_tool_budget,
         wall_budget_s=scaled_wall_budget,
         progress_callback=progress_cb,
@@ -2206,7 +2263,7 @@ async def phase_test_and_heal(
             concise_mode=_backend_concise_fix_prompts(backend),
         )
         await run_agent(
-            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX, max_turns=FIX_MAX_TURNS,
+            backend, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
@@ -2235,7 +2292,13 @@ async def phase_test_and_heal(
         test_command_override = None
 
         output, continuation, _ = await run_agent(
-            backend, work.repo, prompt, continuation=continuation, phase=DaydreamPhase.TEST,
+            backend,
+            work.repo,
+            prompt,
+            continuation=continuation,
+            phase=DaydreamPhase.TEST,
+            tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=TEST_WALL_BUDGET_S,
         )
 
         test_passed = detect_test_success(output)
@@ -2564,6 +2627,7 @@ async def phase_understand_intent(
     *,
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
+    diff_text: str | None = None,
 ) -> str:
     """Phase: Understand the intent of the PR through conversational confirmation.
 
@@ -2598,17 +2662,20 @@ async def phase_understand_intent(
         log=log,
         exploration_dir=exploration_dir,
         pr_description=pr_description,
+        inline_diff=_inlineable_diff(diff_text),
     )
 
     while True:
         console.print()
         print_info(console, "Agent is analyzing the changes...")
 
-        output, _, _ = await run_agent(
+        output, _, budget_reason = await run_agent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
         )
+        if budget_reason is not None:
+            raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
         intent_text = output if isinstance(output, str) else str(output)
 
         console.print()
@@ -2668,6 +2735,7 @@ async def phase_alternative_review(
     intent_summary: str,
     *,
     exploration_dir: Path | None = None,
+    diff_text: str | None = None,
 ) -> list[dict[str, Any]]:
     """Phase: Evaluate whether there's a better way to implement the PR.
 
@@ -2686,18 +2754,33 @@ async def phase_alternative_review(
         intent_summary=intent_summary,
         diff_path=str(diff_path),
         exploration_dir=exploration_dir,
+        inline_diff=_inlineable_diff(diff_text),
     )
 
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
 
-    result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=ALTERNATIVE_REVIEW_SCHEMA, phase=DaydreamPhase.ALTERNATIVES,
+    result, _, budget_reason = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=ALTERNATIVE_REVIEW_SCHEMA,
+        phase=DaydreamPhase.ALTERNATIVES,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
+
+    # A budget-truncated wonder pass is a run failure, not an empty lens: the
+    # findings it would have produced are silently missing, and every
+    # downstream stage would treat [] as "nothing to see".
+    if budget_reason:
+        raise RuntimeError(f"Alternative review hit its budget: {budget_reason}")
 
     if isinstance(result, dict) and "issues" in result:
         issues = result["issues"]
     else:
+        # Only genuinely unusable model output degrades to an empty lens; the
+        # budget case above already failed the run.
         if not get_quiet_mode():
             print_warning(console, f"TTT review returned unexpected result type: {type(result).__name__}")
         issues = []
@@ -2725,6 +2808,7 @@ async def phase_per_stack_reviews(
     exploration_dir: Path | None = None,
     diff_text: str | None = None,
     intent_authoritative: bool = False,
+    include_alternatives: bool = True,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -2798,6 +2882,7 @@ async def phase_per_stack_reviews(
                     exploration_dir=exploration_dir,
                     prior_commits=prior_commits,
                     intent_authoritative=intent_authoritative,
+                    include_alternatives=include_alternatives,
                 )
             else:
                 # Issue #172 Fix B: inline the relevant diff hunks for this
@@ -2821,6 +2906,7 @@ async def phase_per_stack_reviews(
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
+                        include_alternatives=include_alternatives,
                     )
                 else:
                     # Route the raw Beagle stack key through the backend
@@ -2838,6 +2924,7 @@ async def phase_per_stack_reviews(
                         prior_commits=prior_commits,
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
+                        include_alternatives=include_alternatives,
                     )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
@@ -2849,8 +2936,22 @@ async def phase_per_stack_reviews(
                 async with limiter:
                     async with maybe_fork(recorder, f"deep-{stack_name}"):
                         try:
-                            await run_agent(backend, work.repo, task_prompt, phase=DaydreamPhase.DEEP)
-                            results[stack_name] = task_output
+                            _, _, budget_reason = await run_agent(
+                                backend,
+                                work.repo,
+                                task_prompt,
+                                phase=DaydreamPhase.DEEP,
+                                tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+                                wall_budget_s=DEFAULT_WALL_BUDGET_S,
+                            )
+                            if budget_reason:
+                                # A truncated stack did not really pass: route it
+                                # into failures so merge lists it under
+                                # "Uncovered stacks" instead of silently shipping
+                                # a partial review as a complete one.
+                                failures[stack_name] = f"budget exhausted: {budget_reason}"
+                            else:
+                                results[stack_name] = task_output
                         except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                             failures[stack_name] = f"{type(e).__name__}: {e}"
 
@@ -2970,6 +3071,8 @@ async def phase_supervise_review(
         prompt,
         output_schema=SUPERVISE_SCHEMA,
         phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
     if not isinstance(result, dict) or not isinstance(result.get("verdicts"), list):
         raise ValueError(f"Supervisor returned no verdicts list (got {type(result).__name__})")
@@ -3028,7 +3131,7 @@ async def phase_arbiter_review(
     alternatives_path: Path,
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
-) -> dict[int, dict[str, Any]]:
+) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
     """Re-review high-severity / contested per-stack findings with the arbiter (#168).
 
     Runs a single heavyweight (Opus by default) agent over only the findings the
@@ -3054,11 +3157,14 @@ async def phase_arbiter_review(
             phase was grounded by a fresh, head-matched PR description.
 
     Returns:
-        Mapping of ``arb_id`` -> adjudicated finding dict with keys ``keep``,
-        ``severity``, ``confidence``, ``description``, ``rationale``. A missing
-        ``arb_id`` (the agent dropped or truncated a row) is fail-open: the caller
-        retains the original record unchanged with a warning, since arbitration
-        targets are the high-severity / contested findings worth protecting.
+        ``(verdicts, continuation)``. ``verdicts`` maps ``arb_id`` -> adjudicated
+        finding dict with keys ``keep``, ``severity``, ``confidence``,
+        ``description``, ``rationale``. A missing ``arb_id`` (the agent dropped or
+        truncated a row) is fail-open: the caller retains the original record
+        unchanged with a warning, since arbitration targets are the high-severity
+        / contested findings worth protecting. ``continuation`` is the backend's
+        session token (``None`` when the backend mints none), so the cross-stack
+        merge can resume this conversation instead of paying for a cold prompt.
 
     """
     from daydream.deep.artifacts import arbiter_input_path, deep_dir
@@ -3081,12 +3187,20 @@ async def phase_arbiter_review(
         exploration_dir=exploration_dir,
         intent_authoritative=intent_authoritative,
     )
-    result, _, _ = await run_agent(backend, work.repo, prompt, output_schema=ARBITER_SCHEMA, phase=DaydreamPhase.DEEP)
+    result, continuation, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=ARBITER_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+    )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise ValueError(f"Arbiter returned no findings list (got {type(result).__name__})")
 
-    return _rekey_verdicts(result["findings"], "arb_id", "Arbiter")
+    return _rekey_verdicts(result["findings"], "arb_id", "Arbiter"), continuation
 
 
 # Suppression schema (issue #232). Mirrors ARBITER_SCHEMA but the confidence enum
@@ -3177,7 +3291,13 @@ async def phase_suppression_review(
         exploration_dir=exploration_dir,
     )
     result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=SUPPRESSION_SCHEMA, phase=DaydreamPhase.DEEP
+        backend,
+        work.repo,
+        prompt,
+        output_schema=SUPPRESSION_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
 
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
@@ -3390,6 +3510,7 @@ async def phase_cross_stack_merge(
     failed_stacks: dict[str, str] | None = None,
     structural_records_path: Path | None = None,
     intent_authoritative: bool = False,
+    continuation: ContinuationToken | None = None,
 ) -> Path:
     """Run the cross-stack merge agent and return the merged-report path (D-23..D-27).
 
@@ -3464,11 +3585,19 @@ async def phase_cross_stack_merge(
         failed_stacks=failed_stacks,
         structural_records_path=structural_records_path,
         intent_authoritative=intent_authoritative,
+        resumed_from_arbiter=continuation is not None,
     )
     print_phase_hero(console, "MERGE", phase_subtitle("MERGE"))
     print_dim(console, f"Model: {backend.model}")
     result, _, _ = await run_agent(
-        backend, work.repo, prompt, output_schema=MERGED_ITEMS_SCHEMA, phase=DaydreamPhase.DEEP
+        backend,
+        work.repo,
+        prompt,
+        output_schema=MERGED_ITEMS_SCHEMA,
+        phase=DaydreamPhase.DEEP,
+        continuation=continuation,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
     )
 
     # Fail loudly on empty/invalid output -- a silent [] would hide a broken

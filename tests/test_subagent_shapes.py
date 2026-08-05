@@ -190,8 +190,12 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
     assert all_child_ids[1][0] == 1
 
 
-async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> None:
-    """SUBA-09: Parent FinalMetrics.total_prompt_tokens excludes child contributions."""
+async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> None:
+    """Parent FinalMetrics.total_prompt_tokens folds in child contributions.
+
+    Supersedes the original SUBA-09 expectation: the root trajectory is
+    whole-run truth, while the sibling file keeps its own share.
+    """
     recorder = make_recorder(tmp_path)
 
     async with recorder:
@@ -223,7 +227,7 @@ async def test_parent_final_metrics_excludes_sibling_steps(tmp_path: Path) -> No
     parent_traj = read_trajectory(recorder.path)
     child_traj = read_trajectory(child.path)
 
-    assert parent_traj["final_metrics"]["total_prompt_tokens"] == 100
+    assert parent_traj["final_metrics"]["total_prompt_tokens"] == 600
     assert child_traj["final_metrics"]["total_prompt_tokens"] == 500
 
 

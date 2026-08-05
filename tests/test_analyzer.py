@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from daydream.eval.analyzer import analyze_grounding, load_trajectories
+from daydream.backends import MetricsEvent, ResultEvent, TextEvent
+from daydream.eval.analyzer import analyze_costs, analyze_grounding, load_trajectories
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, TrajectoryRecorder
 
 
 def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
@@ -63,6 +65,102 @@ def test_exact_match_takes_precedence(tmp_path: Path):
 
     assert result["main"] is not None
     assert result["main"]["marker"] == "exact"
+
+
+def test_analyze_costs_preserves_fractional_aggregate_precision():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {"total_cost_usd": 0.00006},
+        },
+        "forked": [],
+    }
+
+    result = analyze_costs(trajectories)
+
+    assert result["total_cost_usd"] == 0.00006
+    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
+
+
+def test_analyze_costs_includes_cached_tokens_when_prompt_dominates():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {
+                "total_prompt_tokens": 140,
+                "total_cached_tokens": 14,
+            },
+        },
+        "forked": [],
+    }
+
+    result = analyze_costs(trajectories)
+
+    assert result["total_input_tokens"] == 140
+    assert result["cache_hit_rate"] == 0.1
+
+
+def test_analyze_costs_aggregates_legacy_fork_metrics():
+    trajectories = {
+        "main": {
+            "_source_file": "trajectory.json",
+            "final_metrics": {"total_cost_usd": 1.0},
+        },
+        "forked": [
+            {
+                "_source_file": "fork.json",
+                "final_metrics": {"total_cost_usd": 0.5},
+            }
+        ],
+    }
+
+    result = analyze_costs(trajectories)
+
+    assert result["total_cost_usd"] == 1.5
+
+
+async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path):
+    session = "nested-forks"
+    daydream_dir = tmp_path / ".daydream"
+    recorder = TrajectoryRecorder(
+        path=daydream_dir / "runs" / session / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id=session,
+    )
+
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="main"))
+            inv.observe(MetricsEvent("main", 10, 1, 0, 0.1))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with recorder.fork("outer") as outer:
+            async with outer.invocation(phase=DaydreamPhase.DEEP) as inv:
+                inv.observe(TextEvent(text="outer"))
+                inv.observe(MetricsEvent("outer", 20, 2, 1, 0.2))
+                inv.observe(ResultEvent(structured_output=None, continuation=None))
+            async with outer.fork("inner") as inner:
+                async with inner.invocation(phase=DaydreamPhase.DEEP) as inv:
+                    inv.observe(TextEvent(text="inner"))
+                    inv.observe(MetricsEvent("inner", 30, 3, 1, 0.3))
+                    inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+    trajectories = load_trajectories(daydream_dir, session)
+
+    result = analyze_costs(trajectories)
+
+    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
+    assert by_agent["main"]["cost_usd"] == pytest.approx(0.1)
+    assert by_agent["outer"]["cost_usd"] == pytest.approx(0.2)
+    assert by_agent["inner"]["cost_usd"] == pytest.approx(0.3)
+    assert by_agent["main"]["steps"] == 1
+    assert by_agent["outer"]["steps"] == 1
+    assert by_agent["inner"]["steps"] == 1
+    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == pytest.approx(
+        result["total_cost_usd"]
+    )
+    assert sum(agent["steps"] for agent in result["by_agent"]) == 3
 
 
 # --- analyze_grounding ---

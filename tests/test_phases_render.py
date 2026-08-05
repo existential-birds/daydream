@@ -139,7 +139,7 @@ async def test_arbiter_prints_kept_dropped(monkeypatch, tmp_path, make_work):
     alts = dd / "alternatives.json"
     alts.write_text("[]")
 
-    verdicts = await phase_arbiter_review(
+    verdicts, _ = await phase_arbiter_review(
         backend,
         make_work(tmp_path),
         selected_records=selected,
