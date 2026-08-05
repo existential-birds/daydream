@@ -314,6 +314,21 @@ def test_build_fix_prompt_concise_mode():
     assert "CONCISE MODE" not in prompt_default
 
 
+def test_fix_guardrails_forbid_generated_file_edits():
+    from daydream.phases import _FIX_GUARDRAILS
+
+    assert "generated" in _FIX_GUARDRAILS.lower()
+    assert "migration" in _FIX_GUARDRAILS.lower()
+
+
+def test_build_fix_prompt_carries_generated_file_rule():
+    from daydream.phases import _build_fix_prompt
+
+    prompt = _build_fix_prompt("test output failed", [{"file": "src/a.py"}])
+    assert "generated" in prompt.lower()
+    assert "migration" in prompt.lower()
+
+
 @pytest.mark.asyncio
 async def test_phase_fix_resolves_existing_file_to_absolute_path(tmp_path, make_work, silence_console):
     """phase_fix hands the agent an absolute path when the file exists under work.repo."""

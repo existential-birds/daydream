@@ -34,6 +34,7 @@ from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
+from daydream.generated_files import GENERATED_FILES_PROMPT_RULE
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
@@ -160,7 +161,7 @@ def _build_fix_prompt(
                 "another file, edit it and say which and why."
             )
 
-    return "\n".join(parts) + _build_fix_style_suffix(concise_mode)
+    return "\n".join(parts) + f"\n\n{GENERATED_FILES_PROMPT_RULE}\n" + _build_fix_style_suffix(concise_mode)
 
 
 
@@ -1690,7 +1691,8 @@ async def phase_verify_recommendations(
 # Shared scope/precedence/contract guardrails appended to every fix prompt
 # (single-finding ``phase_fix`` and batched ``phase_fix_batched``). Kept in one
 # place so the two prompt paths can never drift.
-_FIX_GUARDRAILS = """Do NOT change error handling semantics
+_FIX_GUARDRAILS = (
+    """Do NOT change error handling semantics
 (e.g., converting warn-and-continue to error propagation, or vice versa)
 unless the issue description specifically explains why the current error
 handling strategy is wrong for that code path.
@@ -1710,6 +1712,9 @@ to satisfy the finding; stop and report the conflict rather than overriding
 documented intent. Treat low/medium-confidence findings with extra skepticism
 here.
 """
+    + GENERATED_FILES_PROMPT_RULE
+    + "\n"
+)
 
 
 def _build_intent_suffix(intent_path: Path | None) -> str:
