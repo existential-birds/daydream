@@ -8,6 +8,7 @@ preserving the accept/reject grammar.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -16,6 +17,9 @@ from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
     WORKING_DIRECTORY_SCHEMA,
+    path_is_confined,
+    valid_directory_scope_lexical,
+    valid_repository_file_path,
 )
 
 ALL_SCHEMA_PATTERNS = [
@@ -41,6 +45,12 @@ PATH_ACCEPTS = [
     ".github/workflows/ci.yml",
     "foo.bar",
     "foo..bar",
+]
+
+MULTI_DOT_PATHS = [
+    "..cache",
+    "...",
+    "src/...generated",
 ]
 
 PATH_REJECTS = [
@@ -91,3 +101,16 @@ def test_working_directory_accepts_cwd() -> None:
     assert regex.match(".")
     assert regex.match("src/main.rs")
     assert not regex.match("/abs/path")
+
+
+@pytest.mark.parametrize("value", MULTI_DOT_PATHS)
+def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
+    value: str, tmp_path: Path
+) -> None:
+    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(value)
+    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid(value)
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid(value)
+    assert valid_repository_file_path(value)
+    assert valid_directory_scope_lexical(value)
+    assert path_is_confined(tmp_path, value)
+    assert path_is_confined(tmp_path, value, directory_scope=True)
