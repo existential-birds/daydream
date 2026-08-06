@@ -86,6 +86,12 @@ class Manifest:
             parallel groups share one working tree these cannot be attributed to
             a specific group, so they are recorded (never deleted) to make the
             partial run fully auditable. ``None`` when none were left behind.
+        fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
+            (issue #315): ``{"enabled": bool, "rounds": [...]}`` written to
+            ``deep/fix-quality-gate.json`` by the orchestrator, covering
+            per-file before/after erosion + verbosity deltas over the files the
+            fix phase edited. ``None`` when the gate artifact is absent or
+            malformed.
         total_findings: Number of findings (from eval, if available).
         grounding_rate: Grounding rate (from eval, if available).
         coverage_ratio: File coverage ratio (from eval, if available).
@@ -126,6 +132,7 @@ class Manifest:
     loop: bool = False
     fix_failures: dict[str, str] | None = None
     fix_leftover_untracked: list[str] | None = None
+    fix_quality_gate: dict[str, Any] | None = None
 
     # Git context
     source_path: str | None = None
@@ -189,6 +196,7 @@ class Manifest:
             },
             "fix_failures": self.fix_failures,
             "fix_leftover_untracked": self.fix_leftover_untracked,
+            "fix_quality_gate": self.fix_quality_gate,
             "git": {
                 "source_path": self.source_path,
                 "remote_url": self.remote_url,
@@ -242,6 +250,7 @@ def build_manifest(
     source_path: str | None = None,
     fix_failures: dict[str, str] | None = None,
     fix_leftover_untracked: list[str] | None = None,
+    fix_quality_gate: dict[str, Any] | None = None,
 ) -> Manifest:
     """Construct a Manifest from run context.
 
@@ -257,6 +266,9 @@ def build_manifest(
             every fix applied. Recorded verbatim on the manifest.
         fix_leftover_untracked: Sorted list of untracked paths left behind by a
             failed fix pass, or ``None``. Recorded verbatim on the manifest.
+        fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
+            (issue #315), or ``None`` when the artifact is absent. Recorded
+            verbatim on the manifest.
 
     Returns:
         A fully populated Manifest.
@@ -287,6 +299,7 @@ def build_manifest(
         loop=config.loop,
         fix_failures=fix_failures or None,
         fix_leftover_untracked=fix_leftover_untracked or None,
+        fix_quality_gate=fix_quality_gate or None,
         source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,

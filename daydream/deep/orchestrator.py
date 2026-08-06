@@ -30,6 +30,9 @@ from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_QUALITY_GATE_ENABLED,
+    DEFAULT_QUALITY_GATE_EROSION_DELTA,
+    DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_UNCOVERED_SWEEP_ENABLED,
     DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
@@ -49,6 +52,7 @@ from daydream.deep.artifacts import (
     diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
+    fix_quality_gate_path,
     generated_file_violations_path,
     merged_items_path,
     merged_report_path,
@@ -1981,6 +1985,157 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
+def _capture_quality_before(daydream_dir: Path) -> dict[str, Any] | None:
+    """Best-effort pre-fix quality snapshot; ``None`` means the gate is unavailable.
+
+    ``analyze_quality`` is pure and deterministic (no backend, no network), but
+    any failure here degrades to "gate unavailable" rather than failing the run
+    -- the anti-degradation gate is fail-open by design (#315).
+    """
+    try:
+        from daydream.eval.analyzer import analyze_quality
+
+        return analyze_quality(daydream_dir)
+    except Exception:
+        return None
+
+
+def _quality_delta(before: float | None, after: float | None) -> float | None:
+    """Rounded per-file metric delta; ``None`` when either side is undefined."""
+    if before is None or after is None:
+        return None
+    return round(after - before, 4)
+
+
+def _quality_flagged(
+    *,
+    erosion_delta: float | None,
+    verbosity_delta: float | None,
+    erosion_after: float | None,
+    verbosity_after: float | None,
+    is_new: bool,
+    erosion_threshold: float,
+    verbosity_threshold: float,
+) -> bool:
+    """Whether a fixed file regressed past a threshold (#315).
+
+    An existing file is flagged when its delta exceeds the threshold. A NEW
+    file (no pre-fix baseline) is flagged on its absolute values vs the same
+    thresholds. ``None`` deltas never flag (the metric has no defined baseline).
+    """
+    if erosion_delta is not None and erosion_delta > erosion_threshold:
+        return True
+    if verbosity_delta is not None and verbosity_delta > verbosity_threshold:
+        return True
+    if is_new:
+        if erosion_after is not None and erosion_after > erosion_threshold:
+            return True
+        if verbosity_after is not None and verbosity_after > verbosity_threshold:
+            return True
+    return False
+
+
+def _evaluate_quality_gate(
+    *,
+    enabled: bool,
+    erosion_delta_threshold: float,
+    verbosity_delta_threshold: float,
+    daydream_dir: Path,
+    dd: Path,
+    candidates: set[str],
+    before: dict[str, Any] | None,
+    iteration: int | None,
+) -> None:
+    """Compute and persist the fix-phase quality-gate verdict (issue #315).
+
+    Fail-open by design: never raises, never stops the run. When disabled,
+    writes ``{"enabled": false}``. When enabled but the quality snapshot is
+    unavailable (``before`` is ``None`` or the post-fix capture raises), writes
+    nothing so an analyzer failure cannot masquerade as a clean gate. Each
+    ``_step_fix`` invocation appends one ``rounds`` entry (keyed by the flow's
+    loop iteration when present, else the next sequence number), so a resume or
+    loop preserves the per-round trend. Flagged files are surfaced as warnings
+    with their before/after numbers.
+    """
+    try:
+        gate_p = fix_quality_gate_path(dd)
+        if not enabled:
+            gate_p.write_text(json.dumps({"enabled": False}, indent=2))
+            return
+        if before is None:
+            return
+        from daydream.eval.analyzer import analyze_quality
+
+        after = analyze_quality(daydream_dir)
+        before_per_file: dict[str, Any] = before.get("per_file") or {}
+        after_per_file: dict[str, Any] = after.get("per_file") or {}
+
+        # Load prior rounds so a ``--start-at fix`` resume appends rather than
+        # clobbering the prior invocation's verdict.
+        rounds: list[dict[str, Any]] = []
+        try:
+            existing = json.loads(gate_p.read_text(encoding="utf-8"))
+            existing_rounds = existing.get("rounds")
+            if isinstance(existing_rounds, list):
+                rounds = existing_rounds
+        except (json.JSONDecodeError, OSError):
+            rounds = []
+
+        round_no = iteration if iteration is not None else len(rounds) + 1
+        per_file: dict[str, dict[str, Any]] = {}
+        for rel in sorted(candidates):
+            before_entry = before_per_file.get(rel)
+            after_entry = after_per_file.get(rel)
+            if before_entry is None and after_entry is None:
+                continue
+            erosion_before = before_entry.get("erosion") if before_entry is not None else None
+            erosion_after = after_entry.get("erosion") if after_entry is not None else None
+            verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
+            verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
+            erosion_delta = _quality_delta(erosion_before, erosion_after)
+            verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
+            is_new = before_entry is None
+            per_file[rel] = {
+                "erosion_before": erosion_before,
+                "erosion_after": erosion_after,
+                "erosion_delta": erosion_delta,
+                "verbosity_before": verbosity_before,
+                "verbosity_after": verbosity_after,
+                "verbosity_delta": verbosity_delta,
+                "flagged": _quality_flagged(
+                    erosion_delta=erosion_delta,
+                    verbosity_delta=verbosity_delta,
+                    erosion_after=erosion_after,
+                    verbosity_after=verbosity_after,
+                    is_new=is_new,
+                    erosion_threshold=erosion_delta_threshold,
+                    verbosity_threshold=verbosity_delta_threshold,
+                ),
+            }
+        rounds.append({"round": round_no, "per_file": per_file})
+        payload = {
+            "enabled": True,
+            "erosion_delta_threshold": erosion_delta_threshold,
+            "verbosity_delta_threshold": verbosity_delta_threshold,
+            "rounds": rounds,
+        }
+        gate_p.write_text(json.dumps(payload, indent=2))
+        flagged = [rel for rel, entry in per_file.items() if entry["flagged"]]
+        if flagged:
+            detail = "\n".join(
+                f"  - {rel}: erosion {per_file[rel]['erosion_before']} -> "
+                f"{per_file[rel]['erosion_after']}, verbosity "
+                f"{per_file[rel]['verbosity_before']} -> {per_file[rel]['verbosity_after']}"
+                for rel in flagged
+            )
+            print_warning(
+                console,
+                f"Quality gate flagged {len(flagged)} file(s) after fixes:\n{detail}",
+            )
+    except Exception:  # noqa: BLE001 - fail-open: the gate must never fail the run
+        return
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
     from daydream import git_ops
@@ -2029,6 +2184,18 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # the config.py default. A runaway file group cannot silently dominate a run.
     group_wall_s = _resolve_config_value(config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S)
     group_serial = _resolve_config_value(config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS)
+    # Issue #315: anti-degradation quality gate. Capture the pre-fix quality
+    # snapshot before any fix runs; the post-fix capture + verdict happen after
+    # failure protection below. Fail-open: a snapshot failure means the gate is
+    # unavailable for this run, never a run failure.
+    quality_gate_enabled = _resolve_config_value(config, "quality_gate_enabled", DEFAULT_QUALITY_GATE_ENABLED)
+    quality_gate_erosion_delta = _resolve_config_value(
+        config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
+    )
+    quality_gate_verbosity_delta = _resolve_config_value(
+        config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
+    )
+    quality_before = _capture_quality_before(daydream_dir) if quality_gate_enabled else None
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2116,6 +2283,19 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     )
     if generated_guard_result is None:
         return Stop(1)
+    # Issue #315: post-fix anti-degradation gate over the files the fix phase
+    # edited. Tree is post-fix here (every applied or budget-preserved fix is
+    # intact); a regression is flagged and surfaced, never fatal.
+    _evaluate_quality_gate(
+        enabled=quality_gate_enabled,
+        erosion_delta_threshold=quality_gate_erosion_delta,
+        verbosity_delta_threshold=quality_gate_verbosity_delta,
+        daydream_dir=daydream_dir,
+        dd=dd,
+        candidates={item["file"] for item in ctx.data["items"] if item.get("file")},
+        before=quality_before,
+        iteration=ctx.data.get("iteration"),
+    )
     return None
 
 

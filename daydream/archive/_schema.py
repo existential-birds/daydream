@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS runs (
     wall_clock_seconds REAL,
     erosion REAL,
     verbosity REAL,
+    fix_quality_gate TEXT,
     total_prompt_tokens INTEGER,
     total_completion_tokens INTEGER,
     total_cached_tokens INTEGER,
@@ -128,7 +129,7 @@ INSERT OR REPLACE INTO runs (
     review_only, deep, loop, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
-    erosion, verbosity,
+    erosion, verbosity, fix_quality_gate,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
     outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
@@ -137,7 +138,7 @@ INSERT OR REPLACE INTO runs (
     :review_only, :deep, :loop, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
-    :erosion, :verbosity,
+    :erosion, :verbosity, :fix_quality_gate,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
     :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version
 )
@@ -183,6 +184,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
             ("erosion", "REAL"),
             ("verbosity", "REAL"),
+            ("fix_quality_gate", "TEXT"),
         ],
     )
 

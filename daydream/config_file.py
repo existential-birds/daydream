@@ -69,6 +69,16 @@ class DaydreamFileConfig:
             ``0`` removes the floor; a negative value degrades to ``None`` (the
             named default applies). ``None`` falls through to the RunConfig field /
             ``config.DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
+        quality_gate_enabled: Issue #315. Toggle the fix-phase anti-degradation
+            quality gate. ``None`` falls through to the orchestrator default
+            (``config.DEFAULT_QUALITY_GATE_ENABLED``, ``True``); ``False`` skips
+            the whole computation and writes ``{"enabled": false}``.
+        quality_gate_erosion_delta: Issue #315. Per-file erosion-delta threshold
+            above which a fixed file is flagged. ``None`` falls through to
+            ``config.DEFAULT_QUALITY_GATE_EROSION_DELTA`` (0.05).
+        quality_gate_verbosity_delta: Issue #315. Per-file verbosity-delta
+            threshold above which a fixed file is flagged. ``None`` falls through
+            to ``config.DEFAULT_QUALITY_GATE_VERBOSITY_DELTA`` (0.05).
         supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
             ``"llm"``), or None when unset/invalid.
         supervisor_deny_globs: Repository-relative deny globs shared by findings
@@ -93,6 +103,9 @@ class DaydreamFileConfig:
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
+    quality_gate_enabled: bool | None = None
+    quality_gate_erosion_delta: float | None = None
+    quality_gate_verbosity_delta: float | None = None
     supervisor: str | None = None
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
@@ -306,6 +319,12 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     uncovered_sweep: bool | None = (
         raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
     )
+    # quality_gate_enabled: bool only, same degrade-to-None rule. The delta
+    # thresholds are floats (reject bool, coerce ints) via _coerce_float.
+    raw_quality_gate_enabled = merged.get("quality_gate_enabled")
+    quality_gate_enabled: bool | None = (
+        raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
+    )
     improve = merged.get("improve")
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
@@ -326,6 +345,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
         uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
+        quality_gate_enabled=quality_gate_enabled,
+        quality_gate_erosion_delta=_coerce_float(merged.get("quality_gate_erosion_delta")),
+        quality_gate_verbosity_delta=_coerce_float(merged.get("quality_gate_verbosity_delta")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),

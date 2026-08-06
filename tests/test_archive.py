@@ -430,6 +430,80 @@ def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path):
     assert row["verbosity"] == pytest.approx(0.08)
 
 
+def test_build_manifest_carries_fix_quality_gate(tmp_path: Path):
+    """Issue #315: the fix-phase quality-gate verdict round-trips on the manifest."""
+    gate = {
+        "enabled": True,
+        "erosion_delta_threshold": 0.05,
+        "verbosity_delta_threshold": 0.05,
+        "rounds": [
+            {
+                "round": 1,
+                "per_file": {
+                    "api.py": {
+                        "erosion_before": 0.0,
+                        "erosion_after": 0.0,
+                        "erosion_delta": 0.0,
+                        "verbosity_before": 0.0,
+                        "verbosity_after": 0.8,
+                        "verbosity_delta": 0.8,
+                        "flagged": True,
+                    }
+                },
+            }
+        ],
+    }
+    m = _build(tmp_path, fix_quality_gate=gate)
+    assert m.fix_quality_gate == gate
+    d = m.to_dict()
+    assert d["fix_quality_gate"] == gate
+    assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
+
+
+def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path):
+    """No gate artifact => the manifest field stays null (additive, never invented)."""
+    m = _build(tmp_path)
+    assert m.fix_quality_gate is None
+    assert m.to_dict()["fix_quality_gate"] is None
+
+
+def test_upsert_run_persists_fix_quality_gate(tmp_path: Path):
+    """Issue #315: fix_quality_gate JSON round-trips through upsert_run -> query_runs."""
+    gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}]}
+    upsert_run(tmp_path, make_manifest(session_id="s-gate", fix_quality_gate=gate))
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-gate",))[0]
+    assert json.loads(row["fix_quality_gate"]) == gate
+
+
+def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path):
+    """A pre-existing index.db without fix_quality_gate gains it via ALTER-ADD.
+
+    Mirrors the erosion/verbosity additive migration: a legacy runs table keeps
+    its rows and gains the column on the next production write, never dropping
+    or rewriting data.
+    """
+    from daydream.archive.index import _CREATE_TABLE
+
+    legacy_ddl = _CREATE_TABLE.replace("    fix_quality_gate TEXT,\n", "")
+    assert "fix_quality_gate" not in legacy_ddl
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("legacy-gate-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-gate-run")),
+    )
+    conn.commit()
+    conn.close()
+
+    gate = {"enabled": True, "rounds": []}
+    upsert_run(tmp_path, make_manifest(session_id="s-mig-gate", fix_quality_gate=gate))
+
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-gate-run",))[0]
+    assert legacy["fix_quality_gate"] is None  # pre-existing row preserved, column nullable
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-gate",))[0]
+    assert json.loads(row["fix_quality_gate"]) == gate
+
+
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))

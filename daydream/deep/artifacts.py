@@ -149,6 +149,18 @@ def fix_failures_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "fix-failures.json"
 
 
+def fix_quality_gate_path(deep_dir_path: Path) -> Path:
+    """Fix-phase anti-degradation quality gate verdict (issue #315).
+
+    Per-round before/after erosion + verbosity deltas over the files the fix
+    phase edited, computed from :func:`daydream.eval.analyzer.analyze_quality`.
+    Fail-open: written whenever the gate runs (``{"enabled": false}`` when
+    disabled, a per-round ``per_file`` map when enabled), never aborting the
+    run. The archive manifest reads this file to surface flagged files.
+    """
+    return deep_dir_path / "fix-quality-gate.json"
+
+
 def generated_file_violations_path(deep_dir_path: Path) -> Path:
     """Generated-file edits rejected by the fix-phase runtime guard."""
     return deep_dir_path / "generated-file-violations.json"

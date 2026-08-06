@@ -142,6 +142,7 @@ def _archive_run_inner(
     #     returned, so it is reliably present here), force status to "partial".
     fix_failures = _read_fix_failures(target_dir)
     fix_leftover_untracked = _read_fix_leftover_untracked(target_dir)
+    fix_quality_gate = _read_fix_quality_gate(target_dir)
     if fix_failures:
         status = "partial"
 
@@ -157,6 +158,7 @@ def _archive_run_inner(
         source_path=source_path,
         fix_failures=fix_failures,
         fix_leftover_untracked=fix_leftover_untracked,
+        fix_quality_gate=fix_quality_gate,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
@@ -217,6 +219,19 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     if data is None:
         return None
     return [str(p) for p in data]
+
+
+def _read_fix_quality_gate(target_dir: Path) -> dict[str, Any] | None:
+    """Read ``deep/fix-quality-gate.json`` from the source tree, if present.
+
+    Written by the deep orchestrator's fix-phase anti-degradation gate (#315):
+    ``{"enabled": bool, "rounds": [...]}`` carrying per-file before/after
+    erosion + verbosity deltas over the files the fix phase edited. Returns the
+    parsed dict, or ``None`` when the file is absent, empty, or malformed.
+    """
+    from daydream.deep.artifacts import fix_quality_gate_path
+
+    return _read_json_artifact(fix_quality_gate_path(target_dir / ".daydream" / "deep"), dict)
 
 
 def _copy_bundle(
