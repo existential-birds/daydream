@@ -552,7 +552,7 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
     delivered. Disabling the collapse restores the full pipeline so the rust
     per-stack and generic-fallback prompts both reach the backend seam.
     """
-    from daydream.prompts.wire_contract import (
+    from daydream.deep.prompts import (
         WIRE_CONTRACT_GENERIC_INSTRUCTION,
         WIRE_CONTRACT_RUST_INSTRUCTION,
     )
