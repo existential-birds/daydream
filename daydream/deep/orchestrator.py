@@ -2128,6 +2128,8 @@ def _persist_quality_gate_unavailable(
     session_id: str | None,
     erosion_delta_threshold: float,
     verbosity_delta_threshold: float,
+    erosion_absolute_threshold: float,
+    verbosity_absolute_threshold: float,
 ) -> None:
     """Persist an auditable ``unavailable`` round entry for THIS round.
 
@@ -2143,6 +2145,8 @@ def _persist_quality_gate_unavailable(
                 "enabled": True,
                 "erosion_delta_threshold": erosion_delta_threshold,
                 "verbosity_delta_threshold": verbosity_delta_threshold,
+                "erosion_absolute_threshold": erosion_absolute_threshold,
+                "verbosity_absolute_threshold": verbosity_absolute_threshold,
                 "session_id": session_id,
                 "rounds": rounds,
             },
@@ -2207,6 +2211,8 @@ async def _evaluate_quality_gate(
                 session_id=session_id,
                 erosion_delta_threshold=erosion_delta_threshold,
                 verbosity_delta_threshold=verbosity_delta_threshold,
+                erosion_absolute_threshold=erosion_absolute_threshold,
+                verbosity_absolute_threshold=verbosity_absolute_threshold,
             )
             return
         if before is None:
@@ -2219,6 +2225,8 @@ async def _evaluate_quality_gate(
                 session_id=session_id,
                 erosion_delta_threshold=erosion_delta_threshold,
                 verbosity_delta_threshold=verbosity_delta_threshold,
+                erosion_absolute_threshold=erosion_absolute_threshold,
+                verbosity_absolute_threshold=verbosity_absolute_threshold,
             )
             return
         try:
@@ -2235,6 +2243,8 @@ async def _evaluate_quality_gate(
                 session_id=session_id,
                 erosion_delta_threshold=erosion_delta_threshold,
                 verbosity_delta_threshold=verbosity_delta_threshold,
+                erosion_absolute_threshold=erosion_absolute_threshold,
+                verbosity_absolute_threshold=verbosity_absolute_threshold,
             )
             return
         before_per_file: dict[str, Any] = before.get("per_file") or {}
@@ -2339,6 +2349,8 @@ async def _evaluate_quality_gate(
                 session_id=session_id,
                 erosion_delta_threshold=erosion_delta_threshold,
                 verbosity_delta_threshold=verbosity_delta_threshold,
+                erosion_absolute_threshold=erosion_absolute_threshold,
+                verbosity_absolute_threshold=verbosity_absolute_threshold,
             )
         except Exception as inner:  # noqa: BLE001 - nothing left to persist; stay fail-open
             print_warning(

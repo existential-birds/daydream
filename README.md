@@ -250,6 +250,8 @@ file-config keys in the same two sources:
 | `quality_gate_enabled` | `true` | Toggle the fix-phase anti-degradation quality gate. `false` skips the computation and writes `{"enabled": false}`. |
 | `quality_gate_erosion_delta` | `0.05` | Per-file erosion-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
 | `quality_gate_verbosity_delta` | `0.05` | Per-file verbosity-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+| `quality_gate_erosion_absolute` | `0.05` | Absolute post-fix erosion threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+| `quality_gate_verbosity_absolute` | `0.05` | Absolute post-fix verbosity threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
 
 The gate is fail-open: a flagged file (or an unavailable verdict) surfaces as a
 warning plus a manifest record, never an aborted run.

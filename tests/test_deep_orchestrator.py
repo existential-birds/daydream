@@ -1139,12 +1139,25 @@ async def test_fix_quality_gate_fail_open(
     def _boom(*_args: object, **_kwargs: object) -> dict:
         raise RuntimeError("analyzer down")
 
+    from daydream.config_file import DaydreamFileConfig
+
     monkeypatch.setattr("daydream.eval.analyzer.analyze_quality", _boom)
-    exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
+    exit_code = await _run_quality_gate_fixture(
+        multi_stack_target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=1.25,
+            quality_gate_verbosity_absolute=2.5,
+        ),
+    )
     assert exit_code == 0
 
     gate = _read_quality_gate(multi_stack_target)
     assert gate["enabled"] is True
+    assert gate["erosion_absolute_threshold"] == 1.25
+    assert gate["verbosity_absolute_threshold"] == 2.5
     unavailable = gate["rounds"][0]["unavailable"]
     assert unavailable["stage"] == "before"
     assert "analyzer down" in unavailable["reason"]
