@@ -1985,19 +1985,21 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
-def _capture_quality_before(daydream_dir: Path) -> dict[str, Any] | None:
-    """Best-effort pre-fix quality snapshot; ``None`` means the gate is unavailable.
+def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
 
     ``analyze_quality`` is pure and deterministic (no backend, no network), but
     any failure here degrades to "gate unavailable" rather than failing the run
-    -- the anti-degradation gate is fail-open by design (#315).
+    -- the anti-degradation gate is fail-open by design (#315). The failure
+    reason is returned so the gate can persist an auditable unavailable entry
+    instead of leaving a silent blank (#329).
     """
     try:
         from daydream.eval.analyzer import analyze_quality
 
-        return analyze_quality(daydream_dir)
-    except Exception:
-        return None
+        return analyze_quality(daydream_dir), None
+    except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def _quality_delta(before: float | None, after: float | None) -> float | None:
@@ -2009,30 +2011,89 @@ def _quality_delta(before: float | None, after: float | None) -> float | None:
 
 def _quality_flagged(
     *,
-    erosion_delta: float | None,
-    verbosity_delta: float | None,
+    erosion_before: float | None,
     erosion_after: float | None,
+    erosion_delta: float | None,
+    verbosity_before: float | None,
     verbosity_after: float | None,
-    is_new: bool,
+    verbosity_delta: float | None,
     erosion_threshold: float,
     verbosity_threshold: float,
 ) -> bool:
     """Whether a fixed file regressed past a threshold (#315).
 
-    An existing file is flagged when its delta exceeds the threshold. A NEW
-    file (no pre-fix baseline) is flagged on its absolute values vs the same
-    thresholds. ``None`` deltas never flag (the metric has no defined baseline).
+    A file is flagged when its delta exceeds the threshold (both sides
+    defined), or on its absolute AFTER value vs the same threshold when the
+    BEFORE metric is undefined -- no functions / no non-blank lines pre-fix --
+    but the AFTER metric is numeric. The absolute fallback fires on ANY file
+    with an undefined baseline, not just new ones, so an EXISTING file that
+    gains a CC>10 function (erosion ``None`` pre-fix) is still caught. A
+    metric with both sides undefined never flags.
     """
     if erosion_delta is not None and erosion_delta > erosion_threshold:
         return True
     if verbosity_delta is not None and verbosity_delta > verbosity_threshold:
         return True
-    if is_new:
-        if erosion_after is not None and erosion_after > erosion_threshold:
-            return True
-        if verbosity_after is not None and verbosity_after > verbosity_threshold:
-            return True
+    if erosion_before is None and erosion_after is not None and erosion_after > erosion_threshold:
+        return True
+    if verbosity_before is None and verbosity_after is not None and verbosity_after > verbosity_threshold:
+        return True
     return False
+
+
+def _current_session_id() -> str | None:
+    """Session id binding the quality-gate artifact to the current run."""
+    recorder = get_current_recorder()
+    return recorder.session_id if recorder is not None else None
+
+
+def _load_quality_gate_rounds(gate_p: Path) -> list[dict[str, Any]]:
+    """Load prior rounds so a ``--start-at fix`` resume appends rather than clobbers."""
+    try:
+        existing = json.loads(gate_p.read_text(encoding="utf-8"))
+        existing_rounds = existing.get("rounds")
+        if isinstance(existing_rounds, list):
+            return existing_rounds
+    except (json.JSONDecodeError, OSError):
+        return []
+    return []
+
+
+def _persist_quality_gate_unavailable(
+    *,
+    gate_p: Path,
+    rounds: list[dict[str, Any]],
+    round_no: int,
+    stage: str,
+    reason: str,
+    session_id: str | None,
+    erosion_delta_threshold: float,
+    verbosity_delta_threshold: float,
+) -> None:
+    """Persist an auditable ``unavailable`` round entry for THIS round.
+
+    Any existing entry with the same round number is dropped first, so an
+    unavailable verdict supersedes a stale successful one from the same round
+    (e.g. a ``--start-at fix`` resume). Never raises.
+    """
+    rounds = [r for r in rounds if r.get("round") != round_no]
+    rounds.append({"round": round_no, "unavailable": {"stage": stage, "reason": reason}})
+    gate_p.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "erosion_delta_threshold": erosion_delta_threshold,
+                "verbosity_delta_threshold": verbosity_delta_threshold,
+                "session_id": session_id,
+                "rounds": rounds,
+            },
+            indent=2,
+        )
+    )
+    print_warning(
+        console,
+        f"Quality gate unavailable (round {round_no}, {stage}): {reason}",
+    )
 
 
 def _evaluate_quality_gate(
@@ -2044,44 +2105,65 @@ def _evaluate_quality_gate(
     dd: Path,
     candidates: set[str],
     before: dict[str, Any] | None,
+    before_unavailable_reason: str | None,
     iteration: int | None,
 ) -> None:
     """Compute and persist the fix-phase quality-gate verdict (issue #315).
 
-    Fail-open by design: never raises, never stops the run. When disabled,
-    writes ``{"enabled": false}``. When enabled but the quality snapshot is
-    unavailable (``before`` is ``None`` or the post-fix capture raises), writes
-    nothing so an analyzer failure cannot masquerade as a clean gate. Each
+    Fail-open by design: never raises, never stops the run. Every payload is
+    bound to the current run's ``session_id`` so a later archive step cannot
+    attribute another run's verdict to this one (#329). When disabled, writes
+    ``{"enabled": false}``. When the gate would run but cannot be evaluated --
+    a pre-fix capture failure, a post-fix capture failure, or a persist failure
+    -- an explicit ``unavailable`` round entry is persisted for THIS round with
+    the failed stage and reason, superseding any stale verdict for that round
+    and keeping the failure auditable instead of reading as a clean gate. Each
     ``_step_fix`` invocation appends one ``rounds`` entry (keyed by the flow's
     loop iteration when present, else the next sequence number), so a resume or
     loop preserves the per-round trend. Flagged files are surfaced as warnings
     with their before/after numbers.
     """
+    session_id = _current_session_id()
     try:
         gate_p = fix_quality_gate_path(dd)
         if not enabled:
-            gate_p.write_text(json.dumps({"enabled": False}, indent=2))
+            gate_p.write_text(
+                json.dumps({"enabled": False, "session_id": session_id}, indent=2)
+            )
             return
+        rounds = _load_quality_gate_rounds(gate_p)
+        round_no = iteration if iteration is not None else len(rounds) + 1
         if before is None:
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="before",
+                reason=before_unavailable_reason or "pre-fix quality snapshot unavailable",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
             return
-        from daydream.eval.analyzer import analyze_quality
+        try:
+            from daydream.eval.analyzer import analyze_quality
 
-        after = analyze_quality(daydream_dir)
+            after = analyze_quality(daydream_dir)
+        except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="after",
+                reason=f"{type(exc).__name__}: {exc}",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+            return
         before_per_file: dict[str, Any] = before.get("per_file") or {}
         after_per_file: dict[str, Any] = after.get("per_file") or {}
 
-        # Load prior rounds so a ``--start-at fix`` resume appends rather than
-        # clobbering the prior invocation's verdict.
-        rounds: list[dict[str, Any]] = []
-        try:
-            existing = json.loads(gate_p.read_text(encoding="utf-8"))
-            existing_rounds = existing.get("rounds")
-            if isinstance(existing_rounds, list):
-                rounds = existing_rounds
-        except (json.JSONDecodeError, OSError):
-            rounds = []
-
-        round_no = iteration if iteration is not None else len(rounds) + 1
         per_file: dict[str, dict[str, Any]] = {}
         for rel in sorted(candidates):
             before_entry = before_per_file.get(rel)
@@ -2094,7 +2176,6 @@ def _evaluate_quality_gate(
             verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
             erosion_delta = _quality_delta(erosion_before, erosion_after)
             verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
-            is_new = before_entry is None
             per_file[rel] = {
                 "erosion_before": erosion_before,
                 "erosion_after": erosion_after,
@@ -2103,20 +2184,23 @@ def _evaluate_quality_gate(
                 "verbosity_after": verbosity_after,
                 "verbosity_delta": verbosity_delta,
                 "flagged": _quality_flagged(
-                    erosion_delta=erosion_delta,
-                    verbosity_delta=verbosity_delta,
+                    erosion_before=erosion_before,
                     erosion_after=erosion_after,
+                    erosion_delta=erosion_delta,
+                    verbosity_before=verbosity_before,
                     verbosity_after=verbosity_after,
-                    is_new=is_new,
+                    verbosity_delta=verbosity_delta,
                     erosion_threshold=erosion_delta_threshold,
                     verbosity_threshold=verbosity_delta_threshold,
                 ),
             }
+        rounds = [r for r in rounds if r.get("round") != round_no]
         rounds.append({"round": round_no, "per_file": per_file})
         payload = {
             "enabled": True,
             "erosion_delta_threshold": erosion_delta_threshold,
             "verbosity_delta_threshold": verbosity_delta_threshold,
+            "session_id": session_id,
             "rounds": rounds,
         }
         gate_p.write_text(json.dumps(payload, indent=2))
@@ -2132,8 +2216,25 @@ def _evaluate_quality_gate(
                 console,
                 f"Quality gate flagged {len(flagged)} file(s) after fixes:\n{detail}",
             )
-    except Exception:  # noqa: BLE001 - fail-open: the gate must never fail the run
-        return
+    except Exception as exc:  # noqa: BLE001 - fail-open: the gate must never fail the run
+        # Stage "persist": the payload itself could not be written. Record the
+        # failure as an unavailable round when the write path still works.
+        try:
+            gate_p = fix_quality_gate_path(dd)
+            rounds = _load_quality_gate_rounds(gate_p)
+            round_no = iteration if iteration is not None else len(rounds) + 1
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="persist",
+                reason=f"{type(exc).__name__}: {exc}",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+        except Exception:  # noqa: BLE001 - nothing left to persist; stay fail-open
+            pass
 
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
@@ -2195,7 +2296,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     quality_gate_verbosity_delta = _resolve_config_value(
         config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
     )
-    quality_before = _capture_quality_before(daydream_dir) if quality_gate_enabled else None
+    if quality_gate_enabled:
+        quality_before, quality_before_unavailable = _capture_quality_before(daydream_dir)
+    else:
+        quality_before, quality_before_unavailable = None, None
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2294,6 +2398,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         dd=dd,
         candidates={item["file"] for item in ctx.data["items"] if item.get("file")},
         before=quality_before,
+        before_unavailable_reason=quality_before_unavailable,
         iteration=ctx.data.get("iteration"),
     )
     return None

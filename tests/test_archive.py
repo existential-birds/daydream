@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daydream.archive import _copy_bundle, archive_run, get_archive_dir
+from daydream.archive import _copy_bundle, _read_fix_quality_gate, archive_run, get_archive_dir
 from daydream.archive.git_context import GitContext, _parse_repo_slug, capture_git_context
 from daydream.archive.index import (
     append_label_observation,
@@ -502,6 +502,35 @@ def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path):
     assert legacy["fix_quality_gate"] is None  # pre-existing row preserved, column nullable
     row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-gate",))[0]
     assert json.loads(row["fix_quality_gate"]) == gate
+
+
+def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path):
+    """#329: only an artifact bound to the current session is read.
+
+    A gate verdict left behind by another session (e.g. a prior deep run on the
+    same target repo) must not be attributed to the current run's manifest.
+    """
+    gate = {
+        "enabled": True,
+        "session_id": "sess-42",
+        "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],
+    }
+    gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
+    gate_p.parent.mkdir(parents=True)
+    gate_p.write_text(json.dumps(gate))
+
+    assert _read_fix_quality_gate(tmp_path, "sess-42") == gate
+    assert _read_fix_quality_gate(tmp_path, "sess-other") is None
+    assert _read_fix_quality_gate(tmp_path, None) is None
+
+
+def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path):
+    """#329: an artifact with no session_id key cannot be attributed to this run."""
+    gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
+    gate_p.parent.mkdir(parents=True)
+    gate_p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
+
+    assert _read_fix_quality_gate(tmp_path, "sess-42") is None
 
 
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):

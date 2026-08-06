@@ -142,7 +142,7 @@ def _archive_run_inner(
     #     returned, so it is reliably present here), force status to "partial".
     fix_failures = _read_fix_failures(target_dir)
     fix_leftover_untracked = _read_fix_leftover_untracked(target_dir)
-    fix_quality_gate = _read_fix_quality_gate(target_dir)
+    fix_quality_gate = _read_fix_quality_gate(target_dir, recorder.session_id)
     if fix_failures:
         status = "partial"
 
@@ -221,17 +221,28 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     return [str(p) for p in data]
 
 
-def _read_fix_quality_gate(target_dir: Path) -> dict[str, Any] | None:
+def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
     """Read ``deep/fix-quality-gate.json`` from the source tree, if present.
 
     Written by the deep orchestrator's fix-phase anti-degradation gate (#315):
-    ``{"enabled": bool, "rounds": [...]}`` carrying per-file before/after
-    erosion + verbosity deltas over the files the fix phase edited. Returns the
-    parsed dict, or ``None`` when the file is absent, empty, or malformed.
+    ``{"enabled": bool, "session_id": ..., "rounds": [...]}`` carrying per-file
+    before/after erosion + verbosity deltas over the files the fix phase
+    edited. Returns the parsed dict only when its ``session_id`` matches the
+    current run's -- an artifact left behind by a DIFFERENT session (e.g. a
+    prior deep run on the same target repo) must not be attributed to this run
+    (#329). Returns ``None`` when the file is absent, empty, malformed, unbound
+    (no ``session_id`` key), or bound to another session.
     """
     from daydream.deep.artifacts import fix_quality_gate_path
 
-    return _read_json_artifact(fix_quality_gate_path(target_dir / ".daydream" / "deep"), dict)
+    if session_id is None:
+        return None
+    data = _read_json_artifact(fix_quality_gate_path(target_dir / ".daydream" / "deep"), dict)
+    if data is None:
+        return None
+    if data.get("session_id") != session_id:
+        return None
+    return data
 
 
 def _copy_bundle(

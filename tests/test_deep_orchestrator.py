@@ -859,6 +859,36 @@ _FIX_EDIT_VERBOSE = (
     "        return 2\n"
 )
 
+# Issue #329 (Finding 5): a fix that adds a CC>10 function to a file that had
+# NO functions pre-fix. Pre-fix erosion is ``None`` (no denominator); the gate
+# must flag the absolute post-fix erosion rather than treating the undefined
+# baseline as "nothing to compare".
+_FIX_EDIT_ERODED = (
+    "\ndef route(request):\n"
+    "    if request == 'a':\n"
+    "        return 1\n"
+    "    elif request == 'b':\n"
+    "        return 2\n"
+    "    elif request == 'c':\n"
+    "        return 3\n"
+    "    elif request == 'd':\n"
+    "        return 4\n"
+    "    elif request == 'e':\n"
+    "        return 5\n"
+    "    elif request == 'f':\n"
+    "        return 6\n"
+    "    elif request == 'g':\n"
+    "        return 7\n"
+    "    elif request == 'h':\n"
+    "        return 8\n"
+    "    elif request == 'i':\n"
+    "        return 9\n"
+    "    elif request == 'j':\n"
+    "        return 10\n"
+    "    else:\n"
+    "        return 0\n"
+)
+
 
 def _build_gate_target(tmp_path: Path, name: str) -> Path:
     """Build a python-only fixture repo (the shape the quality gate measures)."""
@@ -870,6 +900,37 @@ def _build_gate_target(tmp_path: Path, name: str) -> Path:
     _commit(project, "init")
     _git(project, "checkout", "-b", "feature")
     (project / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    _git(project, "add", "api.py")
+    _commit(project, "change")
+    return project
+
+
+def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
+    """A python-only fixture repo whose api.py has NO functions (erosion None pre-fix)."""
+    project = tmp_path / name
+    project.mkdir()
+    (project / "api.py").write_text(
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "NAME = 'gate_five'\n"
+        "VERSION = '1.0.0'\n"
+        "\n"
+        "CONFIG = os.environ.get('APP_CONFIG', 'default')\n"
+    )
+    _init_repo(project)
+    _git(project, "add", "api.py")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text(
+        "import os\n"
+        "import sys\n"
+        "\n"
+        "NAME = 'gate_five'\n"
+        "VERSION = '1.0.1'\n"
+        "\n"
+        "CONFIG = os.environ.get('APP_CONFIG', 'default')\n"
+    )
     _git(project, "add", "api.py")
     _commit(project, "change")
     return project
@@ -1020,10 +1081,12 @@ async def test_fix_quality_gate_fail_open(
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#315): an analyzer failure degrades to "gate unavailable", never fails the run.
+    """Real-path (#315/#329): an analyzer failure degrades to an auditable unavailable round.
 
-    ``analyze_quality`` raising must leave the gate artifact absent (no fake
-    clean verdict) and the run must still complete its fix cycle.
+    ``analyze_quality`` raising on the pre-fix capture must (a) never fail the
+    run, and (b) persist an ``unavailable`` round entry naming the failed stage
+    and reason -- so the failure is auditable and can never read as a clean
+    verdict (and it supersedes any stale verdict for the current round).
     """
     def _boom(*_args: object, **_kwargs: object) -> dict:
         raise RuntimeError("analyzer down")
@@ -1031,8 +1094,77 @@ async def test_fix_quality_gate_fail_open(
     monkeypatch.setattr("daydream.eval.analyzer.analyze_quality", _boom)
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
-    gate_p = multi_stack_target / ".daydream" / "deep" / "fix-quality-gate.json"
-    assert not gate_p.exists(), "gate must be absent when the analyzer is unavailable"
+
+    gate = _read_quality_gate(multi_stack_target)
+    assert gate["enabled"] is True
+    unavailable = gate["rounds"][0]["unavailable"]
+    assert unavailable["stage"] == "before"
+    assert "analyzer down" in unavailable["reason"]
+
+
+async def test_fix_quality_gate_flags_undefined_baseline_erosion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/Finding 5): an EXISTING file with an undefined baseline is flagged.
+
+    Pre-fix api.py has no functions, so its erosion metric is ``None`` (no
+    defined baseline). The fix adds a CC>10 function; before this fix the
+    absolute-threshold fallback only fired for NEW files, so this regression
+    slipped past the gate unflagged. The fallback now fires on any file whose
+    BEFORE metric is undefined but whose AFTER metric is numeric.
+    """
+    target = _build_gate_target_no_functions(tmp_path, "gate_undefined_baseline")
+    exit_code = await _run_quality_gate_fixture(
+        target, monkeypatch, make_config, mute_side_effects, fix_edit_line=_FIX_EDIT_ERODED
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(target)
+    assert gate["enabled"] is True
+    entry = gate["rounds"][0]["per_file"]["api.py"]
+    assert entry["erosion_before"] is None
+    assert entry["erosion_after"] is not None
+    assert entry["erosion_after"] > 0.05
+    assert entry["erosion_delta"] is None
+    assert entry["flagged"] is True
+
+
+async def test_fix_quality_gate_artifact_bound_to_current_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    archive_dir: Path,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/Finding 7): the gate artifact is bound to the run that wrote it.
+
+    Two runs on two byte-identical targets each mint a fresh session; the
+    artifact each writes carries ITS session id (which appears in that run's
+    archived manifest), never the other run's.
+    """
+    alpha = _build_gate_target(tmp_path, "gate_alpha")
+    exit_code = await _run_quality_gate_fixture(alpha, monkeypatch, make_config, mute_side_effects)
+    assert exit_code == 0
+    alpha_gate = _read_quality_gate(alpha)
+    assert alpha_gate["session_id"]
+
+    beta = _build_gate_target(tmp_path, "gate_beta")
+    exit_code = await _run_quality_gate_fixture(beta, monkeypatch, make_config, mute_side_effects)
+    assert exit_code == 0
+    beta_gate = _read_quality_gate(beta)
+    assert beta_gate["session_id"]
+    assert beta_gate["session_id"] != alpha_gate["session_id"]
+
+    manifests = [
+        json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        for d in (archive_dir / "runs").iterdir()
+    ]
+    archived_sessions = {m["session_id"] for m in manifests}
+    assert alpha_gate["session_id"] in archived_sessions
+    assert beta_gate["session_id"] in archived_sessions
 
 
 async def test_fix_guard_reverts_generated_migration_edit(
