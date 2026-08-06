@@ -28,6 +28,10 @@ from daydream.phases import (
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.wire_contract import (
+    WIRE_CONTRACT_GENERIC_INSTRUCTION,
+    WIRE_CONTRACT_RUST_INSTRUCTION,
+)
 
 DOC_REVIEW_NOTICE = (
     "[Notice] Dedicated documentation review (beagle-docs) is planned but not yet "
@@ -181,59 +185,6 @@ ANTI_SLOP_RUBRIC_INSTRUCTION = (
     "  5. Scope: when erosion is pre-existing-and-growing, flag the growth, not "
     "the whole function -- report only the newly introduced growth, scoped to "
     "this diff's contribution."
-)
-
-
-# Per-stack Rust wire-contract checklist (issue #311). Embedded inline as
-# instruction text for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``:
-# per-stack reviewers run with cwd set to the reviewed repo, so a bare
-# skill-file read resolves against that repo and silently drops the gate.
-# Targets the serde serialization/deserialization contract and the enum-routing
-# bug class that a reasoning reviewer can catch from hunks + surrounding type
-# definitions without a compiler: nested `#[serde(default)]` / `skip_serializing_if` /
-# `flatten` missing on partial-object deserialization (PR #1), and a
-# `Debug`/`Display`/`as_str` routing arm that never matches the constructed
-# variant shape -- the PR #26 approval-gate-never-fires shape (a JSON-object
-# variant does not match a string arm).
-WIRE_CONTRACT_RUST_INSTRUCTION = (
-    "Wire-contract check (apply to every new-or-changed #[derive(...)] type "
-    "that crosses a wire boundary -- config structs, API payloads, persisted "
-    "shapes):\n"
-    "  1. Nested serde defaults: every nested struct field that can be absent "
-    "must be covered by #[serde(default)] (or #[serde(skip_serializing_if = "
-    "\"...\")]), and #[serde(flatten)] where extra fields are absorbed -- "
-    "otherwise a partial object fails deserialization or silently drops "
-    "fields.\n"
-    "  2. Enum routing matches the constructed shape: when a Debug/Display/"
-    "as_str impl is used to route a value, the match arms must match what is "
-    "actually constructed -- a JSON-object variant never matches a string arm "
-    "(the StepValue::Json.as_str() approval gate that never fires). Compare the "
-    "constructed variant's shape against every match arm before trusting the "
-    "route."
-)
-
-
-# Generic-fallback wire-contract checklist (issue #311). Embedded inline as
-# instruction text for the same reason as ``VERIFICATION_PROTOCOL_INSTRUCTION``:
-# the generic-fallback reviewer runs with cwd set to the reviewed repo, so a
-# bare skill-file read resolves against that repo and silently drops the gate.
-# Language-agnostic: targets URL/arg/heredoc construction via string
-# interpolation that breaks on reserved characters (PR #107) and cross-format
-# doc-example / sample-payload drift from the actual schema (PR #79, PR #240).
-WIRE_CONTRACT_GENERIC_INSTRUCTION = (
-    "Wire-contract check (apply to every value assembled into a URL, shell "
-    "command, heredoc, or example payload):\n"
-    "  1. URL/arg/heredoc construction: do not build these by string "
-    "interpolation of untrusted values -- reserved characters (a password "
-    "containing '@' or '#', query separators, shell metacharacters) silently "
-    "corrupt or misparse the result. Use the language's URL builder (url::Url, "
-    "URL(string:), new URL(...)), an argument-vector/quoting helper (shlex, "
-    "subprocess arg lists), or a structured builder.\n"
-    "  2. Cross-format consistency: doc examples and sample payloads must "
-    "match the actual schema -- an added or renamed required field, or a "
-    "parameter the runtime rejects, invalidates the example. Verify the "
-    "example against the current struct/interface/signature before treating "
-    "it as authoritative."
 )
 
 

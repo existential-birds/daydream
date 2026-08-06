@@ -11,8 +11,6 @@ from daydream.deep.prompts import (
     DOC_REVIEW_NOTICE,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
-    WIRE_CONTRACT_GENERIC_INSTRUCTION,
-    WIRE_CONTRACT_RUST_INSTRUCTION,
     build_arbiter_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
@@ -589,55 +587,6 @@ def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: 
     assert "review-verification-protocol" in out
     assert "anchor" in out
     assert "evidence" in out
-
-
-def test_per_stack_rust_prompt_includes_wire_contract(tmp_path: Path) -> None:
-    """#311 R1: the rust per-stack prompt carries the serde + routing checklist."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        skill_invocation="/beagle-rust:review-rust",
-        stack_name="rust",
-        files=["src/main.rs"],
-        **p,
-    )
-    assert WIRE_CONTRACT_RUST_INSTRUCTION in out
-    assert "serde" in out
-    assert "as_str" in out
-    assert "JSON-object variant" in out
-
-
-def test_per_stack_non_rust_prompt_omits_wire_contract(tmp_path: Path) -> None:
-    """#311 KD-2: serde rules are Rust-only and must not leak into other stacks."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
-        stack_name="python",
-        files=["api.py"],
-        **p,
-    )
-    assert WIRE_CONTRACT_RUST_INSTRUCTION not in out
-
-
-def test_generic_fallback_prompt_includes_wire_contract(tmp_path: Path) -> None:
-    """#311 R2: the generic-fallback prompt carries URL/quoting + cross-format rules."""
-    p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
-    assert WIRE_CONTRACT_GENERIC_INSTRUCTION in out
-    assert "url::Url" in out
-    assert "shlex" in out
-    assert "reserved" in out
-
-
-def test_structural_prompt_omits_wire_contract(tmp_path: Path) -> None:
-    """#311 spec: the structural reviewer carries neither wire-contract checklist."""
-    p = _paths(tmp_path)
-    out = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
-        files=["api.py"],
-        **p,
-    )
-    assert WIRE_CONTRACT_RUST_INSTRUCTION not in out
-    assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in out
 
 
 def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> None:
