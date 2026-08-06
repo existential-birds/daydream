@@ -42,6 +42,7 @@ from tests.harness.stub_backend import (
 )
 
 if TYPE_CHECKING:
+    from daydream.config_file import DaydreamFileConfig
     from daydream.pr_review import PRInfo
     from daydream.runner import RunConfig
 
@@ -996,7 +997,7 @@ async def _run_quality_gate_fixture(
     mute_side_effects: Mute,
     *,
     fix_edit_line: str | None = _FIX_EDIT_VERBOSE,
-    file_config: Any = None,
+    file_config: DaydreamFileConfig | None = None,
 ) -> int:
     """Drive a deep run to the fix phase over *target*, editing api.py verbosely.
 
@@ -1209,9 +1210,17 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
         json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         for d in (archive_dir / "runs").iterdir()
     ]
-    archived_sessions = {m["session_id"] for m in manifests}
-    assert alpha_gate["session_id"] in archived_sessions
-    assert beta_gate["session_id"] in archived_sessions
+    # Per-manifest correspondence: the manifest that carries session A's
+    # verdict must BE session A's manifest, and vice versa. manifest["session_id"]
+    # comes from the recorder; manifest["fix_quality_gate"]["session_id"] comes
+    # from the gate artifact, so a swapped verdict would fail this binding.
+    by_session = {m["session_id"]: m for m in manifests}
+    assert alpha_gate["session_id"] in by_session
+    assert beta_gate["session_id"] in by_session
+    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] == alpha_gate["session_id"]
+    assert by_session[beta_gate["session_id"]]["fix_quality_gate"]["session_id"] == beta_gate["session_id"]
+    # The two verdicts are distinct artifacts: alpha's manifest never carries beta's verdict.
+    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] != beta_gate["session_id"]
 
 
 async def test_fix_quality_gate_flags_unparseable_post_fix_file(
@@ -1253,6 +1262,10 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
         multi_stack_target, monkeypatch, make_config, mute_side_effects
     )
     assert exit_code == 0
+    assert calls["n"] == 3, (
+        f"gate makes a before+after capture and the archive eval a third; "
+        f"got {calls['n']} analyzer calls"
+    )
 
     gate = _read_quality_gate(multi_stack_target)
     assert gate["enabled"] is True
