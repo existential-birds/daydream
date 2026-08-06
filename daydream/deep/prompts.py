@@ -35,6 +35,67 @@ DOC_REVIEW_NOTICE = (
     "generic-fallback agent (D-20)."
 )
 
+# Repo-wide cross-file symbol existence check (issue #310). Embedded inline as
+# instruction text for the same reason as ``ANTI_SLOP_RUBRIC_INSTRUCTION``: the
+# structural reviewer runs with cwd set to the reviewed repo, so a bare
+# skill-file read resolves against that repo and silently drops the gate.
+# Demands Gate-2 evidence (``rg`` the definition) before flagging any symbol
+# referenced outside the diff, so cross-file bug classes -- a subcommand invoked
+# by a CLI wrapper that does not exist, a trait method implemented by generated
+# code whose contract differs from its call site, a config field read by a
+# different module than the one that writes it -- are verified against the repo
+# rather than asserted from the call site alone.
+CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
+    "Cross-file symbol existence check (apply before flagging anything about a "
+    "symbol defined OUTSIDE the diff):\n"
+    "  1. Every referenced symbol not defined in this diff -- a function, a "
+    "subcommand invoked by a CLI wrapper, a trait method implemented by "
+    "generated code, a config field, a CLI flag -- must be verified to exist "
+    "in the checked-out repo before you report a finding about it.\n"
+    "  2. Evidence (Gate-2): `rg` for the definition in the repo and cite the "
+    "file:line where it is declared. Never assert a symbol's behavior from the "
+    "call site alone.\n"
+    "  3. If no definition can be found, say so explicitly and downgrade the "
+    "finding's confidence -- an unresolved reference is reportable only when "
+    "the missing definition is real, never when you simply failed to locate it."
+)
+
+# Per-stack config-flow trace (issue #310). Embedded inline as instruction text
+# for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``: per-stack
+# reviewers run with cwd set to the reviewed repo, so a bare skill-file read
+# resolves against that repo and silently drops the gate. Targets the
+# plumbed-config bug class: a field parsed in a config struct but silently
+# dropped before it reaches the request, or the same value read twice at
+# different points with the source able to change between reads (TOCTOU).
+CONFIG_FLOW_TRACE_INSTRUCTION = (
+    "Config/env flow trace (apply to every config field or env var plumbed "
+    "through layers):\n"
+    "  1. Trace the full path of each plumbed field: config struct -> driver "
+    "config -> request construction.\n"
+    "  2. Emit a one-line trace statement per field naming where it is parsed, "
+    "where it is forwarded, and where (if anywhere) it reaches the request.\n"
+    "  3. Flag silent drops -- a field parsed but never forwarded to the next "
+    "layer.\n"
+    "  4. Flag double-resolves -- the same value read twice at different points "
+    "with the source able to change between reads (TOCTOU)."
+)
+
+# Trust-model check (issue #310). Embedded inline as instruction text for the
+# same reason as the other rubrics: reviewers run with cwd set to the reviewed
+# repo, so a bare skill-file read resolves against that repo and drops the
+# gate. Targets security-relevant markers -- cache-control injection across a
+# trust boundary, escaping, credential forwarding -- by demanding an explicit
+# trust-model sentence before a finding is reported.
+TRUST_MODEL_INSTRUCTION = (
+    "Trust-model check (apply to every security-relevant marker: cache-control "
+    "injection, trust boundaries, escaping, credential forwarding):\n"
+    "  For each marker, state the trust model in one sentence: who is the "
+    "untrusted party here, and does this path honor the boundary?\n"
+    "  Flag any path that instructs an untrusted party to retain or forward "
+    "sensitive content -- e.g. an edge proxy echoing an untrusted response's "
+    "cache-control directive, or credentials passed through an intermediate hop."
+)
+
 # Shared verification-protocol instruction for structural and generic-fallback
 # builders (issue #229). The gates are embedded inline as instruction text, not
 # routed through ``Backend.format_skill_invocation`` and NOT loaded from a skill
@@ -364,6 +425,8 @@ def build_per_stack_prompt(
     parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
+    parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
@@ -434,6 +497,8 @@ def build_structural_prompt(
     parts.append(skill_invocation)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
+    parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)
+    parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
@@ -927,5 +992,7 @@ def build_generic_fallback_prompt(
         "author's intent. Apply language-agnostic review practices."
     )
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)

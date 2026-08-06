@@ -5,7 +5,12 @@ from typing import TypedDict
 import pytest
 
 from daydream.deep.prompts import (
+    ANTI_SLOP_RUBRIC_INSTRUCTION,
+    CONFIG_FLOW_TRACE_INSTRUCTION,
+    CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
     DOC_REVIEW_NOTICE,
+    TEST_QUALITY_RUBRIC_INSTRUCTION,
+    TRUST_MODEL_INSTRUCTION,
     build_arbiter_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
@@ -1011,3 +1016,164 @@ def test_anti_slop_rubric_never_high_prohibition(tmp_path: Path) -> None:
     assert "medium/low" in out
     assert "pre-existing-and-growing" in out
     assert "flag the growth, not the whole function" in out
+
+
+# =============================================================================
+# Issue #310 — cross-file verification instruction (symbol existence,
+# config-flow traces, trust-model checks)
+# =============================================================================
+
+_CROSS_FILE_ANCHORS = (
+    "defined OUTSIDE the diff",
+    "subcommand invoked by a CLI wrapper",
+    "trait method implemented by generated code",
+    "`rg`",
+    "downgrade the finding's confidence",
+    "call site alone",
+)
+
+_CONFIG_TRACE_ANCHORS = (
+    "config struct",
+    "driver config",
+    "request construction",
+    "one-line trace",
+    "silent drops",
+    "double-resolves",
+    "TOCTOU",
+)
+
+_TRUST_MODEL_ANCHORS = (
+    "cache-control",
+    "trust boundaries",
+    "untrusted party",
+    "honor the boundary",
+    "retain or forward sensitive content",
+    "escaping",
+    "credential forwarding",
+)
+
+
+def _assert_anchors(out: str, anchors: tuple[str, ...]) -> None:
+    missing = [anchor for anchor in anchors if anchor not in out]
+    assert not missing, f"missing pinned anchors: {missing}"
+
+
+def _build_structural_for_310(tmp_path: Path) -> str:
+    p = _paths(tmp_path)
+    return build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["api.py"],
+        **p,
+    )
+
+
+def _build_per_stack_for_310(tmp_path: Path) -> str:
+    p = _paths(tmp_path)
+    return build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python",
+        files=["api.py"],
+        **p,
+    )
+
+
+def test_structural_prompt_includes_cross_file_symbol_existence(tmp_path: Path) -> None:
+    """#310: the repo-wide structural reviewer demands symbol-existence verification."""
+    out = _build_structural_for_310(tmp_path)
+    assert "Cross-file symbol existence check" in out
+    _assert_anchors(out, _CROSS_FILE_ANCHORS)
+
+
+def test_structural_prompt_includes_trust_model_check(tmp_path: Path) -> None:
+    """#310: trust boundaries are repo-wide, so the structural prompt carries the check."""
+    out = _build_structural_for_310(tmp_path)
+    assert "Trust-model check" in out
+    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
+
+
+def test_per_stack_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
+    """#310: per-stack reviewers trace plumbed config fields for silent drops /
+    double-resolves."""
+    out = _build_per_stack_for_310(tmp_path)
+    assert "Config/env flow trace" in out
+    _assert_anchors(out, _CONFIG_TRACE_ANCHORS)
+
+
+def test_per_stack_prompt_includes_trust_model_check(tmp_path: Path) -> None:
+    """#310: security markers appear in hunks, so the per-stack prompt carries the
+    check too."""
+    out = _build_per_stack_for_310(tmp_path)
+    assert "Trust-model check" in out
+    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
+
+
+def test_cross_file_instruction_stays_out_of_per_stack_prompt(tmp_path: Path) -> None:
+    """#310: symbol-existence verification is the structural reviewer's job; it must
+    not leak into the per-stack prompt."""
+    out = _build_per_stack_for_310(tmp_path)
+    leaked = [anchor for anchor in _CROSS_FILE_ANCHORS if anchor in out]
+    assert not leaked, f"cross-file anchors leaked into per-stack prompt: {leaked}"
+
+
+def test_config_trace_instruction_stays_out_of_structural_prompt(tmp_path: Path) -> None:
+    """#310: config-flow tracing is per-stack; it must not leak into the structural
+    prompt."""
+    out = _build_structural_for_310(tmp_path)
+    leaked = [anchor for anchor in _CONFIG_TRACE_ANCHORS if anchor in out]
+    assert not leaked, f"config-trace anchors leaked into structural prompt: {leaked}"
+
+
+def _build_generic_fallback_for_310(tmp_path: Path) -> str:
+    p = _paths(tmp_path)
+    return build_generic_fallback_prompt(files=["config.yaml"], **p)
+
+
+def test_generic_fallback_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
+    """#310: config/env files without a stack land in the generic bucket, so the
+    fallback prompt carries the config-flow trace."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    assert "Config/env flow trace" in out
+    _assert_anchors(out, _CONFIG_TRACE_ANCHORS)
+
+
+def test_generic_fallback_prompt_includes_trust_model_check(tmp_path: Path) -> None:
+    """#310: security-relevant markers appear in config/env files, so the fallback
+    prompt carries the trust-model check too."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    assert "Trust-model check" in out
+    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
+
+
+def test_cross_file_instruction_stays_out_of_generic_fallback_prompt(tmp_path: Path) -> None:
+    """#310: symbol-existence verification is the structural reviewer's job; it must
+    not leak into the generic-fallback prompt."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    leaked = [anchor for anchor in _CROSS_FILE_ANCHORS if anchor in out]
+    assert not leaked, f"cross-file anchors leaked into generic-fallback prompt: {leaked}"
+
+
+def test_cross_file_additions_keep_existing_rubrics(tmp_path: Path) -> None:
+    """#310 additivity guard: the new blocks are separate -- the existing rubric
+    constants still appear unchanged in the builders that own them, so #311 lands
+    cleanly. The test-quality rubric is per-stack only; the anti-slop rubric runs
+    in both builders."""
+    structural = _build_structural_for_310(tmp_path)
+    per_stack = _build_per_stack_for_310(tmp_path)
+    assert TEST_QUALITY_RUBRIC_INSTRUCTION in per_stack
+    assert TEST_QUALITY_RUBRIC_INSTRUCTION not in structural
+    for out in (structural, per_stack):
+        assert ANTI_SLOP_RUBRIC_INSTRUCTION in out
+        _assert_anti_slop_anchors(out)
+
+
+def test_cross_file_instructions_contain_no_banned_words() -> None:
+    """#310: the new instruction text avoids banned vocabulary
+    (defer/TODO/partial/future/TBD/out of scope/follow-up) and names no external
+    review tools."""
+    text = CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION
+    text += CONFIG_FLOW_TRACE_INSTRUCTION
+    text += TRUST_MODEL_INSTRUCTION
+    lower = text.lower()
+    banned = ("defer", "todo", "partial", "future", "tbd", "out of scope", "follow-up")
+    found = [word for word in banned if word in lower]
+    assert not found, f"banned words leaked into cross-file instruction text: {found}"

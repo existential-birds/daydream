@@ -21,6 +21,7 @@ class _DeepMockBackend:
         self.target_dir = target_dir
         self.calls: list[str] = []
         self.agents_kwargs_seen: list[object] = []
+        self.prompts: list[str] = []
 
     async def execute(
         self,
@@ -35,6 +36,8 @@ class _DeepMockBackend:
     ):
         # Record parity evidence -- D-38: no stage may pass `agents=`.
         self.agents_kwargs_seen.append(agents)
+        # Record the delivered prompt at the backend seam (no builder spies).
+        self.prompts.append(prompt)
         if agents and self.raise_on_agents:
             raise NotImplementedError("Mock Codex: agents kwarg not supported")
 
@@ -419,3 +422,92 @@ async def test_structural_meta_stack_flows_end_to_end(
     assert "## Structural Review" in merged_report, (
         "merged report is missing the ## Structural Review header"
     )
+
+
+async def test_310_prompt_gates_reach_built_prompts_in_real_run(
+    multi_stack_target: Path, monkeypatch
+) -> None:
+    """Real-path coverage for the #310 prompt gates (PR #328, Finding 2).
+
+    The #310 unit tests call the prompt builders directly. This one drives a
+    deep run through ``runner.run`` with the stub backend and observes at the
+    backend seam: ``_DeepMockBackend.execute`` records the full ``prompt`` it
+    receives on every call, so the prompts actually delivered to the external
+    backend are classified by content -- no builder spies, no assumption that a
+    built prompt survives the trip from builder to ``Backend.execute``. The
+    gates are asserted on what the backend received:
+
+      - structural: cross-file symbol-existence + trust-model, NOT config-trace;
+      - per-stack (language): config-trace + trust-model, NOT cross-file;
+      - generic-fallback: config-trace + trust-model, NOT cross-file.
+
+    ``multi_stack_target`` (api.py + App.tsx + README.md) routes one file to
+    each of the three builders when every built-in stack skill is available, so
+    all three gate assignments are exercised in a single real run.
+    """
+    from daydream.deep.prompts import (
+        CONFIG_FLOW_TRACE_INSTRUCTION,
+        CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
+        TRUST_MODEL_INSTRUCTION,
+    )
+
+    # Pin all built-in stack skills as available so api.py -> python and
+    # App.tsx -> react route per-stack instead of collapsing into generic under
+    # the hermetic no-plugin skill registry.
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+
+    backend = _ClaudeShape(multi_stack_target)
+    exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
+    assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
+
+    # Classify the prompts the backend actually received by content. The
+    # per-stack predicate also matches the generic-fallback scope line ("You are
+    # reviewing the generic-fallback stack"), so structural + generic-fallback
+    # are excluded from the per-stack class to keep each class meaningful.
+    structural = [p for p in backend.prompts if "structural reviewer" in p]
+    generic = [p for p in backend.prompts if "generic-fallback" in p]
+    per_stack = [
+        p
+        for p in backend.prompts
+        if "You are reviewing the" in p
+        and "stack" in p
+        and "structural reviewer" not in p
+        and "generic-fallback" not in p
+    ]
+
+    assert structural, "structural prompt never reached the backend"
+    assert per_stack, "per-stack language prompt never reached the backend"
+    assert generic, "generic-fallback prompt never reached the backend"
+
+    for prompt in structural:
+        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION in prompt, (
+            "structural prompt missing the cross-file symbol-existence gate"
+        )
+        assert TRUST_MODEL_INSTRUCTION in prompt, (
+            "structural prompt missing the trust-model gate"
+        )
+        assert CONFIG_FLOW_TRACE_INSTRUCTION not in prompt, (
+            "config-trace gate leaked into the structural prompt"
+        )
+
+    for prompt in per_stack:
+        assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, (
+            "per-stack prompt missing the config-flow trace gate"
+        )
+        assert TRUST_MODEL_INSTRUCTION in prompt, (
+            "per-stack prompt missing the trust-model gate"
+        )
+        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
+            "cross-file gate leaked into the per-stack prompt"
+        )
+
+    for prompt in generic:
+        assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, (
+            "generic-fallback prompt missing the config-flow trace gate"
+        )
+        assert TRUST_MODEL_INSTRUCTION in prompt, (
+            "generic-fallback prompt missing the trust-model gate"
+        )
+        assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
+            "cross-file gate leaked into the generic-fallback prompt"
+        )
