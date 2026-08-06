@@ -95,12 +95,22 @@ def _install_model_capturing_stubs(
     return shared_calls
 
 
-async def _run_deep(target: Path, *, start_at: str = "review", precision_mode: bool = False) -> int:
+async def _run_deep(
+    target: Path,
+    *,
+    start_at: str = "review",
+    precision_mode: bool = False,
+    uncovered_sweep: bool | None = None,
+) -> int:
     from daydream.runner import RunConfig, run
 
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(
-        target=str(target), start_at=start_at, cleanup=False, precision_mode=precision_mode
+        target=str(target),
+        start_at=start_at,
+        cleanup=False,
+        precision_mode=precision_mode,
+        uncovered_sweep=uncovered_sweep,
     )
     return await run(config)
 
@@ -1584,13 +1594,16 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     """D-30: pre-flight notice lists stages, stacks, skill per stack, total agent count."""
     captured: list[dict[str, Any]] = []
 
-    def _capture(console, *, stages, stack_lines, agent_count, exploration_available) -> None:
+    def _capture(
+        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+    ) -> None:
         captured.append(
             {
                 "stages": stages,
                 "stack_lines": stack_lines,
                 "agent_count": agent_count,
                 "exploration_available": exploration_available,
+                "sweep_note": sweep_note,
             }
         )
 
@@ -1609,6 +1622,41 @@ async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.Mo
     # fixture yields N=4 (python + react + generic + structure), so 2 + 2*4 + 1 + 1 = 12.
     assert notice["agent_count"] == 12
     assert len(notice["stack_lines"]) >= 1
+    # Issue #309 finding 8: the sweep is enabled by default, so the pre-flight
+    # estimate appends an upper-bound note. The fixture changes 3 files, so the
+    # sweep could add up to 2 x min(3, max_files=10) = 6 review+parse agents.
+    assert notice["sweep_note"] == (
+        "(+ up to 6 sweep agents: review + parse per uncovered file, "
+        "capped by eligible changed files)"
+    )
+
+
+async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No sweep additive in the pre-flight estimate when the sweep is disabled."""
+    captured: list[dict[str, Any]] = []
+
+    def _capture(
+        console, *, stages, stack_lines, agent_count, exploration_available, sweep_note=None
+    ) -> None:
+        captured.append(
+            {
+                "agent_count": agent_count,
+                "sweep_note": sweep_note,
+            }
+        )
+
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **kw: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target, uncovered_sweep=False)
+    assert exit_code == 0
+    assert len(captured) == 1
+    assert captured[0]["sweep_note"] is None
 
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5087,3 +5135,559 @@ async def test_structural_finding_reported_medium_severity_survives_merge(
         "structural anti-slop finding must keep its reported medium severity, "
         f"got {structural[0].get('severity')!r}:\n{structural}"
     )
+
+
+def _uncovered_sweep_target(tmp_path: Path) -> Path:
+    """Git repo whose diff has one file NO per-stack reviewer reads.
+
+    ``notes.txt`` is an ambiguous-extension file routed to the generic stack;
+    the stub leaves it unread (``per_stack_unread``) and its hunk is large
+    enough (6 added lines) to clear the sweep's ``uncovered_sweep_min_hunk_lines``
+    budget, so it is the single file the sweep covers. The other files' hunks
+    are trivially small (<5 changed lines), so the sweep has exactly one target.
+    """
+    project = tmp_path / "sweep_target"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
+    (project / "README.md").write_text("# Project\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    (project / "notes.txt").write_text("".join(f"line{i}\n" for i in range(1, 7)))
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
+async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """AC (issue #309): the sweep reviews an uncovered file, its finding is an
+    ordinary merged finding, coverage stats improve, and the report surfaces
+    coverage.
+
+    Real path: ``runner.run`` through the deep flow with a real temp git repo,
+    real filesystem, and real event loop; only the backend is stubbed. The
+    stub per-stack reviewers read their own files (leaving ``notes.txt`` the
+    single uncovered file), and the sweep branch emits a read + a finding for
+    it.
+    """
+    from daydream.eval.analyzer import analyze_coverage, load_trajectories
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+
+    # (a) The sweep records file exists and its finding is a MERGED finding.
+    records_file = deep / "stack-uncovered-records.json"
+    assert records_file.is_file()
+    records = json.loads(records_file.read_text())
+    assert any(r.get("file") == "notes.txt" for r in records)
+    merged_items = json.loads((deep / "merged-items.json").read_text())
+    merged_files = {item.get("file") for item in merged_items["items"]}
+    assert "notes.txt" in merged_files
+
+    # (b) coverage-stats records the PRE-sweep state separately from the
+    # POST-sweep recompute, and labels the swept files it actually completed.
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre_sweep = stats["pre_sweep"]
+    assert pre_sweep["files_in_diff"] == 4
+    assert pre_sweep["files_read_by_reviewers"] == 3  # api.py, App.tsx, README.md read pre-sweep
+    assert pre_sweep["uncovered_files"] == ["notes.txt"]
+    assert stats["attempted_files"] == ["notes.txt"]
+    assert stats["completed_files"] == ["notes.txt"]
+    assert stats["covered_files"] == ["notes.txt"]  # sweep fork's read is verified
+    assert stats["sweep_attempt_status"] == {"notes.txt": "read"}
+    assert stats["sweep_finding_count"] == len(records) >= 1
+    assert stats["sweep_skipped_small_hunks"] == 0
+    # Finding 10: the skip filename lists are persisted alongside the counts
+    # (derived from the lists) so capacity/hunk skips stay auditable.
+    assert stats["sweep_skipped_small_hunks_files"] == []
+    assert stats["sweep_skipped_capacity"] == 0
+    assert stats["sweep_skipped_capacity_files"] == []
+    # The POST-sweep ratio reflects the sweep fork's completed read of notes.txt.
+    assert stats["post_sweep"]["files_read_by_reviewers"] == 4
+    assert stats["post_sweep"]["coverage_ratio"] > pre_sweep["coverage_ratio"]  # 0.75 -> 1.0
+
+    # (c) post-run analyze_coverage sees the sweep fork's read: ratio improves.
+    trajectories = load_trajectories(target / ".daydream")
+    post = analyze_coverage(trajectories, target / ".daydream")
+    assert post["files_read_by_reviewers"] == 4
+    assert post["coverage_ratio"] == 1.0
+    assert post["coverage_ratio"] == stats["post_sweep"]["coverage_ratio"]  # report shows the achieved ratio
+
+    # (d) the merged report carries the Coverage section with the POST-sweep
+    # ratio and the completed swept-file line.
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Files in diff: 4" in report
+    assert "Files read by reviewers: 4" in report
+    assert "Coverage ratio: 1.0" in report
+    assert "Second-pass sweep covered: notes.txt" in report
+
+
+async def test_run_deep_uncovered_sweep_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A broken sweep (backend raise) never fails the run: exit 0, the failure
+    is recorded in coverage-stats.json, and merged-items.json is still written.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.fail_sweep = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["attempted_files"] == ["notes.txt"]
+    assert stats["completed_files"] == []
+    assert stats["sweep_finding_count"] == 0
+    assert "notes.txt" in stats["sweep_failures"]
+    assert (deep / "merged-items.json").is_file()
+    # No review output to parse on a fresh run -> no records artifact at all
+    # (nothing stale to replace).
+    assert not (deep / "stack-uncovered-records.json").exists()
+    # The report does NOT claim the failed sweep covered anything: it names the
+    # failure instead.
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Second-pass sweep covered" not in report
+    assert "Best-effort sweep failures: notes.txt" in report
+
+
+async def test_uncovered_sweep_disabled_by_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Setting ``uncovered_sweep = false`` (CLI tier) skips the sweep entirely."""
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+
+    exit_code = await run(
+        make_config(target, assume="yes", output_mode="loop", uncovered_sweep=False)
+    )
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    assert not (deep / "coverage-stats.json").exists()
+    assert not (deep / "stack-uncovered-records.json").exists()
+    merged_items = json.loads((deep / "merged-items.json").read_text())
+    assert all(item.get("file") != "notes.txt" for item in merged_items["items"])
+
+
+async def test_uncovered_sweep_noop_on_merge_resume(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--start-at merge`` resume is a sweep no-op: no sweep artifacts are
+    created and the resume still succeeds.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(confidence="HIGH")],
+        react=[_record()],
+        generic=[_record()],
+        structure=[_record()],
+    )
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert not (deep / "stack-uncovered-records.json").exists()
+    assert not (deep / "coverage-stats.json").exists()
+
+
+async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``--start-at per-stack`` resume drops the prior run's sweep artifacts.
+
+    First run: the sweep produces output (records + stats + review files).
+    Resume at per-stack with the sweep disabled: the rerun re-reviews
+    per-stack work but must NOT inherit the prior run's coverage -- the stale
+    records file is gone, so a later merge resume cannot reload it.
+    """
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    assert await _run_deep(target) == 0
+
+    deep = target / ".daydream" / "deep"
+    assert (deep / "stack-uncovered-records.json").is_file()
+    assert (deep / "coverage-stats.json").is_file()
+    assert list(deep.glob("uncovered-*-review.md"))
+
+    stub2 = _install_stub_backend(monkeypatch, target)
+    stub2.per_stack_emit_reads = True
+    stub2.per_stack_unread = frozenset({"notes.txt"})
+    stub2.merge_echo_records = True
+    assert await _run_deep(target, start_at="per-stack", uncovered_sweep=False) == 0
+
+    assert not (deep / "stack-uncovered-records.json").exists()
+    assert not (deep / "coverage-stats.json").exists()
+    assert not list(deep.glob("uncovered-*-review.md"))
+
+
+async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-stack resume whose rerun sweep produces no findings writes ``[]``.
+
+    The prior run's records file must not survive a rerun that yields no
+    findings: the rerun writes a current empty records artifact so a later
+    merge resume reloads ``[]`` instead of stale records.
+    """
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    assert await _run_deep(target) == 0
+
+    deep = target / ".daydream" / "deep"
+    assert json.loads((deep / "stack-uncovered-records.json").read_text())
+
+    stub2 = _install_stub_backend(monkeypatch, target)
+    stub2.per_stack_emit_reads = True
+    stub2.per_stack_unread = frozenset({"notes.txt"})
+    stub2.fail_sweep = True  # the rerun sweep attempts and fails -> no findings
+    stub2.merge_echo_records = True
+    assert await _run_deep(target, start_at="per-stack") == 0
+
+    assert json.loads((deep / "stack-uncovered-records.json").read_text()) == []
+
+
+async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A sweep backend that returns success WITHOUT writing its review output is
+    NOT recorded as completed coverage (issue #309 finding 7).
+
+    A backend can return normally while producing nothing; without a
+    ``task_output.is_file()`` guard the file would be claimed covered and the
+    parse would fail on a phantom output. The file must land in
+    ``sweep_failures`` (``"no review output written"``), never in
+    ``completed_files`` / the report's covered line.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.sweep_no_output = True  # backend returns normally but writes nothing
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert stats["attempted_files"] == ["notes.txt"]
+    assert stats["completed_files"] == []  # no actual review output to parse
+    assert stats["sweep_finding_count"] == 0
+    assert stats["sweep_failures"] == {"notes.txt": "no review output written"}
+    # No review output, no records artifact on a fresh run.
+    assert not (deep / "stack-uncovered-records.json").exists()
+
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Second-pass sweep covered" not in report
+    assert "Best-effort sweep failures: notes.txt" in report
+
+
+async def test_run_deep_uncovered_sweep_review_without_read_not_claimed_as_covered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A successful sweep review WITHOUT a file Read is an attempt, not coverage
+    (issue #309 finding 6).
+
+    The sweep prompt now requires reading the file before reviewing hunks; a
+    backend that still writes a valid review without emitting a Read must not
+    move ``files_read_by_reviewers`` / ``coverage_ratio``. The file lands in
+    ``completed_files`` (completed attempt) but NOT ``covered_files``, and the
+    report labels it ``reviewed (hunks only)``.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.sweep_no_read = True  # review written, but no Read tool call emitted
+    stub.merge_echo_records = True
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre_sweep = stats["pre_sweep"]
+    assert pre_sweep["uncovered_files"] == ["notes.txt"]
+    # The review output WAS written -> the file is a completed ATTEMPT.
+    assert stats["completed_files"] == ["notes.txt"]
+    # But no verified completed read of the file -> never "covered".
+    assert stats["covered_files"] == []
+    assert stats["sweep_attempt_status"] == {"notes.txt": "reviewed (hunks only)"}
+    # The coverage numbers are unchanged by the hunk-only review.
+    assert stats["post_sweep"]["files_read_by_reviewers"] == 3
+    assert stats["post_sweep"]["coverage_ratio"] == pre_sweep["coverage_ratio"] == 0.75
+
+    report = (target / ".review-output.md").read_text()
+    assert "## Coverage" in report
+    assert "Second-pass sweep covered" not in report
+    assert "Second-pass sweep reviewed (hunks only): notes.txt" in report
+    assert "Files read by reviewers: 3" in report
+    assert "Coverage ratio: 0.75" in report
+
+
+async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A per-stack resume whose stale sweep artifact cannot be removed STOPS
+    with an actionable error instead of continuing (issue #309 finding 8).
+
+    The cleanup is resume-safety-critical (a stale ``stack-uncovered-records.json``
+    surviving would be reloaded by a later merge resume as current findings), so
+    an unremovable artifact aborts the resume at exit 1 before any new per-stack
+    work is dispatched.
+    """
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    assert await _run_deep(target) == 0
+
+    deep = target / ".daydream" / "deep"
+    assert (deep / "stack-uncovered-records.json").is_file()
+
+    # Make one artifact unremovable: a directory sharing the artifact name makes
+    # Path.unlink() raise IsADirectoryError, and the cleanup must fail closed.
+    (deep / "coverage-stats.json").unlink()
+    (deep / "coverage-stats.json").mkdir()
+
+    stub2 = _install_stub_backend(monkeypatch, target)
+    exit_code = await _run_deep(target, start_at="per-stack")
+    assert exit_code == 1
+    # The resume aborted BEFORE new per-stack work, so no backend call ran and
+    # the unremovable artifact is still present (it was NOT silently skipped).
+    assert stub2.calls == []
+    assert (deep / "coverage-stats.json").is_dir()
+
+
+async def test_uncovered_sweep_malformed_stats_does_not_fail_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structurally-malformed ``coverage-stats.json`` must NOT abort the run
+    (issue #309 finding 9).
+
+    ``[]`` is syntactically valid JSON but the wrong shape: without the
+    ``isinstance(stats, dict)`` guard + blanket advisory try/except, the
+    ``stats.get(...)`` in ``_append_coverage_section`` raises AttributeError and
+    kills an otherwise-completed review. The run must still complete (exit 0,
+    report written) with no Coverage section rendered.
+    """
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_merge_resume(
+        multi_stack_target,
+        python=[_record(confidence="HIGH")],
+        react=[_record()],
+        generic=[_record()],
+        structure=[_record()],
+    )
+    # Malformed shape: valid JSON but a list, so stats.get(...) would raise
+    # AttributeError without the shape guard.
+    (deep / "coverage-stats.json").write_text("[]")
+
+    exit_code = await _run_deep(multi_stack_target, start_at="merge")
+    assert exit_code == 0
+
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "## Coverage" not in report
+
+
+def test_uncovered_sweep_step_resolves_via_parse_phase_key() -> None:
+    """The sweep step registers ``config_phase="parse"`` (docs/extensions.md)."""
+    from daydream.deep.orchestrator import STEPS
+
+    steps = {s.name: s for s in STEPS}
+    assert steps["uncovered-sweep"].phase_key == "parse"
+    assert steps["per-stack-parse"].phase_key == "parse"
+
+
+def test_uncovered_sweep_enabled_resolution(tmp_path: Path) -> None:
+    """The sweep toggle resolves via the named default constant, with config tiers."""
+    from daydream.config import DEFAULT_UNCOVERED_SWEEP_ENABLED
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _uncovered_sweep_enabled
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+
+    assert DEFAULT_UNCOVERED_SWEEP_ENABLED is True
+
+    def _ctx(config: RunConfig) -> FlowContext:
+        work = WorkContext(
+            repo=tmp_path,
+            source=tmp_path,
+            base_branch="main",
+            base_sha="",
+            head_branch=None,
+            head_sha="",
+            is_ephemeral=False,
+            run_id="test",
+        )
+        return FlowContext(config=config, work=work, registry=Registry(), data={})
+
+    # Default on.
+    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path)))) is True
+    # File-config False disables.
+    fc = DaydreamFileConfig(uncovered_sweep=False)
+    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), file_config=fc))) is False
+    # RunConfig False (highest tier) beats a file-config True.
+    fc_on = DaydreamFileConfig(uncovered_sweep=True)
+    cfg = RunConfig(target=str(tmp_path), uncovered_sweep=False, file_config=fc_on)
+    assert _uncovered_sweep_enabled(_ctx(cfg)) is False
+    # Merge/fix resumes always disable the sweep.
+    assert _uncovered_sweep_enabled(_ctx(RunConfig(target=str(tmp_path), start_at="merge"))) is False
+
+
+def test_uncovered_sweep_numeric_resolution_rejects_negatives(tmp_path: Path) -> None:
+    """Negative sweep numerics degrade to the named defaults; explicit 0 survives."""
+    from daydream.config import (
+        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
+        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    )
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import (
+        _uncovered_sweep_max_files,
+        _uncovered_sweep_min_hunk_lines,
+    )
+    from daydream.runner import RunConfig
+
+    # A directly-constructed RunConfig negative override degrades to the default.
+    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-5)
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # Explicit 0 is preserved (0 max = sweep nothing; 0 min = no hunk floor).
+    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
+    assert _uncovered_sweep_max_files(cfg) == 0
+    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
+
+    # A negative file-config value is coerced to None at load -> default applies.
+    fc = DaydreamFileConfig(uncovered_sweep_max_files=-1, uncovered_sweep_min_hunk_lines=-3)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # A file-config 0 with no RunConfig override stays 0.
+    fc = DaydreamFileConfig(uncovered_sweep_max_files=0, uncovered_sweep_min_hunk_lines=0)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _uncovered_sweep_max_files(cfg) == 0
+    assert _uncovered_sweep_min_hunk_lines(cfg) == 0
+
+
+def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> None:
+    """RunConfig numeric overrides are type-validated, not just range-checked
+    (issue #309 finding 7).
+
+    Booleans subclass int and floats pass a ``>= 0`` check, but
+    ``filter_sweepable_files`` needs an int slice: ``max_files=1.5`` raises
+    TypeError and the fail-open wrapper discards the ENTIRE sweep. The resolver
+    accepts a value only when it is an int, not a bool, and >= 0; everything
+    else degrades to the named default.
+    """
+    from daydream.config import (
+        DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
+        DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    )
+    from daydream.deep.orchestrator import (
+        _uncovered_sweep_max_files,
+        _uncovered_sweep_min_hunk_lines,
+    )
+    from daydream.runner import RunConfig
+
+    # Bool overrides degrade to the defaults (True is not a meaningful count).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files=True,  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines=True,  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # Float overrides degrade to the defaults (an int slice is required).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files=1.5,  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines=1.5,  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # String overrides degrade to the defaults (never compared or sliced).
+    cfg = RunConfig(
+        target=str(tmp_path),
+        uncovered_sweep_max_files="10",  # type: ignore[arg-type]
+        uncovered_sweep_min_hunk_lines="5",  # type: ignore[arg-type]
+    )
+    assert _uncovered_sweep_max_files(cfg) == DEFAULT_UNCOVERED_SWEEP_MAX_FILES
+    assert _uncovered_sweep_min_hunk_lines(cfg) == DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+    # Valid ints still pass through unchanged.
+    cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
+    assert _uncovered_sweep_max_files(cfg) == 7
+    assert _uncovered_sweep_min_hunk_lines(cfg) == 2

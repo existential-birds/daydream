@@ -361,6 +361,16 @@ REVIEW_OUTPUT_FILE = ".review-output.md"
 # Pattern to detect unknown skill errors
 UNKNOWN_SKILL_PATTERN = r"Unknown skill: ([\w:-]+)"
 
+# Issue #309: uncovered-diff-file sweep. After per-stack reviews + parse, the
+# deep flow re-reviews diff files no reviewer read with a cheap second-pass
+# agent. `uncovered_sweep` toggles the pass (default True);
+# `uncovered_sweep_max_files` caps how many uncovered files are swept in one run
+# (the remainder is recorded, not silently dropped);
+# `uncovered_sweep_min_hunk_lines` skips files whose hunks are trivially small.
+DEFAULT_UNCOVERED_SWEEP_ENABLED: bool = True
+DEFAULT_UNCOVERED_SWEEP_MAX_FILES: int = 10
+DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5
+
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
 # ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` and
 # ``skill_invocation=STRUCTURE_SKILL`` so the structural reviewer always runs

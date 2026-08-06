@@ -55,6 +55,20 @@ class DaydreamFileConfig:
             calls in one file group (the group is severity-sorted, so the dropped
             tail is lowest-severity). ``None`` (the default when the key is absent
             or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
+        uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep
+            (second-pass reviewer over diff files no per-stack reviewer read).
+            ``None`` falls through to the RunConfig field / orchestrator default
+            (``True``); ``False`` disables the pass.
+        uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
+            are swept in one run. Non-negative only: ``0`` disables the sweep;
+            a negative value degrades to ``None`` (the named default applies).
+            ``None`` falls through to the RunConfig field /
+            ``config.DEFAULT_UNCOVERED_SWEEP_MAX_FILES`` (10).
+        uncovered_sweep_min_hunk_lines: Issue #309. Minimum added/removed lines
+            a file's hunks must contain to warrant a sweep. Non-negative only:
+            ``0`` removes the floor; a negative value degrades to ``None`` (the
+            named default applies). ``None`` falls through to the RunConfig field /
+            ``config.DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
         supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
             ``"llm"``), or None when unset/invalid.
         supervisor_deny_globs: Repository-relative deny globs shared by findings
@@ -76,6 +90,9 @@ class DaydreamFileConfig:
     precision_mode: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
+    uncovered_sweep: bool | None = None
+    uncovered_sweep_max_files: int | None = None
+    uncovered_sweep_min_hunk_lines: int | None = None
     supervisor: str | None = None
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
@@ -204,6 +221,20 @@ def _coerce_int(raw: Any) -> int | None:
     return raw if isinstance(raw, int) else None
 
 
+def _coerce_non_negative_int(raw: Any) -> int | None:
+    """Return ``raw`` as a non-negative int, or None otherwise (degrade to default).
+
+    Unlike :func:`_coerce_int`, a negative value degrades to ``None`` so the
+    named default applies (issue #309): a negative sweep capacity cap or hunk
+    floor is never a meaningful count. Explicit ``0`` is preserved — ``0`` max
+    files means "sweep nothing" and ``0`` min hunk lines means "no hunk-size
+    floor".
+    """
+    if isinstance(raw, bool):
+        return None
+    return raw if isinstance(raw, int) and raw >= 0 else None
+
+
 def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
     """Return a positive int bound from ``key``, accepting its hyphenated spelling.
 
@@ -269,6 +300,12 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
     raw_precision = merged.get("precision_mode")
     precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
+    # uncovered_sweep: bool only, same degrade-to-None rule as precision_mode so
+    # an accidental ``uncovered_sweep = 1`` is treated as unset, not enabled.
+    raw_uncovered_sweep = merged.get("uncovered_sweep")
+    uncovered_sweep: bool | None = (
+        raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
+    )
     improve = merged.get("improve")
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
@@ -286,6 +323,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         precision_mode=precision,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
+        uncovered_sweep=uncovered_sweep,
+        uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
+        uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),

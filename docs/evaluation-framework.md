@@ -276,6 +276,10 @@ Operational metrics informed by Atlassian RovoDev's production deployment metric
 | FPs per PR | Absolute false-positive burden |
 | Repeatability | Jaccard similarity of findings across repeated runs on same PR |
 
+### Coverage and the uncovered-file sweep
+
+The deep flow tracks file-level review coverage — `files_in_diff` vs `files_read_by_reviewers` (derived from the `deep-*` fork trajectories) — and records it in `deep/coverage-stats.json` plus a short `## Coverage` section on the merged report. After per-stack reviews + parse, an uncovered-diff-file sweep (issue #309) re-reviews each diff file no reviewer read with a cheap second-pass agent, filtering out trivially small hunks and capping the sweep at `uncovered_sweep_max_files`. The sweep's findings are ordinary merged findings, and its reads are counted by the post-run coverage analysis, so the sweep improves `coverage_ratio`; it is deliberately fail-open, so a broken sweep can only reduce recall, never fail the run. The sweep's config keys (`uncovered_sweep`, `uncovered_sweep_max_files`, `uncovered_sweep_min_hunk_lines`) are documented in the README Configuration section.
+
 ---
 
 ## Quality Metrics (Erosion & Verbosity)

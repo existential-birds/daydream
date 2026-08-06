@@ -34,6 +34,7 @@ from daydream.backends import (
     MaxTurnsError,
     ResultEvent,
     TextEvent,
+    ToolResultEvent,
     ToolStartEvent,
 )
 
@@ -185,6 +186,46 @@ class StubBackend:
         # the real pre_scan degrade path runs: specialist_failed -> completed
         # False -> exploration dir materialized without a cache-key.
         self.fail_exploration: bool = False
+        # Issue #309 (uncovered-file sweep): knobs for the per-stack review
+        # branches' simulated reads and the sweep branch/parse.
+        # When True, the per-stack / generic review branch emits a Read
+        # ToolStartEvent per file in its scope (except `per_stack_unread`), so
+        # analyze_coverage sees per-stack reviewers as having read their own
+        # files -- leaving only genuinely-unread files uncovered.
+        self.per_stack_emit_reads: bool = False
+        # Files in a stack's scope to NOT emit a read for, even when
+        # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
+        # leave one diff file unread by every reviewer).
+        self.per_stack_unread: frozenset[str] = frozenset()
+        # When set, the sweep parse branch emits its finding for this file
+        # (instead of the default api.py), so stack-uncovered-records.json names
+        # the swept file.
+        self.sweep_file: str | None = None
+        # When True, the uncovered-file-sweep branch returns success WITHOUT
+        # writing the review output file -- a backend can return normally while
+        # producing nothing (issue #309 finding 7). A successful return must
+        # NOT be recorded as completed coverage.
+        self.sweep_no_output: bool = False
+        # When True, the uncovered-file-sweep branch writes its review output
+        # but emits NO Read tool call -- a successful hunk-only review (issue
+        # #309 finding 6). The file must be recorded as a completed ATTEMPT
+        # ("reviewed (hunks only)"), never as covered.
+        self.sweep_no_read: bool = False
+        # When True, the uncovered-file-sweep branch raises -- exercising the
+        # sweep's fail-open contract.
+        self.fail_sweep: bool = False
+
+    @staticmethod
+    def _stack_scope_files(prompt: str) -> list[str]:
+        """Extract the file list from a per-stack/generic scope instruction.
+
+        ``_stack_scope_instruction`` renders the files comma-joined on a single
+        line (``  api.py, README.md``), so the single line is split on commas.
+        """
+        m = re.search(r"Focus ONLY on these files:\n\s*([^\n]+)", prompt)
+        if m is None:
+            return []
+        return [part.strip() for part in m.group(1).split(",") if part.strip()]
 
     def _is_runaway(self, prompt: str, pl: str) -> bool:
         """Whether this turn should emit the unbounded budget-tripping burst."""
@@ -323,6 +364,37 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
+        # Issue #309: uncovered-file sweep reviewer. Dispatch marker phrase is
+        # unique to build_uncovered_sweep_prompt. Emits a Read of the swept
+        # file (so post-run analyze_coverage counts it as read) and writes a
+        # review the sweep parse pass turns into a PER_STACK_RECORD_SCHEMA
+        # finding for that file. fail_sweep raises to exercise the fail-open
+        # contract.
+        if "uncovered file sweep" in pl:
+            if self.fail_sweep:
+                raise RuntimeError("stub: uncovered-file sweep blew up")
+            file_match = re.search(r"changed file (\S+) was NOT read", prompt)
+            swept_file = file_match.group(1) if file_match else "notes.txt"
+            if not self.sweep_no_output:
+                out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
+                if out_match is not None:
+                    out_path = Path(out_match.group(1).rstrip("."))
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_text(
+                        f"# Review (uncovered)\n\n## Issues\n\n"
+                        f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
+                    )
+            if not self.sweep_no_read:
+                yield ToolStartEvent(
+                    id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
+                )
+                yield ToolResultEvent(
+                    id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
+                )
+            yield TextEvent(text="")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
         # Per-stack review -> write a markdown file + emit done.
         m = re.search(r"you are reviewing the (\S+) stack", pl)
         if m is None:
@@ -336,6 +408,18 @@ class StubBackend:
 
             m = _M()  # type: ignore[assignment]
         if m is not None:
+            if self.per_stack_emit_reads:
+                for scope_file in self._stack_scope_files(prompt):
+                    if scope_file in self.per_stack_unread:
+                        continue
+                    yield ToolStartEvent(
+                        id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
+                    )
+                    # Completed read: a ToolResultEvent paired with the start,
+                    # so the sweep's coverage computation counts the file as read.
+                    yield ToolResultEvent(
+                        id=f"read-{scope_file}", output="file content", is_error=False
+                    )
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
@@ -368,6 +452,17 @@ class StubBackend:
                 issue["severity"] = self.parse_severity
                 issue["confidence"] = "MEDIUM"
                 issue["rationale"] = "stub"
+            # Issue #309: the uncovered-sweep parse (prompt points at an
+            # `uncovered-<n>-review.md`) emits its finding for the swept file.
+            if self.sweep_file is not None and re.search(r"uncovered-\d+-review\.md", prompt):
+                issue["file"] = self.sweep_file
+                issue["line"] = 1
+                issue["description"] = f"Sweep finding for {self.sweep_file}"
+                issue["evidence"] = f"{self.sweep_file}:1"
+                if "severity" in pl:
+                    issue["severity"] = self.parse_severity or "low"
+                    issue["confidence"] = "MEDIUM"
+                    issue["rationale"] = "stub"
             # #232: per-stack override keyed off the review-file path the parse
             # prompt points at (``stack-<name>-review.md``). Lets one stack emit a
             # HIGH finding and another a borderline LOW one at DISTINCT locations,

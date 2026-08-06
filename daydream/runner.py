@@ -220,6 +220,21 @@ class RunConfig:
             means unresolved or registry-unreadable (→ optimistic routing in
             ``detect_stacks``). Set explicitly to inject availability and bypass
             the probe (tests).
+        uncovered_sweep: Issue #309. Toggle the uncovered-diff-file sweep (the
+            second-pass reviewer over diff files no per-stack reviewer read).
+            ``None`` falls through to ``file_config.uncovered_sweep`` then the
+            built-in default ``True`` (precedence CLI > file > default,
+            mirroring ``shallow_fanout_threshold``; resolved by
+            ``_uncovered_sweep_enabled``).
+        uncovered_sweep_max_files: Issue #309. Cap on how many uncovered files
+            are swept in one run; files beyond the cap are recorded in
+            ``coverage-stats.json`` as ``sweep_skipped_capacity`` rather than
+            silently dropped. ``None`` falls through to file config then
+            ``DEFAULT_UNCOVERED_SWEEP_MAX_FILES`` (10).
+        uncovered_sweep_min_hunk_lines: Issue #309. A file counts as sweepable
+            only when its hunks contain at least this many added/removed lines.
+            ``None`` falls through to file config then
+            ``DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
 
     """
 
@@ -280,6 +295,13 @@ class RunConfig:
     improve_scope: str | None = None
     improve_plan_description: str | None = None
     skill_availability: frozenset[str] | None = None
+    # Issue #309: uncovered-diff-file sweep (second-pass reviewer). CLI-tier
+    # overrides; ``None`` falls through to the file-config scalar then the
+    # orchestrator default (True / DEFAULT_UNCOVERED_SWEEP_MAX_FILES /
+    # DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES).
+    uncovered_sweep: bool | None = None
+    uncovered_sweep_max_files: int | None = None
+    uncovered_sweep_min_hunk_lines: int | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:
