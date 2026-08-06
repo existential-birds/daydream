@@ -41,7 +41,7 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
-from daydream.config_file import _coerce_non_negative_int
+from daydream.config_file import _coerce_non_negative_int, _coerce_quality_threshold
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     adjudication_complete_path,
@@ -2041,14 +2041,39 @@ def _quality_flagged(
     return False
 
 
+def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> float:
+    """Resolve a quality-gate delta threshold, degrading invalid values to *default*.
+
+    Mirrors ``_uncovered_sweep_max_files``: ``RunConfig`` field > file-config
+    scalar > default, then the same finite non-negative guard the file-config
+    parser applies (#329 / Finding 7). A negative threshold flags every
+    unchanged file (a zero delta exceeds it); a NaN/infinite one disables the
+    metric (every comparison against it is False) and writes a non-standard
+    ``NaN`` to JSON. Both degrade to the named default so a directly-constructed
+    ``RunConfig`` / ``DaydreamFileConfig`` cannot smuggle an invalid floor past
+    the parser.
+    """
+    value = _resolve_config_value(config, attr, default)
+    coerced = _coerce_quality_threshold(value)
+    return coerced if coerced is not None else default
+
+
 def _current_session_id() -> str | None:
     """Session id binding the quality-gate artifact to the current run."""
     recorder = get_current_recorder()
     return recorder.session_id if recorder is not None else None
 
 
-def _load_quality_gate_rounds(gate_p: Path) -> list[dict[str, Any]]:
-    """Load prior rounds so a ``--start-at fix`` resume appends rather than clobbers.
+def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:
+    """Load prior rounds for the CURRENT session, or start fresh when rebound.
+
+    Rounds are carried forward only when the artifact's stored ``session_id``
+    matches the current run's session (issue #329 / Finding 5): a ``--start-at
+    fix`` resume of the SAME session appends rather than clobbers, while an
+    artifact left by a DIFFERENT run is discarded with a warning so the first
+    run's verdicts can never be archived as the new run's (corrupting the
+    manifest / SQLite audit history). An artifact with no stored session is
+    treated as belonging to another session.
 
     Never raises, and a malformed artifact is never treated as authoritative
     prior rounds (issue #329 / Finding 6): invalid JSON, a non-object payload
@@ -2066,6 +2091,13 @@ def _load_quality_gate_rounds(gate_p: Path) -> list[dict[str, Any]]:
         existing = None
     if not isinstance(existing, dict):
         print_warning(console, f"Quality gate artifact {gate_p} is malformed; starting rounds fresh")
+        return []
+    if existing.get("session_id") != session_id:
+        print_warning(
+            console,
+            f"Quality gate artifact {gate_p} belongs to another run's session; "
+            "its rounds were not carried forward",
+        )
         return []
     existing_rounds = existing.get("rounds")
     if not isinstance(existing_rounds, list):
@@ -2121,7 +2153,7 @@ def _evaluate_quality_gate(
     verbosity_delta_threshold: float,
     daydream_dir: Path,
     dd: Path,
-    candidates: set[str],
+    candidates: set[str] | None,
     before: dict[str, Any] | None,
     before_unavailable_reason: str | None,
     iteration: int | None,
@@ -2132,14 +2164,15 @@ def _evaluate_quality_gate(
     bound to the current run's ``session_id`` so a later archive step cannot
     attribute another run's verdict to this one (#329). When disabled, writes
     ``{"enabled": false}``. When the gate would run but cannot be evaluated --
-    a pre-fix capture failure, a post-fix capture failure, or a persist failure
-    -- an explicit ``unavailable`` round entry is persisted for THIS round with
-    the failed stage and reason, superseding any stale verdict for that round
-    and keeping the failure auditable instead of reading as a clean gate. Each
-    ``_step_fix`` invocation appends one ``rounds`` entry (keyed by the flow's
-    loop iteration when present, else the next sequence number), so a resume or
-    loop preserves the per-round trend. Flagged files are surfaced as warnings
-    with their before/after numbers.
+    a pre-fix capture failure, a post-fix capture failure, a changed-file
+    enumeration failure (``candidates`` is ``None``, #329 / Finding 6), or a
+    persist failure -- an explicit ``unavailable`` round entry is persisted for
+    THIS round with the failed stage and reason, superseding any stale verdict
+    for that round and keeping the failure auditable instead of reading as a
+    clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
+    (keyed by the flow's loop iteration when present, else the next sequence
+    number), so a resume or loop preserves the per-round trend. Flagged files
+    are surfaced as warnings with their before/after numbers.
     """
     session_id = _current_session_id()
     try:
@@ -2149,8 +2182,20 @@ def _evaluate_quality_gate(
                 json.dumps({"enabled": False, "session_id": session_id}, indent=2)
             )
             return
-        rounds = _load_quality_gate_rounds(gate_p)
+        rounds = _load_quality_gate_rounds(gate_p, session_id)
         round_no = iteration if iteration is not None else len(rounds) + 1
+        if candidates is None:
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="candidates",
+                reason="could not enumerate files changed by the fix pass against the pre-fix snapshot",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+            return
         if before is None:
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -2266,7 +2311,7 @@ def _evaluate_quality_gate(
         # pass, which is the exact hazard #329 describes.
         try:
             gate_p = fix_quality_gate_path(dd)
-            rounds = _load_quality_gate_rounds(gate_p)
+            rounds = _load_quality_gate_rounds(gate_p, session_id)
             round_no = iteration if iteration is not None else len(rounds) + 1
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -2340,10 +2385,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # failure protection below. Fail-open: a snapshot failure means the gate is
     # unavailable for this run, never a run failure.
     quality_gate_enabled = _resolve_config_value(config, "quality_gate_enabled", DEFAULT_QUALITY_GATE_ENABLED)
-    quality_gate_erosion_delta = _resolve_config_value(
+    quality_gate_erosion_delta = _quality_gate_threshold(
         config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
     )
-    quality_gate_verbosity_delta = _resolve_config_value(
+    quality_gate_verbosity_delta = _quality_gate_threshold(
         config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
     )
     if quality_gate_enabled:
@@ -2440,13 +2485,39 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
+    #
+    # Issue #329 / Finding 6: gate every python file the fix pass changed, not
+    # just the finding-group targets. The fix agent is explicitly allowed to
+    # touch files outside a group's named file, so a regression in such a
+    # secondary file would otherwise bypass the gate, the artifact, the
+    # manifest, and SQLite. The candidate set is derived from the PRE-FIX git
+    # snapshot (clean tree -> HEAD; dirty tree -> the stash snapshot) -- the
+    # same base the generated-file guard and recommended-patch capture use --
+    # scoped to ``*.py``, then unioned with the finding-target files so finding
+    # targets stay covered even when their on-disk content did not change.
+    # Fail-open: if enumeration raises, candidates stay ``None`` and the gate
+    # persists an explicit ``unavailable`` verdict rather than gating on a
+    # partial candidate set.
+    quality_candidates: set[str] | None
+    if quality_gate_enabled:
+        try:
+            pre_fix_ref = pre_fix_snapshot or "HEAD"
+            changed_after_fix = git_ops.changed_files_against(
+                work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
+            )
+            quality_candidates = {path for path in changed_after_fix if path.endswith(".py")}
+            quality_candidates |= {item["file"] for item in ctx.data["items"] if item.get("file")}
+        except git_ops.GitError:
+            quality_candidates = None
+    else:
+        quality_candidates = set()
     _evaluate_quality_gate(
         enabled=quality_gate_enabled,
         erosion_delta_threshold=quality_gate_erosion_delta,
         verbosity_delta_threshold=quality_gate_verbosity_delta,
         daydream_dir=daydream_dir,
         dd=dd,
-        candidates={item["file"] for item in ctx.data["items"] if item.get("file")},
+        candidates=quality_candidates,
         before=quality_before,
         before_unavailable_reason=quality_before_unavailable,
         iteration=ctx.data.get("iteration"),
