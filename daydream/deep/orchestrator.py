@@ -2048,15 +2048,33 @@ def _current_session_id() -> str | None:
 
 
 def _load_quality_gate_rounds(gate_p: Path) -> list[dict[str, Any]]:
-    """Load prior rounds so a ``--start-at fix`` resume appends rather than clobbers."""
+    """Load prior rounds so a ``--start-at fix`` resume appends rather than clobbers.
+
+    Never raises, and a malformed artifact is never treated as authoritative
+    prior rounds (issue #329 / Finding 6): invalid JSON, a non-object payload
+    (``[]``, ``42``, ...), a missing ``rounds`` list, or non-object round
+    entries all degrade to an empty round list WITH a warning, so the current
+    run repairs the artifact instead of silently losing the gate.
+    """
     try:
-        existing = json.loads(gate_p.read_text(encoding="utf-8"))
-        existing_rounds = existing.get("rounds")
-        if isinstance(existing_rounds, list):
-            return existing_rounds
-    except (json.JSONDecodeError, OSError):
+        raw = gate_p.read_text(encoding="utf-8")
+    except OSError:
         return []
-    return []
+    try:
+        existing = json.loads(raw)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        existing = None
+    if not isinstance(existing, dict):
+        print_warning(console, f"Quality gate artifact {gate_p} is malformed; starting rounds fresh")
+        return []
+    existing_rounds = existing.get("rounds")
+    if not isinstance(existing_rounds, list):
+        print_warning(console, f"Quality gate artifact {gate_p} has no rounds list; starting rounds fresh")
+        return []
+    valid = [r for r in existing_rounds if isinstance(r, dict)]
+    if len(valid) != len(existing_rounds):
+        print_warning(console, f"Quality gate artifact {gate_p} has non-object round entries; dropping them")
+    return valid
 
 
 def _persist_quality_gate_unavailable(
@@ -2170,6 +2188,26 @@ def _evaluate_quality_gate(
             after_entry = after_per_file.get(rel)
             if before_entry is None and after_entry is None:
                 continue
+            # Issue #329 / Finding 5: a candidate that parsed pre-fix but is
+            # MISSING from the post-fix analyzer output is unparseable after the
+            # fix (analyze_quality omits malformed files). Recording null
+            # after-metrics with ``flagged=false`` would read as a clean
+            # verdict, so mark it explicitly unavailable and flagged -- a fix
+            # that breaks a file is a regression, never a pass. Still fail-open:
+            # never raises, never stops the run.
+            if before_entry is not None and after_entry is None:
+                per_file[rel] = {
+                    "erosion_before": before_entry.get("erosion"),
+                    "erosion_after": None,
+                    "erosion_delta": None,
+                    "verbosity_before": before_entry.get("verbosity"),
+                    "verbosity_after": None,
+                    "verbosity_delta": None,
+                    "unparseable": True,
+                    "flagged": True,
+                    "reason": "file missing from post-fix analyzer output (unparseable?)",
+                }
+                continue
             erosion_before = before_entry.get("erosion") if before_entry is not None else None
             erosion_after = after_entry.get("erosion") if after_entry is not None else None
             verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
@@ -2206,19 +2244,26 @@ def _evaluate_quality_gate(
         gate_p.write_text(json.dumps(payload, indent=2))
         flagged = [rel for rel, entry in per_file.items() if entry["flagged"]]
         if flagged:
-            detail = "\n".join(
-                f"  - {rel}: erosion {per_file[rel]['erosion_before']} -> "
-                f"{per_file[rel]['erosion_after']}, verbosity "
-                f"{per_file[rel]['verbosity_before']} -> {per_file[rel]['verbosity_after']}"
-                for rel in flagged
-            )
+            lines = []
+            for rel in flagged:
+                entry = per_file[rel]
+                if entry.get("unparseable"):
+                    lines.append(f"  - {rel}: {entry['reason']}")
+                else:
+                    lines.append(
+                        f"  - {rel}: erosion {entry['erosion_before']} -> "
+                        f"{entry['erosion_after']}, verbosity "
+                        f"{entry['verbosity_before']} -> {entry['verbosity_after']}"
+                    )
             print_warning(
                 console,
-                f"Quality gate flagged {len(flagged)} file(s) after fixes:\n{detail}",
+                f"Quality gate flagged {len(flagged)} file(s) after fixes:\n" + "\n".join(lines),
             )
     except Exception as exc:  # noqa: BLE001 - fail-open: the gate must never fail the run
         # Stage "persist": the payload itself could not be written. Record the
-        # failure as an unavailable round when the write path still works.
+        # failure as an unavailable round when the write path still works, and
+        # ALWAYS warn -- a gate failure that surfaces nothing reads as a clean
+        # pass, which is the exact hazard #329 describes.
         try:
             gate_p = fix_quality_gate_path(dd)
             rounds = _load_quality_gate_rounds(gate_p)
@@ -2233,8 +2278,13 @@ def _evaluate_quality_gate(
                 erosion_delta_threshold=erosion_delta_threshold,
                 verbosity_delta_threshold=verbosity_delta_threshold,
             )
-        except Exception:  # noqa: BLE001 - nothing left to persist; stay fail-open
-            pass
+        except Exception as inner:  # noqa: BLE001 - nothing left to persist; stay fail-open
+            print_warning(
+                console,
+                f"Quality gate unavailable (round {iteration if iteration is not None else '?'}, "
+                f"persist): {type(exc).__name__}: {exc}; could not persist unavailable verdict "
+                f"({type(inner).__name__}: {inner})",
+            )
 
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:

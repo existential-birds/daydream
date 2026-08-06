@@ -1167,6 +1167,109 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     assert beta_gate["session_id"] in archived_sessions
 
 
+async def test_fix_quality_gate_flags_unparseable_post_fix_file(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/Finding 5): a file missing from post-fix analyzer output is flagged.
+
+    A candidate that parsed pre-fix but is absent from the post-fix
+    ``analyze_quality`` per_file map means the fix made it unparseable (the
+    analyzer omits malformed files). Before this fix the gate recorded null
+    after-metrics with ``flagged=false`` -- a fix that broke a file read as a
+    clean pass. The gate now records the file as explicitly unavailable and
+    flagged, warns naming the file, and the run still completes (fail-open).
+    """
+    from daydream.eval import analyzer as analyzer_mod
+
+    calls = {"n": 0}
+    real_analyze = analyzer_mod.analyze_quality
+
+    def _stub(daydream_dir: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        result = real_analyze(daydream_dir)
+        if calls["n"] == 2:
+            result["per_file"] = {
+                rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
+            }
+        return result
+
+    monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+    exit_code = await _run_quality_gate_fixture(
+        multi_stack_target, monkeypatch, make_config, mute_side_effects
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(multi_stack_target)
+    assert gate["enabled"] is True
+    entry = gate["rounds"][0]["per_file"]["api.py"]
+    assert entry["unparseable"] is True
+    assert entry["flagged"] is True
+    assert "post-fix analyzer output" in entry["reason"]
+    assert any("api.py" in w for w in warnings), "the unparseable file must be named in a warning"
+
+
+async def test_fix_quality_gate_malformed_resume_artifact_repairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/Finding 6): a malformed resume artifact can't silently disable the gate.
+
+    Pre-seeding ``fix-quality-gate.json`` with a valid-JSON-but-wrong-shape
+    payload (``[]``) used to raise AttributeError inside the loader; the outer
+    fail-open handler re-raised and swallowed it, so a ``--start-at fix`` resume
+    continued with NO warning, the stale artifact survived, and the gate was
+    silently lost. The loader now degrades a malformed artifact to empty rounds
+    WITH a warning, and the run repairs the file in place -- the gate stays live
+    and the corrupted payload is never treated as authoritative prior rounds.
+    """
+    from daydream.runner import run
+
+    target = _build_gate_target(tmp_path, "gate_malformed_resume")
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    _write_matching_diff_key(target, deep)
+    (deep / "merged-items.json").write_text(
+        json.dumps({"items": [_merge_item(1, "api.py", "high")]})
+    )
+    gate_p = deep / "fix-quality-gate.json"
+    gate_p.write_text("[]")
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    _install_stub_backend(monkeypatch, target)
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+    exit_code = await run(
+        make_config(
+            target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+
+    assert any("fix-quality-gate.json" in w and "malformed" in w for w in warnings), (
+        "a malformed artifact must surface a warning, never fail silently"
+    )
+    gate = json.loads(gate_p.read_text(encoding="utf-8"))
+    assert gate["enabled"] is True
+    assert gate["session_id"]
+    assert len(gate["rounds"]) == 1
+
+
 async def test_fix_guard_reverts_generated_migration_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
