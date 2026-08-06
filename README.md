@@ -250,14 +250,17 @@ file-config keys in the same two sources:
 | `quality_gate_enabled` | `true` | Toggle the fix-phase anti-degradation quality gate. `false` skips the computation and writes `{"enabled": false}`. |
 | `quality_gate_erosion_delta` | `0.05` | Per-file erosion-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
 | `quality_gate_verbosity_delta` | `0.05` | Per-file verbosity-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+| `quality_gate_erosion_absolute` | `0.05` | Absolute post-fix erosion threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+| `quality_gate_verbosity_absolute` | `0.05` | Absolute post-fix verbosity threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
 
 The gate is fail-open: a flagged file (or an unavailable verdict) surfaces as a
 warning plus a manifest record, never an aborted run.
 
-Resolution precedence is the standard **CLI > config file > default**. Both
-thresholds are clamped to finite non-negative numbers at parse time and again at
-resolution time: a negative value would flag every unchanged file (a zero delta
-exceeds it) and a `NaN`/`inf` value would silently disable the metric, so any
+Resolution precedence is the standard **CLI > config file > default**. All four
+quality-gate thresholds are clamped to finite non-negative numbers at parse
+time and again at resolution time: a negative value would flag every unchanged
+file (a zero delta exceeds it) and a `NaN`/`inf` value would silently disable
+the metric, so any
 invalid value degrades to the named default.
 
 The LLM supervisor uses one batched call. Configure its model under

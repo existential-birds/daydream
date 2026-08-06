@@ -81,12 +81,19 @@ DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 # erosion/verbosity growth on files the fix phase edited; never aborts the run
 # (the test gate stays the hard gate). Deltas are per-file before/after ratios
 # from ``analyze_quality``; a file whose delta exceeds a threshold is flagged in
-# ``deep/fix-quality-gate.json`` and the run manifest. Overridable via
-# ``[tool.daydream]`` (``quality_gate_enabled`` / ``quality_gate_erosion_delta`` /
-# ``quality_gate_verbosity_delta``); resolved in ``_step_fix``.
+# ``deep/fix-quality-gate.json`` and the run manifest. The *_ABSOLUTE defaults
+# are the yardstick for the undefined-baseline fallback: a BEFORE metric that
+# is ``None`` (e.g. a file with no functions pre-fix) has no delta to compare,
+# so the AFTER value is checked against the absolute knob, never the delta one
+# (#329 / CodeRabbit Finding D). Overridable via ``[tool.daydream]``
+# (``quality_gate_enabled`` / ``quality_gate_erosion_delta`` /
+# ``quality_gate_verbosity_delta`` / ``quality_gate_erosion_absolute`` /
+# ``quality_gate_verbosity_absolute``); resolved in ``_step_fix``.
 DEFAULT_QUALITY_GATE_ENABLED = True
 DEFAULT_QUALITY_GATE_EROSION_DELTA = 0.05
 DEFAULT_QUALITY_GATE_VERBOSITY_DELTA = 0.05
+DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE = 0.05
+DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE = 0.05
 
 # Plan writers are long, expensive turns and hit Pi's provider rate limit when
 # they inherit the standard/deep audit fanout of ten. Keep plan generation at
