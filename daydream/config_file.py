@@ -87,6 +87,19 @@ class DaydreamFileConfig:
             only, same degrade-to-``None`` rule as ``quality_gate_erosion_delta``.
             ``None`` falls through to
             ``config.DEFAULT_QUALITY_GATE_VERBOSITY_DELTA`` (0.05).
+        quality_gate_erosion_absolute: Issue #315. Absolute post-fix erosion
+            threshold for the undefined-baseline fallback -- the BEFORE erosion
+            metric is ``None`` (no functions pre-fix), so no delta exists and
+            the AFTER value is compared against this knob instead of the delta
+            one (#329 / CodeRabbit Finding D). Finite non-negative only, same
+            degrade-to-``None`` rule as ``quality_gate_erosion_delta``. ``None``
+            falls through to
+            ``config.DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE`` (0.05).
+        quality_gate_verbosity_absolute: Issue #315. Absolute post-fix verbosity
+            threshold for the undefined-baseline fallback, the verbosity twin of
+            ``quality_gate_erosion_absolute``. Finite non-negative only, same
+            degrade-to-``None`` rule. ``None`` falls through to
+            ``config.DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE`` (0.05).
         supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
             ``"llm"``), or None when unset/invalid.
         supervisor_deny_globs: Repository-relative deny globs shared by findings
@@ -114,6 +127,8 @@ class DaydreamFileConfig:
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
+    quality_gate_erosion_absolute: float | None = None
+    quality_gate_verbosity_absolute: float | None = None
     supervisor: str | None = None
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
@@ -282,7 +297,7 @@ def _coerce_float(raw: Any) -> float | None:
 def _coerce_quality_threshold(raw: Any) -> float | None:
     """Return ``raw`` as a finite non-negative float, else None (degrade to default).
 
-    The quality-gate delta thresholds must be finite and non-negative
+    Quality-gate thresholds must be finite and non-negative
     (#329 / Finding 7): a NaN or infinite threshold makes every ``>``
     comparison False, silently disabling the metric (and non-standard ``NaN``
     reaches JSON); a negative threshold makes a zero delta (an unchanged file)
@@ -344,9 +359,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     uncovered_sweep: bool | None = (
         raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
     )
-    # quality_gate_enabled: bool only, same degrade-to-None rule. The delta
-    # thresholds are finite non-negative floats (reject bool, coerce ints,
-    # reject negative / NaN / inf) via _coerce_quality_threshold.
+    # quality_gate_enabled: bool only, same degrade-to-None rule. The delta AND
+    # absolute thresholds are finite non-negative floats (reject bool, coerce
+    # ints, reject negative / NaN / inf) via _coerce_quality_threshold.
     raw_quality_gate_enabled = merged.get("quality_gate_enabled")
     quality_gate_enabled: bool | None = (
         raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
@@ -374,6 +389,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         quality_gate_enabled=quality_gate_enabled,
         quality_gate_erosion_delta=_coerce_quality_threshold(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_quality_threshold(merged.get("quality_gate_verbosity_delta")),
+        quality_gate_erosion_absolute=_coerce_quality_threshold(merged.get("quality_gate_erosion_absolute")),
+        quality_gate_verbosity_absolute=_coerce_quality_threshold(merged.get("quality_gate_verbosity_absolute")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),

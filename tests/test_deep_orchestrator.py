@@ -42,6 +42,7 @@ from tests.harness.stub_backend import (
 )
 
 if TYPE_CHECKING:
+    from daydream.config_file import DaydreamFileConfig
     from daydream.pr_review import PRInfo
     from daydream.runner import RunConfig
 
@@ -996,7 +997,7 @@ async def _run_quality_gate_fixture(
     mute_side_effects: Mute,
     *,
     fix_edit_line: str | None = _FIX_EDIT_VERBOSE,
-    file_config: Any = None,
+    file_config: DaydreamFileConfig | None = None,
 ) -> int:
     """Drive a deep run to the fix phase over *target*, editing api.py verbosely.
 
@@ -1138,12 +1139,25 @@ async def test_fix_quality_gate_fail_open(
     def _boom(*_args: object, **_kwargs: object) -> dict:
         raise RuntimeError("analyzer down")
 
+    from daydream.config_file import DaydreamFileConfig
+
     monkeypatch.setattr("daydream.eval.analyzer.analyze_quality", _boom)
-    exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
+    exit_code = await _run_quality_gate_fixture(
+        multi_stack_target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=1.25,
+            quality_gate_verbosity_absolute=2.5,
+        ),
+    )
     assert exit_code == 0
 
     gate = _read_quality_gate(multi_stack_target)
     assert gate["enabled"] is True
+    assert gate["erosion_absolute_threshold"] == 1.25
+    assert gate["verbosity_absolute_threshold"] == 2.5
     unavailable = gate["rounds"][0]["unavailable"]
     assert unavailable["stage"] == "before"
     assert "analyzer down" in unavailable["reason"]
@@ -1179,6 +1193,91 @@ async def test_fix_quality_gate_flags_undefined_baseline_erosion(
     assert entry["flagged"] is True
 
 
+async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329): an empty file uses the verbosity absolute fallback."""
+    from daydream.config_file import DaydreamFileConfig
+
+    target = _build_gate_target_no_functions(tmp_path, "gate_undefined_verbosity")
+    (target / "api.py").write_text("\n")
+    exit_code = await _run_quality_gate_fixture(
+        target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=100.0,
+            quality_gate_erosion_delta=100.0,
+            quality_gate_verbosity_delta=100.0,
+            quality_gate_verbosity_absolute=0.0,
+        ),
+    )
+    assert exit_code == 0
+
+    entry = _read_quality_gate(target)["rounds"][0]["per_file"]["api.py"]
+    assert entry["verbosity_before"] is None
+    assert entry["verbosity_after"] is not None
+    assert entry["verbosity_after"] > 0.0
+    assert entry["verbosity_delta"] is None
+    assert entry["flagged"] is True
+
+
+async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#315/#329): the ABSOLUTE knob, not the delta one, gates undefined baselines.
+
+    Pre-fix api.py has no functions, so ``erosion_before`` is ``None`` and no
+    delta exists -- the delta thresholds (left at their 0.05 defaults) can
+    never fire on this shape. The fix adds a CC>10 function (``erosion_after``
+    ~1.0, which the default 0.05 ABSOLUTE threshold would flag -- see
+    ``test_fix_quality_gate_flags_undefined_baseline_erosion``). A HIGH
+    absolute threshold must suppress the flag despite the delta defaults, and
+    the persisted payload must carry the absolute thresholds that actually
+    decided the verdict. Verbosity knobs are raised out of the way so the
+    flagged bit isolates the erosion absolute branch.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    target = _build_gate_target_no_functions(tmp_path, "gate_absolute_threshold")
+    exit_code = await _run_quality_gate_fixture(
+        target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        fix_edit_line=_FIX_EDIT_ERODED,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=100.0,
+            quality_gate_verbosity_absolute=100.0,
+            quality_gate_verbosity_delta=100.0,
+        ),
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(target)
+    assert gate["enabled"] is True
+    assert gate["erosion_absolute_threshold"] == 100.0
+    assert gate["verbosity_absolute_threshold"] == 100.0
+    assert gate["erosion_delta_threshold"] == 0.05
+    assert gate["verbosity_delta_threshold"] == 100.0
+    entry = gate["rounds"][0]["per_file"]["api.py"]
+    assert entry["erosion_before"] is None
+    assert entry["erosion_after"] is not None
+    assert entry["erosion_after"] > 0.05
+    assert entry["erosion_delta"] is None
+    assert entry["flagged"] is False, (
+        "the absolute threshold (100.0), not the delta default (0.05), must decide the "
+        "undefined-baseline branch"
+    )
+
+
 async def test_fix_quality_gate_artifact_bound_to_current_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1209,9 +1308,17 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
         json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         for d in (archive_dir / "runs").iterdir()
     ]
-    archived_sessions = {m["session_id"] for m in manifests}
-    assert alpha_gate["session_id"] in archived_sessions
-    assert beta_gate["session_id"] in archived_sessions
+    # Per-manifest correspondence: the manifest that carries session A's
+    # verdict must BE session A's manifest, and vice versa. manifest["session_id"]
+    # comes from the recorder; manifest["fix_quality_gate"]["session_id"] comes
+    # from the gate artifact, so a swapped verdict would fail this binding.
+    by_session = {m["session_id"]: m for m in manifests}
+    assert alpha_gate["session_id"] in by_session
+    assert beta_gate["session_id"] in by_session
+    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] == alpha_gate["session_id"]
+    assert by_session[beta_gate["session_id"]]["fix_quality_gate"]["session_id"] == beta_gate["session_id"]
+    # The two verdicts are distinct artifacts: alpha's manifest never carries beta's verdict.
+    assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] != beta_gate["session_id"]
 
 
 async def test_fix_quality_gate_flags_unparseable_post_fix_file(
@@ -1231,13 +1338,11 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
     """
     from daydream.eval import analyzer as analyzer_mod
 
-    calls = {"n": 0}
     real_analyze = analyzer_mod.analyze_quality
 
     def _stub(daydream_dir: Any) -> dict[str, Any]:
-        calls["n"] += 1
         result = real_analyze(daydream_dir)
-        if calls["n"] == 2:
+        if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {
                 rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
             }

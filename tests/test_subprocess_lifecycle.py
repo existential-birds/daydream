@@ -68,7 +68,7 @@ async def test_terminate_process_releases_fds() -> None:
     base = _fd_count()
     proc = await _spawn_holder()
     await terminate_process(proc)
-    assert _fd_count() == base
+    await _wait_for_fd_count(base)
 
 
 async def test_terminate_process_is_idempotent() -> None:
@@ -90,7 +90,7 @@ async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
 
     for pgid in pgids:
         await _wait_for_group_gone(pgid)
-    assert _fd_count() == base
+    await _wait_for_fd_count(base)
 
 
 async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
@@ -135,6 +135,27 @@ async def _wait_for_group_gone(pgid: int, *, timeout_s: float = 10.0) -> None:
             return
         if loop.time() > deadline:
             raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
+        await asyncio.sleep(0.01)
+
+
+async def _wait_for_fd_count(base: int, *, timeout_s: float = 10.0) -> None:
+    """Await the fd count's return to *base* (a readiness wait, not a fixed sleep).
+
+    The transport close releases the pipe fds, but the release lands in the
+    event loop's connection_lost processing — asserting equality in the same
+    tick as teardown races the loop on a loaded host (CI runners, parallel
+    suites), the same failure mode ``_wait_for_group_gone`` documents. Polling
+    until the count returns makes the assertion deterministic; the loop exits
+    the moment the baseline is reached and the timeout is a failure bound, not
+    a synchronization delay.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    while _fd_count() != base:
+        if loop.time() > deadline:
+            raise TimeoutError(
+                f"fd count {_fd_count()} did not return to baseline {base} after {timeout_s}s"
+            )
         await asyncio.sleep(0.01)
 
 
@@ -218,4 +239,4 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
 
     assert pgid is not None
     await _wait_for_group_gone(pgid)
-    assert _fd_count() == base_fds
+    await _wait_for_fd_count(base_fds)

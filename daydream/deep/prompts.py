@@ -28,6 +28,10 @@ from daydream.phases import (
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.wire_contract import (
+    WIRE_CONTRACT_GENERIC_INSTRUCTION,
+    WIRE_CONTRACT_RUST_INSTRUCTION,
+)
 
 DOC_REVIEW_NOTICE = (
     "[Notice] Dedicated documentation review (beagle-docs) is planned but not yet "
@@ -427,6 +431,8 @@ def build_per_stack_prompt(
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
+    if stack_name == "rust":
+        parts.append(WIRE_CONTRACT_RUST_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
 
@@ -994,5 +1000,6 @@ def build_generic_fallback_prompt(
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
+    parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
