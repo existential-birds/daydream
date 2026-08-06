@@ -17,6 +17,7 @@ Exports:
 from __future__ import annotations
 
 import logging
+import math
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,23 @@ class DaydreamFileConfig:
             ``0`` removes the floor; a negative value degrades to ``None`` (the
             named default applies). ``None`` falls through to the RunConfig field /
             ``config.DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
+        quality_gate_enabled: Issue #315. Toggle the fix-phase anti-degradation
+            quality gate. ``None`` falls through to the orchestrator default
+            (``config.DEFAULT_QUALITY_GATE_ENABLED``, ``True``); ``False`` skips
+            the whole computation and writes ``{"enabled": false}``.
+        quality_gate_erosion_delta: Issue #315. Per-file erosion-delta threshold
+            above which a fixed file is flagged. Finite non-negative only: a
+            negative, NaN, or infinite value degrades to ``None`` (the named
+            default applies) so a bad threshold can neither flag every unchanged
+            file (a negative floor is exceeded by any delta) nor silently
+            disable the metric (every comparison against NaN is False).
+            ``None`` falls through to
+            ``config.DEFAULT_QUALITY_GATE_EROSION_DELTA`` (0.05).
+        quality_gate_verbosity_delta: Issue #315. Per-file verbosity-delta
+            threshold above which a fixed file is flagged. Finite non-negative
+            only, same degrade-to-``None`` rule as ``quality_gate_erosion_delta``.
+            ``None`` falls through to
+            ``config.DEFAULT_QUALITY_GATE_VERBOSITY_DELTA`` (0.05).
         supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
             ``"llm"``), or None when unset/invalid.
         supervisor_deny_globs: Repository-relative deny globs shared by findings
@@ -93,6 +111,9 @@ class DaydreamFileConfig:
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
+    quality_gate_enabled: bool | None = None
+    quality_gate_erosion_delta: float | None = None
+    quality_gate_verbosity_delta: float | None = None
     supervisor: str | None = None
     supervisor_deny_globs: list[str] = field(default_factory=list)
     tool_supervisor: str | None = None
@@ -258,6 +279,23 @@ def _coerce_float(raw: Any) -> float | None:
     return None
 
 
+def _coerce_quality_threshold(raw: Any) -> float | None:
+    """Return ``raw`` as a finite non-negative float, else None (degrade to default).
+
+    The quality-gate delta thresholds must be finite and non-negative
+    (#329 / Finding 7): a NaN or infinite threshold makes every ``>``
+    comparison False, silently disabling the metric (and non-standard ``NaN``
+    reaches JSON); a negative threshold makes a zero delta (an unchanged file)
+    exceed it, flagging files that did not regress. Anything invalid --
+    negative, NaN, inf, bool, or non-number -- degrades to ``None`` so the
+    ``config.py`` default applies.
+    """
+    value = _coerce_float(raw)
+    if value is None or not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
 def _coerce_string_list(raw: Any) -> list[str]:
     """Return a list of strings, or an empty list for malformed values."""
     if not isinstance(raw, list) or not all(isinstance(value, str) for value in raw):
@@ -306,6 +344,13 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     uncovered_sweep: bool | None = (
         raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
     )
+    # quality_gate_enabled: bool only, same degrade-to-None rule. The delta
+    # thresholds are finite non-negative floats (reject bool, coerce ints,
+    # reject negative / NaN / inf) via _coerce_quality_threshold.
+    raw_quality_gate_enabled = merged.get("quality_gate_enabled")
+    quality_gate_enabled: bool | None = (
+        raw_quality_gate_enabled if isinstance(raw_quality_gate_enabled, bool) else None
+    )
     improve = merged.get("improve")
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
@@ -326,6 +371,9 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
         uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
+        quality_gate_enabled=quality_gate_enabled,
+        quality_gate_erosion_delta=_coerce_quality_threshold(merged.get("quality_gate_erosion_delta")),
+        quality_gate_verbosity_delta=_coerce_quality_threshold(merged.get("quality_gate_verbosity_delta")),
         supervisor=_coerce_choice(merged.get("supervisor"), {"off", "rules", "llm"}),
         supervisor_deny_globs=_coerce_string_list(merged.get("supervisor_deny_globs")),
         tool_supervisor=_coerce_choice(merged.get("tool_supervisor"), {"off", "rules"}),

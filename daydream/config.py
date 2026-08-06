@@ -77,6 +77,17 @@ TEST_WALL_BUDGET_S = 3600.0
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 
+# Issue #315: anti-degradation quality gate. Fail-open: flags and surfaces
+# erosion/verbosity growth on files the fix phase edited; never aborts the run
+# (the test gate stays the hard gate). Deltas are per-file before/after ratios
+# from ``analyze_quality``; a file whose delta exceeds a threshold is flagged in
+# ``deep/fix-quality-gate.json`` and the run manifest. Overridable via
+# ``[tool.daydream]`` (``quality_gate_enabled`` / ``quality_gate_erosion_delta`` /
+# ``quality_gate_verbosity_delta``); resolved in ``_step_fix``.
+DEFAULT_QUALITY_GATE_ENABLED = True
+DEFAULT_QUALITY_GATE_EROSION_DELTA = 0.05
+DEFAULT_QUALITY_GATE_VERBOSITY_DELTA = 0.05
+
 # Plan writers are long, expensive turns and hit Pi's provider rate limit when
 # they inherit the standard/deep audit fanout of ten. Keep plan generation at
 # the prior stable Pi fanout while audit retains its independent tier ceiling.

@@ -30,6 +30,9 @@ from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
+    DEFAULT_QUALITY_GATE_ENABLED,
+    DEFAULT_QUALITY_GATE_EROSION_DELTA,
+    DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_UNCOVERED_SWEEP_ENABLED,
     DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
@@ -38,7 +41,7 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
-from daydream.config_file import _coerce_non_negative_int
+from daydream.config_file import _coerce_non_negative_int, _coerce_quality_threshold
 from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
 from daydream.deep.artifacts import (
     adjudication_complete_path,
@@ -49,6 +52,7 @@ from daydream.deep.artifacts import (
     diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
+    fix_quality_gate_path,
     generated_file_violations_path,
     merged_items_path,
     merged_report_path,
@@ -1981,6 +1985,353 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
+def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
+
+    ``analyze_quality`` is pure and deterministic (no backend, no network), but
+    any failure here degrades to "gate unavailable" rather than failing the run
+    -- the anti-degradation gate is fail-open by design (#315). The failure
+    reason is returned so the gate can persist an auditable unavailable entry
+    instead of leaving a silent blank (#329).
+    """
+    try:
+        from daydream.eval.analyzer import analyze_quality
+
+        return analyze_quality(daydream_dir), None
+    except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _quality_delta(before: float | None, after: float | None) -> float | None:
+    """Rounded per-file metric delta; ``None`` when either side is undefined."""
+    if before is None or after is None:
+        return None
+    return round(after - before, 4)
+
+
+def _quality_flagged(
+    *,
+    erosion_before: float | None,
+    erosion_after: float | None,
+    erosion_delta: float | None,
+    verbosity_before: float | None,
+    verbosity_after: float | None,
+    verbosity_delta: float | None,
+    erosion_threshold: float,
+    verbosity_threshold: float,
+) -> bool:
+    """Whether a fixed file regressed past a threshold (#315).
+
+    A file is flagged when its delta exceeds the threshold (both sides
+    defined), or on its absolute AFTER value vs the same threshold when the
+    BEFORE metric is undefined -- no functions / no non-blank lines pre-fix --
+    but the AFTER metric is numeric. The absolute fallback fires on ANY file
+    with an undefined baseline, not just new ones, so an EXISTING file that
+    gains a CC>10 function (erosion ``None`` pre-fix) is still caught. A
+    metric with both sides undefined never flags.
+    """
+    if erosion_delta is not None and erosion_delta > erosion_threshold:
+        return True
+    if verbosity_delta is not None and verbosity_delta > verbosity_threshold:
+        return True
+    if erosion_before is None and erosion_after is not None and erosion_after > erosion_threshold:
+        return True
+    if verbosity_before is None and verbosity_after is not None and verbosity_after > verbosity_threshold:
+        return True
+    return False
+
+
+def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> float:
+    """Resolve a quality-gate delta threshold, degrading invalid values to *default*.
+
+    Mirrors ``_uncovered_sweep_max_files``: ``RunConfig`` field > file-config
+    scalar > default, then the same finite non-negative guard the file-config
+    parser applies (#329 / Finding 7). A negative threshold flags every
+    unchanged file (a zero delta exceeds it); a NaN/infinite one disables the
+    metric (every comparison against it is False) and writes a non-standard
+    ``NaN`` to JSON. Both degrade to the named default so a directly-constructed
+    ``RunConfig`` / ``DaydreamFileConfig`` cannot smuggle an invalid floor past
+    the parser.
+    """
+    value = _resolve_config_value(config, attr, default)
+    coerced = _coerce_quality_threshold(value)
+    return coerced if coerced is not None else default
+
+
+def _current_session_id() -> str | None:
+    """Session id binding the quality-gate artifact to the current run."""
+    recorder = get_current_recorder()
+    return recorder.session_id if recorder is not None else None
+
+
+def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:
+    """Load prior rounds for the CURRENT session, or start fresh when rebound.
+
+    Rounds are carried forward only when the artifact's stored ``session_id``
+    matches the current run's session (issue #329 / Finding 5): a ``--start-at
+    fix`` resume of the SAME session appends rather than clobbers, while an
+    artifact left by a DIFFERENT run is discarded with a warning so the first
+    run's verdicts can never be archived as the new run's (corrupting the
+    manifest / SQLite audit history). An artifact with no stored session is
+    treated as belonging to another session.
+
+    Never raises, and a malformed artifact is never treated as authoritative
+    prior rounds (issue #329 / Finding 6): invalid JSON, a non-object payload
+    (``[]``, ``42``, ...), a missing ``rounds`` list, or non-object round
+    entries all degrade to an empty round list WITH a warning, so the current
+    run repairs the artifact instead of silently losing the gate.
+    """
+    try:
+        raw = gate_p.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        existing = json.loads(raw)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        existing = None
+    if not isinstance(existing, dict):
+        print_warning(console, f"Quality gate artifact {gate_p} is malformed; starting rounds fresh")
+        return []
+    if existing.get("session_id") != session_id:
+        print_warning(
+            console,
+            f"Quality gate artifact {gate_p} belongs to another run's session; "
+            "its rounds were not carried forward",
+        )
+        return []
+    existing_rounds = existing.get("rounds")
+    if not isinstance(existing_rounds, list):
+        print_warning(console, f"Quality gate artifact {gate_p} has no rounds list; starting rounds fresh")
+        return []
+    valid = [r for r in existing_rounds if isinstance(r, dict)]
+    if len(valid) != len(existing_rounds):
+        print_warning(console, f"Quality gate artifact {gate_p} has non-object round entries; dropping them")
+    return valid
+
+
+def _persist_quality_gate_unavailable(
+    *,
+    gate_p: Path,
+    rounds: list[dict[str, Any]],
+    round_no: int,
+    stage: str,
+    reason: str,
+    session_id: str | None,
+    erosion_delta_threshold: float,
+    verbosity_delta_threshold: float,
+) -> None:
+    """Persist an auditable ``unavailable`` round entry for THIS round.
+
+    Any existing entry with the same round number is dropped first, so an
+    unavailable verdict supersedes a stale successful one from the same round
+    (e.g. a ``--start-at fix`` resume). Never raises.
+    """
+    rounds = [r for r in rounds if r.get("round") != round_no]
+    rounds.append({"round": round_no, "unavailable": {"stage": stage, "reason": reason}})
+    gate_p.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "erosion_delta_threshold": erosion_delta_threshold,
+                "verbosity_delta_threshold": verbosity_delta_threshold,
+                "session_id": session_id,
+                "rounds": rounds,
+            },
+            indent=2,
+        )
+    )
+    print_warning(
+        console,
+        f"Quality gate unavailable (round {round_no}, {stage}): {reason}",
+    )
+
+
+def _evaluate_quality_gate(
+    *,
+    enabled: bool,
+    erosion_delta_threshold: float,
+    verbosity_delta_threshold: float,
+    daydream_dir: Path,
+    dd: Path,
+    candidates: set[str] | None,
+    before: dict[str, Any] | None,
+    before_unavailable_reason: str | None,
+    iteration: int | None,
+) -> None:
+    """Compute and persist the fix-phase quality-gate verdict (issue #315).
+
+    Fail-open by design: never raises, never stops the run. Every payload is
+    bound to the current run's ``session_id`` so a later archive step cannot
+    attribute another run's verdict to this one (#329). When disabled, writes
+    ``{"enabled": false}``. When the gate would run but cannot be evaluated --
+    a pre-fix capture failure, a post-fix capture failure, a changed-file
+    enumeration failure (``candidates`` is ``None``, #329 / Finding 6), or a
+    persist failure -- an explicit ``unavailable`` round entry is persisted for
+    THIS round with the failed stage and reason, superseding any stale verdict
+    for that round and keeping the failure auditable instead of reading as a
+    clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
+    (keyed by the flow's loop iteration when present, else the next sequence
+    number), so a resume or loop preserves the per-round trend. Flagged files
+    are surfaced as warnings with their before/after numbers.
+    """
+    session_id = _current_session_id()
+    try:
+        gate_p = fix_quality_gate_path(dd)
+        if not enabled:
+            gate_p.write_text(
+                json.dumps({"enabled": False, "session_id": session_id}, indent=2)
+            )
+            return
+        rounds = _load_quality_gate_rounds(gate_p, session_id)
+        round_no = iteration if iteration is not None else len(rounds) + 1
+        if candidates is None:
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="candidates",
+                reason="could not enumerate files changed by the fix pass against the pre-fix snapshot",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+            return
+        if before is None:
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="before",
+                reason=before_unavailable_reason or "pre-fix quality snapshot unavailable",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+            return
+        try:
+            from daydream.eval.analyzer import analyze_quality
+
+            after = analyze_quality(daydream_dir)
+        except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="after",
+                reason=f"{type(exc).__name__}: {exc}",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+            return
+        before_per_file: dict[str, Any] = before.get("per_file") or {}
+        after_per_file: dict[str, Any] = after.get("per_file") or {}
+
+        per_file: dict[str, dict[str, Any]] = {}
+        for rel in sorted(candidates):
+            before_entry = before_per_file.get(rel)
+            after_entry = after_per_file.get(rel)
+            if before_entry is None and after_entry is None:
+                continue
+            # Issue #329 / Finding 5: a candidate that parsed pre-fix but is
+            # MISSING from the post-fix analyzer output is unparseable after the
+            # fix (analyze_quality omits malformed files). Recording null
+            # after-metrics with ``flagged=false`` would read as a clean
+            # verdict, so mark it explicitly unavailable and flagged -- a fix
+            # that breaks a file is a regression, never a pass. Still fail-open:
+            # never raises, never stops the run.
+            if before_entry is not None and after_entry is None:
+                per_file[rel] = {
+                    "erosion_before": before_entry.get("erosion"),
+                    "erosion_after": None,
+                    "erosion_delta": None,
+                    "verbosity_before": before_entry.get("verbosity"),
+                    "verbosity_after": None,
+                    "verbosity_delta": None,
+                    "unparseable": True,
+                    "flagged": True,
+                    "reason": "file missing from post-fix analyzer output (unparseable?)",
+                }
+                continue
+            erosion_before = before_entry.get("erosion") if before_entry is not None else None
+            erosion_after = after_entry.get("erosion") if after_entry is not None else None
+            verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
+            verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
+            erosion_delta = _quality_delta(erosion_before, erosion_after)
+            verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
+            per_file[rel] = {
+                "erosion_before": erosion_before,
+                "erosion_after": erosion_after,
+                "erosion_delta": erosion_delta,
+                "verbosity_before": verbosity_before,
+                "verbosity_after": verbosity_after,
+                "verbosity_delta": verbosity_delta,
+                "flagged": _quality_flagged(
+                    erosion_before=erosion_before,
+                    erosion_after=erosion_after,
+                    erosion_delta=erosion_delta,
+                    verbosity_before=verbosity_before,
+                    verbosity_after=verbosity_after,
+                    verbosity_delta=verbosity_delta,
+                    erosion_threshold=erosion_delta_threshold,
+                    verbosity_threshold=verbosity_delta_threshold,
+                ),
+            }
+        rounds = [r for r in rounds if r.get("round") != round_no]
+        rounds.append({"round": round_no, "per_file": per_file})
+        payload = {
+            "enabled": True,
+            "erosion_delta_threshold": erosion_delta_threshold,
+            "verbosity_delta_threshold": verbosity_delta_threshold,
+            "session_id": session_id,
+            "rounds": rounds,
+        }
+        gate_p.write_text(json.dumps(payload, indent=2))
+        flagged = [rel for rel, entry in per_file.items() if entry["flagged"]]
+        if flagged:
+            lines = []
+            for rel in flagged:
+                entry = per_file[rel]
+                if entry.get("unparseable"):
+                    lines.append(f"  - {rel}: {entry['reason']}")
+                else:
+                    lines.append(
+                        f"  - {rel}: erosion {entry['erosion_before']} -> "
+                        f"{entry['erosion_after']}, verbosity "
+                        f"{entry['verbosity_before']} -> {entry['verbosity_after']}"
+                    )
+            print_warning(
+                console,
+                f"Quality gate flagged {len(flagged)} file(s) after fixes:\n" + "\n".join(lines),
+            )
+    except Exception as exc:  # noqa: BLE001 - fail-open: the gate must never fail the run
+        # Stage "persist": the payload itself could not be written. Record the
+        # failure as an unavailable round when the write path still works, and
+        # ALWAYS warn -- a gate failure that surfaces nothing reads as a clean
+        # pass, which is the exact hazard #329 describes.
+        try:
+            gate_p = fix_quality_gate_path(dd)
+            rounds = _load_quality_gate_rounds(gate_p, session_id)
+            round_no = iteration if iteration is not None else len(rounds) + 1
+            _persist_quality_gate_unavailable(
+                gate_p=gate_p,
+                rounds=rounds,
+                round_no=round_no,
+                stage="persist",
+                reason=f"{type(exc).__name__}: {exc}",
+                session_id=session_id,
+                erosion_delta_threshold=erosion_delta_threshold,
+                verbosity_delta_threshold=verbosity_delta_threshold,
+            )
+        except Exception as inner:  # noqa: BLE001 - nothing left to persist; stay fail-open
+            print_warning(
+                console,
+                f"Quality gate unavailable (round {iteration if iteration is not None else '?'}, "
+                f"persist): {type(exc).__name__}: {exc}; could not persist unavailable verdict "
+                f"({type(inner).__name__}: {inner})",
+            )
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
     from daydream import git_ops
@@ -2029,6 +2380,21 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # the config.py default. A runaway file group cannot silently dominate a run.
     group_wall_s = _resolve_config_value(config, "group_max_wall_s", DEFAULT_GROUP_MAX_WALL_S)
     group_serial = _resolve_config_value(config, "group_max_serial_items", DEFAULT_GROUP_MAX_SERIAL_ITEMS)
+    # Issue #315: anti-degradation quality gate. Capture the pre-fix quality
+    # snapshot before any fix runs; the post-fix capture + verdict happen after
+    # failure protection below. Fail-open: a snapshot failure means the gate is
+    # unavailable for this run, never a run failure.
+    quality_gate_enabled = _resolve_config_value(config, "quality_gate_enabled", DEFAULT_QUALITY_GATE_ENABLED)
+    quality_gate_erosion_delta = _quality_gate_threshold(
+        config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
+    )
+    quality_gate_verbosity_delta = _quality_gate_threshold(
+        config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
+    )
+    if quality_gate_enabled:
+        quality_before, quality_before_unavailable = _capture_quality_before(daydream_dir)
+    else:
+        quality_before, quality_before_unavailable = None, None
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2116,6 +2482,46 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     )
     if generated_guard_result is None:
         return Stop(1)
+    # Issue #315: post-fix anti-degradation gate over the files the fix phase
+    # edited. Tree is post-fix here (every applied or budget-preserved fix is
+    # intact); a regression is flagged and surfaced, never fatal.
+    #
+    # Issue #329 / Finding 6: gate every python file the fix pass changed, not
+    # just the finding-group targets. The fix agent is explicitly allowed to
+    # touch files outside a group's named file, so a regression in such a
+    # secondary file would otherwise bypass the gate, the artifact, the
+    # manifest, and SQLite. The candidate set is derived from the PRE-FIX git
+    # snapshot (clean tree -> HEAD; dirty tree -> the stash snapshot) -- the
+    # same base the generated-file guard and recommended-patch capture use --
+    # scoped to ``*.py``, then unioned with the finding-target files so finding
+    # targets stay covered even when their on-disk content did not change.
+    # Fail-open: if enumeration raises, candidates stay ``None`` and the gate
+    # persists an explicit ``unavailable`` verdict rather than gating on a
+    # partial candidate set.
+    quality_candidates: set[str] | None
+    if quality_gate_enabled:
+        try:
+            pre_fix_ref = pre_fix_snapshot or "HEAD"
+            changed_after_fix = git_ops.changed_files_against(
+                work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
+            )
+            quality_candidates = {path for path in changed_after_fix if path.endswith(".py")}
+            quality_candidates |= {item["file"] for item in ctx.data["items"] if item.get("file")}
+        except git_ops.GitError:
+            quality_candidates = None
+    else:
+        quality_candidates = set()
+    _evaluate_quality_gate(
+        enabled=quality_gate_enabled,
+        erosion_delta_threshold=quality_gate_erosion_delta,
+        verbosity_delta_threshold=quality_gate_verbosity_delta,
+        daydream_dir=daydream_dir,
+        dd=dd,
+        candidates=quality_candidates,
+        before=quality_before,
+        before_unavailable_reason=quality_before_unavailable,
+        iteration=ctx.data.get("iteration"),
+    )
     return None
 
 

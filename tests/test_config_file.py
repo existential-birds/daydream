@@ -187,3 +187,74 @@ def test_empty_config_helper() -> None:
     cfg = DaydreamFileConfig()
     assert cfg.model is None and cfg.backend is None
     assert cfg.phase_model("fix") is None and cfg.phase_backend("review") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(-0.1, None, id="negative"),
+        pytest.param(float("nan"), None, id="nan"),
+        pytest.param(float("inf"), None, id="inf"),
+        pytest.param(float("-inf"), None, id="negative-inf"),
+        pytest.param(True, None, id="bool"),
+        pytest.param("0.05", None, id="string"),
+        pytest.param([0.05], None, id="list"),
+        pytest.param(None, None, id="absent"),
+        pytest.param(0, 0.0, id="zero"),
+        pytest.param(0.05, 0.05, id="valid"),
+        pytest.param(100, 100.0, id="int-coerced"),
+    ],
+)
+def test_quality_gate_threshold_coercion(raw: object, expected: float | None) -> None:
+    """#329/Finding 7: quality-gate thresholds accept only finite non-negative values.
+
+    A negative threshold would flag every unchanged file (a zero delta exceeds
+    it); NaN/inf would silently disable the metric (every comparison is False)
+    and write non-standard ``NaN`` into JSON; bool/string/list are never
+    meaningful floors. Each invalid input degrades to ``None`` so the
+    ``config.py`` default applies.
+    """
+    from daydream.config_file import _coerce_quality_threshold
+
+    value = _coerce_quality_threshold(raw)
+    if expected is None:
+        assert value is None
+    else:
+        assert value == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("-0.1", id="negative"),
+        pytest.param("nan", id="nan"),
+        pytest.param("inf", id="inf"),
+        pytest.param("true", id="bool"),
+        pytest.param('"0.25"', id="string"),
+    ],
+)
+def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, value: str) -> None:
+    """#329/Finding 7: invalid thresholds in ``.daydream.toml`` degrade to None.
+
+    Exercises the real TOML parse path: negative, NaN, inf, bool, and string
+    values for either threshold key land as ``None`` in the loaded config, so
+    ``_step_fix`` resolves the named default rather than a gate-breaking floor.
+    """
+    (tmp_path / ".daydream.toml").write_text(
+        f"quality_gate_erosion_delta = {value}\n"
+        f"quality_gate_verbosity_delta = {value}\n"
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.quality_gate_erosion_delta is None
+    assert cfg.quality_gate_verbosity_delta is None
+
+
+def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> None:
+    """#329/Finding 7: valid thresholds parse through unchanged."""
+    (tmp_path / ".daydream.toml").write_text(
+        "quality_gate_erosion_delta = 0.0\n"
+        "quality_gate_verbosity_delta = 0.25\n"
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.quality_gate_erosion_delta == 0.0
+    assert cfg.quality_gate_verbosity_delta == 0.25

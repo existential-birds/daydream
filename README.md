@@ -242,9 +242,23 @@ sources:
 | `uncovered_sweep_max_files` | `10` | Cap on how many uncovered files are swept in one run; files beyond the cap are recorded in `coverage-stats.json` as `sweep_skipped_capacity` (and named in `sweep_skipped_capacity_files`) rather than silently dropped. `0` sweeps nothing. |
 | `uncovered_sweep_min_hunk_lines` | `5` | A file counts as sweepable only when its hunks contain at least this many added/removed lines. `0` removes the floor (every uncovered file is eligible). |
 
-Resolution precedence is the standard **CLI > config file > default**; a
-negative value (any tier) degrades to the named default, so an invalid floor can
-never make zero-change/trivial blocks eligible.
+The fix-phase anti-degradation quality gate (issue #315) is configured with
+file-config keys in the same two sources:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `quality_gate_enabled` | `true` | Toggle the fix-phase anti-degradation quality gate. `false` skips the computation and writes `{"enabled": false}`. |
+| `quality_gate_erosion_delta` | `0.05` | Per-file erosion-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+| `quality_gate_verbosity_delta` | `0.05` | Per-file verbosity-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
+
+The gate is fail-open: a flagged file (or an unavailable verdict) surfaces as a
+warning plus a manifest record, never an aborted run.
+
+Resolution precedence is the standard **CLI > config file > default**. Both
+thresholds are clamped to finite non-negative numbers at parse time and again at
+resolution time: a negative value would flag every unchanged file (a zero delta
+exceeds it) and a `NaN`/`inf` value would silently disable the metric, so any
+invalid value degrades to the named default.
 
 The LLM supervisor uses one batched call. Configure its model under
 `[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).

@@ -228,6 +228,9 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "wall_clock_seconds": manifest.wall_clock_seconds,
                 "erosion": manifest.erosion,
                 "verbosity": manifest.verbosity,
+                "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
+                if manifest.fix_quality_gate is not None
+                else None,
                 "total_prompt_tokens": manifest.total_prompt_tokens,
                 "total_completion_tokens": manifest.total_completion_tokens,
                 "total_cached_tokens": manifest.total_cached_tokens,
