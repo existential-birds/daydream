@@ -256,10 +256,11 @@ file-config keys in the same two sources:
 The gate is fail-open: a flagged file (or an unavailable verdict) surfaces as a
 warning plus a manifest record, never an aborted run.
 
-Resolution precedence is the standard **CLI > config file > default**. Both
-thresholds are clamped to finite non-negative numbers at parse time and again at
-resolution time: a negative value would flag every unchanged file (a zero delta
-exceeds it) and a `NaN`/`inf` value would silently disable the metric, so any
+Resolution precedence is the standard **CLI > config file > default**. All four
+quality-gate thresholds are clamped to finite non-negative numbers at parse
+time and again at resolution time: a negative value would flag every unchanged
+file (a zero delta exceeds it) and a `NaN`/`inf` value would silently disable
+the metric, so any
 invalid value degrades to the named default.
 
 The LLM supervisor uses one batched call. Configure its model under

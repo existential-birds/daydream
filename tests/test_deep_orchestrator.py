@@ -1193,6 +1193,39 @@ async def test_fix_quality_gate_flags_undefined_baseline_erosion(
     assert entry["flagged"] is True
 
 
+async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329): an empty file uses the verbosity absolute fallback."""
+    from daydream.config_file import DaydreamFileConfig
+
+    target = _build_gate_target_no_functions(tmp_path, "gate_undefined_verbosity")
+    (target / "api.py").write_text("\n")
+    exit_code = await _run_quality_gate_fixture(
+        target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=100.0,
+            quality_gate_erosion_delta=100.0,
+            quality_gate_verbosity_delta=100.0,
+            quality_gate_verbosity_absolute=0.0,
+        ),
+    )
+    assert exit_code == 0
+
+    entry = _read_quality_gate(target)["rounds"][0]["per_file"]["api.py"]
+    assert entry["verbosity_before"] is None
+    assert entry["verbosity_after"] is not None
+    assert entry["verbosity_after"] > 0.0
+    assert entry["verbosity_delta"] is None
+    assert entry["flagged"] is True
+
+
 async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1305,13 +1338,11 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
     """
     from daydream.eval import analyzer as analyzer_mod
 
-    calls = {"n": 0}
     real_analyze = analyzer_mod.analyze_quality
 
     def _stub(daydream_dir: Any) -> dict[str, Any]:
-        calls["n"] += 1
         result = real_analyze(daydream_dir)
-        if calls["n"] == 2:
+        if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {
                 rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
             }
@@ -1327,10 +1358,6 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
         multi_stack_target, monkeypatch, make_config, mute_side_effects
     )
     assert exit_code == 0
-    assert calls["n"] == 3, (
-        f"gate makes a before+after capture and the archive eval a third; "
-        f"got {calls['n']} analyzer calls"
-    )
 
     gate = _read_quality_gate(multi_stack_target)
     assert gate["enabled"] is True

@@ -297,7 +297,7 @@ def _coerce_float(raw: Any) -> float | None:
 def _coerce_quality_threshold(raw: Any) -> float | None:
     """Return ``raw`` as a finite non-negative float, else None (degrade to default).
 
-    The quality-gate delta thresholds must be finite and non-negative
+    Quality-gate thresholds must be finite and non-negative
     (#329 / Finding 7): a NaN or infinite threshold makes every ``>``
     comparison False, silently disabling the metric (and non-standard ``NaN``
     reaches JSON); a negative threshold makes a zero delta (an unchanged file)
