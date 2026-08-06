@@ -34,6 +34,8 @@ def _paths(tmp_path: Path) -> _PromptPaths:
 
 def test_rust_wire_contract_requires_an_input_deserialization_contract() -> None:
     assert "#[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
+    assert "struct-level #[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
+    assert "with Default values" in WIRE_CONTRACT_RUST_INSTRUCTION
     assert "optional/custom deserialization contract" in WIRE_CONTRACT_RUST_INSTRUCTION
     assert "only affects output behavior" in WIRE_CONTRACT_RUST_INSTRUCTION
     assert "(or #[serde(skip_serializing_if" not in WIRE_CONTRACT_RUST_INSTRUCTION

@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
-from typing import Any
 
 from daydream.backends import CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
@@ -210,15 +209,14 @@ async def _run_deep(
     target: Path,
     backend: _DeepMockBackend,
     monkeypatch,
-    **config_overrides: Any,
+    shallow_fanout_threshold: int | None = None,
 ) -> int:
     """Common driver: wire mocks and execute the full deep pipeline.
 
-    ``config_overrides`` are forwarded to :class:`RunConfig`. The #311
-    wire-contract test passes ``shallow_fanout_threshold=0`` so its 2-file
-    fixture does not trigger the tiny-diff collapse (which would absorb the
-    generic bucket into the single rust assignment and suppress the
-    generic-fallback prompt).
+    ``shallow_fanout_threshold`` is forwarded to :class:`RunConfig`. The #311
+    wire-contract test passes ``0`` so its 2-file fixture does not trigger the
+    tiny-diff collapse (which would absorb the generic bucket into the single
+    rust assignment and suppress the generic-fallback prompt).
     """
     from daydream.exploration import ExplorationContext
     from daydream.runner import RunConfig, run
@@ -231,7 +229,7 @@ async def _run_deep(
         target=str(target),
         cleanup=False,
         exploration_context=ExplorationContext(),
-        **config_overrides,
+        shallow_fanout_threshold=shallow_fanout_threshold,
     )
     return await run(config)
 
@@ -552,7 +550,7 @@ async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
     delivered. Disabling the collapse restores the full pipeline so the rust
     per-stack and generic-fallback prompts both reach the backend seam.
     """
-    from daydream.deep.prompts import (
+    from daydream.prompts.wire_contract import (
         WIRE_CONTRACT_GENERIC_INSTRUCTION,
         WIRE_CONTRACT_RUST_INSTRUCTION,
     )

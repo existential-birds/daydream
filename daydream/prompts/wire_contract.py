@@ -1,5 +1,7 @@
 """Static wire-contract review policy for deep-review prompts."""
 
+__all__ = ["WIRE_CONTRACT_RUST_INSTRUCTION", "WIRE_CONTRACT_GENERIC_INSTRUCTION"]
+
 # Per-stack Rust wire-contract checklist (issue #311). This is kept outside the
 # prompt builder so the policy can be reviewed and tested independently.
 WIRE_CONTRACT_RUST_INSTRUCTION = (
