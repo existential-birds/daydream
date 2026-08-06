@@ -13,7 +13,7 @@ from tests.conftest import ExtDir
 @pytest.mark.parametrize(
     ("version", "skill"),
     [
-        pytest.param(4, "ro-core:v4-structure", id="supported-floor-and-ceiling"),
+        pytest.param(5, "ro-core:v5-structure", id="supported-floor-and-ceiling"),
     ],
 )
 def test_supported_extension_loads(ext_dir: ExtDir, version: int, skill: str) -> None:
@@ -29,12 +29,13 @@ def test_supported_extension_loads(ext_dir: ExtDir, version: int, skill: str) ->
 @pytest.mark.parametrize(
     ("declaration", "message"),
     [
-        pytest.param("99", r"99.*supports 4\.\.4", id="above-ceiling"),
-        pytest.param("0", r"= 0;.*supports 4\.\.4", id="below-floor"),
-        pytest.param("3", r"= 3;.*supports 4\.\.4", id="aged-out-v3"),
-        pytest.param("'1'", r"= '1';.*supports 4\.\.4", id="string"),
-        pytest.param("1.5", r"= 1\.5;.*supports 4\.\.4", id="float"),
-        pytest.param("True", r"= True;.*supports 4\.\.4", id="bool"),
+        pytest.param("99", r"99.*supports 5\.\.5", id="above-ceiling"),
+        pytest.param("0", r"= 0;.*supports 5\.\.5", id="below-floor"),
+        pytest.param("4", r"= 4;.*supports 5\.\.5", id="aged-out-v4"),
+        pytest.param("3", r"= 3;.*supports 5\.\.5", id="aged-out-v3"),
+        pytest.param("'1'", r"= '1';.*supports 5\.\.5", id="string"),
+        pytest.param("1.5", r"= 1\.5;.*supports 5\.\.5", id="float"),
+        pytest.param("True", r"= True;.*supports 5\.\.5", id="bool"),
     ],
 )
 def test_unsupported_extension_version_is_rejected(

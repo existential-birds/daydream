@@ -4751,6 +4751,69 @@ def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     assert collapsed == stacks  # unchanged
 
 
+def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
+    """#6: shallow with no ``--skill`` keeps the sole detected language skill.
+
+    A python-only diff routes via ``detect_stacks`` to ``python`` + ``generic``
+    (if any docs) + ``structure``. Shallow collapse must preserve the python
+    stack's Beagle skill instead of downgrading the combined assignment to the
+    generic-fallback reviewer.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "README.md"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "README.md"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+    # The docs file is absorbed into the preserved language stack.
+    assert set(combined.files) == {"api.py", "README.md"}
+
+
+def test_collapse_stacks_for_shallow_two_languages_falls_back_to_generic() -> None:
+    """#6: two real-language stacks cannot share one agent -> generic fallback."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "generic"
+    assert combined.skill_invocation is None
+    assert set(combined.files) == {"api.py", "App.tsx"}
+
+
+def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
+    """#6: an explicit ``--skill`` still names the combined assignment."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, skill="python")
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+
+
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
     """Count per-stack + structural review prompts in a captured call list.
 
@@ -5630,11 +5693,11 @@ async def test_skip_tier_writes_empty_alternatives(
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
+def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
 
-    assert EXTENSION_API_VERSION == 4
+    assert EXTENSION_API_VERSION == 5
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

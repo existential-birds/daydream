@@ -9,7 +9,7 @@ programs against, and the policy for when those names may change. A drift-guard
 test (`tests/test_extension_contract_doc.py`) pins this document to the
 registered inventories in the code.
 
-Current contract version: **`EXTENSION_API_VERSION = 4`** (supported: `4..4`).
+Current contract version: **`EXTENSION_API_VERSION = 5`** (supported: `5..5`).
 
 ## Extension module contract
 
@@ -23,7 +23,7 @@ daydream_ext/
 `__init__.py` must export exactly two things:
 
 ```python
-DAYDREAM_EXT_API = 4          # must be within daydream's supported range
+DAYDREAM_EXT_API = 5          # must be within daydream's supported range
 
 def register(registry):       # receives a daydream.extensions.Registry
     ...                       # mutate flows / skills / prompts / stacks here
@@ -120,21 +120,37 @@ not bump the version.
 
 ### Changelog
 
+- **Version 5** — **hard-breaking**. The `review` / `shallow` / `pr-feedback`
+  flows are gone; they collapsed into modes of the single `deep` flow (#330).
+  Their flow names, the `review` prompt slot, and the `phase:review` skill-slot
+  binding no longer exist. The `deep` flow inventory gained the feedback prefix
+  steps (`fetch-feedback`, `parse-feedback`, `fix-items`, `commit-push`,
+  `respond-feedback`) and the mode gates (review/comment/shallow/feedback are
+  `ctx.data["mode"]` values, not registered flows). Removing flow names and a
+  prompt slot is a breaking change to the flow and prompt inventories, so per
+  the policy above the floor rises to `5` in the same release: the supported
+  range is `5..5` and every fork must declare `DAYDREAM_EXT_API = 5`. Forks
+  that referenced `review`/`shallow`/`pr-feedback` flows, `--flow review`,
+  `override_prompt("review", …)`, or `override_skill("phase:review", …)` must
+  retarget: shallow/comment/review run the `deep` flow (replacing the per-stack
+  prompt, or inserting a step anchored to a `deep` step name), and the feedback
+  prefix is a mode of `deep`, not a separately registered flow.
 - **Version 4** — **hard-breaking**. The `alternatives` step is removed from
   the `deep` flow: the TTT alternative-review (wonder) now runs concurrently
   with the per-stack fan-out inside the `per-stack-reviews` step, so on a fresh
   multi-stack run the reviewers no longer wait for it. Removing a step name is a
   breaking change to the flow inventory, so per the policy above the floor rises
-  to `4` in the same release: the supported range is `4..4` and every fork must
-  declare `DAYDREAM_EXT_API = 4`. Forks that did `r.remove("deep",
-  "alternatives")` or `insert_after("deep", anchor="alternatives", ...)` must
-  retarget — `alternatives` is no longer a step name. `[tool.daydream.phases.wonder]`
+  to `4` in the same release: the supported range was `4..4` at the time.
+  Forks that did `r.remove("deep", "alternatives")` or
+  `insert_after("deep", anchor="alternatives", ...)` must retarget —
+  `alternatives` is no longer a step name. `[tool.daydream.phases.wonder]`
   is unchanged: the config key survives, resolved inside `per-stack-reviews`.
   Additive in the same release (no bump of their own): the `include_alternatives`
   kwarg on the `per-stack` / `structural` / `generic-fallback` prompts, the
   `inline_diff` kwarg on the `intent` / `alternatives` prompts, the
   `resumed_from_arbiter` kwarg on the `merge` prompt, and the `verify` prompt's
-  `output_path` becoming accepted-but-ignored.
+  `output_path` becoming accepted-but-ignored. (Version 5 later raised the
+  floor to `5`, so 4 is now aged out.)
 - **Version 3** — additive. Adds the `improve` flow and its steps, the
   `audit:<category>[:<stack>]` skill slots, and three new prompt slots: `audit`
   (kwargs `category`, `skill_invocation`, `group`, `scope_note`,
@@ -144,8 +160,8 @@ not bump the version.
   this release, so no v1 or v2 extension can have overridden them. No existing
   flow name, step name, prompt name, prompt kwarg, skill slot, or `Registry`
   method changed. The floor therefore stays at `1`: the supported range is
-  `1..3` at the time. (Version 4 later raised the floor to `4`, so 1-3 are now
-  aged out.)
+  `1..3` at the time. (Version 4 later raised the floor to `4`, and version 5
+  to `5`, so 1-3 are now aged out.)
 - **Version 2** — adds the synchronous tool-supervisor seam, the
   `ToolDecision` result, and the public `items_file` findings surface. Aged out
   by the version-4 floor raise.
@@ -299,7 +315,7 @@ key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 The improve run configuration also carries `improve_effort`, `improve_focus`,
 `improve_scope`, and `improve_plan_description`.
 
-Steps carry `enabled` predicates internally (tier gates, `--loop` mode,
+Steps carry `enabled` predicates internally (tier gates, mode gates,
 resume points); a step listed here may be skipped for a given run, but the
 name is stable.
 
@@ -332,18 +348,18 @@ name is stable.
 
 `phase:<name>` is the phase-bound slot convention: no `phase:*` slot is
 registered by default, but when a fork binds one, the phase resolves its skill
-from it (e.g. `phase:review` feeds shallow skill resolution; a custom phase
-reads its own `phase:<name>` slot).
+from it (a custom phase reads its own `phase:<name>` slot). The built-in deep
+flow binds no `phase:*` slots — the per-stack reviewer resolves its skill from
+the `stack:<name>` slots (or a fork `StackRule`), never from a `phase:*` slot.
 
 ### Prompts
 
-The 15 registered prompt names and the exact kwargs their builders receive
+The 14 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
 | Prompt | Kwargs |
 |--------|--------|
-| `review` | `skill_invocation`, `diff_instruction`, `review_output_path`, `exploration_dir`, `prior_commits` |
 | `intent` | `diff_path`, `branch`, `log`, `exploration_dir`, `pr_description`, `inline_diff` |
 | `alternatives` | `intent_summary`, `diff_path`, `exploration_dir`, `inline_diff` |
 | `fix` | `test_output`, `feedback_items` (both positional), `repo`, `concise_mode` |
@@ -453,7 +469,7 @@ import json
 
 from daydream.extensions import FlowStep, ToolDecision
 
-DAYDREAM_EXT_API = 4
+DAYDREAM_EXT_API = 5
 
 async def _filter_items(ctx):
     items_file = ctx.data["items_file"]
@@ -502,8 +518,10 @@ r.register_phase(FlowStep(name="verify", run=_my_verify), replace=True)
 Remove-and-reinsert individual steps, or set the whole flow at once:
 
 ```python
-r.set_flow("review", ["review-intent", "review-exploration", "review-alternatives",
-                      "emit-findings", "no-issues-exit", "post-comments"])
+r.set_flow("deep", ["exploration", "intent", "per-stack-reviews",
+                    "per-stack-parse", "cross-stack-merge", "load-items",
+                    "supervise", "post-review", "fix-gate", "verify",
+                    "fix", "test", "commit"])
 ```
 
 Flow entries are resolved against registered phases by `run_flow`'s pre-flight
@@ -513,9 +531,10 @@ their anchors eagerly.
 
 ### Selecting a flow
 
-The built-in flows dispatch through their existing flags and defaults: the
-default run selects `deep`, `--shallow` selects `shallow`, `--review`/`--comment`
-select `review`, and `daydream feedback <pr#>` selects `pr-feedback`.
+The built-in PR-process modes all run the `deep` flow; `--shallow`,
+`--review`/`--comment`, and `daydream feedback <pr#>` are mode gates on it,
+not separate flow names (#330). The only other registered flow is `improve`
+(`daydream improve <target>`).
 
 A newly registered flow is dispatched by name with `--flow <name>` (or
 `RunConfig(flow_name=...)`):
@@ -525,8 +544,8 @@ r.set_flow("ro-audit", ["ro_audit"])
 # daydream --flow ro-audit /path/to/project
 ```
 
-A built-in name passed to `--flow` (`deep`/`shallow`/`review`/`improve`) routes to its
-dedicated helper, so behavior matches the corresponding flag. `pr-feedback` is
+A built-in name passed to `--flow` (`deep`/`review`/`shallow`/`improve`) routes to its
+dedicated helper, so behavior matches the corresponding flag. `feedback` is
 not selectable via `--flow` (it needs a PR number and bot identity — use
 `daydream feedback`). An unregistered name errors with the same resolve check
 `daydream ext validate` runs.
@@ -557,21 +576,23 @@ r.override_skill("pr-feedback-fetch", "ro-core:fetch-pr-feedback")
 r.override_skill("pr-feedback-respond", "ro-core:respond-pr-feedback")
 ```
 
-### Bind a skill to a phase
+### Bind a skill to a custom phase
+
+A fork-defined step resolves its skill from a `phase:<name>` slot it binds
+itself:
 
 ```python
-r.override_skill("phase:review", "ro-python:review-python")
+r.override_skill("phase:ro_gate", "ro-core:gate-skill")
 ```
 
-Shallow skill resolution precedence: `--skill` (CLI) > `phase:review` slot
-(extension) > interactive menu, or the "Missing --skill" error when
-non-interactive. The slot sits at the config tier of the usual
-`CLI > config > default` chain.
+The built-in deep flow binds no `phase:*` slots — its per-stack reviewer
+resolves the `stack:<name>` slot, never a `phase:*` slot — so this binding
+only takes effect in a step that calls `registry.skill("phase:<name>")`.
 
 ### Override a prompt
 
 ```python
-r.override_prompt("review", my_builder)  # receives the exact built-in kwargs
+r.override_prompt("per-stack", my_builder)  # receives the exact built-in kwargs
 ```
 
 Override is wholesale: the builder's return value is the whole prompt. There
@@ -583,7 +604,7 @@ builders' outputs and are replaced along with them).
 ```python
 from daydream.extensions import FlowStep, get_registry
 
-DAYDREAM_EXT_API = 4
+DAYDREAM_EXT_API = 5
 
 def _ro_prompt(skill):
     return f"RO-GATE {skill}"

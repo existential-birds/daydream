@@ -91,8 +91,9 @@ class RunConfig:
             or "ios"). If None and shallow, prompts user.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
-        start_at: Phase to start at ("review", "parse", "fix", "test", "ttt",
-            "per-stack", or "merge").
+        start_at: Phase to start at ("review", "fix", "ttt", "per-stack", or
+            "merge"). parse/test are legacy shallow-loop stages with no mapping
+            in the unified pipeline and are rejected at the CLI.
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
         backend: Default backend to use ("claude" or "codex"). Default is None;

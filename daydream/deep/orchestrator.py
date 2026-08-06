@@ -1896,14 +1896,22 @@ async def _step_supervise(ctx: FlowContext) -> None:
     return None
 
 
-async def _step_post_review(ctx: FlowContext) -> None:
-    """Offer to post findings as inline PR review comments; ``--comment`` auto-posts."""
-    from daydream.pr_review import post_review_to_pr_from_report
+async def _step_post_review(ctx: FlowContext) -> Stop | None:
+    """Offer to post findings as inline PR review comments; ``--comment`` auto-posts.
+
+    In comment mode posting is the run's deliverable, so a missing PR or a
+    failed GitHub submission ends the run with exit code 1 instead of the
+    warn-and-continue the default deep flow gets (#8).
+    """
+    from daydream.pr_review import PostStatus, post_review_to_pr_from_report
 
     items_file: Path = ctx.data["items_file"]
-    await post_review_to_pr_from_report(
+    outcome = await post_review_to_pr_from_report(
         ctx.work.repo, items_file, console=console, post=_mode_of(ctx) == "comment"
     )
+    if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
+        return Stop(1)
+    return None
 
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
@@ -2948,19 +2956,52 @@ def _collapse_stacks_for_shallow(
 ) -> tuple[list[StackAssignment], bool]:
     """Force the single-stack assignment for shallow mode (#330).
 
-    Collapses every non-structural stack into one combined assignment (whose
-    skill is ``--skill`` when given, else generic) and keeps the structural
-    meta-stack separate, so structural findings stay correctly tagged
-    ``lens="structural"`` downstream. Returns ``(stacks, True)``.
+    Collapses every non-structural stack into one combined assignment and keeps
+    the structural meta-stack separate, so structural findings stay correctly
+    tagged ``lens="structural"`` downstream. Returns ``(stacks, True)``.
+
+    The combined assignment's skill, in precedence order:
+
+    - an explicit ``--skill`` (CLI) wins — the combined stack is named by it;
+    - otherwise a *sole* detected non-structural stack preserves its
+      per-language Beagle skill (e.g. ``beagle-python:review-python`` for a
+      Python diff), absorbing any generic/docs files — so ``daydream --shallow
+      <repo>`` without ``--skill`` uses the language reviewer instead of the
+      generic fallback (#6);
+    - otherwise (multiple real-language stacks — one agent cannot invoke two
+      per-language skills — or no real language at all) the combined assignment
+      uses the generic-fallback skill.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
-    combined = StackAssignment(
-        stack_name=config.skill or GENERIC_STACK,
-        skill_invocation=_shallow_skill_invocation(config),
-        files=combined_files,
-        is_docs_only=False,
-    )
+
+    non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
+    real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
+
+    if config.skill is not None:
+        combined = StackAssignment(
+            stack_name=config.skill,
+            skill_invocation=_shallow_skill_invocation(config),
+            files=combined_files,
+            is_docs_only=False,
+        )
+    elif len(real_language) == 1 and real_language[0].skill_invocation is not None:
+        # Skill-preservation: the sole real-language stack survives unchanged
+        # (mirrors ``_collapse_stacks_for_tiny_diff`` for code+docs diffs).
+        lang = real_language[0]
+        combined = StackAssignment(
+            stack_name=lang.stack_name,
+            skill_invocation=lang.skill_invocation,
+            files=combined_files,
+            is_docs_only=False,
+        )
+    else:
+        combined = StackAssignment(
+            stack_name=GENERIC_STACK,
+            skill_invocation=None,
+            files=combined_files,
+            is_docs_only=False,
+        )
     return [*structural, combined], True
 
 

@@ -60,6 +60,45 @@ async def test_fork_prompt_override_reaches_backend(
     assert review_prompts and "beagle-python:review-python" in review_prompts[0]
 
 
+async def test_shallow_without_skill_keeps_detected_language_skill(
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    mute_side_effects: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--shallow <repo>`` without ``--skill`` uses the detected language skill (#6).
+
+    The diff is `main.py` only, so ``detect_stacks`` routes it to the python
+    stack. Shallow collapse must preserve that stack's per-language Beagle
+    skill (``beagle-python:review-python``) when no explicit ``--skill`` is
+    given, instead of downgrading to the generic-fallback reviewer.
+    Observable outcome: the backend receives a per-stack prompt carrying the
+    python skill invocation.
+    """
+    # Pin skill availability to optimistic so the detected python stack is not
+    # re-routed to generic by D-16 (which depends on the host's installed
+    # Beagle plugins).
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    backend = ScriptedBackend(
+        events=(
+            TextEvent(text=""),
+            ResultEvent(structured_output={"issues": []}, continuation=None),
+        )
+    )
+    install_backend(backend)
+    mute_side_effects("daydream.deep.orchestrator")
+
+    rc = await runner.run(make_config(feature_branch_repo, shallow=True))
+
+    assert rc == 0
+    skilled = [p for p in backend.prompts if "beagle-python:review-python" in p]
+    assert skilled, (
+        "shallow with no --skill must keep the detected python skill "
+        "rather than fall back to the generic-fallback reviewer"
+    )
+
+
 def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:
     failure = (
         "    if _calls == 1:\n"

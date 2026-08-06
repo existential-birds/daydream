@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **extensions:** Bump the extension contract to v5 (hard-breaking, #330)
+
+  The `review` / `shallow` / `pr-feedback` flows collapsed into modes of the
+  single `deep` flow, so their flow names, the `review` prompt slot, and the
+  `phase:review` skill-slot binding are gone. `EXTENSION_API_VERSION` and
+  `MIN_SUPPORTED_EXTENSION_API_VERSION` both rise to `5` (supported range
+  `5..5`); extensions must declare `DAYDREAM_EXT_API = 5`.
+
 ## [0.25.0] - 2026-07-26
 
 ### Added

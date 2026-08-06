@@ -537,6 +537,123 @@ async def test_run_comment_does_not_prompt_for_skill(
     assert exit_code == 0
 
 
+@pytest.mark.asyncio
+async def test_run_comment_missing_pr_exits_nonzero(
+    tmp_path, monkeypatch, make_config
+):
+    """Comment mode chose posting as its deliverable: no open PR -> exit 1.
+
+    Drives ``runner.run`` for real (real temp worktree, stub backend only);
+    only ``pr_review.find_open_pr`` is mocked to report no PR, so the missing-PR
+    warning path runs production code end to end.
+    """
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: None)
+
+    config = make_config(tmp_path, output_mode="comment")
+
+    exit_code = await run(config)
+
+    assert exit_code == 1, "comment mode must fail when no open PR exists"
+
+
+@pytest.mark.asyncio
+async def test_run_comment_submission_failure_exits_nonzero(
+    tmp_path, monkeypatch, make_config
+):
+    """Comment mode: a failed GitHub review post -> exit 1.
+
+    Only ``_submit_review`` is mocked to fail; everything else (the review
+    pipeline, ``_post``, classification, payload build) runs production code.
+    """
+    from daydream.pr_review import PRInfo
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+
+    fake_pr = PRInfo(
+        number=7,
+        head_sha="0" * 40,
+        base_sha="1" * 40,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://example/pr/7",
+    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr(
+        "daydream.pr_review._submit_review",
+        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+    )
+
+    config = make_config(tmp_path, output_mode="comment")
+
+    exit_code = await run(config)
+
+    assert exit_code == 1, "comment mode must fail when the review post fails"
+
+
+@pytest.mark.asyncio
+async def test_run_loop_submission_failure_warns_and_continues(
+    tmp_path, monkeypatch, make_config
+):
+    """Default deep loop: a failed review post warns-and-continues (exit 0).
+
+    Posting is optional in loop mode, so a failed GitHub post must not abort the
+    run. The post gate is approved (interactive prompt path), the fix gate
+    declines, and the run still exits 0 with the report written.
+    """
+    from daydream.pr_review import PRInfo
+    from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    silence(monkeypatch, prompts=False)
+    install_stub_backend(monkeypatch, tmp_path)
+    force_interactive(monkeypatch)
+
+    fake_pr = PRInfo(
+        number=7,
+        head_sha="0" * 40,
+        base_sha="1" * 40,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://example/pr/7",
+    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr(
+        "daydream.pr_review._submit_review",
+        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+    )
+
+    # Approve the PR-post gate but decline the apply-fixes gate so the run ends
+    # after the report is written (no fix cycle / commit).
+    def _gate_prompt(console, message: str, default: str = "") -> str:
+        if "apply fix" in message.lower():
+            return "n"
+        return "y"
+
+    monkeypatch.setattr("daydream.agent.prompt_user", _gate_prompt)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    config = make_config(tmp_path, output_mode="loop")
+
+    exit_code = await run(config)
+
+    assert exit_code == 0, "deep loop must warn-and-continue on a failed PR post"
+    # The report the review produced is still on disk (the fix gate declined).
+    assert (tmp_path / ".review-output.md").exists()
+
+
 # Phase 02-04: Pre-scan exploration wiring
 
 

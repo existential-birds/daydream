@@ -26,6 +26,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +45,20 @@ if TYPE_CHECKING:
 
 
 # --- Data shapes ------------------------------------------------------------
+
+
+class PostStatus(Enum):
+    """Outcome of a PR-post attempt.
+
+    The deep flow treats every non-``POSTED`` state as warn-and-continue;
+    comment mode (``--comment``) treats ``NO_PR`` and ``FAILED`` as a failed
+    run because posting is its deliverable (#8).
+    """
+
+    POSTED = "posted"
+    NOTHING_TO_POST = "nothing-to-post"
+    NO_PR = "no-pr"
+    FAILED = "failed"
 
 
 @dataclass
@@ -142,7 +157,7 @@ async def post_review_to_pr_from_report(
     *,
     console: Console,
     post: bool = False,
-) -> None:
+) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
     Builds issues from the canonical item list (every lens, including
@@ -151,15 +166,20 @@ async def post_review_to_pr_from_report(
     findings, which live under ``## Structural Review``.
 
     ``post=True`` bypasses the interactive confirm gate (comment mode, #330).
+
+    Returns:
+        A :class:`PostStatus` describing the outcome so the caller can decide
+        whether a non-posting run is a failure (comment mode) or a
+        warn-and-continue (default deep flow).
     """
     if not merged_items_path.exists():
-        return
+        return PostStatus.NOTHING_TO_POST
     items = json.loads(merged_items_path.read_text()).get("items", [])
     issues = parsed_issues_from_items(items)
     if not issues:
         print_info(console, "No parseable issues in review output; skipping PR post.")
-        return
-    await _post(target_dir, issues, console=console, post=post)
+        return PostStatus.NOTHING_TO_POST
+    return await _post(target_dir, issues, console=console, post=post)
 
 
 # --- Parsers ---------------------------------------------------------------
@@ -974,21 +994,21 @@ async def _post(
     *,
     console: Console,
     post: bool = False,
-) -> None:
+) -> PostStatus:
     pr = find_open_pr(target_dir)
     if pr is None:
         print_warning(
             console,
             "No open PR found for the current branch; skipping PR post.",
         )
-        return
+        return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
     if classified.is_empty():
         print_info(
             console, "No postable issues after classification; skipping PR post."
         )
-        return
+        return PostStatus.NOTHING_TO_POST
 
     inline_files = sorted({c["path"] for c in classified.inline})
     summary = (
@@ -1007,7 +1027,7 @@ async def _post(
         default="n",
     ):
         print_info(console, "Skipped posting to PR.")
-        return
+        return PostStatus.NOTHING_TO_POST
 
     # File-level comments post first: a failure here has to fall back into the
     # review body, which is built below.
@@ -1034,9 +1054,10 @@ async def _post(
             else " No comments were posted."
         )
         print_warning(console, f"Failed to post PR review;{already}{suffix}")
-        return
+        return PostStatus.FAILED
 
     print_success(console, f"Posted review: {review_url}")
+    return PostStatus.POSTED
 
 
 def _submit_file_level_comments(

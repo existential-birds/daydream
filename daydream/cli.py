@@ -823,7 +823,9 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         dest="start_at",
         help=(
             "Start at a specific phase (default: review). "
-            "Choices: review | parse | fix | test | ttt | per-stack | merge. "
+            "Choices: review | fix | ttt | per-stack | merge. "
+            "parse/test are legacy shallow-loop stages with no mapping in the "
+            "unified pipeline and are rejected. "
             "ttt, per-stack, and merge are valid only in deep (non-shallow) mode."
         ) if full_help else argparse.SUPPRESS,
     )
@@ -940,12 +942,17 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
     if args.shallow and args.start_at in ("ttt", "per-stack", "merge"):
         parser.error(f"--start-at {args.start_at} is not valid with --shallow")
 
-    # parse/test resume points are ambiguous under deep mode (two parse points,
-    # no single test phase).
-    if not args.shallow and args.start_at in ("parse", "test"):
+    # parse/test are legacy shallow-loop resume points (#330). The unified
+    # pipeline has two parse phases and no single test phase, so "resume at
+    # parse/test" has no mapping — their artifacts and phases are gone. Reject
+    # them loudly in every mode rather than silently treating the run as fresh
+    # (which, combined with --yes, would re-review and apply+commit fixes the
+    # user did not ask to re-run).
+    if args.start_at in ("parse", "test"):
         parser.error(
-            f"--start-at {args.start_at} is not supported in deep mode "
-            "(use --shallow, or --start-at fix to resume after the merged report)"
+            f"--start-at {args.start_at} has no mapping in the unified pipeline "
+            "(the legacy shallow-loop phases are gone); "
+            "use --start-at fix to resume after the merged report"
         )
 
     if args.flow_name is not None:
