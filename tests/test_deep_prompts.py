@@ -1123,6 +1123,35 @@ def test_config_trace_instruction_stays_out_of_structural_prompt(tmp_path: Path)
     assert not leaked, f"config-trace anchors leaked into structural prompt: {leaked}"
 
 
+def _build_generic_fallback_for_310(tmp_path: Path) -> str:
+    p = _paths(tmp_path)
+    return build_generic_fallback_prompt(files=["config.yaml"], **p)
+
+
+def test_generic_fallback_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
+    """#310: config/env files without a stack land in the generic bucket, so the
+    fallback prompt carries the config-flow trace."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    assert "Config/env flow trace" in out
+    _assert_anchors(out, _CONFIG_TRACE_ANCHORS)
+
+
+def test_generic_fallback_prompt_includes_trust_model_check(tmp_path: Path) -> None:
+    """#310: security-relevant markers appear in config/env files, so the fallback
+    prompt carries the trust-model check too."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    assert "Trust-model check" in out
+    _assert_anchors(out, _TRUST_MODEL_ANCHORS)
+
+
+def test_cross_file_instruction_stays_out_of_generic_fallback_prompt(tmp_path: Path) -> None:
+    """#310: symbol-existence verification is the structural reviewer's job; it must
+    not leak into the generic-fallback prompt."""
+    out = _build_generic_fallback_for_310(tmp_path)
+    leaked = [anchor for anchor in _CROSS_FILE_ANCHORS if anchor in out]
+    assert not leaked, f"cross-file anchors leaked into generic-fallback prompt: {leaked}"
+
+
 def test_cross_file_additions_keep_existing_rubrics(tmp_path: Path) -> None:
     """#310 additivity guard: the new blocks are separate -- the existing rubric
     constants still appear unchanged in the builders that own them, so #311 lands

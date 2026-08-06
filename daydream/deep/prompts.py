@@ -992,5 +992,7 @@ def build_generic_fallback_prompt(
         "author's intent. Apply language-agnostic review practices."
     )
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
+    parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
+    parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(f"Write your full review to {output_path}.")
     return "\n\n".join(parts)
