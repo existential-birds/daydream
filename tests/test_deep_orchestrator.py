@@ -1180,6 +1180,58 @@ async def test_fix_quality_gate_flags_undefined_baseline_erosion(
     assert entry["flagged"] is True
 
 
+async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#315/#329): the ABSOLUTE knob, not the delta one, gates undefined baselines.
+
+    Pre-fix api.py has no functions, so ``erosion_before`` is ``None`` and no
+    delta exists -- the delta thresholds (left at their 0.05 defaults) can
+    never fire on this shape. The fix adds a CC>10 function (``erosion_after``
+    ~1.0, which the default 0.05 ABSOLUTE threshold would flag -- see
+    ``test_fix_quality_gate_flags_undefined_baseline_erosion``). A HIGH
+    absolute threshold must suppress the flag despite the delta defaults, and
+    the persisted payload must carry the absolute thresholds that actually
+    decided the verdict. Verbosity knobs are raised out of the way so the
+    flagged bit isolates the erosion absolute branch.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    target = _build_gate_target_no_functions(tmp_path, "gate_absolute_threshold")
+    exit_code = await _run_quality_gate_fixture(
+        target,
+        monkeypatch,
+        make_config,
+        mute_side_effects,
+        fix_edit_line=_FIX_EDIT_ERODED,
+        file_config=DaydreamFileConfig(
+            quality_gate_erosion_absolute=100.0,
+            quality_gate_verbosity_absolute=100.0,
+            quality_gate_verbosity_delta=100.0,
+        ),
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(target)
+    assert gate["enabled"] is True
+    assert gate["erosion_absolute_threshold"] == 100.0
+    assert gate["verbosity_absolute_threshold"] == 100.0
+    assert gate["erosion_delta_threshold"] == 0.05
+    assert gate["verbosity_delta_threshold"] == 100.0
+    entry = gate["rounds"][0]["per_file"]["api.py"]
+    assert entry["erosion_before"] is None
+    assert entry["erosion_after"] is not None
+    assert entry["erosion_after"] > 0.05
+    assert entry["erosion_delta"] is None
+    assert entry["flagged"] is False, (
+        "the absolute threshold (100.0), not the delta default (0.05), must decide the "
+        "undefined-baseline branch"
+    )
+
+
 async def test_fix_quality_gate_artifact_bound_to_current_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

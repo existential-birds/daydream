@@ -237,16 +237,21 @@ def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, 
     """#329/Finding 7: invalid thresholds in ``.daydream.toml`` degrade to None.
 
     Exercises the real TOML parse path: negative, NaN, inf, bool, and string
-    values for either threshold key land as ``None`` in the loaded config, so
+    values for any of the four threshold keys (the delta and the absolute
+    undefined-baseline knobs) land as ``None`` in the loaded config, so
     ``_step_fix`` resolves the named default rather than a gate-breaking floor.
     """
     (tmp_path / ".daydream.toml").write_text(
         f"quality_gate_erosion_delta = {value}\n"
         f"quality_gate_verbosity_delta = {value}\n"
+        f"quality_gate_erosion_absolute = {value}\n"
+        f"quality_gate_verbosity_absolute = {value}\n"
     )
     cfg = load_file_config(tmp_path)
     assert cfg.quality_gate_erosion_delta is None
     assert cfg.quality_gate_verbosity_delta is None
+    assert cfg.quality_gate_erosion_absolute is None
+    assert cfg.quality_gate_verbosity_absolute is None
 
 
 def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> None:
@@ -254,7 +259,11 @@ def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> N
     (tmp_path / ".daydream.toml").write_text(
         "quality_gate_erosion_delta = 0.0\n"
         "quality_gate_verbosity_delta = 0.25\n"
+        "quality_gate_erosion_absolute = 0.5\n"
+        "quality_gate_verbosity_absolute = 0.75\n"
     )
     cfg = load_file_config(tmp_path)
     assert cfg.quality_gate_erosion_delta == 0.0
     assert cfg.quality_gate_verbosity_delta == 0.25
+    assert cfg.quality_gate_erosion_absolute == 0.5
+    assert cfg.quality_gate_verbosity_absolute == 0.75

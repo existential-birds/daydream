@@ -31,7 +31,9 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
+    DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE,
     DEFAULT_QUALITY_GATE_EROSION_DELTA,
+    DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_TOOL_CALL_BUDGET,
     DEFAULT_UNCOVERED_SWEEP_ENABLED,
@@ -1985,19 +1987,21 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
-def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+async def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
     """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
 
     ``analyze_quality`` is pure and deterministic (no backend, no network), but
     any failure here degrades to "gate unavailable" rather than failing the run
     -- the anti-degradation gate is fail-open by design (#315). The failure
     reason is returned so the gate can persist an auditable unavailable entry
-    instead of leaving a silent blank (#329).
+    instead of leaving a silent blank (#329). The sync tree-walk runs off the
+    event loop so parallel fix fan-out is never blocked by the analyzer
+    (#329 / CodeRabbit Finding D).
     """
     try:
         from daydream.eval.analyzer import analyze_quality
 
-        return analyze_quality(daydream_dir), None
+        return await anyio.to_thread.run_sync(analyze_quality, daydream_dir), None
     except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -2019,30 +2023,35 @@ def _quality_flagged(
     verbosity_delta: float | None,
     erosion_threshold: float,
     verbosity_threshold: float,
+    erosion_absolute_threshold: float,
+    verbosity_absolute_threshold: float,
 ) -> bool:
     """Whether a fixed file regressed past a threshold (#315).
 
     A file is flagged when its delta exceeds the threshold (both sides
-    defined), or on its absolute AFTER value vs the same threshold when the
+    defined), or on its absolute AFTER value vs the absolute threshold when the
     BEFORE metric is undefined -- no functions / no non-blank lines pre-fix --
-    but the AFTER metric is numeric. The absolute fallback fires on ANY file
-    with an undefined baseline, not just new ones, so an EXISTING file that
-    gains a CC>10 function (erosion ``None`` pre-fix) is still caught. A
-    metric with both sides undefined never flags.
+    but the AFTER metric is numeric. The absolute yardstick is a SEPARATE knob
+    from the delta one (#329 / CodeRabbit Finding D): an undefined baseline has
+    no delta, so a delta threshold is the wrong ruler for the absolute
+    comparison. The absolute fallback fires on ANY file with an undefined
+    baseline, not just new ones, so an EXISTING file that gains a CC>10
+    function (erosion ``None`` pre-fix) is still caught. A metric with both
+    sides undefined never flags.
     """
     if erosion_delta is not None and erosion_delta > erosion_threshold:
         return True
     if verbosity_delta is not None and verbosity_delta > verbosity_threshold:
         return True
-    if erosion_before is None and erosion_after is not None and erosion_after > erosion_threshold:
+    if erosion_before is None and erosion_after is not None and erosion_after > erosion_absolute_threshold:
         return True
-    if verbosity_before is None and verbosity_after is not None and verbosity_after > verbosity_threshold:
+    if verbosity_before is None and verbosity_after is not None and verbosity_after > verbosity_absolute_threshold:
         return True
     return False
 
 
 def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> float:
-    """Resolve a quality-gate delta threshold, degrading invalid values to *default*.
+    """Resolve a quality-gate threshold (delta or absolute), degrading invalid values to *default*.
 
     Mirrors ``_uncovered_sweep_max_files``: ``RunConfig`` field > file-config
     scalar > default, then the same finite non-negative guard the file-config
@@ -2146,11 +2155,13 @@ def _persist_quality_gate_unavailable(
     )
 
 
-def _evaluate_quality_gate(
+async def _evaluate_quality_gate(
     *,
     enabled: bool,
     erosion_delta_threshold: float,
     verbosity_delta_threshold: float,
+    erosion_absolute_threshold: float,
+    verbosity_absolute_threshold: float,
     daydream_dir: Path,
     dd: Path,
     candidates: set[str] | None,
@@ -2172,7 +2183,9 @@ def _evaluate_quality_gate(
     clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
     (keyed by the flow's loop iteration when present, else the next sequence
     number), so a resume or loop preserves the per-round trend. Flagged files
-    are surfaced as warnings with their before/after numbers.
+    are surfaced as warnings with their before/after numbers. The post-fix
+    sync tree-walk runs off the event loop so parallel fix fan-out is never
+    blocked by the analyzer (#329 / CodeRabbit Finding D).
     """
     session_id = _current_session_id()
     try:
@@ -2211,7 +2224,7 @@ def _evaluate_quality_gate(
         try:
             from daydream.eval.analyzer import analyze_quality
 
-            after = analyze_quality(daydream_dir)
+            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir)
         except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -2275,6 +2288,8 @@ def _evaluate_quality_gate(
                     verbosity_delta=verbosity_delta,
                     erosion_threshold=erosion_delta_threshold,
                     verbosity_threshold=verbosity_delta_threshold,
+                    erosion_absolute_threshold=erosion_absolute_threshold,
+                    verbosity_absolute_threshold=verbosity_absolute_threshold,
                 ),
             }
         rounds = [r for r in rounds if r.get("round") != round_no]
@@ -2283,6 +2298,8 @@ def _evaluate_quality_gate(
             "enabled": True,
             "erosion_delta_threshold": erosion_delta_threshold,
             "verbosity_delta_threshold": verbosity_delta_threshold,
+            "erosion_absolute_threshold": erosion_absolute_threshold,
+            "verbosity_absolute_threshold": verbosity_absolute_threshold,
             "session_id": session_id,
             "rounds": rounds,
         }
@@ -2391,8 +2408,14 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     quality_gate_verbosity_delta = _quality_gate_threshold(
         config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
     )
+    quality_gate_erosion_absolute = _quality_gate_threshold(
+        config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
+    )
+    quality_gate_verbosity_absolute = _quality_gate_threshold(
+        config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
+    )
     if quality_gate_enabled:
-        quality_before, quality_before_unavailable = _capture_quality_before(daydream_dir)
+        quality_before, quality_before_unavailable = await _capture_quality_before(daydream_dir)
     else:
         quality_before, quality_before_unavailable = None, None
     async with phase_scope(DaydreamPhase.FIX):
@@ -2511,10 +2534,12 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             quality_candidates = None
     else:
         quality_candidates = set()
-    _evaluate_quality_gate(
+    await _evaluate_quality_gate(
         enabled=quality_gate_enabled,
         erosion_delta_threshold=quality_gate_erosion_delta,
         verbosity_delta_threshold=quality_gate_verbosity_delta,
+        erosion_absolute_threshold=quality_gate_erosion_absolute,
+        verbosity_absolute_threshold=quality_gate_verbosity_absolute,
         daydream_dir=daydream_dir,
         dd=dd,
         candidates=quality_candidates,
