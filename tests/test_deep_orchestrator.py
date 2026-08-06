@@ -3530,6 +3530,134 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     )
 
 
+# --cleanup / --no-cleanup (finding #6, R2 round on #330)
+
+
+async def test_cleanup_true_removes_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--cleanup`` deletes ``.review-output.md`` after a
+    successful shallow run.
+
+    Drives ``runner.run`` -> ``run_deep`` (shallow mode) with the stub backend
+    through the full fix cycle (fix gate auto-accepted via ``assume="yes"``,
+    test green, commit stubbed) and asserts the observable outcome: the report
+    is gone by the time the run returns 0.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a successful run"
+
+
+async def test_no_cleanup_retains_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--no-cleanup`` keeps ``.review-output.md``."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=False, assume="yes"))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=False must keep .review-output.md after a successful run"
+
+
+async def test_cleanup_true_removes_review_output_default_loop(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: the terminal cleanup also applies to the default
+    (deep loop) mode, not just shallow."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a deep run"
+
+
+async def test_cleanup_none_unattended_defaults_to_keep(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: an unspecified cleanup flag on an unattended run defaults to
+    KEEPING the report (the old ``safe_default=False``), without touching stdin.
+
+    Drives review mode (no fix cycle, so no ``assume`` is needed to reach the
+    terminal step) non-interactively. The report is written by ``load-items``
+    and must survive the terminal cleanup step untouched.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() called in unattended mode -- cleanup gate must not read stdin")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, output_mode="review", cleanup=None))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=None unattended must keep the report (safe_default=False)"
+
+
+async def test_cleanup_none_interactive_prompts_before_keeping(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: with cleanup unspecified and interactive stdin, the terminal
+    step prompts the user (the old shallow preamble's question); a "n" answer
+    keeps the report."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+    # Pin interactivity ON so the cleanup gate reaches the real prompt_user seam
+    # (review mode has no fix cycle, so this is the run's only prompt).
+    _force_interactive(monkeypatch)
+
+    asked: list[str] = []
+
+    def _record_prompt(console, message, default=""):
+        asked.append(message)
+        return "n"  # decline cleanup
+
+    monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
+    # Confirm the intent gate so the review spine proceeds; the cleanup prompt is
+    # the one under observation (routed through daydream.agent.prompt_user).
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(
+        make_config(multi_stack_target, output_mode="review", cleanup=None, non_interactive=False)
+    )
+
+    assert exit_code == 0
+    assert any("cleanup" in msg.lower() for msg in asked), (
+        f"cleanup=None interactive run must prompt; saw prompts: {asked!r}"
+    )
+    assert report.exists(), "declining the cleanup prompt must keep .review-output.md"
+
+
 # Git timeout under load (issue #120)
 
 

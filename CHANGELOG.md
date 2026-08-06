@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MIN_SUPPORTED_EXTENSION_API_VERSION` both rise to `5` (supported range
   `5..5`); extensions must declare `DAYDREAM_EXT_API = 5`.
 
+### Fixed
+
+- **deep:** Restore the `--cleanup` / `--no-cleanup` behavior dropped by the
+  single-flow collapse (#330)
+
+  A terminal `cleanup` step at the end of the unified `deep` flow again owns
+  the review-output cleanup: `--cleanup` removes `.review-output.md` after a
+  successful run, `--no-cleanup` keeps it, and an unspecified flag falls back
+  to the old shallow gate (interactive prompt, unattended default keeps). It
+  runs in every mode that writes the report (default loop, shallow, review,
+  comment) and only on successful completion; `feedback` mode writes no report
+  and is gated off.
+
 ## [0.25.0] - 2026-07-26
 
 ### Added

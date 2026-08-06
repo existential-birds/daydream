@@ -2599,6 +2599,41 @@ async def _step_commit(ctx: FlowContext) -> None:
     await phase_commit_push(ctx.backend_for("fix"), ctx.work)
 
 
+async def _step_cleanup(ctx: FlowContext) -> None:
+    """Terminal cleanup: remove the review output when enabled (#330).
+
+    Restores the shallow ``commit-gate`` semantics the single-flow collapse
+    dropped: ``--cleanup`` removes ``.review-output.md`` after a successful
+    run, ``--no-cleanup`` keeps it, and an unspecified flag falls back to the
+    old preamble gate (``--yes`` cleans up, unattended runs keep the artifact
+    via ``safe_default=False``, interactive runs prompt). This is the LAST
+    step, so every failure path (``Stop(1)`` short-circuits) skips it — a
+    failed or partial run keeps its evidence.
+    """
+    config = ctx.config
+    target_dir = ctx.work.repo
+
+    if config.cleanup is True:
+        enabled = True
+    elif config.cleanup is False:
+        enabled = False
+    else:
+        enabled = resolve_or_prompt(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=False,
+            question="Cleanup review output after completion? [y/N]",
+            default="n",
+        )
+
+    if not enabled:
+        return
+    review_output_path = target_dir / REVIEW_OUTPUT_FILE
+    if review_output_path.exists():
+        review_output_path.unlink()
+        print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
+
+
 async def _step_fetch_feedback(ctx: FlowContext) -> None:
     """Fetch bot review comments via the fetch-pr-feedback skill (feedback mode)."""
     await phase_fetch_pr_feedback(
@@ -2759,6 +2794,16 @@ def _fix_cycle_enabled(ctx: FlowContext) -> bool:
     return _mode_of(ctx) in ("loop", "shallow")
 
 
+def _cleanup_applies(ctx: FlowContext) -> bool:
+    """The terminal cleanup runs in every mode that writes ``.review-output.md``.
+
+    Loop/shallow/review/comment all render the report in ``load-items``;
+    feedback mode runs only the comment-fetch prefix and writes no report, so
+    it is gated off (a leftover report there is the user's own file).
+    """
+    return _mode_of(ctx) in ("loop", "shallow", "review", "comment")
+
+
 def _spine_enabled(ctx: FlowContext) -> bool:
     """The review spine is skipped entirely in feedback mode."""
     return not _feedback_mode(ctx)
@@ -2810,7 +2855,7 @@ def _spine_findings_out(ctx: FlowContext) -> bool:
 #     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
 #     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
 #     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
-#     test -> commit.
+#     test -> commit -> cleanup.
 #
 # ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
 # definition; ``run_deep`` keeps the preamble and delegates here via
@@ -2857,6 +2902,10 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
+    # Terminal cleanup (#330): the last step, so it only runs on successful
+    # completion. Review modes fall off the end after post-review; loop/shallow
+    # reach it after commit; feedback mode never writes the report.
+    FlowStep(name="cleanup", run=_step_cleanup, enabled=_cleanup_applies),
 )
 
 

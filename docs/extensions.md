@@ -284,6 +284,7 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 20 | `fix` | `fix` |
 | 21 | `test` | `test` |
 | 22 | `commit` | `fix` |
+| 23 | `cleanup` | `cleanup` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble: `feedback` runs only the prefix (steps 1-5, ending at
@@ -291,6 +292,12 @@ preamble: `feedback` runs only the prefix (steps 1-5, ending at
 `post-review` (the fix cycle is gated off, and `post-review` auto-posts for
 `comment`); `shallow` forces `single_stack_mode` (no arbiter / cross-stack
 merge); `loop` is the unchanged default fixing everything.
+
+`cleanup` (step 23) is the terminal step in every mode that writes the rendered
+report: it only runs on successful completion (any `Stop` short-circuits before
+it) and removes `.review-output.md` per `--cleanup` / `--no-cleanup` /
+interactive-or-unattended prompt defaults. It is gated off in `feedback` mode
+(no report is written there).
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of
