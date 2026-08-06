@@ -1104,42 +1104,6 @@ def _settled_decisions_block(prior_commits: str | None) -> str:
     )
 
 
-def build_review_prompt(
-    *,
-    skill_invocation: str = "",
-    diff_instruction: str = "",
-    review_output_path: str = "",
-    exploration_dir: Path | None = None,
-    prior_commits: str | None = None,
-) -> str:
-    """Assemble the prompt for `phase_review`.
-
-    Args:
-        skill_invocation: Backend-formatted skill invocation string.
-        diff_instruction: Diff scope instruction text.
-        review_output_path: Absolute path the agent should write its review to.
-        exploration_dir: Optional path to exploration output directory.
-        prior_commits: Oneline log of prior daydream commits on this branch.
-            When present, injected as settled-decisions context.
-    """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(_confidence_and_convention_instructions())
-    parts.append(_dependency_impact_instructions())
-    body = (
-        f"{skill_invocation}\n"
-        f"{diff_instruction}\n"
-        f"Write the full review output to {review_output_path}.\n"
-    )
-    parts.append(body)
-    return "\n".join(parts)
-
-
 def _inlineable_diff(diff_text: str | None) -> str | None:
     """The diff to inline, or ``None`` when it is absent or over budget.
 
@@ -1278,25 +1242,6 @@ def build_alternative_review_prompt(
 FixResult = tuple[dict[str, Any], bool, str | None]
 
 
-def revert_uncommitted_changes(cwd: Path) -> bool:
-    """Discard all uncommitted changes (tracked and untracked).
-
-    Used after a failed iteration to restore the last committed state.
-
-    Returns:
-        True if revert succeeded, False otherwise.
-
-    """
-    try:
-        git_ops.checkout_paths(cwd, [Path(".")])
-        git_ops.clean_untracked(cwd)
-    except GitError as e:
-        if not get_quiet_mode():
-            print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
-        return False
-    return True
-
-
 def _prior_daydream_commits(work: WorkContext) -> str | None:
     """Return oneline log of prior daydream commits on this branch."""
     return git_ops.daydream_commits(work.repo, work.base_branch)
@@ -1381,80 +1326,6 @@ Expected: {review_output_path}
 Run a full review first:
   daydream {target_dir}"""
         raise FileNotFoundError(msg)
-
-
-async def phase_review(
-    backend: Backend,
-    work: WorkContext,
-    skill: str,
-    *,
-    diff_base: str | None = None,
-    exploration_dir: Path | None = None,
-    exclude: list[str] | None = None,
-) -> None:
-    """Phase 1: Run review skill, write output to .review-output.md.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the run; ``work.repo`` is the agent cwd
-            and ``work.base_branch`` / ``work.base_sha`` drive the diff
-            instruction. Base resolution happens once in ``open_workspace``.
-        skill: The review skill to invoke (e.g., beagle:review-python)
-        diff_base: Optional commit SHA to diff against. When provided, the review
-            covers only changes since that commit (used for incremental reviews
-            in loop mode). When None, diffs against the resolved base branch.
-        exclude: Optional list of paths the agent should exclude when it runs
-            `git diff` itself. Applied via git's `:(exclude)` magic pathspec.
-
-    Raises:
-        Exception: If the agent fails to execute the review skill.
-    """
-    print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
-    print_dim(console, f"Model: {backend.model}")
-
-    # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = work.repo / REVIEW_OUTPUT_FILE
-    skill_invocation = backend.format_skill_invocation(skill)
-
-    if diff_base:
-        diff_instruction = (
-            f"\nReview ONLY the changes since commit {diff_base}. "
-            f"Use `git diff {diff_base}...HEAD` to get the diff.\n"
-        )
-    else:
-        # Full branch review: hand the agent the workspace's resolved base
-        # branch so Codex / Claude don't re-detect (and possibly disagree).
-        diff_instruction = (
-            f"\nReview the changes on the current branch compared to `{work.base_branch}`. "
-            f"Use `git diff {work.base_branch}...HEAD` to get the diff.\n"
-        )
-
-    if exclude:
-        excluded_paths = ", ".join(exclude)
-        pathspec_args = " ".join(f"':(exclude){p.rstrip('/')}'" for p in exclude)
-        base_for_example = diff_base or work.base_branch
-        ref = f"{base_for_example}...HEAD" if not diff_base else f"{diff_base}...HEAD"
-        diff_instruction += (
-            f"\nExclude these paths from the diff: {excluded_paths}. "
-            f"Use git pathspec magic, e.g. `git diff {ref} -- . {pathspec_args}`.\n"
-        )
-
-    prior_commits = _prior_daydream_commits(work)
-    prompt = get_registry().prompt("review")(
-        skill_invocation=skill_invocation,
-        diff_instruction=diff_instruction,
-        review_output_path=str(review_output_path),
-        exploration_dir=exploration_dir,
-        prior_commits=prior_commits,
-    )
-
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.REVIEW)
-
-    output_path = work.repo / REVIEW_OUTPUT_FILE
-    if output_path.exists():
-        print_success(console, f"Review output written to: {output_path}")
-    else:
-        print_warning(console, "Review output file was not created")
 
 
 async def phase_parse_feedback(
@@ -2559,7 +2430,6 @@ async def _do_commit(
     *,
     push: bool = False,
     interactive: bool = False,
-    iteration: int | None = None,
     items: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Stage, commit, and optionally push with daydream trailers.
@@ -2570,8 +2440,6 @@ async def _do_commit(
         push: If True, push to the remote after committing.
         interactive: If True, prompt the user for confirmation before
             committing.
-        iteration: When set, append an ``Iteration: <n>`` trailer to the
-            commit message body.
         items: Optional list of fix dicts (with ``file`` and ``description``
             keys) summarising changes applied in this run; included in the
             agent prompt so the commit message is accurate.
@@ -2597,7 +2465,6 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return False
 
-    iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
     if items:
@@ -2621,7 +2488,6 @@ async def _do_commit(
         "If multiple categories of changes exist, pick the dominant one. "
         "Keep the subject line under 72 characters. "
         "Add a body with bullet points if there are multiple distinct changes. "
-        f"{iteration_line}"
         "Add these EXACT git trailers as the last lines of the commit message "
         "(after a blank line following the body):\n\n"
         f"Daydream-Run: {work.run_id}\n"
@@ -2705,17 +2571,6 @@ async def phase_fetch_pr_feedback(
         print_success(console, f"PR feedback written to: {output_path}")
     else:
         print_warning(console, "PR feedback file was not created")
-
-
-async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration: int) -> None:
-    """Commit all changes from the current loop iteration.
-
-    Ensures a clean working tree before the next review iteration starts.
-    Does NOT push — the final push happens at the end of the loop.
-    """
-    print_info(console, f"Committing iteration {iteration} changes...")
-    await _do_commit(backend, work, iteration=iteration)
-    print_success(console, f"Iteration {iteration} changes committed")
 
 
 async def phase_commit_push_auto(

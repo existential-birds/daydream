@@ -32,15 +32,17 @@ async def test_fork_prompt_override_reaches_backend(
     install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """A daydream_ext override of the ``review`` prompt replaces the prompt wholesale.
+    """A daydream_ext override of the ``per-stack`` prompt replaces it wholesale.
 
-    The kwarg assertion (``kw['skill_invocation']`` echoed back — the real
-    parameter name per ``build_review_prompt``) pins that overrides receive
-    the exact built-in kwargs — the wholesale-override contract.
+    The ``review`` prompt slot was deleted with the shallow flow (#330): shallow
+    mode now runs the deep flow, whose per-stack reviewer resolves the
+    ``per-stack`` slot. The kwarg assertion (``kw['skill_invocation']`` echoed
+    back — the real parameter name per ``build_per_stack_prompt``) pins that
+    overrides receive the exact built-in kwargs — the wholesale-override contract.
     """
     ext_dir.write_module(
         "def register(r):\n"
-        "    r.override_prompt('review', lambda **kw: f\"RO-REVIEW {kw['skill_invocation']}\")\n"
+        "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['skill_invocation']}\")\n"
     )
     backend = ScriptedBackend(
         events=(
@@ -49,13 +51,52 @@ async def test_fork_prompt_override_reaches_backend(
         )
     )
     install_backend(backend)
-    mute_side_effects("daydream.flows.shallow")
+    mute_side_effects("daydream.deep.orchestrator")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
 
     assert rc == 0
-    review_prompts = [p for p in backend.prompts if p.startswith("RO-REVIEW")]
+    review_prompts = [p for p in backend.prompts if p.startswith("RO-STACK")]
     assert review_prompts and "beagle-python:review-python" in review_prompts[0]
+
+
+async def test_shallow_without_skill_keeps_detected_language_skill(
+    feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object],
+    mute_side_effects: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--shallow <repo>`` without ``--skill`` uses the detected language skill (#6).
+
+    The diff is `main.py` only, so ``detect_stacks`` routes it to the python
+    stack. Shallow collapse must preserve that stack's per-language Beagle
+    skill (``beagle-python:review-python``) when no explicit ``--skill`` is
+    given, instead of downgrading to the generic-fallback reviewer.
+    Observable outcome: the backend receives a per-stack prompt carrying the
+    python skill invocation.
+    """
+    # Pin skill availability to optimistic so the detected python stack is not
+    # re-routed to generic by D-16 (which depends on the host's installed
+    # Beagle plugins).
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    backend = ScriptedBackend(
+        events=(
+            TextEvent(text=""),
+            ResultEvent(structured_output={"issues": []}, continuation=None),
+        )
+    )
+    install_backend(backend)
+    mute_side_effects("daydream.deep.orchestrator")
+
+    rc = await runner.run(make_config(feature_branch_repo, shallow=True))
+
+    assert rc == 0
+    skilled = [p for p in backend.prompts if "beagle-python:review-python" in p]
+    assert skilled, (
+        "shallow with no --skill must keep the detected python skill "
+        "rather than fall back to the generic-fallback reviewer"
+    )
 
 
 def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:

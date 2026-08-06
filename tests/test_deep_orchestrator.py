@@ -3530,6 +3530,134 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     )
 
 
+# --cleanup / --no-cleanup (finding #6, R2 round on #330)
+
+
+async def test_cleanup_true_removes_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--cleanup`` deletes ``.review-output.md`` after a
+    successful shallow run.
+
+    Drives ``runner.run`` -> ``run_deep`` (shallow mode) with the stub backend
+    through the full fix cycle (fix gate auto-accepted via ``assume="yes"``,
+    test green, commit stubbed) and asserts the observable outcome: the report
+    is gone by the time the run returns 0.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a successful run"
+
+
+async def test_no_cleanup_retains_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--no-cleanup`` keeps ``.review-output.md``."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=False, assume="yes"))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=False must keep .review-output.md after a successful run"
+
+
+async def test_cleanup_true_removes_review_output_default_loop(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: the terminal cleanup also applies to the default
+    (deep loop) mode, not just shallow."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a deep run"
+
+
+async def test_cleanup_none_unattended_defaults_to_keep(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: an unspecified cleanup flag on an unattended run defaults to
+    KEEPING the report (the old ``safe_default=False``), without touching stdin.
+
+    Drives review mode (no fix cycle, so no ``assume`` is needed to reach the
+    terminal step) non-interactively. The report is written by ``load-items``
+    and must survive the terminal cleanup step untouched.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() called in unattended mode -- cleanup gate must not read stdin")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, output_mode="review", cleanup=None))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=None unattended must keep the report (safe_default=False)"
+
+
+async def test_cleanup_none_interactive_prompts_before_keeping(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: with cleanup unspecified and interactive stdin, the terminal
+    step prompts the user (the old shallow preamble's question); a "n" answer
+    keeps the report."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+    # Pin interactivity ON so the cleanup gate reaches the real prompt_user seam
+    # (review mode has no fix cycle, so this is the run's only prompt).
+    _force_interactive(monkeypatch)
+
+    asked: list[str] = []
+
+    def _record_prompt(console, message, default=""):
+        asked.append(message)
+        return "n"  # decline cleanup
+
+    monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
+    # Confirm the intent gate so the review spine proceeds; the cleanup prompt is
+    # the one under observation (routed through daydream.agent.prompt_user).
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(
+        make_config(multi_stack_target, output_mode="review", cleanup=None, non_interactive=False)
+    )
+
+    assert exit_code == 0
+    assert any("cleanup" in msg.lower() for msg in asked), (
+        f"cleanup=None interactive run must prompt; saw prompts: {asked!r}"
+    )
+    assert report.exists(), "declining the cleanup prompt must keep .review-output.md"
+
+
 # Git timeout under load (issue #120)
 
 
@@ -4751,6 +4879,69 @@ def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     assert collapsed == stacks  # unchanged
 
 
+def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
+    """#6: shallow with no ``--skill`` keeps the sole detected language skill.
+
+    A python-only diff routes via ``detect_stacks`` to ``python`` + ``generic``
+    (if any docs) + ``structure``. Shallow collapse must preserve the python
+    stack's Beagle skill instead of downgrading the combined assignment to the
+    generic-fallback reviewer.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "README.md"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "README.md"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+    # The docs file is absorbed into the preserved language stack.
+    assert set(combined.files) == {"api.py", "README.md"}
+
+
+def test_collapse_stacks_for_shallow_two_languages_falls_back_to_generic() -> None:
+    """#6: two real-language stacks cannot share one agent -> generic fallback."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "generic"
+    assert combined.skill_invocation is None
+    assert set(combined.files) == {"api.py", "App.tsx"}
+
+
+def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
+    """#6: an explicit ``--skill`` still names the combined assignment."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, skill="python")
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+
+
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
     """Count per-stack + structural review prompts in a captured call list.
 
@@ -5630,11 +5821,11 @@ async def test_skip_tier_writes_empty_alternatives(
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
+def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
 
-    assert EXTENSION_API_VERSION == 4
+    assert EXTENSION_API_VERSION == 5
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

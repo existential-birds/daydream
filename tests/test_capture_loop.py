@@ -116,7 +116,10 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
         "severity": "medium",
         "confidence": "HIGH",
         "files": ["main.py"],
+        "file": "main.py",
+        "line": 1,
         "rationale": "",
+        "evidence": "main.py:1",
     }
     backend = PhaseDispatchBackend(
         events=[
@@ -131,7 +134,7 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     assert findings, "scripted issue must survive to the artifact"
     main_py = [f for f in findings if f["path"] == "main.py"]
     assert main_py, "the finding must target the changed file"
-    assert [f["placement"] for f in main_py] == ["file"], (
+    assert all(f["placement"] == "file" for f in main_py), (
         "a finding on a file in the PR diff with no resolvable line must be "
         f"placed file-level, not folded into the invisible review body: {main_py}"
     )

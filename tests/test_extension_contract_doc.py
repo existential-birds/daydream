@@ -30,7 +30,7 @@ def test_contract_doc_names_every_registered_surface() -> None:
         assert fragment in doc, f"contract detail {fragment!r} undocumented"
     for symbol in extension_api.__all__:
         assert symbol in doc, f"public symbol {symbol!r} undocumented"
-    for flow in ("deep", "shallow", "review", "pr-feedback"):
+    for flow in ("deep", "improve"):
         assert flow in doc, f"flow {flow!r} undocumented"
         for entry in reg.flow(flow):
             for name in [entry] if isinstance(entry, str) else entry.steps:

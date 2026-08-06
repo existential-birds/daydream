@@ -34,14 +34,29 @@ def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
 
 
 @pytest.mark.parametrize("stage", ["parse", "test"])
-def test_deep_rejects_shallow_only_stages(stage: str) -> None:
-    """parse/test resume points are ambiguous in deep mode and are rejected."""
+def test_deep_rejects_legacy_resume_stages(stage: str) -> None:
+    """parse/test are legacy shallow-loop stages; every mode rejects them."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--start-at", stage])
 
 
-@pytest.mark.parametrize("stage", ["parse", "test", "fix", "review"])
-def test_shallow_accepts_loop_stages(stage: str) -> None:
-    """review/parse/fix/test resume stages are valid with --shallow."""
+@pytest.mark.parametrize("stage", ["parse", "test"])
+def test_shallow_rejects_legacy_resume_stages(
+    stage: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """parse/test have no mapping in the unified pipeline, even with --shallow.
+
+    They must error out rather than silently restart the full pipeline (the
+    pre-#330 behavior that let ``--shallow --start-at test --yes`` re-review
+    and re-apply fixes).
+    """
+    with pytest.raises(SystemExit):
+        _parse_args(["target", "--shallow", "--start-at", stage])
+    assert "no mapping in the unified pipeline" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("stage", ["fix", "review"])
+def test_shallow_accepts_unified_resume_stages(stage: str) -> None:
+    """review (fresh) and fix (resume after the merged report) are valid with --shallow."""
     config = _parse_args(["target", "--shallow", "--start-at", stage])
     assert config.start_at == stage

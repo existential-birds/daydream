@@ -40,9 +40,8 @@ remaining surface is opt-in:
 
 ```bash
 daydream --review /path/to/project            # write a report to terminal/markdown, no fixes
-daydream --shallow /path/to/project           # single-stack review → parse → fix → test loop
+daydream --shallow /path/to/project           # single-stack review → parse → fix → test (one pass)
 daydream --yes /path/to/project               # auto-apply fixes without prompting
-daydream --loop /path/to/project              # repeat review-fix-test until clean (or 5 rounds)
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
@@ -136,8 +135,8 @@ Full architectural details about the review pipeline stages, trajectory recordin
 
 | Flag | Behavior |
 |------|----------|
-| _(default)_ | Deep multi-stack review, fix, test loop |
-| `--shallow` | Single-stack review, parse, fix, test |
+| _(default)_ | Deep multi-stack review, fix, test (one pass) |
+| `--shallow` | Single-stack review, parse, fix, test (one pass) |
 | `--review` | Write report to terminal/markdown, then exit |
 | `--comment` | Post inline PR comments, then exit |
 
@@ -174,7 +173,6 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 daydream -s python /path/to/project           # force a specific Beagle skill
 daydream --backend codex /path/to/project     # override backend (claude, codex, pi)
 daydream --model claude-haiku-4-5 /path/to/project  # overrides ALL phases (beats config-file overrides)
-daydream --loop 3 /path/to/project            # repeat up to 3 review-fix-test rounds
 daydream --yes /path/to/project               # auto-apply fixes without prompting
 ```
 
@@ -197,7 +195,7 @@ the resume exits 1 rather than adjudicating stale findings against changed code
 before diff tracking existed has no key and is refused for the same reason: it
 cannot be verified.
 
-`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero instead of looping, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
+`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
 
 Per-phase model and backend overrides are no longer CLI flags. Set them in the config file (see [Configuration](#configuration)).
 
@@ -432,7 +430,7 @@ Behavior notes:
 
 - Neither var set → ambient `gh` identity, exactly as before (the App identity is opt-in).
 - Setting only one of the two vars aborts with an error naming the missing one.
-- Posting runs (`--comment`, `feedback`, and the default deep loop) abort if the owner/repo
+- Posting runs (`--comment`, `feedback`, and the default deep review) abort if the owner/repo
   cannot be determined or token minting fails. daydream never silently falls
   back to posting under your personal identity. Non-posting runs fall back to
   the ambient identity and continue.

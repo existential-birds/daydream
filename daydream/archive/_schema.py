@@ -44,7 +44,6 @@ CREATE TABLE IF NOT EXISTS runs (
     test_backend TEXT,
     review_only INTEGER NOT NULL DEFAULT 0,
     deep INTEGER NOT NULL DEFAULT 0,
-    loop INTEGER NOT NULL DEFAULT 0,
     remote_url TEXT,
     repo_slug TEXT,
     source_path TEXT,
@@ -126,7 +125,7 @@ _UPSERT_SQL = """
 INSERT OR REPLACE INTO runs (
     session_id, archived_at, status, run_flow, skill, model, backend,
     review_backend, fix_backend, test_backend,
-    review_only, deep, loop, remote_url, repo_slug, source_path, branch, base_branch,
+    review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     erosion, verbosity, fix_quality_gate,
@@ -135,7 +134,7 @@ INSERT OR REPLACE INTO runs (
 ) VALUES (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend,
-    :review_only, :deep, :loop, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
+    :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :erosion, :verbosity, :fix_quality_gate,

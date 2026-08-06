@@ -158,7 +158,7 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
     ],
 )
 def test_log_mode_rendering(
-    multi_stack_target: Path,
+    tiny_diff_target: Path,
     make_config: MakeConfig,
     install_backend: InstallBackend,
     monkeypatch: pytest.MonkeyPatch,
@@ -170,7 +170,7 @@ def test_log_mode_rendering(
     """Render only the event fields appropriate to each log-mode scenario."""
     install_backend(ScriptedBackend(events=events, retryable=False))
     config = make_config(
-        multi_stack_target,
+        tiny_diff_target,
         non_interactive=True,
         **config_overrides,
     )
@@ -183,7 +183,7 @@ def test_log_mode_rendering(
 
 
 def test_log_mode_trajectory_still_written(
-    multi_stack_target: Path,
+    tiny_diff_target: Path,
     make_config: MakeConfig,
     install_backend: InstallBackend,
     monkeypatch: pytest.MonkeyPatch,
@@ -195,7 +195,7 @@ def test_log_mode_trajectory_still_written(
     trajectory_path = tmp_path / "trajectory.json"
 
     config = make_config(
-        multi_stack_target,
+        tiny_diff_target,
         log_mode=True,
         quiet=True,
         output_mode="review",

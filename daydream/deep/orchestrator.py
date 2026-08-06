@@ -94,14 +94,19 @@ from daydream.generated_files import (
 )
 from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
+    FixResult,
     _write_single_stack_merged_items,
     phase_alternative_review,
     phase_arbiter_review,
     phase_commit_push,
+    phase_commit_push_auto,
     phase_cross_stack_merge,
+    phase_fetch_pr_feedback,
+    phase_fix,
     phase_fix_parallel,
     phase_parse_feedback,
     phase_per_stack_reviews,
+    phase_respond_pr_feedback,
     phase_supervise_review,
     phase_suppression_review,
     phase_test_and_heal,
@@ -1449,9 +1454,8 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                                 sweep_failures[file] = f"budget exhausted: {budget_reason}"
                             elif task_output.is_file():
                                 # A backend can return normally without writing
-                                # its output (phase_review guards the same
-                                # possibility); only an actual review file
-                                # counts as coverage, so the parse loop and
+                                # its output; only an actual review file counts
+                                # as coverage, so the parse loop and
                                 # `completed_files` never see phantom outputs.
                                 review_outputs[file] = task_output
                             else:
@@ -1892,14 +1896,22 @@ async def _step_supervise(ctx: FlowContext) -> None:
     return None
 
 
-async def _step_post_review(ctx: FlowContext) -> None:
-    """Offer to post findings as inline PR review comments."""
-    from daydream.pr_review import post_review_to_pr_from_report
+async def _step_post_review(ctx: FlowContext) -> Stop | None:
+    """Offer to post findings as inline PR review comments; ``--comment`` auto-posts.
+
+    In comment mode posting is the run's deliverable, so a missing PR or a
+    failed GitHub submission ends the run with exit code 1 instead of the
+    warn-and-continue the default deep flow gets (#8).
+    """
+    from daydream.pr_review import PostStatus, post_review_to_pr_from_report
 
     items_file: Path = ctx.data["items_file"]
-    await post_review_to_pr_from_report(
-        ctx.work.repo, items_file, console=console
+    outcome = await post_review_to_pr_from_report(
+        ctx.work.repo, items_file, console=console, post=_mode_of(ctx) == "comment"
     )
+    if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
+        return Stop(1)
+    return None
 
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
@@ -2587,6 +2599,134 @@ async def _step_commit(ctx: FlowContext) -> None:
     await phase_commit_push(ctx.backend_for("fix"), ctx.work)
 
 
+async def _step_cleanup(ctx: FlowContext) -> None:
+    """Terminal cleanup: remove the review output when enabled (#330).
+
+    Restores the shallow ``commit-gate`` semantics the single-flow collapse
+    dropped: ``--cleanup`` removes ``.review-output.md`` after a successful
+    run, ``--no-cleanup`` keeps it, and an unspecified flag falls back to the
+    old preamble gate (``--yes`` cleans up, unattended runs keep the artifact
+    via ``safe_default=False``, interactive runs prompt). This is the LAST
+    step, so every failure path (``Stop(1)`` short-circuits) skips it — a
+    failed or partial run keeps its evidence.
+    """
+    config = ctx.config
+    target_dir = ctx.work.repo
+
+    if config.cleanup is True:
+        enabled = True
+    elif config.cleanup is False:
+        enabled = False
+    else:
+        enabled = resolve_or_prompt(
+            assume=get_assume(),
+            interactive=not get_non_interactive(),
+            safe_default=False,
+            question="Cleanup review output after completion? [y/N]",
+            default="n",
+        )
+
+    if not enabled:
+        return
+    review_output_path = target_dir / REVIEW_OUTPUT_FILE
+    if review_output_path.exists():
+        review_output_path.unlink()
+        print_success(console, f"Cleaned up {REVIEW_OUTPUT_FILE}")
+
+
+async def _step_fetch_feedback(ctx: FlowContext) -> None:
+    """Fetch bot review comments via the fetch-pr-feedback skill (feedback mode)."""
+    await phase_fetch_pr_feedback(
+        ctx.backend_for("pr_feedback"), ctx.work, ctx.data["pr_number"], ctx.data["bot"]
+    )
+
+
+async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
+    """Parse the fetched feedback into actionable items; stop when none."""
+    try:
+        async with phase_scope(DaydreamPhase.PARSE):
+            feedback_items = await phase_parse_feedback(ctx.backend_for("parse"), ctx.work)
+    except ValueError:
+        print_error(console, "Parse Failed", "Failed to parse PR feedback. Exiting.")
+        return Stop(1)
+
+    if not feedback_items:
+        print_info(console, "No actionable feedback found in PR comments.")
+        return Stop(0)
+
+    ctx.data["feedback_items"] = feedback_items
+    return None
+
+
+async def _step_fix_items(ctx: FlowContext) -> Stop | None:
+    """Apply a fix per feedback item; abort before commit when all fail."""
+    feedback_items = ctx.data["feedback_items"]
+    fix_backend = ctx.backend_for("fix")
+
+    # Fix sequentially to avoid concurrent access to one mutable backend.
+    results: list[FixResult] = []
+    total_items = len(feedback_items)
+    async with phase_scope(DaydreamPhase.FIX):
+        for idx, item in enumerate(feedback_items, start=1):
+            try:
+                await phase_fix(fix_backend, ctx.work, item, idx, total_items)
+                results.append((item, True, None))
+            except Exception as e:
+                results.append((item, False, f"{type(e).__name__}: {e}"))
+
+    successful = [r for r in results if r[1]]
+    failed = [r for r in results if not r[1]]
+
+    if not successful:
+        print_error(
+            console,
+            "All Fixes Failed",
+            f"All {len(failed)} fix(es) failed. Aborting before commit.",
+        )
+        return Stop(1)
+
+    ctx.data["results"] = results
+    ctx.data["successful"] = successful
+    ctx.data["failed"] = failed
+    return None
+
+
+async def _step_commit_push(ctx: FlowContext) -> Stop | None:
+    """Commit and push the applied fixes (feedback mode)."""
+    results: list[FixResult] = ctx.data["results"]
+    try:
+        await phase_commit_push_auto(
+            ctx.backend_for("review"), ctx.work, items=[item for item, _ok, _err in results if _ok],
+        )
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return Stop(1)
+    return None
+
+
+async def _step_respond_feedback(ctx: FlowContext) -> Stop:
+    """Reply on each addressed comment and print the run summary."""
+    pr_number = ctx.data["pr_number"]
+    try:
+        await phase_respond_pr_feedback(
+            ctx.backend_for("pr_feedback"), ctx.work, pr_number, ctx.data["bot"], ctx.data["results"]
+        )
+    except Exception as e:
+        print_warning(console, f"Failed to respond to PR comments: {e}")
+        print_info(console, "Fixes were already pushed successfully.")
+
+    successful = ctx.data["successful"]
+    failed = ctx.data["failed"]
+    console.print()
+    print_success(
+        console,
+        f"PR #{pr_number}: {len(successful)} fix(es) applied"
+        + (f", {len(failed)} failed" if failed else ""),
+    )
+
+    return Stop(0)
+
+
 def _fresh_ttt(ctx: FlowContext) -> bool:
     # Verbatim resume gate: --start-at per-stack/merge/fix skips the TTT phases.
     return ctx.config.start_at not in ("per-stack", "merge", "fix")
@@ -2613,45 +2753,171 @@ def _findings_out_enabled(ctx: FlowContext) -> bool:
     return ctx.config.findings_out is not None
 
 
+def _resolve_mode(config: RunConfig) -> str:
+    """Map a RunConfig onto the single deep-flow mode key (#330).
+
+    ``feedback`` (``daydream feedback <pr#>``) replaces the pr-feedback flow;
+    ``review`` / ``comment`` replace the review flow (stop after post-review);
+    ``shallow`` replaces the shallow flow (single-stack deep). ``loop`` is the
+    unchanged default.
+    """
+    if config.bot is not None:
+        return "feedback"
+    if config.flow_name in ("review", "shallow"):
+        return config.flow_name
+    if config.output_mode == "review":
+        return "review"
+    if config.output_mode == "comment":
+        return "comment"
+    if config.shallow:
+        return "shallow"
+    return "loop"
+
+
+def _mode_of(ctx: FlowContext) -> str:
+    """The active mode, set by ``run_deep``'s dispatch preamble."""
+    return ctx.data.get("mode", "loop")
+
+
+def _feedback_mode(ctx: FlowContext) -> bool:
+    """Feedback mode runs the fetch->parse->fix->commit->respond prefix only."""
+    return _mode_of(ctx) == "feedback"
+
+
+def _review_only_mode(ctx: FlowContext) -> bool:
+    """Review/comment modes stop after ``post-review``; no fix cycle runs."""
+    return _mode_of(ctx) in ("review", "comment")
+
+
+def _fix_cycle_enabled(ctx: FlowContext) -> bool:
+    """The apply-fix gate + verify/fix/test/commit run in loop + shallow modes."""
+    return _mode_of(ctx) in ("loop", "shallow")
+
+
+def _cleanup_applies(ctx: FlowContext) -> bool:
+    """The terminal cleanup runs in every mode that writes ``.review-output.md``.
+
+    Loop/shallow/review/comment all render the report in ``load-items``;
+    feedback mode runs only the comment-fetch prefix and writes no report, so
+    it is gated off (a leftover report there is the user's own file).
+    """
+    return _mode_of(ctx) in ("loop", "shallow", "review", "comment")
+
+
+def _spine_enabled(ctx: FlowContext) -> bool:
+    """The review spine is skipped entirely in feedback mode."""
+    return not _feedback_mode(ctx)
+
+
+def _flow_kind_for_mode(mode: str) -> DaydreamRunFlow:
+    """Recorder run-flow label per mode (preserves the pre-collapse mapping)."""
+    if mode == "shallow":
+        return DaydreamRunFlow.NORMAL
+    if mode in ("review", "comment"):
+        return DaydreamRunFlow.TTT
+    return DaydreamRunFlow.DEEP
+
+
+def _spine_fresh_ttt(ctx: FlowContext) -> bool:
+    """Fresh-run TTT gate AND not feedback mode."""
+    return _spine_enabled(ctx) and _fresh_ttt(ctx)
+
+
+def _spine_before_fix(ctx: FlowContext) -> bool:
+    """``--start-at fix`` resume gate AND not feedback mode."""
+    return _spine_enabled(ctx) and _before_fix_resume(ctx)
+
+
+def _spine_multi_merge(ctx: FlowContext) -> bool:
+    return _spine_enabled(ctx) and _multi_stack_merge_enabled(ctx)
+
+
+def _spine_single_merge(ctx: FlowContext) -> bool:
+    return _spine_enabled(ctx) and _single_stack_merge_enabled(ctx)
+
+
+def _spine_supervise(ctx: FlowContext) -> bool:
+    return _spine_enabled(ctx) and _supervise_enabled(ctx)
+
+
+def _spine_uncovered(ctx: FlowContext) -> bool:
+    return _spine_enabled(ctx) and _uncovered_sweep_enabled(ctx)
+
+
+def _spine_findings_out(ctx: FlowContext) -> bool:
+    return _spine_enabled(ctx) and _findings_out_enabled(ctx)
+
+
 # The deep pipeline as a registered flow (D-07):
 #
+#     [feedback prefix: fetch -> parse -> fix-items -> commit-push -> respond]
 #     exploration pre-scan -> TTT intent -> TTT alternative-review ->
 #     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
 #     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
 #     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
-#     test -> commit.
+#     test -> commit -> cleanup.
 #
 # ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
 # definition; ``run_deep`` keeps the preamble and delegates here via
 # ``run_flow``. The old imperative body's tier / single_stack_mode /
 # ``start_at`` / ``findings_out`` conditions are the ``enabled`` predicates
-# above (whole-block gates) or stay inside step bodies (resume branches).
+# above (whole-block gates) or stay inside step bodies (resume branches). The
+# mode gates replace the review/comment/shallow/pr-feedback flows (#330):
+# feedback mode runs only the prefix (the review spine is gated off and
+# ``respond-feedback`` ends the flow), and review/comment modes stop after
+# ``post-review`` (the fix cycle is gated off).
 STEPS: tuple[FlowStep, ...] = (
-    FlowStep(name="exploration", run=_step_exploration),
-    FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
-    FlowStep(name="per-stack-reviews", run=_step_wonder_and_per_stack, config_phase="per_stack_review"),
-    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
-    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled, config_phase="parse"),
-    FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
+    # Feedback-mode prefix (was the ``pr-feedback`` flow): runs first and
+    # ``respond-feedback`` ends the flow, so the review spine below never runs.
+    FlowStep(name="fetch-feedback", run=_step_fetch_feedback, config_phase="pr_feedback", enabled=_feedback_mode),
+    FlowStep(name="parse-feedback", run=_step_parse_feedback, config_phase="parse", enabled=_feedback_mode),
+    FlowStep(name="fix-items", run=_step_fix_items, config_phase="fix", enabled=_feedback_mode),
+    # config_phase "review" mirrors the old body's use of the review backend for the commit.
+    FlowStep(name="commit-push", run=_step_commit_push, config_phase="review", enabled=_feedback_mode),
+    FlowStep(name="respond-feedback", run=_step_respond_feedback, config_phase="pr_feedback", enabled=_feedback_mode),
+    # Review spine (the deep pipeline).
+    FlowStep(name="exploration", run=_step_exploration, enabled=_spine_enabled),
+    FlowStep(name="intent", run=_step_intent, enabled=_spine_fresh_ttt),
     FlowStep(
-        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
+        name="per-stack-reviews",
+        run=_step_wonder_and_per_stack,
+        config_phase="per_stack_review",
+        enabled=_spine_enabled,
     ),
-    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_single_stack_merge_enabled),
-    FlowStep(name="load-items", run=_step_load_items),
-    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_supervise_enabled),
-    FlowStep(name="findings-out", run=_step_findings_out, enabled=_findings_out_enabled),
-    FlowStep(name="post-review", run=_step_post_review, enabled=_before_fix_resume),
-    FlowStep(name="fix-gate", run=_step_fix_gate),
-    FlowStep(name="verify", run=_step_verify),
-    FlowStep(name="fix", run=_step_fix),
-    FlowStep(name="test", run=_step_test),
+    FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_spine_before_fix),
+    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_spine_uncovered, config_phase="parse"),
+    FlowStep(name="arbiter", run=_step_arbiter, enabled=_spine_multi_merge),
+    FlowStep(
+        name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_spine_multi_merge
+    ),
+    FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_spine_single_merge),
+    FlowStep(name="load-items", run=_step_load_items, enabled=_spine_enabled),
+    FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_spine_supervise),
+    FlowStep(name="findings-out", run=_step_findings_out, enabled=_spine_findings_out),
+    FlowStep(name="post-review", run=_step_post_review, enabled=_spine_before_fix),
+    # Fix cycle: loop + shallow modes only (review/comment stop after post-review).
+    FlowStep(name="fix-gate", run=_step_fix_gate, enabled=_fix_cycle_enabled),
+    FlowStep(name="verify", run=_step_verify, enabled=_fix_cycle_enabled),
+    FlowStep(name="fix", run=_step_fix, enabled=_fix_cycle_enabled),
+    FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
-    FlowStep(name="commit", run=_step_commit, config_phase="fix"),
+    FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
+    # Terminal cleanup (#330): the last step, so it only runs on successful
+    # completion. Review modes fall off the end after post-review; loop/shallow
+    # reach it after commit; feedback mode never writes the report.
+    FlowStep(name="cleanup", run=_step_cleanup, enabled=_cleanup_applies),
 )
 
 
 async def run_deep(config: RunConfig, work: WorkContext) -> int:
-    """Execute the deep-review pipeline (D-07).
+    """Execute the deep-review pipeline (D-07) across every PR-process mode.
+
+    Collapsed the review/comment/shallow/pr-feedback flows into modes of the
+    single ``deep`` flow (#330): ``review`` and ``comment`` run the review
+    spine and stop after ``post-review``, ``shallow`` forces single-stack mode,
+    and ``feedback`` (``daydream feedback <pr#>``) runs only the
+    fetch -> parse -> fix -> commit -> respond prefix. The default ``loop``
+    mode is unchanged.
 
     Runs the preamble (diff computation, stack detection, tiny-diff collapse,
     trajectory recorder, pre-flight notice) and delegates the pipeline to the
@@ -2660,15 +2926,136 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
     ``config.start_at in ("ttt", "per-stack", "merge", "fix")``.
 
     Args:
-        config: Run configuration. ``config.shallow`` must be False (deep is
-            the default); ``config.start_at`` drives resume behavior.
-            ``config.identity`` carries the GitHub identity set by
-            :func:`daydream.runner.run`.
+        config: Run configuration; ``config.shallow`` / ``config.output_mode``
+            / ``config.bot`` select the mode. ``config.identity`` carries the
+            GitHub identity set by :func:`daydream.runner.run`.
         work: Resolved working environment for the run.
 
     Returns:
         Exit code (0 on success, 1 on failure).
     """
+    mode = _resolve_mode(config)
+    if mode == "feedback":
+        return await _run_feedback_flow(config, work)
+    return await _run_review_spine(config, work, mode)
+
+
+async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
+    """Feedback-mode preamble (was ``runner._run_pr_feedback``).
+
+    Validates args, opens the trajectory recorder, prints the info block,
+    then delegates to the registered ``deep`` flow's feedback prefix.
+    """
+    from daydream.runner import _open_recorder
+
+    if config.pr_number is None or config.bot is None:
+        print_error(
+            console,
+            "Invalid PR config",
+            "PR number and --bot are required (use: daydream feedback <pr#> --bot <name>).",
+        )
+        return 1
+
+    pr_number = config.pr_number
+    bot = config.bot
+    target_dir = work.repo
+
+    async with _open_recorder(
+        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
+    ):
+        ctx = FlowContext(config=config, work=work, registry=get_registry())
+        ctx.data["mode"] = "feedback"
+        ctx.data["pr_number"] = pr_number
+        ctx.data["bot"] = bot
+
+        console.print()
+        print_info(console, f"PR feedback mode: PR #{pr_number}")
+        print_info(console, f"Bot: {bot}")
+        print_info(console, f"Target directory: {target_dir}")
+        print_info(console, f"Model: {ctx.backend_for('review').model}")
+        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
+        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
+        console.print()
+
+        return await run_flow(ctx.registry, "deep", ctx)
+
+
+def _shallow_skill_invocation(config: RunConfig) -> str | None:
+    """Resolve the ``--skill`` stack slot for shallow mode (#330).
+
+    Mirrors the old shallow preamble's precedence: ``stack:<skill>`` slot, then
+    a skill value that is itself a registered slot value. ``None`` (no skill or
+    unresolvable skill) falls back to the generic-fallback review.
+    """
+    if config.skill is None:
+        return None
+    registry = get_registry()
+    resolved = registry.skill_if_registered(f"stack:{config.skill}")
+    if resolved is not None:
+        return resolved
+    if config.skill in registry.skill_slots().values():
+        return config.skill
+    return None
+
+
+def _collapse_stacks_for_shallow(
+    stacks: list[StackAssignment],
+    changed_files: list[str],
+    config: RunConfig,
+) -> tuple[list[StackAssignment], bool]:
+    """Force the single-stack assignment for shallow mode (#330).
+
+    Collapses every non-structural stack into one combined assignment and keeps
+    the structural meta-stack separate, so structural findings stay correctly
+    tagged ``lens="structural"`` downstream. Returns ``(stacks, True)``.
+
+    The combined assignment's skill, in precedence order:
+
+    - an explicit ``--skill`` (CLI) wins — the combined stack is named by it;
+    - otherwise a *sole* detected non-structural stack preserves its
+      per-language Beagle skill (e.g. ``beagle-python:review-python`` for a
+      Python diff), absorbing any generic/docs files — so ``daydream --shallow
+      <repo>`` without ``--skill`` uses the language reviewer instead of the
+      generic fallback (#6);
+    - otherwise (multiple real-language stacks — one agent cannot invoke two
+      per-language skills — or no real language at all) the combined assignment
+      uses the generic-fallback skill.
+    """
+    structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
+    combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
+
+    non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
+    real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
+
+    if config.skill is not None:
+        combined = StackAssignment(
+            stack_name=config.skill,
+            skill_invocation=_shallow_skill_invocation(config),
+            files=combined_files,
+            is_docs_only=False,
+        )
+    elif len(real_language) == 1 and real_language[0].skill_invocation is not None:
+        # Skill-preservation: the sole real-language stack survives unchanged
+        # (mirrors ``_collapse_stacks_for_tiny_diff`` for code+docs diffs).
+        lang = real_language[0]
+        combined = StackAssignment(
+            stack_name=lang.stack_name,
+            skill_invocation=lang.skill_invocation,
+            files=combined_files,
+            is_docs_only=False,
+        )
+    else:
+        combined = StackAssignment(
+            stack_name=GENERIC_STACK,
+            skill_invocation=None,
+            files=combined_files,
+            is_docs_only=False,
+        )
+    return [*structural, combined], True
+
+
+async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> int:
+    """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
     # Late imports to avoid circular dependency with runner.
     from daydream import git_ops
     from daydream.backends import Backend
@@ -2724,7 +3111,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
 
     async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.DEEP,
+        config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
     ):
         console.print()
         print_info(console, f"Target directory: {target_dir}")
@@ -2781,6 +3168,10 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
         stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
             stacks, changed_files, threshold=_shallow_fanout_threshold(config)
         )
+        # Issue #330 — ``--shallow`` forces the single-stack assignment regardless
+        # of diff size, so no arbiter / cross-stack merge runs.
+        if mode == "shallow":
+            stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
 
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
@@ -2807,6 +3198,7 @@ async def run_deep(config: RunConfig, work: WorkContext) -> int:
             work=work,
             registry=get_registry(),
             data={
+                "mode": mode,
                 "diff": diff,
                 "diff_path": diff_path,
                 "tier": tier,

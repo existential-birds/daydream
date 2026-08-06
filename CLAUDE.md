@@ -10,7 +10,7 @@ records every agent interaction as an
 [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus
 pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
 
-Default flow is the deep multi-stack pipeline; `--shallow` is a single-skill loop; `--comment`/`--review`
+Default flow is the deep multi-stack pipeline; `--shallow` is a single-stack, single pass; `--comment`/`--review`
 are review-only; `daydream feedback <pr#>` ingests bot review comments. Three backends — Claude
 (in-process SDK), Codex and Pi (subprocess CLIs) — all emit the same `AgentEvent` stream.
 
@@ -35,10 +35,9 @@ daydream improve /path/to/project                  # read-only repo audit -> pri
 daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
 
 # Other verbs / flags (`--help-all` for the full advanced surface)
-daydream --shallow -s python /path/to/project      # shallow Python review-fix-test loop
+daydream --shallow -s python /path/to/project      # shallow Python single-pass review-fix-test
 daydream --review /path/to/project                 # review only, skip fixes
 daydream --yes /path/to/project                    # auto-apply fixes without prompting
-daydream --loop 3 /path/to/project                 # repeat review-fix-test up to 3 rounds
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # bot PR comments
 daydream --non-interactive /path/to/project        # unattended/harness run
 ```
@@ -206,7 +205,7 @@ exploration pre-scan (cached across runs)
 
 A fork customizes phases, flows, skills, and prompts from a top-level `daydream_ext` package (found via
 `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`. It must export
-`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 4), may
+`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 5), may
 register one `ToolDecision`-returning tool supervisor, and is resolve-checked by `daydream ext validate`.
 Full contract: `docs/extensions.md`.
 

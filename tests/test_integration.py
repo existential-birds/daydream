@@ -1,5 +1,6 @@
 """Integration tests for the full review-fix-test flow."""
 
+import json
 import re
 from io import StringIO
 from pathlib import Path
@@ -116,7 +117,7 @@ def target_project(tmp_path: Path) -> Path:
 
     (project / "main.py").write_text("def hello():\n    return 'world'\n")
 
-    # Pre-create the review output phase_review would write (the mock doesn't).
+    # Pre-create the review output the harness mock does not write.
     review_content = """# Code Review
 
 ## Issues Found
@@ -168,7 +169,7 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
         max_turns=None,
         read_only=False,
     ):
-        if prompt.startswith("Fix this issue"):
+        if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
             (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
         elif prompt.startswith("Stage all changes and commit"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
@@ -194,30 +195,36 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
 @pytest.mark.asyncio
 async def test_shallow_commits_when_operator_ignores_red_suite(
     monkeypatch,
-    target_project: Path,
+    feature_branch_repo: Path,
     install_backend,
     make_config,
+    silence_console,
 ):
-    """Heal-menu choice "3" keeps the shallow run going all the way to a real commit.
+    """Heal-menu choice "3" keeps the shallow deep run going all the way to a real commit.
 
-    Drives the shallow flow through the REAL ``phase_test_and_heal`` and
+    Drives the deep shallow flow through the REAL ``phase_test_and_heal`` and
     ``phase_commit_push`` against a permanently red suite, with the backend as
     the only mocked seam. Choice "3" (ignore and continue) reports ``passed``
-    False but ``proceed`` True, and the commit gate reads ``test_proceed`` -- so
-    the run exits 0 and the fix lands in the real worktree instead of being
-    abandoned with the failure.
+    False but ``proceed`` True, and the deep fix cycle's commit step reads the
+    operator's "y" at the commit gate -- so the run exits 0 and the fix lands
+    in the real worktree instead of being abandoned with the failure.
     """
-    monkeypatch.setattr("sys.stdin", StringIO("3\ny\n"))
+    # stdin answers, in order: intent confirmation, the apply-fixes gate, the
+    # heal menu ("3" = ignore and continue), and the commit gate.
+    monkeypatch.setattr("sys.stdin", StringIO("y\ny\n3\ny\n"))
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
+    silence_console("daydream.runner")
+    silence_console("daydream.deep.orchestrator")
+    silence_console("daydream.phases")
     install_backend(
         _WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False)
     )
 
-    head_before = _git(target_project, "rev-parse", "HEAD")
+    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
 
     config = make_config(
-        target_project,
+        feature_branch_repo,
         skill="python",
         quiet=True,
         shallow=True,
@@ -227,13 +234,13 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     exit_code = await run(config)
 
     assert exit_code == 0, "choice '3' must continue the run, not abort it"
-    assert _git(target_project, "rev-parse", "HEAD") != head_before, (
+    assert _git(feature_branch_repo, "rev-parse", "HEAD") != head_before, (
         "the ignored-red-suite run never committed"
     )
-    assert "-> str" in _git(target_project, "show", "HEAD:main.py"), (
+    assert "-> str" in _git(feature_branch_repo, "show", "HEAD:main.py"), (
         "the fix was reverted instead of committed"
     )
-    assert "Daydream-Run:" in _git(target_project, "log", "-1", "--format=%B")
+    assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
 
 
 @pytest.mark.asyncio
@@ -468,58 +475,35 @@ def _two_commit_repo(repo: Path, filename: str, before: str, after: str, branch:
 
 
 @pytest.mark.asyncio
-async def test_run_comment_full_flow(tmp_path, monkeypatch, install_backend, silence_console,
-                                    make_config):
-    """Integration test: full --comment flow through all three phases."""
+async def test_run_comment_full_flow(tmp_path, monkeypatch, make_config):
+    """Integration test: full --comment flow through the deep pipeline."""
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
 
-    backend = install_backend(ScriptedBackend(
-        script=[
-            # Phase 1: understand intent
-            [
-                TextEvent(text="This PR changes the hello message to world."),
-                ResultEvent(structured_output=None, continuation=None),
-            ],
-            # Phase 2: alternative review
-            [
-                TextEvent(text="Found 1 issue."),
-                ResultEvent(
-                    structured_output={
-                        "issues": [{
-                            "id": 1, "title": "Use constants", "description": "Hardcoded string",
-                            "recommendation": "Use a constant", "severity": "low", "files": ["app.py"],
-                        }]
-                    },
-                    continuation=None,
-                ),
-            ],
-        ],
-        model="mock-model",
-    ))
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
 
-    silence_console("daydream.phases")
-    silence_console("daydream.runner")
+    # Capture the canonical items that reach the PR-posting step — the comment path.
+    posted: list[dict[str, Any]] = []
+    posted_posts: list[bool] = []
 
-    # Phase 1: user confirms intent.
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+    async def fake_post(target_dir, merged_items_path, *, console, post):
+        posted.extend(json.loads(merged_items_path.read_text())["items"])
+        posted_posts.append(post)
 
-    # Capture the issues that reach the PR-posting step -- the comment path.
-    posted: list[dict] = []
-
-    async def fake_post(target_dir, alt_issues, *, console):
-        posted.extend(alt_issues)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_alt_issues", fake_post)
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", fake_post)
 
     config = make_config(tmp_path, output_mode="comment")
 
     exit_code = await run(config)
 
     assert exit_code == 0
-    assert backend.call_count == 2  # intent + alternative review
-    # The alternative-review issue was handed to the PR-posting step.
-    assert len(posted) == 1
-    assert posted[0]["title"] == "Use constants"
+    # Comment mode auto-posts (post=True) with the canonical merged items.
+    assert posted_posts == [True]
+    assert posted, "the --comment post step never received merged items"
+    # The review spine ran: a per-stack finding reached the post step.
+    assert any(item.get("file") for item in posted), posted
     # The diff was materialised for the review prompts.
     assert (tmp_path / ".daydream" / "diff.patch").exists()
 
@@ -553,49 +537,158 @@ async def test_run_comment_does_not_prompt_for_skill(
     assert exit_code == 0
 
 
+@pytest.mark.asyncio
+async def test_run_comment_missing_pr_exits_nonzero(
+    tmp_path, monkeypatch, make_config
+):
+    """Comment mode chose posting as its deliverable: no open PR -> exit 1.
+
+    Drives ``runner.run`` for real (real temp worktree, stub backend only);
+    only ``pr_review.find_open_pr`` is mocked to report no PR, so the missing-PR
+    warning path runs production code end to end.
+    """
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: None)
+
+    config = make_config(tmp_path, output_mode="comment")
+
+    exit_code = await run(config)
+
+    assert exit_code == 1, "comment mode must fail when no open PR exists"
+
+
+@pytest.mark.asyncio
+async def test_run_comment_submission_failure_exits_nonzero(
+    tmp_path, monkeypatch, make_config
+):
+    """Comment mode: a failed GitHub review post -> exit 1.
+
+    Only ``_submit_review`` is mocked to fail; everything else (the review
+    pipeline, ``_post``, classification, payload build) runs production code.
+    """
+    from daydream.pr_review import PRInfo
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, tmp_path)
+
+    fake_pr = PRInfo(
+        number=7,
+        head_sha="0" * 40,
+        base_sha="1" * 40,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://example/pr/7",
+    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr(
+        "daydream.pr_review._submit_review",
+        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+    )
+
+    config = make_config(tmp_path, output_mode="comment")
+
+    exit_code = await run(config)
+
+    assert exit_code == 1, "comment mode must fail when the review post fails"
+
+
+@pytest.mark.asyncio
+async def test_run_loop_submission_failure_warns_and_continues(
+    tmp_path, monkeypatch, make_config
+):
+    """Default deep loop: a failed review post warns-and-continues (exit 0).
+
+    Posting is optional in loop mode, so a failed GitHub post must not abort the
+    run. The post gate is approved (interactive prompt path), the fix gate
+    declines, and the run still exits 0 with the report written.
+    """
+    from daydream.pr_review import PRInfo
+    from tests.harness.stub_backend import force_interactive, install_stub_backend, silence
+
+    _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
+
+    silence(monkeypatch, prompts=False)
+    install_stub_backend(monkeypatch, tmp_path)
+    force_interactive(monkeypatch)
+
+    fake_pr = PRInfo(
+        number=7,
+        head_sha="0" * 40,
+        base_sha="1" * 40,
+        base_ref="main",
+        owner="acme",
+        repo="widgets",
+        url="https://example/pr/7",
+    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _td: fake_pr)
+    monkeypatch.setattr(
+        "daydream.pr_review._submit_review",
+        lambda _td, _pr, _payload: (None, "gh api failed: HTTP 500"),
+    )
+
+    # Approve the PR-post gate but decline the apply-fixes gate so the run ends
+    # after the report is written (no fix cycle / commit).
+    def _gate_prompt(console, message: str, default: str = "") -> str:
+        if "apply fix" in message.lower():
+            return "n"
+        return "y"
+
+    monkeypatch.setattr("daydream.agent.prompt_user", _gate_prompt)
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    config = make_config(tmp_path, output_mode="loop")
+
+    exit_code = await run(config)
+
+    assert exit_code == 0, "deep loop must warn-and-continue on a failed PR post"
+    # The report the review produced is still on disk (the fix gate declined).
+    assert (tmp_path / ".review-output.md").exists()
+
+
 # Phase 02-04: Pre-scan exploration wiring
 
 
 @pytest.mark.asyncio
 async def test_run_populates_exploration_context(
-    monkeypatch, target_project: Path, mock_ui, install_backend, make_config
+    monkeypatch, multi_stack_target, make_config
 ):
-    """run() populates config.exploration_context before phase_review fires."""
+    """run() populates config.exploration_context before the review fan-out fires.
+
+    Drives the deep shallow flow through ``runner.run`` with exploration left
+    enabled (4 changed files -> "parallel" tier so the real ``pre_scan`` runs)
+    and asserts the wired consequence: ``config.exploration_context`` is set and
+    the per-stack review receives the on-disk ``exploration_dir``.
+    """
     from daydream.exploration import ExplorationContext
-    from tests.test_exploration_runner import _AgentsRecordingMockBackend
+    from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
-    fixtures = Path(__file__).parent / "fixtures" / "diffs"
-    diff_text = (
-        (fixtures / "python_multifile.diff").read_text()
-        + (fixtures / "typescript_multifile.diff").read_text()
-    )
+    (multi_stack_target / "extra.py").write_text("VALUE = 2\n")
+    _git(multi_stack_target, "add", ".")
+    _commit(multi_stack_target, "add extra")
 
-    # Force the diff source so exploration runs even in a tmp dir.
-    monkeypatch.setattr("daydream.flows.shallow._git_diff", lambda cwd, exclude=None: diff_text)
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
 
     captured: dict[str, Any] = {}
 
-    async def fake_phase_review(
-        backend, work, skill, *, diff_base=None, exploration_dir=None, exclude=None,
-    ):
-        captured["exploration_dir"] = exploration_dir
+    async def fake_per_stack_reviews(backend, work, stacks, **kwargs):
+        captured["exploration_dir"] = kwargs.get("exploration_dir")
+        return {}, {}
 
-    async def fake_phase_parse_feedback(backend, work, *, input_path=None):
-        return []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_per_stack_reviews", fake_per_stack_reviews
+    )
 
-    async def fake_phase_test_and_heal(backend, work, feedback_items=None):
-        return True, 0, True
-
-    async def fake_phase_commit_push(backend, work):
-        return None
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_review", fake_phase_review)
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", fake_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", fake_phase_test_and_heal)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", fake_phase_commit_push)
-    install_backend(_AgentsRecordingMockBackend())
-
-    config = make_config(target_project, skill="python", quiet=True, shallow=True)
+    config = make_config(multi_stack_target, shallow=True)
     exit_code = await run(config)
 
     assert exit_code == 0

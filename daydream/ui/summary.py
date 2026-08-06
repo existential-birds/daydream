@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 from rich import box
 from rich.console import Console, Group
-from rich.rule import Rule
 from rich.style import Style
 from rich.table import Table
 from rich.text import Text
@@ -71,14 +70,6 @@ def print_fix_complete(console: Console, item_num: int, total: int) -> None:
     console.print(text)
 
 
-def print_iteration_divider(console: Console, iteration: int, max_iterations: int) -> None:
-    """Print an iteration divider for loop mode."""
-    console.print()
-    label = f" Iteration {iteration} of {max_iterations} "
-    console.print(Rule(label, style=STYLE_PURPLE, characters="━"))
-    console.print()
-
-
 @dataclass
 class SummaryData:
     """Data class for summary information.
@@ -90,8 +81,6 @@ class SummaryData:
         fixes_applied: Number of fixes that were applied.
         test_retries: Number of times tests were retried.
         tests_passed: Whether all tests passed after fixes.
-        loop_mode: If True, loop mode was enabled for iterative fixes.
-        iterations_used: Number of loop iterations used (1 if not in loop mode).
 
     """
 
@@ -101,8 +90,6 @@ class SummaryData:
     fixes_applied: int
     test_retries: int
     tests_passed: bool
-    loop_mode: bool = False
-    iterations_used: int = 1
 
 
 def print_summary(console: Console, data: SummaryData) -> None:
@@ -126,9 +113,6 @@ def print_summary(console: Console, data: SummaryData) -> None:
     table.add_row("Skill", data.skill)
     table.add_row("Target", data.target)
     table.add_row("Issues Found", str(data.feedback_count))
-
-    if data.loop_mode:
-        table.add_row("Iterations", str(data.iterations_used))
     table.add_row("Fixes Applied", str(data.fixes_applied))
     table.add_row("Test Retries", str(data.test_retries))
 

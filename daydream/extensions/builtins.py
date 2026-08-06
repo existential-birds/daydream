@@ -1,8 +1,9 @@
 """Built-in registry seed.
 
 ``register_builtins(registry)`` seeds the registry with everything daydream
-does today: built-in skill slots, prompt names, and all five flow definitions
-(pr-feedback, review/comment, shallow, deep, improve).
+does today: built-in skill slots, prompt names, and the two flow definitions
+(deep, improve). Review/comment/shallow/pr-feedback are modes of the deep flow
+(#330).
 
 Uses only function-local late imports (import-cycle guard): this module must
 not import from ``daydream.runner`` or ``daydream.phases`` at module level.
@@ -55,7 +56,6 @@ def _register_builtin_prompts(registry: Registry) -> None:
     from daydream import phases
     from daydream.deep import prompts as deep_prompts
 
-    registry.override_prompt("review", phases.build_review_prompt)
     registry.override_prompt("intent", phases.build_intent_prompt)
     registry.override_prompt("alternatives", phases.build_alternative_review_prompt)
     registry.override_prompt("fix", phases._build_fix_prompt)
@@ -70,22 +70,9 @@ def _register_builtin_prompts(registry: Registry) -> None:
 
 
 def _register_builtin_flows(registry: Registry) -> None:
-    """Seed the built-in flow definitions."""
+    """Seed the built-in flow definitions (deep + improve only, #330)."""
     from daydream.deep import orchestrator as deep
-    from daydream.flows import pr_feedback, review, shallow
     from daydream.improve import orchestrator as improve
-
-    for step in pr_feedback.STEPS:
-        registry.register_phase(step)
-    registry.set_flow("pr-feedback", [step.name for step in pr_feedback.STEPS])
-
-    for step in review.STEPS:
-        registry.register_phase(step)
-    registry.set_flow("review", [step.name for step in review.STEPS])
-
-    for step in shallow.STEPS:
-        registry.register_phase(step)
-    registry.set_flow("shallow", list(shallow.FLOW))
 
     for step in deep.STEPS:
         registry.register_phase(step)

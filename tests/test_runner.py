@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -124,22 +126,16 @@ def patch_workspace(
 
 
 @pytest.fixture
-def silence_runner_ui(silence_console: Callable[..., None], monkeypatch: pytest.MonkeyPatch) -> None:
+def silence_runner_ui(silence_console: Callable[..., None]) -> None:
     """Drop ``daydream.runner``'s UI helpers (notably the ``print_phase_hero``
-    banner) plus the shallow flow's end-of-run summary.
-
-    ``daydream.flows.shallow``'s own ``print_phase_hero``/``print_dim`` bindings
-    are deliberately left live: the HEAL-hero ordering test spies on them.
+    banner). ``daydream.deep.orchestrator``'s own ``print_phase_hero`` /
+    ``print_dim`` bindings are deliberately left live: the AWAKEN-hero ordering
+    test spies on them via ``daydream.phases``.
     """
     silence_console("daydream.runner")
-    monkeypatch.setattr("daydream.flows.shallow.print_summary", lambda *a, **kw: None)
 
 
 _DISPATCH_TARGETS = (
-    "_run_pr_feedback",
-    "_run_comment",
-    "_run_review",
-    "_run_loop_shallow",
     "_run_loop_deep",
     "_run_improve",
 )
@@ -149,12 +145,12 @@ _DISPATCH_TARGETS = (
 @pytest.mark.parametrize(
     ("expected_target", "config_kwargs", "expected_attr", "expected_value"),
     [
-        ("_run_pr_feedback", {"pr_number": 42, "bot": "botname"}, "pr_number", 42),
+        ("_run_loop_deep", {"pr_number": 42, "bot": "botname"}, "pr_number", 42),
         # Auto-detected pr_number (no bot) routes to the deep loop, not PR feedback.
         ("_run_loop_deep", {"pr_number": 42, "bot": None}, "pr_number", 42),
-        ("_run_comment", {"output_mode": "comment"}, "output_mode", "comment"),
-        ("_run_review", {"output_mode": "review"}, "output_mode", "review"),
-        ("_run_loop_shallow", {"output_mode": "loop", "shallow": True}, "shallow", True),
+        ("_run_loop_deep", {"output_mode": "comment"}, "output_mode", "comment"),
+        ("_run_loop_deep", {"output_mode": "review"}, "output_mode", "review"),
+        ("_run_loop_deep", {"output_mode": "loop", "shallow": True}, "shallow", True),
         # Stage 4.2: deep is the default. No flags required to route here.
         ("_run_loop_deep", {"output_mode": "loop"}, "shallow", False),
         ("_run_improve", {"flow_name": "improve"}, "flow_name", "improve"),
@@ -164,7 +160,7 @@ _DISPATCH_TARGETS = (
         "auto_detected_pr_number_goes_deep",
         "comment_mode",
         "review_mode",
-        "shallow_loop_when_explicit",
+        "shallow_mode",
         "deep_loop_by_default",
         "improve_flow",
     ],
@@ -183,8 +179,9 @@ async def test_run_dispatches_to_expected_flow(
     """``run()`` routes each flag combination to exactly one flow entrypoint.
 
     Every dispatch function is stubbed, so the recorded call list also proves
-    exclusivity: shallow runs only when ``--shallow`` is explicitly set, and an
-    auto-detected ``pr_number`` (no ``bot``) must not reach PR feedback.
+    exclusivity: every PR-process mode (feedback / comment / review / shallow /
+    deep loop) lands on the single deep flow, and an auto-detected ``pr_number``
+    (no ``bot``) must not route to a separate PR-feedback path.
     """
     called: list[tuple[str, WorkContext, RunConfig]] = []
 
@@ -322,7 +319,7 @@ async def test_review_run_does_not_mint_app_identity(
 
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
-    monkeypatch.setattr("daydream.runner._run_review", fake_review)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_review)
 
     rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
 
@@ -360,41 +357,48 @@ def test_run_posts_to_github_matches_dispatch(config: RunConfig, expected: bool)
 
 
 @pytest.mark.asyncio
-async def test_comment_mode_errors_when_no_open_pr_for_branch(
+async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
     monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
 ):
-    """``--comment --branch X`` with no open PR for X exits 1 with a clear error."""
+    """``--comment --branch X`` with no open PR for X runs the deep flow.
+
+    The old review flow refused up front ("No Open PR" error, exit 1); the
+    collapsed deep flow dropped that pre-flight — ``_step_post_review`` warns and
+    skips the post when no PR is resolvable (covered at the seam by
+    ``test_post_skips_when_no_pr``). The runner-level contract is now: comment
+    mode reaches the deep flow regardless of PR existence.
+    """
     monkeypatch.setattr(
         "daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch: []
     )
-    captured: dict[str, str] = {}
+    seen: dict[str, Any] = {}
 
-    def fake_print_error(_console, title, body):
-        captured["title"] = title
-        captured["body"] = body
+    async def fake_deep(work: WorkContext, config: RunConfig) -> int:
+        seen["output_mode"] = config.output_mode
+        seen["branch"] = config.branch
+        return 0
 
-    monkeypatch.setattr("daydream.runner.print_error", fake_print_error)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_deep)
 
     config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
     exit_code = await runner.run(config)
 
-    assert exit_code == 1
-    assert "No Open PR" == captured["title"]
-    assert "no open PR for branch feat/missing" in captured["body"]
+    assert exit_code == 0
+    assert seen == {"output_mode": "comment", "branch": "feat/missing"}, seen
 
 
 @pytest.mark.asyncio
-async def test_run_feedback_routes_through_pr_feedback(
+async def test_run_feedback_routes_through_deep_flow(
     monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config
 ):
-    """``run_feedback`` sets ``pr_number`` and re-enters dispatch."""
+    """``run_feedback`` sets ``pr_number`` and re-enters dispatch (deep loop)."""
     called: dict[str, Any] = {}
 
     async def stub(work, config):
         called["pr"] = config.pr_number
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_pr_feedback", stub)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", stub)
     config = make_config(tmp_path, bot="botname")
 
     exit_code = await runner.run_feedback(config, 99)
@@ -412,8 +416,13 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     actually carries — not a parallel literal hardcoded in the runner. Tests
     propagation, not a specific id.
     """
+    from daydream.deep import orchestrator
+    from daydream.extensions import build_registry, set_registry
+
     work = make_work(tmp_path)
     chosen_model = "fixture-model-xyz"
+
+    set_registry(build_registry())
 
     # ``FlowContext.backend_for`` resolves through ``daydream.runner._resolve_backend``
     # (late import) and passes ``cache=`` by keyword.
@@ -428,19 +437,21 @@ async def test_pr_feedback_banner_echoes_resolved_backend_model(
     async def _empty_parse(*_args, **_kwargs):
         return []
 
-    # The fetch/parse call sites moved into the registered pr-feedback flow steps.
-    monkeypatch.setattr("daydream.flows.pr_feedback.phase_fetch_pr_feedback", _no_op_fetch)
-    monkeypatch.setattr("daydream.flows.pr_feedback.phase_parse_feedback", _empty_parse)
+    # The fetch/parse call sites live in the feedback-mode prefix of the deep flow.
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_fetch_pr_feedback", _no_op_fetch
+    )
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_parse_feedback", _empty_parse)
 
     captured: list[str] = []
     monkeypatch.setattr(
-        "daydream.runner.print_info",
+        "daydream.deep.orchestrator.print_info",
         lambda _console, message: captured.append(message),
     )
 
     config = make_config(tmp_path, pr_number=42, bot="botname")
 
-    exit_code = await runner._run_pr_feedback(work, config)
+    exit_code = await orchestrator._run_feedback_flow(config, work)
     assert exit_code == 0
     assert f"Model: {chosen_model}" in captured, (
         f"Banner did not echo backend.model; got {captured!r}"
@@ -504,55 +515,98 @@ class TestResolveBackendPhaseModel:
         assert low_backend is not high_backend  # different effort -> distinct cached instance
 
 
-# --- Task 6: HEAL hero is followed by Model: dim line ----------------------
+# --- Task 6: deep fix-cycle hero is followed by Model: dim line -------------
+
+
+def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
+    """Prime the deep artifacts a ``--start-at fix`` resume reads.
+
+    ``merged-items.json`` is the canonical items source the fix gate reads, and
+    ``diff-key`` must match the current diff so ``check_deep_artifacts`` does not
+    treat the primed set as stale. Key written first so every prerequisite is
+    strictly newer than the key (the resume freshness gate requires it).
+
+    Returns:
+        The ``.daydream/deep`` directory.
+    """
+    from daydream import git_ops
+    from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
+    from daydream.workspace import _resolve_base
+
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    base = _resolve_base(target, None, None)
+    diff = git_ops.diff(target, base)
+    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+    merged_items_path(deep).write_text(json.dumps({"items": items}))
+    return deep
+
+
+def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
+    """Build a validated merged item targeting the fixture's tracked file."""
+    return {
+        "id": item_id,
+        "lens": "per-stack",
+        "file": "main.py",
+        "line": 1,
+        "severity": severity,
+        "description": f"{severity} issue in main.py",
+        "confidence": "MEDIUM",
+        "rationale": "rationale",
+        "evidence": "main.py:1",
+    }
+
+
+def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
+    """Silence the runner / deep orchestrator / phases noise; keeps phase hero
+    and dim bindings alive so the hero-ordering test can spy on them."""
+    silence_console("daydream.runner")
+    silence_console("daydream.deep.orchestrator")
+    silence_console("daydream.phases", keep=("print_phase_hero", "print_dim"))
+
+
+async def _stub_verify(*_a: Any, **_k: Any) -> tuple[Path, dict[str, Any]]:
+    """Empty-verdicts stand-in for ``phase_verify_recommendations``."""
+    return Path("/nonexistent"), {"verdicts": []}
 
 
 @pytest.mark.asyncio
-async def test_run_loop_shallow_heal_hero_followed_by_model_line(
-    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+async def test_fix_cycle_awaken_hero_followed_by_model_line(
+    monkeypatch, feature_branch_repo, make_config, silence_console
 ):
-    """The HEAL phase hero in ``_run_loop_shallow`` must be followed by a dim
-    ``Model: <name>`` line scoped to the fix backend.
+    """The AWAKEN test-phase hero must be followed by a dim ``Model: <name>``
+    line scoped to the test backend.
 
-    Drives single-pass shallow loop with ``start_at="fix"`` to skip review,
-    exploration, and skill resolution. Only the fix and test phases run, and
-    HEAL renders before phase_fix. Asserts hero + dim call ordering.
+    The shallow flow's HEAL hero was dropped in the single-flow collapse (#330);
+    the surviving phase-hero + Model-line pair in the deep fix cycle is
+    ``phase_test_and_heal``'s AWAKEN hero followed by the dim Model line. Drives
+    the deep fix cycle (``shallow=True, start_at="fix"``) real-path with the REAL
+    ``phase_test_and_heal`` over a passing scripted suite, and asserts hero + dim
+    call ordering through the module bindings that actually render them.
     """
-    from daydream.config import REVIEW_OUTPUT_FILE
+    _seed_fix_resume(feature_branch_repo, [_fix_item()])
+    _silence_fix_cycle_ui(silence_console)
 
-    # Pre-create the review file so the check_review_file_exists guard passes.
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - Bug\n")
-
-    work = make_work(tmp_path)
-
-    # Stub backends to carry distinct phase-specific models so the dim line's
-    # source is unambiguous.
-    backends_by_phase = {
-        phase: ScriptedBackend(model=f"{phase}-model-xyz")
-        for phase in ("review", "parse", "fix", "test")
-    }
-
+    test_backend = ScriptedBackend(
+        script=[(TextEvent(text="All 1 tests passed. 0 failed."), _RESULT)],
+        model="test-model-xyz",
+    )
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
-        lambda _config, phase, cache=None, **_kwargs: backends_by_phase[phase],
+        lambda _config, phase, cache=None, **_kwargs: (
+            test_backend if phase == "test" else ScriptedBackend(model="stub-model")
+        ),
     )
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
 
-    async def _stub_phase_parse_feedback(_backend, _work):
-        return [{"id": 1, "description": "Bug", "file": "foo.py", "line": 1}]
+    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
+        return {}
 
-    async def _stub_phase_fix(*_args, **_kwargs):
+    async def _noop_commit(*_a: Any, **_k: Any) -> None:
         return None
 
-    async def _stub_phase_test_and_heal(*_args, **_kwargs):
-        return (True, 0, True)
-
-    async def _stub_phase_commit_push(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _stub_phase_commit_push)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _noop_fix)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
     # Capture hero + dim calls in order.
     calls: list[tuple[str, str]] = []  # (kind, payload)
@@ -563,82 +617,81 @@ async def test_run_loop_shallow_heal_hero_followed_by_model_line(
     def _dim_spy(_console, message):
         calls.append(("dim", message))
 
-    monkeypatch.setattr("daydream.flows.shallow.print_phase_hero", _hero_spy)
-    monkeypatch.setattr("daydream.flows.shallow.print_dim", _dim_spy)
+    monkeypatch.setattr("daydream.phases.print_phase_hero", _hero_spy)
+    monkeypatch.setattr("daydream.phases.print_dim", _dim_spy)
 
-    config = make_config(tmp_path, start_at="fix", loop=False, shallow=True)
-
-    exit_code = await runner._run_loop_shallow(work, config)
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
+    )
     assert exit_code == 0
 
-    # Find the HEAL hero in call order.
-    heal_idx = next(
-        (i for i, (kind, payload) in enumerate(calls) if kind == "hero" and payload == "HEAL"),
+    # Find the AWAKEN hero in call order.
+    awaken_idx = next(
+        (
+            i
+            for i, (kind, payload) in enumerate(calls)
+            if kind == "hero" and payload == "AWAKEN"
+        ),
         None,
     )
-    assert heal_idx is not None, f"HEAL hero never rendered; calls={calls!r}"
-    # The very next call must be a dim Model: line carrying the fix backend's id.
-    assert heal_idx + 1 < len(calls), "HEAL hero has no following call"
-    next_kind, next_payload = calls[heal_idx + 1]
+    assert awaken_idx is not None, f"AWAKEN hero never rendered; calls={calls!r}"
+    # The very next call must be a dim Model: line carrying the test backend's id.
+    assert awaken_idx + 1 < len(calls), "AWAKEN hero has no following call"
+    next_kind, next_payload = calls[awaken_idx + 1]
     assert next_kind == "dim", (
-        f"Call after HEAL hero was not a dim line; got {(next_kind, next_payload)!r}"
+        f"Call after AWAKEN hero was not a dim line; got {(next_kind, next_payload)!r}"
     )
-    assert next_payload == "Model: fix-model-xyz", (
-        f"Dim line after HEAL hero did not echo the fix backend's model; got {next_payload!r}"
+    assert next_payload == "Model: test-model-xyz", (
+        f"Dim line after AWAKEN hero did not echo the test backend's model; got {next_payload!r}"
     )
 
 
-async def test_shallow_items_canonicalized_and_severity_ordered(
-    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+@pytest.mark.asyncio
+async def test_fix_cycle_items_severity_ordered(
+    monkeypatch, feature_branch_repo, make_config, silence_console
 ):
-    """Shallow items carry ``lens="per-stack"`` + a ``severity`` derived from
-    confidence, and ``phase_fix`` receives them severity-sorted.
+    """Merged items are severity-sorted (high before low) before ``phase_fix_parallel``.
 
-    parse_feedback returns confidence-tagged items in order [LOW, HIGH]. After
-    canonicalization + severity-sort, the HIGH-confidence item must be fixed
-    first. Asserts on the severity ``phase_fix`` actually receives (observable
-    consequence), never on dispatch.
+    The fix gate seeds ``ctx.data["items"]`` with canonical merged items in an
+    out-of-order shape [low, high]; after ``severity_sorted`` the HIGH item must
+    be fixed first. Asserts on the severity ``phase_fix_parallel`` actually
+    receives (observable consequence), never on dispatch bookkeeping.
     """
-    from daydream.config import REVIEW_OUTPUT_FILE
-
-    # Pre-create the review file so the check_review_file_exists guard passes.
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. low.py:1 - L\n2. high.py:2 - H\n")
-
-    work = make_work(tmp_path)
+    _seed_fix_resume(
+        feature_branch_repo,
+        [_fix_item(1, severity="low"), _fix_item(2, severity="high")],
+    )
+    _silence_fix_cycle_ui(silence_console)
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
-
-    async def _stub_phase_parse_feedback(_backend, _work):
-        # Intentionally out of severity order: LOW then HIGH.
-        return [
-            {"id": 1, "description": "L", "file": "low.py", "line": 1, "confidence": "LOW"},
-            {"id": 2, "description": "H", "file": "high.py", "line": 2, "confidence": "HIGH"},
-        ]
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
 
     order: list[str] = []
 
-    async def _spy_phase_fix(_b, _w, item, _n, _t):
-        order.append(item["severity"])
+    async def _spy_fix_parallel(_b, _w, items, **_k):
+        order.extend(item["severity"] for item in items)
+        return {}
 
-    async def _stub_phase_test_and_heal(*_args, **_kwargs):
+    async def _noop_test(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
         return (True, 0, True)
 
-    async def _stub_phase_commit_push(*_args, **_kwargs):
+    async def _noop_commit(*_a: Any, **_k: Any) -> None:
         return None
 
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _spy_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _stub_phase_commit_push)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _spy_fix_parallel)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_test_and_heal", _noop_test)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _noop_commit)
 
-    config = make_config(tmp_path, start_at="fix", loop=False, shallow=True)
-
-    exit_code = await runner._run_loop_shallow(work, config)
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
+    )
     assert exit_code == 0
-    assert order == ["high", "low"], f"phase_fix did not receive severity-ordered items; got {order!r}"
+    assert order == ["high", "low"], (
+        f"phase_fix_parallel did not receive severity-ordered items; got {order!r}"
+    )
 
 
 # --- Task 4: non_interactive threading -------------------------------------
@@ -653,11 +706,12 @@ def test_runconfig_defaults_non_interactive_false():
     ("dispatch_target", "config_kwargs"),
     [
         ("daydream.runner._run_loop_deep", {"output_mode": "loop"}),
-        ("daydream.runner._run_loop_shallow", {"output_mode": "loop", "shallow": True}),
-        ("daydream.runner._run_pr_feedback", {"pr_number": 7, "bot": "botname"}),
-        ("daydream.runner._run_comment", {"output_mode": "comment"}),
+        ("daydream.runner._run_loop_deep", {"output_mode": "loop", "shallow": True}),
+        ("daydream.runner._run_loop_deep", {"pr_number": 7, "bot": "botname"}),
+        ("daydream.runner._run_loop_deep", {"output_mode": "comment"}),
+        ("daydream.runner._run_improve", {"flow_name": "improve"}),
     ],
-    ids=["deep_loop", "shallow", "pr_feedback", "comment"],
+    ids=["deep_loop", "shallow", "pr_feedback", "comment", "improve"],
 )
 async def test_run_threads_non_interactive_into_agent_state(
     dispatch_target, config_kwargs, monkeypatch, patch_workspace, silence_runner_ui, tmp_path,
@@ -686,106 +740,178 @@ async def test_run_threads_non_interactive_into_agent_state(
         reset_state()
 
 
-# --- non_interactive commit branch in _run_loop_shallow --------------------
+# --- Deep fix-cycle commit gate semantics ----------------------------------
+
+
+class _CommitWritingBackend:
+    """Scripted fake whose test-suite and commit turns really touch the worktree.
+
+    The test-suite turn reports a green run; the commit turn runs a REAL ``git
+    commit`` carrying the Daydream trailers, so ``_do_commit``'s post-commit
+    trailer verification sees a new HEAD. The backend is the only mocked seam —
+    exactly the shape an agent with tools would take.
+    """
+
+    model = "mock-model"
+
+    def __init__(self, repo: Path) -> None:
+        self.repo = repo
+        self.commit_prompts: list[str] = []
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        pl = prompt.lower()
+        if "run the project's test suite" in pl:
+            yield TextEvent(text="All 1 tests passed. 0 failed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+        if "stage all changes and commit" in pl:
+            self.commit_prompts.append(prompt)
+            run_id = re.search(r"Daydream-Run: (\S+)", prompt)
+            version = re.search(r"Daydream-Version: (\S+)", prompt)
+            message = (
+                "fix: apply daydream fix\n\n"
+                f"Daydream-Run: {run_id.group(1) if run_id else 'unknown'}\n"
+                f"Daydream-Version: {version.group(1) if version else 'unknown'}\n"
+            )
+            _git(cwd, "add", "-A")
+            _git(cwd, "commit", "-m", message)
+            yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+        yield TextEvent(text="ok")
+        yield ResultEvent(structured_output=None, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}" + (f" {args}" if args else "")
 
 
 @pytest.mark.asyncio
-async def test_non_interactive_shallow_calls_phase_commit_push_auto(
-    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+async def test_fix_cycle_yes_commits_fixes(
+    monkeypatch, feature_branch_repo, make_config, silence_console
 ):
-    """When non_interactive=True and tests pass, _run_loop_shallow must call
-    phase_commit_push_auto — not the interactive phase_commit_push.
+    """Real-path: a --yes shallow deep run whose tests pass commits its fixes.
 
-    This is a real-path test: it drives _run_loop_shallow directly and asserts
-    on which commit function was actually invoked (observable side effect),
-    rather than asserting on dispatch bookkeeping.
+    The deep fix cycle's commit step is ``phase_commit_push`` (interactive gate);
+    under ``assume="yes"`` the gate auto-approves and the commit agent runs. The
+    observable outcome is a NEW git commit carrying the Daydream trailer.
     """
-    from daydream.agent import set_non_interactive
     from daydream.config import REVIEW_OUTPUT_FILE
 
-    # The commit gate reads the agent singleton (set by run() from config), not
-    # config.non_interactive directly. This test enters at _run_loop_shallow,
-    # below run()'s set_non_interactive call, so establish the global here.
-    set_non_interactive(True)
+    _seed_fix_resume(feature_branch_repo, [_fix_item()])
+    _silence_fix_cycle_ui(silence_console)
 
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+    commit_backend = _CommitWritingBackend(feature_branch_repo)
+    monkeypatch.setattr(
+        "daydream.runner._resolve_backend",
+        lambda _config, _phase, cache=None, **_kwargs: commit_backend,
+    )
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
 
-    work = make_work(tmp_path)
+    async def _fix_writes(*_a: Any, **_k: Any) -> dict[str, str]:
+        main_py = feature_branch_repo / "main.py"
+        main_py.write_text(main_py.read_text() + "\n# daydream fix\n")
+        return {}
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _fix_writes)
+
+    # Pre-create the review output so the fix-gate decline path never triggers.
+    (feature_branch_repo / REVIEW_OUTPUT_FILE).write_text("# Review\n")
+    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
+
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
+    )
+    assert exit_code == 0
+
+    head_after = _git(feature_branch_repo, "rev-parse", "HEAD")
+    assert head_after != head_before, "the --yes run never committed"
+    assert len(commit_backend.commit_prompts) == 1
+    assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
+    assert "# daydream fix" in _git(feature_branch_repo, "show", "HEAD:main.py")
+
+
+@pytest.mark.asyncio
+async def test_fix_cycle_non_interactive_declines_fix_and_commit(
+    monkeypatch, feature_branch_repo, make_config, silence_console
+):
+    """Real-path: a non-interactive shallow deep run with no ``--yes`` declines at
+    the apply-fixes gate — no fix, no test, no commit (observable: HEAD unchanged).
+    """
+    _seed_fix_resume(feature_branch_repo, [_fix_item()])
+    _silence_fix_cycle_ui(silence_console)
 
     monkeypatch.setattr(
         "daydream.runner._resolve_backend",
         lambda _config, _phase, cache=None, **_kwargs: ScriptedBackend(model="stub-model"),
     )
+    head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
 
-    async def _stub_phase_parse_feedback(_backend, _work):
-        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
-
-    async def _stub_phase_fix(*_args, **_kwargs):
-        return None
-
-    async def _stub_phase_test_and_heal(*_args, **_kwargs):
-        return (True, 0, True)
-
-    auto_calls: list[bool] = []
-    interactive_calls: list[bool] = []
-
-    async def _spy_phase_commit_push_auto(*_args, **_kwargs):
-        auto_calls.append(True)
-
-    async def _spy_phase_commit_push(*_args, **_kwargs):
-        interactive_calls.append(True)
-
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_test_and_heal", _stub_phase_test_and_heal)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_phase_commit_push_auto)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_phase_commit_push)
-
-    config = make_config(
-        tmp_path, start_at="fix", loop=False, shallow=True, non_interactive=True
+    exit_code = await runner.run(
+        make_config(feature_branch_repo, start_at="fix", shallow=True)
     )
 
-    exit_code = await runner._run_loop_shallow(work, config)
     assert exit_code == 0
-    assert auto_calls == [True], (
-        "phase_commit_push_auto was not called when non_interactive=True"
+    assert _git(feature_branch_repo, "rev-parse", "HEAD") == head_before, (
+        "a non-interactive run without --yes committed"
     )
-    assert interactive_calls == [], (
-        "phase_commit_push was called despite non_interactive=True"
+    assert not (feature_branch_repo / ".daydream-fix-applied").exists(), (
+        "a non-interactive run without --yes applied a fix"
     )
 
 
-async def _drive_shallow_failing_run(
+async def _drive_fix_cycle_failing(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    work: WorkContext,
+    target: Path,
     config: RunConfig,
     *,
     script: list[Turn],
-    stdin_guard_message: str,
-    apply_agent_state: Callable[[], None],
+    stdin_guard_message: str | None = None,
+    stdin_answers: list[str] | None = None,
 ) -> tuple[int, ScriptedBackend, list[bool]]:
-    """Drive ``_run_loop_shallow`` with the REAL ``phase_test_and_heal`` over a
-    scripted failing test run.
+    """Drive the deep fix-cycle (``shallow=True, start_at="fix"``) with the REAL
+    ``phase_test_and_heal`` over a scripted failing test run.
 
-    Holds everything the two failing-shallow real-path tests share: the review
-    file seed, the scripted backend bound to the ``test`` phase, stubbed
-    parse/fix, one commit spy across BOTH commit variants, a stdin trap, and the
-    agent-state reset bracket. The differing script, config, agent axis, and
-    assertions stay at the call sites.
-
-    ``_BEYOND_SCRIPT`` is appended so a heal loop that runs past its script
-    raises instead of silently replaying the last turn forever.
+    Holds everything the two failing-fix-cycle real-path tests share: the
+    fix-resume artifact seed, the scripted backend bound to the ``test`` phase,
+    stubbed verify/fix so only the test phase touches the backend, one commit
+    spy, and either a stdin trap (unattended) or a fed stdin queue (interactive
+    gate answers). ``_BEYOND_SCRIPT`` is appended so a heal loop that runs past
+    its script raises instead of silently replaying the last turn forever.
 
     Returns:
         ``(exit_code, test_backend, commit_calls)``.
     """
     from daydream.agent import reset_state
-    from daydream.config import REVIEW_OUTPUT_FILE
 
-    (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1 - X\n")
+    _seed_fix_resume(target, [_fix_item()])
 
-    test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model")
+    # Silence the flow's terminal noise; the test phase is observed through the
+    # backend script, not scraped rendering.
+    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_stage_progress", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.print_verification_summary", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "daydream.phases.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+    monkeypatch.setattr(
+        "daydream.runner.console",
+        type("C", (), {"print": lambda *a, **kw: None})(),
+    )
+
+    test_backend = ScriptedBackend(script=[*script, _BEYOND_SCRIPT], model="test-model-xyz")
     stub_backend = ScriptedBackend(model="stub-model")
 
     monkeypatch.setattr(
@@ -794,36 +920,39 @@ async def _drive_shallow_failing_run(
             test_backend if phase == "test" else stub_backend
         ),
     )
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
 
-    async def _stub_phase_parse_feedback(_backend, _work):
-        return [{"id": 1, "description": "X", "file": "foo.py", "line": 1}]
-
-    async def _stub_phase_fix(*_args, **_kwargs):
-        return None
+    async def _noop_fix(*_a: Any, **_k: Any) -> dict[str, str]:
+        return {}
 
     commit_calls: list[bool] = []
 
-    async def _spy_commit(*_args, **_kwargs):
+    async def _spy_commit(*_a: Any, **_k: Any) -> None:
         commit_calls.append(True)
 
-    monkeypatch.setattr("daydream.flows.shallow.phase_parse_feedback", _stub_phase_parse_feedback)
-    monkeypatch.setattr("daydream.flows.shallow.phase_fix", _stub_phase_fix)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push_auto", _spy_commit)
-    monkeypatch.setattr("daydream.flows.shallow.phase_commit_push", _spy_commit)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _noop_fix)
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
 
-    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
-        raise AssertionError(stdin_guard_message)
+    if stdin_answers is not None:
+        answers = iter(stdin_answers)
 
-    monkeypatch.setattr("builtins.input", _forbidden_input)
-    monkeypatch.setattr(
-        "daydream.phases.console",
-        type("C", (), {"print": lambda *a, **kw: None})(),
-    )
+        def _feed_input(*_a: Any, **_k: Any) -> str:
+            return next(answers)
+
+        monkeypatch.setattr("builtins.input", _feed_input)
+        monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
+        monkeypatch.delenv("CI", raising=False)
+    else:
+
+        def _forbidden_input(*_a: Any, **_k: Any) -> str:
+            raise AssertionError(stdin_guard_message or "stdin must not be touched")
+
+        monkeypatch.setattr("builtins.input", _forbidden_input)
 
     reset_state()
-    apply_agent_state()
     try:
-        exit_code = await runner._run_loop_shallow(work, config)
+        exit_code = await runner.run(config)
     finally:
         reset_state()
 
@@ -831,43 +960,31 @@ async def _drive_shallow_failing_run(
 
 
 @pytest.mark.asyncio
-async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(
-    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+async def test_fix_cycle_failing_tests_abort_writes_handoff(
+    monkeypatch, feature_branch_repo, make_config
 ):
-    """Real-path: a non-interactive shallow run whose tests FAIL writes a handoff
-    and exits 1 without launching the fix agent or reading stdin.
+    """Real-path: an interactive deep shallow run whose tests FAIL and the operator
+    aborts (heal-menu "4") writes a handoff and exits 1 without committing.
 
-    Drives ``_run_loop_shallow`` (the ``--shallow`` dispatch target) with the
-    REAL ``phase_test_and_heal`` -- not stubbed -- against a failing test run.
-    With the agent singleton's ``non_interactive`` flag set, ``phase_test_and_heal``
-    must take choice-"4" semantics: skip the menu, skip stdin, run the read-only
-    failure-summarizer, write ``handoff.md`` to the live run directory, and
-    return ``(False, 0)``. If the non-interactive guard in ``phase_test_and_heal``
-    were reverted, the menu's default "2" would launch the mutating heal fix agent
-    -- whose ``_build_fix_prompt`` text ("Analyze the failures and fix them",
-    asserted absent) -- and ``prompt_user`` would read stdin (rigged to fail).
+    Drives the deep fix cycle with the REAL ``phase_test_and_heal`` over a
+    scripted failing test run. Fix-gate answered "y"; the heal menu answered "4"
+    (abort): the read-only failure-summarizer runs, ``handoff.md`` lands in the
+    live run directory, and the run exits 1. The mutating heal fix agent is never
+    launched ("Analyze the failures and fix them" absent).
     """
-    from daydream.agent import set_non_interactive
-
-    exit_code, test_backend, commit_calls = await _drive_shallow_failing_run(
+    exit_code, test_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch,
-        tmp_path,
-        make_work(tmp_path),
-        make_config(tmp_path, start_at="fix", loop=False, shallow=True, non_interactive=True),
-        # The test phase's backend yields a failing test run, then the read-only
-        # summarizer's handoff body -- exactly the choice-"4" path the guard takes.
-        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\nnon-interactive failure context")],
-        stdin_guard_message=(
-            "input() was called in non-interactive mode -- stdin must not be touched"
-        ),
-        apply_agent_state=lambda: set_non_interactive(True),
+        feature_branch_repo,
+        make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
+        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\ninteractive abort")],
+        stdin_answers=["y", "4"],
     )
 
     assert exit_code == 1
 
-    handoffs = list(tmp_path.glob(".daydream/runs/*/handoff.md"))
+    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\nnon-interactive failure context"
+    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\ninteractive abort"
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
@@ -881,36 +998,24 @@ async def test_non_interactive_shallow_failing_tests_write_handoff_no_fix(
 
 
 @pytest.mark.asyncio
-async def test_yes_shallow_failing_tests_bounded_fix_and_abort(
-    monkeypatch, tmp_path, make_work, make_config, silence_runner_ui
+async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
+    monkeypatch, feature_branch_repo, make_config
 ):
-    """Real-path: a --yes shallow run whose tests FAIL runs ONE fix attempt then aborts.
+    """Real-path: a --yes shallow deep run whose tests FAIL runs ONE fix attempt
+    then aborts.
 
-    Drives ``_run_loop_shallow`` with the REAL ``phase_test_and_heal`` (not stubbed)
-    against a scripted backend: fail → fix → fail → handoff (summarizer).
-
-    With ``assume="yes"`` the bounded-loop guard at phases.py line 1777
-    (``decision is True and retries_used > 0``) must fire after the first auto
-    fix attempt, writing ``handoff.md`` and returning exit code 1. If the guard
-    were absent, the fix agent would loop forever (the backend raises on call 5).
-    The fix prompt text ("Analyze the failures and fix them") must appear in
-    exactly one call (the fix agent), proving the fix ran once and only once.
-    stdin must never be touched.
+    Drives the deep fix cycle with the REAL ``phase_test_and_heal`` against a
+    scripted backend: fail → fix → fail → handoff (summarizer). With
+    ``assume="yes"`` the bounded-loop guard (``decision is True and
+    retries_used > 0``) fires after the first auto fix attempt, writing
+    ``handoff.md`` and returning exit code 1. The fix prompt text ("Analyze the
+    failures and fix them") appears in exactly one call (the fix agent), proving
+    the fix ran once and only once. stdin must never be touched.
     """
-    from daydream.agent import set_assume
-
-    exit_code, test_backend, commit_calls = await _drive_shallow_failing_run(
+    exit_code, test_backend, commit_calls = await _drive_fix_cycle_failing(
         monkeypatch,
-        tmp_path,
-        make_work(tmp_path),
-        make_config(
-            tmp_path,
-            start_at="fix",
-            loop=False,
-            shallow=True,
-            non_interactive=False,
-            assume="yes",
-        ),
+        feature_branch_repo,
+        make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes"),
         # Script: fail → fix (one bounded attempt) → fail → handoff (summarizer).
         # Any 5th call raises via the beyond-script turn, proving the loop ends.
         script=[
@@ -920,12 +1025,11 @@ async def test_yes_shallow_failing_tests_bounded_fix_and_abort(
             _handoff_turn("# Handoff\n\n--yes bounded fix failure"),
         ],
         stdin_guard_message="input() must not be called under --yes",
-        apply_agent_state=lambda: set_assume("yes"),
     )
 
     assert exit_code == 1
 
-    handoffs = list(tmp_path.glob(".daydream/runs/*/handoff.md"))
+    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
     assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
     assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\n--yes bounded fix failure"
 
