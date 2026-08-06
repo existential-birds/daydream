@@ -10,23 +10,26 @@ echo "Running pre-push checks..."
 
 # Reject unsigned commits: every pushed commit must carry an SSH signature.
 echo "→ Verifying commit signatures..."
+remote_name="${1:-origin}"
 while read -r _local_ref local_sha remote_ref remote_sha; do
     # Skip delete operations and empty refs
     if [ -z "${local_sha:-}" ] || [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
         continue
     fi
 
-    # Range of commits to check, excluding those already on any remote branch
+    # Range of commits to check, excluding those already on the destination remote
     if [ -z "${remote_sha:-}" ] || [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
-        range="$local_sha --not --remotes=origin"
+        range="$local_sha --not --remotes=$remote_name"
     else
-        range="$local_sha --not $remote_sha --remotes=origin"
+        range="$local_sha --not $remote_sha --remotes=$remote_name"
     fi
 
-    unsigned_commits=$(git log --format='%H %G?' $range 2>/dev/null | grep -E ' N$' | cut -d' ' -f1 || true)
+    # Accept only 'G' (good signature): reject unsigned plus bad/error/unknown/
+    # expired/revoked signatures (%G? -> B, E, U, X, Y, R, T, N, ?)
+    unsigned_commits=$(git log --format='%H %G?' $range 2>/dev/null | grep -vE ' G$' | cut -d' ' -f1 || true)
 
     if [ -n "$unsigned_commits" ]; then
-        echo "ERROR: The following commits are not signed:"
+        echo "ERROR: The following commits do not carry a valid signature:"
         for commit in $unsigned_commits; do
             echo "  - $(git log -1 --format='%h %s' "$commit")"
         done
@@ -40,7 +43,7 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     fi
 done
 
-echo "All commits are signed."
+echo "All commits carry a valid signature."
 
 # Must run before any `uv run` below: `uv run`/`uv sync` silently re-lock a
 # drifted uv.lock, which would mask a release that bumped the version but forgot
