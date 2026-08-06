@@ -77,25 +77,25 @@ def test_flow_default_none(monkeypatch):
     assert _cfg(monkeypatch, ["/tmp/project"]).flow_name is None
 
 
-@pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"], ["--loop"]])
+@pytest.mark.parametrize("conflict", [["--review"], ["--comment"], ["--shallow"]])
 def test_flow_conflicts_rejected(monkeypatch, conflict):
     monkeypatch.setattr(sys, "argv", ["daydream", "--flow", "x", *conflict, "/tmp/project"])
     with pytest.raises(SystemExit):
         _parse_args()
 
 
-def test_loop_flag_default_off(monkeypatch):
-    config = _cfg(monkeypatch, ["/tmp/project"])
-    assert config.loop is False
-    assert config.max_iterations == 5
+def test_loop_flag_rejected(monkeypatch, capsys):
+    """``--loop`` was removed entirely (#330); the CLI rejects it as unknown."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "/tmp/project"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_loop_optional_count(monkeypatch):
-    """--loop with no count enables looping at the default of 5; --loop N sets N."""
-    bare = _cfg(monkeypatch, ["--loop", "/tmp/project"])
-    assert (bare.loop, bare.max_iterations) == (True, 5)
-    assert _cfg(monkeypatch, ["--loop", "3", "/tmp/project"]).max_iterations == 3
-    assert _cfg(monkeypatch, ["/tmp/project"]).loop is False
+def test_runconfig_has_no_loop_fields():
+    """RunConfig carries no loop mode after the collapse (#330)."""
+    assert not hasattr(RunConfig(), "loop")
+    assert not hasattr(RunConfig(), "max_iterations")
 
 
 @pytest.mark.parametrize("output_flag", ["--review", "--comment"], ids=["review", "comment"])
@@ -105,30 +105,6 @@ def test_yes_with_review_only_output_errors(monkeypatch, capsys, output_flag):
     with pytest.raises(SystemExit):
         _parse_args()
     assert "--yes" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("count", ["0", "-1"], ids=["zero", "negative"])
-def test_invalid_loop_count_errors(monkeypatch, capsys, count):
-    """--loop counts must be positive."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", count, "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-    assert "positive" in capsys.readouterr().err
-
-
-def test_loop_with_comment_errors(monkeypatch):
-    """--loop is incompatible with --comment (review-only output mode)."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "--loop", "--comment", "/tmp/project"])
-    with pytest.raises(SystemExit):
-        _parse_args()
-
-
-def test_loop_start_at_conflict(monkeypatch):
-    monkeypatch.setattr(sys, "argv", [
-        "daydream", "/tmp/project", "--shallow", "--loop", "--start-at", "fix",
-    ])
-    with pytest.raises(SystemExit):
-        _parse_args()
 
 
 @pytest.mark.parametrize(

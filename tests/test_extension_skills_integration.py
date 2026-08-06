@@ -72,7 +72,7 @@ async def test_stack_slot_override_reaches_shallow_skill_flag(
     )
     backend = ScriptedBackend(events=_CLEAN_TURN)
     install_backend(backend)
-    mute_side_effects("daydream.flows.shallow")
+    mute_side_effects("daydream.deep.orchestrator")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
 
@@ -121,31 +121,3 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     assert rc == 0
     proto_prompts = [c["prompt"] for c in backend.calls if "/ro-proto:review-proto" in c["prompt"]]
     assert proto_prompts and "api.proto" in proto_prompts[0]
-
-
-async def test_phase_review_slot_supplies_shallow_skill(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    mute_side_effects: Callable[..., None],
-) -> None:
-    """A bound phase:review slot replaces the non-interactive "Missing --skill" error.
-
-    Runs the shallow flow through ``runner.run`` non-interactively WITHOUT
-    ``--skill`` — today that config exits 1 with "Missing --skill". With the
-    slot bound, the run must exit 0 and the review prompt must carry the
-    bound skill invocation.
-    """
-    ext_dir.write_module(
-        "def register(r):\n"
-        "    r.override_skill('phase:review', 'ro-python:review-python')\n"
-    )
-    backend = ScriptedBackend(events=_CLEAN_TURN)
-    install_backend(backend)
-    mute_side_effects("daydream.flows.shallow")
-
-    rc = await runner.run(make_config(feature_branch_repo, shallow=True))
-
-    assert rc == 0
-    assert any("ro-python:review-python" in p for p in backend.prompts)

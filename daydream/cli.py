@@ -838,58 +838,9 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
 
-    parser.add_argument(
-        "--loop",
-        nargs="?",
-        const=5,
-        default=None,
-        type=int,
-        metavar="N",
-        help="Repeat the review-fix-test cycle until zero issues or N iterations (default N: 5)",
-    )
-
     _add_shared_arguments(parser, full_help=full_help)
 
     return parser
-
-
-def _normalize_loop_argv(raw_argv: list[str]) -> list[str]:
-    """Disambiguate ``--loop``'s optional count from a following positional.
-
-    ``--loop`` carries an optional integer count (``nargs="?"``), which makes
-    argparse greedily try to consume the next token as that count. For the
-    golden path ``daydream --loop /some/path`` argparse would then fail trying
-    to parse the path as an int. This pre-scan pins the count explicitly when
-    ``--loop`` is bare (last token, or followed by a flag or a non-integer
-    token), turning it into ``--loop=5`` so the positional is preserved. An
-    explicit ``--loop N`` is left untouched.
-
-    Args:
-        raw_argv: The argument list after verb-shim stripping.
-
-    Returns:
-        A new argv list with bare ``--loop`` rewritten to ``--loop=5``.
-    """
-    def _looks_like_int(s: str) -> bool:
-        # int() — the same parser argparse applies via type=int — so pre-scan and
-        # argparse agree on what counts as an integer.
-        try:
-            int(s)
-            return True
-        except ValueError:
-            return False
-
-    normalized: list[str] = []
-    for i, token in enumerate(raw_argv):
-        if token == "--loop":
-            nxt = raw_argv[i + 1] if i + 1 < len(raw_argv) else None
-            # Pass signed integers through so argparse applies type=int validation;
-            # pin the default only when the next token is absent, a flag, or non-int.
-            if nxt is None or not _looks_like_int(nxt):
-                normalized.append("--loop=5")
-                continue
-        normalized.append(token)
-    return normalized
 
 
 # Removed per-phase model/backend flags → their config-file replacement in
@@ -955,8 +906,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         feedback_args = feedback_parser.parse_intermixed_args(raw_argv[1:])
         return _build_feedback_config(feedback_args)
 
-    raw_argv = _normalize_loop_argv(raw_argv)
-
     parser = _build_main_parser()
     _reject_removed_phase_flags(parser, raw_argv)
     args = parser.parse_args(raw_argv)
@@ -999,25 +948,11 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
             "(use --shallow, or --start-at fix to resume after the merged report)"
         )
 
-    # ``--loop`` carries an optional count (bare ⇒ 5); None when absent.
-    loop = args.loop is not None
-    max_iterations = args.loop if args.loop is not None else 5
-
-    if loop and max_iterations < 1:
-        parser.error("--loop count must be positive")
-
-    if loop and output_mode != "loop":
-        parser.error("--loop cannot be combined with --review/--comment")
-    if loop and args.start_at != "review":
-        parser.error("--loop requires starting at review phase (incompatible with --start-at)")
-
     if args.flow_name is not None:
         if args.comment or args.review:
             parser.error("--flow cannot be combined with --review/--comment")
         if args.shallow:
             parser.error("--flow cannot be combined with --shallow")
-        if loop:
-            parser.error("--flow cannot be combined with --loop")
 
     target_repo, pr_repo, file_config = _resolve_target_provenance(args.target)
     # Explicit --pr-number pins the target PR; otherwise auto-detect from branch.
@@ -1046,8 +981,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         fix_backend=None,
         test_backend=None,
         ignore_paths=args.ignore_paths,
-        loop=loop,
-        max_iterations=max_iterations,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,
@@ -1104,8 +1037,6 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         fix_backend=None,
         test_backend=None,
         ignore_paths=[],
-        loop=False,
-        max_iterations=5,
         trajectory_path=args.trajectory_path,
         pr_repo=pr_repo,
         archive=not args.no_archive,

@@ -229,74 +229,20 @@ policy or the built-in policy.
 
 ### Flows and steps
 
-Five flows are registered: `deep`, `shallow`, `review`, `pr-feedback`, and
-`improve`.
+Two flows are registered: `deep` (the single PR-process flow) and `improve`.
 Each step's *config key* is its `[tool.daydream.phases.<key>]` key
 (`FlowStep.config_phase`, defaulting to the step name) — the key per-phase
 model/backend overrides resolve against.
 
-**Naming convention:** phase names are one global registry namespace shared by
-every flow. The deep flow owns the plain names; when another flow has a step
-whose natural name is already taken, that step gets a flow-qualified name
-(`review-exploration`, `shallow-fix`, …) while `config_phase` keeps the
-original per-phase config key. Fork-defined flows should follow the same
-convention: pick globally unique step names, and use `config_phase` to reuse
-an existing config key.
+**Naming convention:** phase names are one global registry namespace. The `deep`
+flow owns the plain names. The `review` / `shallow` / `pr-feedback` flows were
+collapsed into modes of `deep` (#330) — `--review`, `--comment`, and `--shallow`
+run the review spine (stopping after `post-review` for review/comment, forcing a
+single stack for shallow), and `daydream feedback <pr#>` runs only the feedback
+prefix. Fork-defined flows should follow the same convention: pick globally
+unique step names, and use `config_phase` to reuse an existing config key.
 
-#### `deep` (the default review → fix → test pipeline)
-
-| # | Step | Config key |
-|---|------|------------|
-| 1 | `exploration` | `exploration` |
-| 2 | `intent` | `intent` |
-| 3 | `per-stack-reviews` | `per_stack_review` |
-| 4 | `per-stack-parse` | `parse` |
-| 5 | `uncovered-sweep` | `parse` |
-| 6 | `arbiter` | `arbiter` |
-| 7 | `cross-stack-merge` | `merge` |
-| 8 | `single-stack-merge` | `single-stack-merge` |
-| 9 | `load-items` | `load-items` |
-| 10 | `supervise` | `supervise` |
-| 11 | `findings-out` | `findings-out` |
-| 12 | `post-review` | `post-review` |
-| 13 | `fix-gate` | `fix-gate` |
-| 14 | `verify` | `verify` |
-| 15 | `fix` | `fix` |
-| 16 | `test` | `test` |
-| 17 | `commit` | `fix` |
-
-`per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
-multi-stack run the two are siblings in one task group, so wonder no longer has
-a step of its own. Its per-phase config key is still `wonder`
-(`[tool.daydream.phases.wonder]`), resolved inside the step.
-
-`uncovered-sweep` (issue #309) re-reviews diff files no per-stack reviewer read
-with a cheap second-pass agent; it resolves its backend via the `parse` phase
-key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
-
-#### `shallow` (`--shallow` single-skill loop)
-
-| # | Step | Config key |
-|---|------|------------|
-| 1 | `shallow-exploration` | `exploration` |
-| 2 | `loop-preflight` | `loop-preflight` |
-| 3 | loop group `iterate` (up to `--loop` N passes): `review` → `parse` → `shallow-fix` → `shallow-test` → `commit-iteration` | `review` / `parse` / `fix` / `test` / `fix` |
-| 4 | `loop-exhausted` | `loop-exhausted` |
-| 5 | `summary` | `summary` |
-| 6 | `commit-gate` | `review` |
-
-#### `review` (`--review` / `--comment` review-only)
-
-| # | Step | Config key |
-|---|------|------------|
-| 1 | `review-exploration` | `exploration` |
-| 2 | `review-intent` | `review` |
-| 3 | `review-alternatives` | `review` |
-| 4 | `emit-findings` | `emit-findings` |
-| 5 | `no-issues-exit` | `no-issues-exit` |
-| 6 | `post-comments` | `post-comments` |
-
-#### `pr-feedback` (`daydream feedback <pr#>`)
+#### `deep` (the single PR-process flow, #330)
 
 | # | Step | Config key |
 |---|------|------------|
@@ -305,6 +251,39 @@ key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 | 3 | `fix-items` | `fix` |
 | 4 | `commit-push` | `review` |
 | 5 | `respond-feedback` | `pr_feedback` |
+| 6 | `exploration` | `exploration` |
+| 7 | `intent` | `intent` |
+| 8 | `per-stack-reviews` | `per_stack_review` |
+| 9 | `per-stack-parse` | `parse` |
+| 10 | `uncovered-sweep` | `parse` |
+| 11 | `arbiter` | `arbiter` |
+| 12 | `cross-stack-merge` | `merge` |
+| 13 | `single-stack-merge` | `single-stack-merge` |
+| 14 | `load-items` | `load-items` |
+| 15 | `supervise` | `supervise` |
+| 16 | `findings-out` | `findings-out` |
+| 17 | `post-review` | `post-review` |
+| 18 | `fix-gate` | `fix-gate` |
+| 19 | `verify` | `verify` |
+| 20 | `fix` | `fix` |
+| 21 | `test` | `test` |
+| 22 | `commit` | `fix` |
+
+The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
+preamble: `feedback` runs only the prefix (steps 1-5, ending at
+`respond-feedback`); `review` / `comment` run the review spine and stop after
+`post-review` (the fix cycle is gated off, and `post-review` auto-posts for
+`comment`); `shallow` forces `single_stack_mode` (no arbiter / cross-stack
+merge); `loop` is the unchanged default fixing everything.
+
+`per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
+multi-stack run the two are siblings in one task group, so wonder has no step of
+its own. Its per-phase config key is still `wonder`
+(`[tool.daydream.phases.wonder]`), resolved inside the step.
+
+`uncovered-sweep` (issue #309) re-reviews diff files no per-stack reviewer read
+with a cheap second-pass agent; it resolves its backend via the `parse` phase
+key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 
 #### `improve` (`daydream improve <target>`)
 

@@ -141,6 +141,7 @@ async def post_review_to_pr_from_report(
     merged_items_path: Path,
     *,
     console: Console,
+    post: bool = False,
 ) -> None:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -148,6 +149,8 @@ async def post_review_to_pr_from_report(
     structural) via :func:`parsed_issues_from_items` rather than re-parsing
     the rendered markdown — the regex parser silently dropped structural
     findings, which live under ``## Structural Review``.
+
+    ``post=True`` bypasses the interactive confirm gate (comment mode, #330).
     """
     if not merged_items_path.exists():
         return
@@ -156,20 +159,7 @@ async def post_review_to_pr_from_report(
     if not issues:
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return
-    await _post(target_dir, issues, console=console)
-
-
-async def post_review_to_pr_from_alt_issues(
-    target_dir: Path,
-    alt_issues: list[dict[str, Any]],
-    *,
-    console: Console,
-) -> None:
-    """Convert alt-review issues (from `--comment`) and offer to post to the PR."""
-    issues = alt_issues_to_parsed(alt_issues)
-    if not issues:
-        return
-    await _post(target_dir, issues, console=console)
+    await _post(target_dir, issues, console=console, post=post)
 
 
 # --- Parsers ---------------------------------------------------------------
@@ -983,6 +973,7 @@ async def _post(
     issues: list[ParsedIssue],
     *,
     console: Console,
+    post: bool = False,
 ) -> None:
     pr = find_open_pr(target_dir)
     if pr is None:
@@ -1008,7 +999,7 @@ async def _post(
     )
     print_info(console, f"PR #{pr.number}: {summary}")
 
-    if not resolve_or_prompt(
+    if not post and not resolve_or_prompt(
         assume=get_assume(),
         interactive=not get_non_interactive(),
         safe_default=False,

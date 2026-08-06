@@ -53,7 +53,6 @@ class Manifest:
         test_backend: Per-phase backend override for test, if set.
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
-        loop: Whether loop mode was enabled.
         source_path: Absolute path to the source repository at archive time.
         remote_url: Git remote origin URL.
         repo_slug: ``owner/repo`` extracted from remote URL.
@@ -129,7 +128,6 @@ class Manifest:
     test_backend: str | None = None
     review_only: bool = False
     deep: bool = False
-    loop: bool = False
     fix_failures: dict[str, str] | None = None
     fix_leftover_untracked: list[str] | None = None
     fix_quality_gate: dict[str, Any] | None = None
@@ -192,7 +190,6 @@ class Manifest:
                 **({"test_backend": self.test_backend} if self.test_backend else {}),
                 "review_only": self.review_only,
                 "deep": self.deep,
-                "loop": self.loop,
             },
             "fix_failures": self.fix_failures,
             "fix_leftover_untracked": self.fix_leftover_untracked,
@@ -296,7 +293,6 @@ def build_manifest(
         test_backend=_resolved_backend_name(config, "test"),
         review_only=config.output_mode == "review",
         deep=not config.shallow,
-        loop=config.loop,
         fix_failures=fix_failures or None,
         fix_leftover_untracked=fix_leftover_untracked or None,
         fix_quality_gate=fix_quality_gate or None,

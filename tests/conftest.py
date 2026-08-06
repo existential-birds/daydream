@@ -451,7 +451,7 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
 
     Args:
         module: Flow module owning the ``phase_*`` bindings —
-            ``"daydream.deep.orchestrator"`` or ``"daydream.flows.shallow"``.
+            ``"daydream.deep.orchestrator"``.
         post: Stub ``daydream.pr_review.post_review_to_pr_from_report``.
         heal: Stub ``<module>.phase_test_and_heal`` to report success, 0 retries.
         commit: Stub ``<module>.phase_commit_push``.

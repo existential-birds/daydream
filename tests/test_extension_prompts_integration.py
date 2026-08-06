@@ -32,15 +32,17 @@ async def test_fork_prompt_override_reaches_backend(
     install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """A daydream_ext override of the ``review`` prompt replaces the prompt wholesale.
+    """A daydream_ext override of the ``per-stack`` prompt replaces it wholesale.
 
-    The kwarg assertion (``kw['skill_invocation']`` echoed back — the real
-    parameter name per ``build_review_prompt``) pins that overrides receive
-    the exact built-in kwargs — the wholesale-override contract.
+    The ``review`` prompt slot was deleted with the shallow flow (#330): shallow
+    mode now runs the deep flow, whose per-stack reviewer resolves the
+    ``per-stack`` slot. The kwarg assertion (``kw['skill_invocation']`` echoed
+    back — the real parameter name per ``build_per_stack_prompt``) pins that
+    overrides receive the exact built-in kwargs — the wholesale-override contract.
     """
     ext_dir.write_module(
         "def register(r):\n"
-        "    r.override_prompt('review', lambda **kw: f\"RO-REVIEW {kw['skill_invocation']}\")\n"
+        "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['skill_invocation']}\")\n"
     )
     backend = ScriptedBackend(
         events=(
@@ -49,12 +51,12 @@ async def test_fork_prompt_override_reaches_backend(
         )
     )
     install_backend(backend)
-    mute_side_effects("daydream.flows.shallow")
+    mute_side_effects("daydream.deep.orchestrator")
 
     rc = await runner.run(make_config(feature_branch_repo, shallow=True, skill="python"))
 
     assert rc == 0
-    review_prompts = [p for p in backend.prompts if p.startswith("RO-REVIEW")]
+    review_prompts = [p for p in backend.prompts if p.startswith("RO-STACK")]
     assert review_prompts and "beagle-python:review-python" in review_prompts[0]
 
 

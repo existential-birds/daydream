@@ -189,7 +189,7 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
 def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     """Insert or replace a run entry from a Manifest.
 
-    Bool fields (review_only, deep, loop) are mapped to integers (0/1)
+    Bool fields (review_only, deep) are mapped to integers (0/1)
     for SQLite storage.
     """
     conn = _get_connection(archive_dir)
@@ -209,7 +209,6 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "test_backend": manifest.test_backend,
                 "review_only": int(manifest.review_only),
                 "deep": int(manifest.deep),
-                "loop": int(manifest.loop),
                 "remote_url": manifest.remote_url,
                 "repo_slug": manifest.repo_slug,
                 "source_path": manifest.source_path,

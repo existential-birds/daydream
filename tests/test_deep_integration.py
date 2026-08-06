@@ -328,7 +328,7 @@ def test_existing_tests_still_collect() -> None:
     import importlib.util
 
     tests_dir = Path(__file__).parent
-    for name in ("test_cli", "test_integration", "test_loop", "test_phases"):
+    for name in ("test_cli", "test_integration", "test_deep_orchestrator", "test_phases"):
         spec = importlib.util.spec_from_file_location(
             f"_d40_probe_{name}", tests_dir / f"{name}.py"
         )
