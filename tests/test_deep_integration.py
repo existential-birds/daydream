@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import re
 from pathlib import Path
+from typing import Any
 
 from daydream.backends import CostEvent, ResultEvent, TextEvent
 from daydream.config import REVIEW_OUTPUT_FILE
@@ -205,8 +206,20 @@ def _wire_mocks(monkeypatch, backend: _DeepMockBackend) -> None:
     _silence_ui(monkeypatch)
 
 
-async def _run_deep(target: Path, backend: _DeepMockBackend, monkeypatch) -> int:
-    """Common driver: wire mocks and execute the full deep pipeline."""
+async def _run_deep(
+    target: Path,
+    backend: _DeepMockBackend,
+    monkeypatch,
+    **config_overrides: Any,
+) -> int:
+    """Common driver: wire mocks and execute the full deep pipeline.
+
+    ``config_overrides`` are forwarded to :class:`RunConfig`. The #311
+    wire-contract test passes ``shallow_fanout_threshold=0`` so its 2-file
+    fixture does not trigger the tiny-diff collapse (which would absorb the
+    generic bucket into the single rust assignment and suppress the
+    generic-fallback prompt).
+    """
     from daydream.exploration import ExplorationContext
     from daydream.runner import RunConfig, run
 
@@ -218,6 +231,7 @@ async def _run_deep(target: Path, backend: _DeepMockBackend, monkeypatch) -> int
         target=str(target),
         cleanup=False,
         exploration_context=ExplorationContext(),
+        **config_overrides,
     )
     return await run(config)
 
@@ -510,4 +524,79 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
         )
         assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION not in prompt, (
             "cross-file gate leaked into the generic-fallback prompt"
+        )
+
+
+async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
+    rust_wire_target: Path, monkeypatch
+) -> None:
+    """Real-path coverage for the #311 wire-contract instructions (R3/R4).
+
+    Mirrors ``test_310_prompt_gates_reach_built_prompts_in_real_run``: drives a
+    deep run through ``runner.run`` with the stub backend and classifies the
+    prompts actually delivered to ``_DeepMockBackend.execute`` by content -- no
+    builder spies, no assumption that a built prompt survives the trip from
+    builder to backend. ``rust_wire_target`` (src/main.rs + README.md) routes
+    the rust file to the per-stack builder and README.md to the
+    generic-fallback bucket, so both wire-contract instructions are pinned on
+    the delivered prompts in one run:
+
+      - rust per-stack: serde/routing instruction present, URL instruction NOT;
+      - generic-fallback: URL/quoting instruction present, serde instruction NOT;
+      - structural: neither (out of scope per spec).
+
+    ``shallow_fanout_threshold=0`` disables the tiny-diff short-circuit
+    (``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` = 2): with the default threshold a
+    2-file diff containing exactly one real language stack absorbs the generic
+    bucket into that stack, and the generic-fallback prompt would never be
+    delivered. Disabling the collapse restores the full pipeline so the rust
+    per-stack and generic-fallback prompts both reach the backend seam.
+    """
+    from daydream.deep.prompts import (
+        WIRE_CONTRACT_GENERIC_INSTRUCTION,
+        WIRE_CONTRACT_RUST_INSTRUCTION,
+    )
+
+    # Pin all built-in stack skills as available so src/main.rs -> rust routes
+    # per-stack instead of collapsing into generic.
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+
+    backend = _ClaudeShape(rust_wire_target)
+    exit_code = await _run_deep(
+        rust_wire_target, backend, monkeypatch, shallow_fanout_threshold=0
+    )
+    assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
+
+    rust_per_stack = [
+        p for p in backend.prompts if "You are reviewing the rust stack" in p
+    ]
+    generic = [p for p in backend.prompts if "generic-fallback" in p]
+    structural = [p for p in backend.prompts if "structural reviewer" in p]
+
+    assert rust_per_stack, "rust per-stack prompt never reached the backend"
+    assert generic, "generic-fallback prompt never reached the backend"
+    assert structural, "structural prompt never reached the backend"
+
+    for prompt in rust_per_stack:
+        assert WIRE_CONTRACT_RUST_INSTRUCTION in prompt, (
+            "rust per-stack prompt missing the serde/routing wire-contract instruction"
+        )
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in prompt, (
+            "URL/quoting wire-contract instruction leaked into the rust per-stack prompt"
+        )
+
+    for prompt in generic:
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION in prompt, (
+            "generic-fallback prompt missing the URL/quoting wire-contract instruction"
+        )
+        assert WIRE_CONTRACT_RUST_INSTRUCTION not in prompt, (
+            "serde wire-contract instruction leaked into the generic-fallback prompt"
+        )
+
+    for prompt in structural:
+        assert WIRE_CONTRACT_RUST_INSTRUCTION not in prompt, (
+            "serde wire-contract instruction leaked into the structural prompt"
+        )
+        assert WIRE_CONTRACT_GENERIC_INSTRUCTION not in prompt, (
+            "URL/quoting wire-contract instruction leaked into the structural prompt"
         )

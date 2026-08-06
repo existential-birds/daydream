@@ -290,6 +290,35 @@ def multi_stack_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def rust_wire_target(tmp_path: Path) -> Path:
+    """Git repo with a Rust + Markdown diff on a feature branch.
+
+    Mirrors ``multi_stack_target`` for the #311 wire-contract real-path test:
+    ``src/main.rs`` routes to the rust stack (``.rs`` -> ``rust``) and
+    ``README.md`` to the generic-fallback bucket, so a single run exercises
+    both wire-contract instruction constants on the delivered prompts.
+    """
+    project = tmp_path / "rust_wire"
+    project.mkdir()
+    (project / "src").mkdir()
+    (project / "src" / "main.rs").write_text(
+        "fn main() {\n    println!(\"hi\");\n}\n"
+    )
+    (project / "README.md").write_text("# Project\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "src" / "main.rs").write_text(
+        "fn main() {\n    println!(\"hello from wire\");\n}\n"
+    )
+    (project / "README.md").write_text("# Project\n\nUpdated.\n")
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
+@pytest.fixture
 def tiny_diff_target(tmp_path: Path) -> Path:
     """Git repo with a 2-file two-language diff on a feature branch (issue #172).
 
