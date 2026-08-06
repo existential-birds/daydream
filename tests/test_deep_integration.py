@@ -21,6 +21,7 @@ class _DeepMockBackend:
         self.target_dir = target_dir
         self.calls: list[str] = []
         self.agents_kwargs_seen: list[object] = []
+        self.prompts: list[str] = []
 
     async def execute(
         self,
@@ -35,6 +36,8 @@ class _DeepMockBackend:
     ):
         # Record parity evidence -- D-38: no stage may pass `agents=`.
         self.agents_kwargs_seen.append(agents)
+        # Record the delivered prompt at the backend seam (no builder spies).
+        self.prompts.append(prompt)
         if agents and self.raise_on_agents:
             raise NotImplementedError("Mock Codex: agents kwarg not supported")
 
@@ -427,9 +430,12 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     """Real-path coverage for the #310 prompt gates (PR #328, Finding 2).
 
     The #310 unit tests call the prompt builders directly. This one drives a
-    deep run through ``runner.run`` with the stub backend and spies the three
-    builders at the ``daydream.deep.prompts`` seam (the ``_spy_merge`` pattern),
-    asserting each built prompt carries exactly the gates that own it:
+    deep run through ``runner.run`` with the stub backend and observes at the
+    backend seam: ``_DeepMockBackend.execute`` records the full ``prompt`` it
+    receives on every call, so the prompts actually delivered to the external
+    backend are classified by content -- no builder spies, no assumption that a
+    built prompt survives the trip from builder to ``Backend.execute``. The
+    gates are asserted on what the backend received:
 
       - structural: cross-file symbol-existence + trust-model, NOT config-trace;
       - per-stack (language): config-trace + trust-model, NOT cross-file;
@@ -439,41 +445,12 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     each of the three builders when every built-in stack skill is available, so
     all three gate assignments are exercised in a single real run.
     """
-    from daydream.deep import prompts as _prompts
     from daydream.deep.prompts import (
         CONFIG_FLOW_TRACE_INSTRUCTION,
         CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
         TRUST_MODEL_INSTRUCTION,
     )
 
-    built: dict[str, list[str]] = {"structural": [], "per-stack": [], "generic": []}
-
-    real_structural = _prompts.build_structural_prompt
-
-    def _spy_structural(**kwargs):
-        prompt = real_structural(**kwargs)
-        built["structural"].append(prompt)
-        return prompt
-
-    real_per_stack = _prompts.build_per_stack_prompt
-
-    def _spy_per_stack(**kwargs):
-        prompt = real_per_stack(**kwargs)
-        built["per-stack"].append(prompt)
-        return prompt
-
-    real_generic = _prompts.build_generic_fallback_prompt
-
-    def _spy_generic(**kwargs):
-        prompt = real_generic(**kwargs)
-        built["generic"].append(prompt)
-        return prompt
-
-    # The builders are captured into the per-run registry inside run(); patch
-    # the source module so that late capture resolves to the spies.
-    monkeypatch.setattr("daydream.deep.prompts.build_structural_prompt", _spy_structural)
-    monkeypatch.setattr("daydream.deep.prompts.build_per_stack_prompt", _spy_per_stack)
-    monkeypatch.setattr("daydream.deep.prompts.build_generic_fallback_prompt", _spy_generic)
     # Pin all built-in stack skills as available so api.py -> python and
     # App.tsx -> react route per-stack instead of collapsing into generic under
     # the hermetic no-plugin skill registry.
@@ -483,11 +460,26 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
-    assert built["structural"], "structural prompt was never built in the run"
-    assert built["per-stack"], "per-stack language prompt was never built in the run"
-    assert built["generic"], "generic-fallback prompt was never built in the run"
+    # Classify the prompts the backend actually received by content. The
+    # per-stack predicate also matches the generic-fallback scope line ("You are
+    # reviewing the generic-fallback stack"), so structural + generic-fallback
+    # are excluded from the per-stack class to keep each class meaningful.
+    structural = [p for p in backend.prompts if "structural reviewer" in p]
+    generic = [p for p in backend.prompts if "generic-fallback" in p]
+    per_stack = [
+        p
+        for p in backend.prompts
+        if "You are reviewing the" in p
+        and "stack" in p
+        and "structural reviewer" not in p
+        and "generic-fallback" not in p
+    ]
 
-    for prompt in built["structural"]:
+    assert structural, "structural prompt never reached the backend"
+    assert per_stack, "per-stack language prompt never reached the backend"
+    assert generic, "generic-fallback prompt never reached the backend"
+
+    for prompt in structural:
         assert CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION in prompt, (
             "structural prompt missing the cross-file symbol-existence gate"
         )
@@ -498,7 +490,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
             "config-trace gate leaked into the structural prompt"
         )
 
-    for prompt in built["per-stack"]:
+    for prompt in per_stack:
         assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, (
             "per-stack prompt missing the config-flow trace gate"
         )
@@ -509,7 +501,7 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
             "cross-file gate leaked into the per-stack prompt"
         )
 
-    for prompt in built["generic"]:
+    for prompt in generic:
         assert CONFIG_FLOW_TRACE_INSTRUCTION in prompt, (
             "generic-fallback prompt missing the config-flow trace gate"
         )
