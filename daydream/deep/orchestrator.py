@@ -1914,6 +1914,24 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _file_scope_issue(repo: Path, *, title: str, body: str, noun: str, ident: str) -> None:
+    """Best-effort: file one scope-related GitHub issue; never raise.
+
+    Shared by the out-of-scope *finding* router (pre-fix gate) and the
+    reverted *edit* filer (post-fix residual net). Issue #336 — both file a
+    tracked issue for work the fix loop will not land in the PR. Filing is
+    best-effort: a failed ``gh issue create`` (no auth, cross-org, offline)
+    logs a warning and the scope decision (exclude / revert) stands regardless.
+    """
+    from daydream import git_ops
+
+    try:
+        url = git_ops.gh_issue_create(repo, title=title, body=body)
+        print_warning(console, f"Filed out-of-scope {noun} as issue: {url}")
+    except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
+        print_warning(console, f"Could not file out-of-scope {noun} '{ident}' as issue: {exc}")
+
+
 def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     """Best-effort: file one out-of-scope finding as a tracked GitHub issue.
 
@@ -1924,8 +1942,6 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     cross-org, offline) logs a warning and the item is still excluded from
     auto-fix — the scope decision never depends on issue-filing success.
     """
-    from daydream import git_ops
-
     file = item.get("file") or "<unknown>"
     description = item.get("description", "No description")
     evidence = item.get("evidence", "")
@@ -1937,11 +1953,7 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
         f"- Evidence: {evidence}\n\n"
         "Filed by daydream fix loop: out of scope for PR."
     )
-    try:
-        url = git_ops.gh_issue_create(ctx.work.repo, title=title, body=body)
-        print_warning(console, f"Filed out-of-scope finding as issue: {url}")
-    except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
-        print_warning(console, f"Could not file out-of-scope finding '{file}' as issue: {exc}")
+    _file_scope_issue(ctx.work.repo, title=title, body=body, noun="finding", ident=file)
 
 
 def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
@@ -1953,8 +1965,6 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
     Filing is best-effort: a failed ``gh issue create`` logs a warning and the
     revert stands regardless.
     """
-    from daydream import git_ops
-
     title = f"[daydream] out-of-scope edit reverted: {path}"
     body = (
         f"The fix pass edited `{path}`, which is outside the reviewed diff. "
@@ -1962,11 +1972,7 @@ def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
         f"```diff\n{patch}\n```\n\n"
         "Filed by daydream fix loop: out of scope for PR."
     )
-    try:
-        url = git_ops.gh_issue_create(repo, title=title, body=body)
-        print_warning(console, f"Filed out-of-scope edit as issue: {url}")
-    except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
-        print_warning(console, f"Could not file out-of-scope edit '{path}' as issue: {exc}")
+    _file_scope_issue(repo, title=title, body=body, noun="edit", ident=path)
 
 
 def _revert_out_of_scope_edits(
@@ -1977,7 +1983,7 @@ def _revert_out_of_scope_edits(
     pre_fix_untracked: set[str],
     changed_files: set[str] | None,
     finding_files: set[str],
-) -> list[str]:
+) -> list[str] | None:
     """Revert post-fix edits outside the reviewed diff; file an issue per residual.
 
     Issue #336 (Task 4): after ``phase_fix_parallel`` returns, enumerate the
@@ -2007,7 +2013,9 @@ def _revert_out_of_scope_edits(
         finding_files: Files named by the findings being fixed.
 
     Returns:
-        The repo-relative paths that were reverted (empty when none).
+        The repo-relative paths that were reverted (empty when none), or ``None``
+        when any revert failed — matching the generated-file guard, the caller
+        aborts the run so an unreverted out-of-scope edit never reaches commit.
     """
     from daydream import git_ops
     from daydream.git_ops import GitError
@@ -2053,6 +2061,7 @@ def _revert_out_of_scope_edits(
             continue
         residual.append(path)
 
+    restoration_failed = False
     for path in residual:
         # Capture the diff as evidence BEFORE reverting (the revert destroys it).
         try:
@@ -2065,6 +2074,12 @@ def _revert_out_of_scope_edits(
             git_ops.restore_paths_from_ref(repo, pre_fix_ref, [path])
         except GitError as exc:
             print_warning(console, f"Could not revert out-of-scope edit '{path}': {exc}")
+            # Fail-close to match the sibling generated-file guard: an
+            # unreverted out-of-scope edit must never reach the commit step
+            # (the whole point of this net), so signal abort rather than leave
+            # the edit in the worktree. Continue so remaining residuals are
+            # still best-effort reverted before the abort is signalled.
+            restoration_failed = True
             continue
         _file_reverted_edit_issue(repo, path, patch)
     if residual:
@@ -2073,7 +2088,7 @@ def _revert_out_of_scope_edits(
             f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff and "
             f"filed issue(s): {residual}.",
         )
-    return residual
+    return None if restoration_failed else residual
 
 
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
@@ -2101,13 +2116,19 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_success(console, "No actionable items -- done.")
         return Stop(0)
 
-    # Issue #336 — pre-fix scope partition. When the reviewed diff's file set is
-    # known, findings on files OUTSIDE that set are filed as GitHub issues
-    # (best-effort) and excluded from auto-fix: the loop must not expand the
-    # PR's scope. Without a diff file set (no diff context, e.g. a resume that
-    # lost ctx.data["diff"]) no partition happens — every item auto-fixes as
-    # today, because scope cannot be judged without the diff.
+    # Issue #336 — pre-fix scope partition. Findings on files OUTSIDE the
+    # reviewed diff are filed as GitHub issues (best-effort) and excluded from
+    # auto-fix: the loop must not expand the PR's scope. The reviewed-diff file
+    # set is computed once in the preamble and carried in ctx.data; on a
+    # ``--start-at fix`` resume that lost it but retained ``diff`` it is
+    # recomputed via _diff_changed_files, mirroring _step_fix, so the gate and
+    # the post-fix residual net agree on the allowed set (a divergence left the
+    # residual net strictly weaker than the gate on that resume path).
     changed_files: set[str] | None = ctx.data.get("changed_files")
+    if changed_files is None:
+        diff_str = ctx.data.get("diff") or ""
+        if diff_str:
+            changed_files = set(_diff_changed_files(diff_str))
     if changed_files:
         in_scope: list[dict[str, Any]] = []
         out_of_scope: list[dict[str, Any]] = []
@@ -2732,7 +2753,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # double-revert) and BEFORE the quality gate (which then measures the
     # now-scoped edited set).
     pre_fix_ref = pre_fix_snapshot or "HEAD"
-    _revert_out_of_scope_edits(
+    residual_guard_result = _revert_out_of_scope_edits(
         work,
         pre_fix_ref=pre_fix_ref,
         snapshot_captured=pre_fix_snapshot_captured,
@@ -2740,6 +2761,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         changed_files=changed_files,
         finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
     )
+    if residual_guard_result is None:
+        # Fail-close to match the generated-file guard: an unreverted
+        # out-of-scope edit must never reach the commit step.
+        return Stop(1)
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
