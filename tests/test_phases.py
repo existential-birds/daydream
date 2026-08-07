@@ -489,6 +489,8 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     # pins its absence from the delivered prompt.)
     old_license = "justify each out-of-" "scope edit " "rather than" " expanding silently"
     assert old_license not in fix_prompt
+    # Deferred-behavior implementation stays forbidden even when it looks obvious.
+    assert "explicitly deferred is forbidden" in fix_prompt
     # Precedence rule (contract wins) survives the rewrite.
     assert "the contract wins" in fix_prompt
 
