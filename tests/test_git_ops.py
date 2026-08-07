@@ -799,6 +799,106 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
     assert calls["n"] == 1
 
 
+# --- gh issue create ---------------------------------------------------------
+
+
+def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`gh_issue_create` shells out via `_run_gh` with title inline, body in a
+    tempfile (`--body-file`, never on argv), optional `--label` flags and a
+    `--repo owner/name` target. Returns the parsed issue URL.
+
+    Issue-filing is the routing target for out-of-scope findings (issue #336);
+    bodies can be large, so they never appear in argv (process-list hygiene,
+    same rule as `gh secret set`'s stdin path).
+    """
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        # Snapshot argv + cwd + body-file contents at call time (the tempfile
+        # is unlinked after `_run_gh` returns, matching real gh's read-then-exit).
+        captured["argv"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        i_body = list(args).index("--body-file")
+        captured["body"] = Path(args[i_body + 1]).read_text()
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0,
+            stdout="https://github.com/octocat/hello/issues/42\n", stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    url = git_ops.gh_issue_create(
+        repo,
+        title="out-of-scope: refactor handler.py error path",
+        body="evidence and rationale\nthat the fix loop overreached\n",
+        repo_slug="octocat/hello",
+        labels=["daydream", "tech-debt"],
+    )
+
+    # URL is parsed from stdout.
+    assert url == "https://github.com/octocat/hello/issues/42"
+
+    argv = captured["argv"]
+    # Subcommand shape and --repo target.
+    assert argv[:5] == ["gh", "issue", "create", "--repo", "octocat/hello"]
+    # Title inline.
+    i_title = argv.index("--title")
+    assert argv[i_title + 1] == "out-of-scope: refactor handler.py error path"
+    # Body via --body-file (never inline): the tempfile held the body at call time.
+    i_body = argv.index("--body-file")
+    body_path = argv[i_body + 1]
+    assert captured["body"] == "evidence and rationale\nthat the fix loop overreached\n"
+    # The tempfile is unlinked post-call (no leak).
+    assert not Path(body_path).exists()
+    # The body text itself must not appear anywhere in argv.
+    assert "that the fix loop overreached" not in argv
+    # Both labels, in order, after --label.
+    label_positions = [i for i, tok in enumerate(argv) if tok == "--label"]
+    assert [argv[i + 1] for i in label_positions] == ["daydream", "tech-debt"]
+    # Ran in the target repo's cwd.
+    assert captured["cwd"] == repo
+
+
+def test_gh_issue_create_omits_label_flags_when_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No `labels` argument → no `--label` flag on argv at all."""
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        captured["argv"] = list(args)
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0,
+            stdout="https://github.com/octocat/hello/issues/7\n", stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    url = git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
+    assert url == "https://github.com/octocat/hello/issues/7"
+    assert "--label" not in captured["argv"]
+
+
+def test_gh_issue_create_raises_on_non_zero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-zero `gh` exit raises GitError, matching sibling gh_* wrappers."""
+    repo = _make_repo_with_main(tmp_path)
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    with pytest.raises(GitError):
+        git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
+
+
 def test_wrong_branch_error_is_raisable() -> None:
     with pytest.raises(WrongBranchError):
         raise WrongBranchError("expected feat, got main")

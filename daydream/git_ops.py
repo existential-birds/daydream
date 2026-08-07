@@ -1892,3 +1892,61 @@ def gh_pr_create(
     if proc.returncode != 0:
         raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
     return proc.stdout.strip()
+
+
+def gh_issue_create(
+    repo: Path,
+    *,
+    title: str,
+    body: str,
+    repo_slug: str | None = None,
+    labels: list[str] | None = None,
+) -> str:
+    """Open a GitHub issue via ``gh issue create`` and return its URL.
+
+    Used by the fix loop (issue #336) to route out-of-scope-but-valid findings
+    — files outside the reviewed diff or residuals after a fix round — into a
+    tracked issue instead of auto-applying them to the PR.
+
+    The body is written to a temp file and passed via ``--body-file`` so it
+    never appears on the process argument vector (process-list hygiene; bodies
+    can be large). Same pattern as ``gh secret set``'s stdin path.
+
+    Args:
+        repo: Worktree the call is rooted in (cwd for ``gh``).
+        title: Issue title (inline ``--title``).
+        body: Issue body markdown (written to a tempfile, passed as
+            ``--body-file``).
+        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
+            the ambient ``gh`` context (cwd) is used.
+        labels: Optional labels applied verbatim as repeated ``--label`` flags.
+            *None* (the default) emits no ``--label`` flag.
+
+    Returns:
+        The created issue's URL (parsed from ``gh``'s stdout).
+
+    Raises:
+        GitError: If the ``gh issue create`` call fails (stderr included).
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    ) as bf:
+        bf.write(body)
+        body_path = bf.name
+    args: list[str] = ["issue", "create"]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
+    args += ["--title", title, "--body-file", body_path]
+    if labels:
+        for label in labels:
+            args += ["--label", label]
+    try:
+        proc = _run_gh(repo, args)
+    finally:
+        try:
+            Path(body_path).unlink()
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh issue create failed: {proc.stderr.strip()}", proc.stderr)
+    return proc.stdout.strip()
