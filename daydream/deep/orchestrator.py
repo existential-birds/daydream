@@ -2442,6 +2442,17 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         quality_before, quality_before_unavailable = await _capture_quality_before(daydream_dir)
     else:
         quality_before, quality_before_unavailable = None, None
+    # Issue #336 — fix-loop scope bound. Thread the reviewed diff's file set
+    # into every fix prompt as an explicit "Allowed files" clause. ``None``
+    # (no diff context, e.g. a resume that lost ctx.data["diff"]) leaves the
+    # prompt unchanged; the prose scope boundary still applies. Recomputable
+    # from ctx.data["diff"] via _diff_changed_files so a missing key never
+    # crashes.
+    changed_files: set[str] | None = ctx.data.get("changed_files")
+    if changed_files is None:
+        diff_str = ctx.data.get("diff") or ""
+        if diff_str:
+            changed_files = set(_diff_changed_files(diff_str))
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2450,6 +2461,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
             group_max_wall_s=group_wall_s,
             group_max_serial_items=group_serial,
+            changed_files=changed_files,
         )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so
@@ -3200,6 +3212,13 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
             data={
                 "mode": mode,
                 "diff": diff,
+                # Issue #336 — fix-loop scope bound. The reviewed diff's file
+                # set threads through ctx.data so the fix gate can partition
+                # out-of-scope findings (Task 3) and the fix step can both
+                # forward it into the fix prompt (Task 2) and run a post-fix
+                # residual check (Task 4). Recomputable from "diff" via
+                # ``_diff_changed_files``; a missing key never crashes.
+                "changed_files": set(changed_files),
                 "diff_path": diff_path,
                 "tier": tier,
                 "dd": dd,

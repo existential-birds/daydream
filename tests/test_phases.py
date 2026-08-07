@@ -460,7 +460,13 @@ async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, mak
 async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     tmp_path, make_work, silence_console,
 ):
-    """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails."""
+    """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails.
+
+    Issue #336 turns the old "make it, but name and justify" license into a
+    hard boundary: only files in the reviewed diff or named by the finding
+    may be edited; out-of-scope-but-valid improvements are reported (→ issue),
+    never applied. The legacy license string MUST be gone.
+    """
     from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
@@ -473,9 +479,50 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     assert len(backend.prompts) == 1
     fix_prompt = backend.prompts[0]
     assert "Anchor the change to what this finding names" in fix_prompt
-    # Necessary expansion is allowed but must be declared, not silent.
-    assert "justify each out-of-scope edit rather than expanding silently" in fix_prompt
+    # Hard boundary (issue #336): edits confined to reviewed diff + finding files.
+    assert "only files in the reviewed diff or named by this finding may be edited" in fix_prompt
+    # Out-of-scope-but-valid improvements must be reported, never applied.
+    assert "report out-of-scope improvements instead of applying them" in fix_prompt
+    # The old expansion license MUST be gone.
+    assert "justify each out-of-scope edit rather than expanding silently" not in fix_prompt
+    # Precedence rule (contract wins) survives the rewrite.
     assert "the contract wins" in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
+    tmp_path, make_work, silence_console,
+):
+    """When ``changed_files`` is passed, the prompt carries an explicit
+    "Allowed files" clause enumerating the reviewed diff's file set.
+
+    ``changed_files=None`` (legacy/resume callers) keeps the old behavior — no
+    allowed-files clause in the prompt, only the prose boundary.
+    """
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+
+    # --- With changed_files: the clause enumerates the allowed file set. -----
+    backend_with = ScriptedBackend()
+    item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
+    await phase_fix(
+        backend_with, make_work(tmp_path), item, 1, 1,
+        changed_files={"src/handler.py", "src/util.py"},
+    )
+    assert len(backend_with.prompts) == 1
+    prompt_with = backend_with.prompts[0]
+    # The clause is present and lists both files (sorted).
+    assert "Allowed files" in prompt_with
+    assert "src/handler.py" in prompt_with
+    assert "src/util.py" in prompt_with
+
+    # --- Without changed_files: no allowed-files clause (legacy callers). ---
+    backend_without = ScriptedBackend()
+    await phase_fix(backend_without, make_work(tmp_path), item, 1, 1)
+    assert len(backend_without.prompts) == 1
+    prompt_without = backend_without.prompts[0]
+    assert "Allowed files" not in prompt_without
 
 
 @pytest.mark.asyncio

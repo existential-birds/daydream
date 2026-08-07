@@ -4253,6 +4253,28 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
     raise AssertionError(f"no batched fix turn found for {file_basename}")
 
 
+def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict[str, Any]]:
+    """Single-finding ``phase_fix`` calls whose ``File:`` line names *file_basename*.
+
+    Robust to issue #336's "Allowed files" clause, which legitimately lists every
+    reviewed-diff file in every prompt: a substring check like
+    ``"api.py" in prompt`` would over-count by also matching the App.tsx prompt
+    (whose allowed-files clause names api.py). Filtering on the ``File:`` line
+    captures only the calls actually fixing *file_basename*.
+    """
+    import re as _re
+
+    out: list[dict[str, Any]] = []
+    for c in stub.calls:
+        prompt = c["prompt"]
+        if not prompt.lower().startswith("fix this issue"):
+            continue
+        m = _re.search(r"^File: (.+)$", prompt, _re.M)
+        if m is not None and Path(m.group(1).strip()).name == file_basename:
+            out.append(c)
+    return out
+
+
 async def test_run_caps_runaway_file_group_serial_fixes(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -4304,11 +4326,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
 
     # Only 3 fallback fixes ran (the ceiling) before the group budget tripped --
     # NOT the full group, which is the runaway #186 behaviour the guard bounds.
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == 3, f"expected 3 fallback fixes, got {len(api_singles)}"
 
     # The skipped group is recorded as a budget failure (surfaces to the user).
@@ -4363,11 +4381,7 @@ async def test_run_leaves_small_file_group_unbudgeted(
     assert isinstance(exit_code, int)
 
     group_size = _batched_group_size(stub, "api.py")
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == group_size, f"all {group_size} fallback fixes should run, got {len(api_singles)}"
 
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
@@ -4436,11 +4450,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     # ZERO fallback fixes ran: the batched turn's carried-over wall tripped the
     # group budget on the fallback's very first check -- the #186 runaway is fully
     # bounded, not merely trimmed.
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == 0, f"expected 0 fallback fixes (wall carried over), got {len(api_singles)}"
 
     # The skipped group is recorded as a WALL budget failure (surfaces to the user).
