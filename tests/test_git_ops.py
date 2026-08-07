@@ -702,6 +702,15 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
             ),
             id="gh-pr-create",
         ),
+        pytest.param(
+            lambda repo: git_ops.gh_issue_create(
+                repo,
+                title="t",
+                body="b",
+                repo_slug="octocat/hello",
+            ),
+            id="gh-issue-create",
+        ),
     ],
 )
 def test_mutating_wrapper_does_not_retry_on_timeout(
@@ -797,6 +806,173 @@ def test_gh_api_retries_only_when_idempotent(monkeypatch: pytest.MonkeyPatch, tm
     with pytest.raises(git_ops.GitTimeoutError):
         git_ops.gh_api(repo, "graphql", method="POST", input_data={"query": "mutation { x }"})
     assert calls["n"] == 1
+
+
+# --- gh issue create ---------------------------------------------------------
+
+
+def test_gh_issue_create_constructs_argv_with_body_file_and_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`gh_issue_create` shells out via `_run_gh` with title inline, body in a
+    tempfile (`--body-file`, never on argv), optional `--label` flags and a
+    `--repo owner/name` target. Returns the parsed issue URL.
+
+    Issue-filing is the routing target for out-of-scope findings (issue #336);
+    bodies can be large, so they never appear in argv (process-list hygiene,
+    same rule as `gh secret set`'s stdin path).
+    """
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        # Snapshot argv + cwd + body-file contents at call time (the tempfile
+        # is unlinked after `_run_gh` returns, matching real gh's read-then-exit).
+        captured["argv"] = list(args)
+        captured["cwd"] = kwargs.get("cwd")
+        i_body = list(args).index("--body-file")
+        captured["body"] = Path(args[i_body + 1]).read_text()
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0,
+            stdout="https://github.com/octocat/hello/issues/42\n", stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    url = git_ops.gh_issue_create(
+        repo,
+        title="out-of-scope: refactor handler.py error path",
+        body="evidence and rationale\nthat the fix loop overreached\n",
+        repo_slug="octocat/hello",
+        labels=["daydream", "tech-debt"],
+    )
+
+    # URL is parsed from stdout.
+    assert url == "https://github.com/octocat/hello/issues/42"
+
+    argv = captured["argv"]
+    # Subcommand shape and --repo target.
+    assert argv[:5] == ["gh", "issue", "create", "--repo", "octocat/hello"]
+    # Title inline.
+    i_title = argv.index("--title")
+    assert argv[i_title + 1] == "out-of-scope: refactor handler.py error path"
+    # Body via --body-file (never inline): the tempfile held the body at call time.
+    i_body = argv.index("--body-file")
+    body_path = argv[i_body + 1]
+    assert captured["body"] == "evidence and rationale\nthat the fix loop overreached\n"
+    # The tempfile is unlinked post-call (no leak).
+    assert not Path(body_path).exists()
+    # The body text itself must not appear anywhere in argv.
+    assert "that the fix loop overreached" not in argv
+    # Both labels, in order, after --label.
+    label_positions = [i for i, tok in enumerate(argv) if tok == "--label"]
+    assert [argv[i + 1] for i in label_positions] == ["daydream", "tech-debt"]
+    # Ran in the target repo's cwd.
+    assert captured["cwd"] == repo
+
+
+def test_gh_issue_create_omits_label_flags_when_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No `labels` argument → no `--label` flag on argv at all."""
+    repo = _make_repo_with_main(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        captured["argv"] = list(args)
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0,
+            stdout="https://github.com/octocat/hello/issues/7\n", stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    url = git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
+    assert url == "https://github.com/octocat/hello/issues/7"
+    assert "--label" not in captured["argv"]
+
+
+def test_gh_issue_create_raises_on_non_zero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-zero `gh` exit raises GitError, matching sibling gh_* wrappers."""
+    repo = _make_repo_with_main(tmp_path)
+
+    body_path: list[str] = []
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        # Capture the body tempfile path while it still exists (the unlink-in-
+        # finally runs after _run_gh returns).
+        i_body = list(args).index("--body-file")
+        body_path.append(args[i_body + 1])
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    with pytest.raises(GitError):
+        git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
+    # The body tempfile is unlinked on the failure path too (unlink-in-finally).
+    assert body_path and not Path(body_path[0]).exists()
+
+
+def test_gh_issue_list_returns_parsed_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`gh_issue_list` parses ``number/title/body/url`` rows; best-effort dedup.
+
+    Issue #336 — the fix loop dedups out-of-scope findings against already-filed
+    open issues (GitHub is the store), so the wrapper returns the parsed rows
+    it needs to scan bodies for the finding's fingerprint marker.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    rows = [
+        {
+            "number": 42,
+            "title": "[daydream] out-of-scope finding: notes.txt",
+            "body": "desc\n<!-- daydream-scope-finding: abc123 -->",
+            "url": "https://github.com/octocat/hello/issues/42",
+        },
+        {"number": 7, "title": "unrelated", "body": "", "url": ""},
+    ]
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        captured["argv"] = list(args)
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0, stdout=json.dumps(rows), stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    result = git_ops.gh_issue_list(repo, search="out-of-scope", repo_slug="octocat/hello")
+    assert result == rows
+
+    argv = captured["argv"]
+    assert argv[:3] == ["gh", "issue", "list"]
+    assert "--state" in argv and argv[argv.index("--state") + 1] == "open"
+    assert "--json" in argv and "number,title,body,url" in argv
+    assert "--search" in argv and argv[argv.index("--search") + 1] == "out-of-scope"
+    assert "--repo" in argv and "octocat/hello" in argv
+
+
+def test_gh_issue_list_returns_empty_on_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Best-effort: a non-zero ``gh`` exit returns [] (never raises).
+
+    Dedup must fail open: a failed lookup degrades to filing (the prior
+    behavior) rather than blocking the scope decision or dropping the finding.
+    """
+    repo = _make_repo_with_main(tmp_path)
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    assert git_ops.gh_issue_list(repo) == []
 
 
 def test_wrong_branch_error_is_raisable() -> None:

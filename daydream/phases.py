@@ -1572,6 +1572,14 @@ async def phase_verify_recommendations(
 # Shared scope/precedence/contract guardrails appended to every fix prompt
 # (single-finding ``phase_fix`` and batched ``phase_fix_batched``). Kept in one
 # place so the two prompt paths can never drift.
+#
+# Issue #336 — fix-loop scope expansion: this prose is now a HARD BOUNDARY, not
+# a license. Edits are confined to files in the reviewed diff or named by the
+# finding; out-of-scope-but-valid improvements (maintainability, architecture,
+# deferred-behavior implementation) are reported in the agent's final message
+# (the caller routes them to GitHub issues via ``git_ops.gh_issue_create``),
+# never applied. The earlier "make it, but name and justify" license was the
+# root cause of fix-loop scope creep and is gone.
 _FIX_GUARDRAILS = (
     """Do NOT change error handling semantics
 (e.g., converting warn-and-continue to error propagation, or vice versa)
@@ -1580,11 +1588,16 @@ handling strategy is wrong for that code path.
 
 Anchor the change to what this finding names — the file/symbol/line above. Do
 NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
-not require; naming one issue is not license to "tidy" its neighbours. If a
-correct fix genuinely requires an edit the finding didn't name — a caller that
-must change in step, or a file the review step missed — make it, but name and
-justify each out-of-scope edit rather than expanding silently. If the change
-balloons far beyond the named site, stop and report.
+not require; naming one issue is not license to "tidy" its neighbours.
+
+SCOPE BOUNDARY (issue #336): only files in the reviewed diff or named by this finding may be edited.
+Out-of-scope-but-valid improvements — maintainability, architecture, a refactor
+this finding suggests but does not require, or behavior a plan/issue explicitly
+deferred — must NOT be applied. Instead, report out-of-scope improvements instead of applying them:
+name each one in your final message (file + the change you would have made), so
+the caller can file them as tracked issues. Implementing behavior a plan or
+dependent issue explicitly deferred is forbidden, even if the fix looks obviously
+correct.
 
 If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins (unless
@@ -1596,6 +1609,20 @@ here.
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
 )
+
+
+def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
+    """Build the explicit "Allowed files" clause for a fix prompt.
+
+    Issue #336 threads the reviewed diff's file set into the fix prompt so the
+    prose boundary above is also concrete and checkable. ``None`` (legacy
+    callers, resume without diff context) yields an empty string — the prose
+    boundary still applies, but no enumerated file set is injected (behavior
+    unchanged for those callers).
+    """
+    if not changed_files:
+        return ""
+    return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
 
 
 def _build_intent_suffix(intent_path: Path | None) -> str:
@@ -1674,6 +1701,7 @@ async def phase_fix(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    changed_files: set[str] | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1691,6 +1719,11 @@ async def phase_fix(
             with a rule forbidding fixes that undo a deliberate decision. The
             read is best-effort enrichment: a missing or unreadable file is
             skipped silently so an intent-read failure can never block the fix.
+        changed_files: Optional set of files in the reviewed diff (issue #336).
+            When non-None, an explicit "Allowed files" clause is appended to
+            the prompt so the prose scope boundary is also concrete. ``None``
+            (legacy/resume callers) leaves the prompt without the clause; the
+            prose boundary still applies.
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
@@ -1709,6 +1742,9 @@ File: {file_ref}
 Line: {line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
+    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
+    # the prose boundary in place without an enumerated set.
+    prompt += _build_allowed_files_clause(changed_files)
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
     # deliberate decision. A read failure skips the block; it is never coerced
@@ -1750,6 +1786,7 @@ async def phase_fix_batched(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    changed_files: set[str] | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1770,11 +1807,16 @@ async def phase_fix_batched(
             ``None`` for serial callers.
         intent_path: Optional path to the confirmed author-intent file, injected
             verbatim (same best-effort handling as ``phase_fix``).
+        changed_files: Optional set of files in the reviewed diff (issue #336),
+            forwarded to the single-item delegation and appended to the batched
+            prompt as an explicit "Allowed files" clause. ``None`` for
+            legacy/resume callers leaves the prompt without the clause.
     """
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
+            changed_files=changed_files,
         )
         return
 
@@ -1786,6 +1828,7 @@ async def phase_fix_batched(
             await phase_fix(
                 backend, work, item, item_num, total,
                 console_lock=console_lock, intent_path=intent_path,
+                changed_files=changed_files,
             )
         return
 
@@ -1809,6 +1852,9 @@ async def phase_fix_batched(
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
 Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
+    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
+    # the prose boundary in place without an enumerated set.
+    prompt += _build_allowed_files_clause(changed_files)
 
     prompt += _build_intent_suffix(intent_path)
     for idx, item in enumerate(items, start=1):
@@ -1860,6 +1906,7 @@ async def phase_fix_parallel(
     intent_path: Path | None = None,
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    changed_files: set[str] | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1870,7 +1917,11 @@ async def phase_fix_parallel(
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
     Same-file serialization prevents concurrent writes to the *same named file*;
     it does not guarantee disjoint edits if an agent touches files other than the
-    one named in the item's ``file`` key. Commit stays serial and after.
+    one named in the item's ``file`` key. Issue #336 bounds that: the caller
+    passes ``changed_files`` (the reviewed diff's file set) so every fix prompt
+    carries an explicit allowed-files clause, and the post-fix residual check
+    in ``_step_fix`` reverts any edited file outside ``changed_files ∪ finding
+    files ∪ generated whitelist``. Commit stays serial and after.
 
     Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
     is consulted before every fix call (including the batched call), and if a
@@ -1893,6 +1944,10 @@ async def phase_fix_parallel(
             fix call so every fix carries the deliberate-intent guard.
         group_max_wall_s: Per-file-group wall-clock ceiling (#201).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
+        changed_files: Optional set of files in the reviewed diff (issue #336),
+            forwarded to every ``phase_fix_batched`` / ``phase_fix`` call so each
+            prompt carries an explicit "Allowed files" clause. ``None`` for
+            legacy/resume callers (no diff context) leaves prompts unchanged.
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
@@ -1969,6 +2024,7 @@ async def phase_fix_parallel(
                 backend, work, item, item_num, total,
                 console_lock=_console_lock,
                 intent_path=intent_path,
+                changed_files=changed_files,
             )
             budget.record_item()
 
@@ -2010,6 +2066,7 @@ async def phase_fix_parallel(
                                         backend, work, grp_items, grp_nums, total,
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
+                                        changed_files=changed_files,
                                     )
                                     budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
