@@ -2636,6 +2636,74 @@ async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
     assert not any("notes.txt" in p for p in fix_prompts), "deduped finding was auto-fixed"
 
 
+async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: when every finding routes to issues, the gate Stop(0)s.
+
+    merged-items.json carries ONLY out-of-scope findings (files outside the
+    reviewed diff {api.py, App.tsx, README.md}). The host also appends a
+    structural finding, so ``parse_by_stack`` routes THAT one to an
+    out-of-scope file too -- otherwise it would default to ``api.py`` (in
+    scope) and keep the gate open. With every merged item out of scope the
+    gate files them all and short-circuits before the no-op fix pass, the
+    full target test-suite run, and the commit-agent turn. Discriminating:
+    without the post-partition ``Stop(0)`` the flow continues into
+    ``phase_fix`` with nothing to fix -- a fix prompt would be dispatched.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
+    # Route the appended structural finding to an out-of-scope file too; the
+    # stub's default structural parse emits ``file=api.py`` (in scope).
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "high",
+            "confidence": "HIGH",
+            "file": "docs/elsewhere.md",
+            "line": 1,
+            "description": "structural finding outside the reviewed diff",
+        }
+    }
+    mute_side_effects()
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    # Every finding filed as an issue, all on out-of-scope files.
+    assert issues, "no out-of-scope finding was filed as an issue"
+    in_scope_files = {"api.py", "App.tsx", "README.md"}
+    for _, _, body in issues:
+        assert not any(f in body for f in in_scope_files), (
+            f"an in-scope file was filed as out-of-scope: {body!r}"
+        )
+
+    # No fix prompt dispatched -- the gate short-circuited before phase_fix,
+    # so the run skipped a no-op fix pass + the full target test suite + the
+    # commit-agent turn.
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert fix_prompts == [], (
+        f"fix phase ran with nothing to fix (gate did not short-circuit): {fix_prompts!r}"
+    )
+
+
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-30: pre-flight notice lists stages, stacks, skill per stack, total agent count."""
     captured: list[dict[str, Any]] = []

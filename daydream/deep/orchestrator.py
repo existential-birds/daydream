@@ -1959,7 +1959,7 @@ def _scope_finding_marker(fingerprint: str) -> str:
     return f"<!-- daydream-scope-finding: {fingerprint} -->"
 
 
-def _scope_finding_already_filed(repo: Path, item: dict[str, Any]) -> bool:
+def _scope_finding_already_filed(repo: Path, marker: str) -> bool:
     """Best-effort: has an open issue already filed this out-of-scope finding?
 
     Issue #336 — out-of-scope findings are never fixed, so a re-run/resume
@@ -1968,10 +1968,13 @@ def _scope_finding_already_filed(repo: Path, item: dict[str, Any]) -> bool:
     filing when present. Best-effort — a failed ``gh issue list`` returns
     ``False`` so the call degrades to filing (the prior behavior) rather than
     silently dropping the finding.
+
+    The marker is computed once by the caller (``_file_out_of_scope_issue``)
+    and threaded in, so the finding's fingerprint is not recomputed for both
+    the dedup lookup and the issue body.
     """
     from daydream import git_ops
 
-    marker = _scope_finding_marker(_scope_finding_fingerprint(item))
     try:
         issues = git_ops.gh_issue_list(repo, search="out-of-scope")
     except Exception:  # noqa: BLE001 -- best-effort dedup lookup
@@ -1995,7 +1998,10 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     file = item.get("file") or "<unknown>"
     description = item.get("description", "No description")
     evidence = item.get("evidence", "")
-    if _scope_finding_already_filed(ctx.work.repo, item):
+    # Compute the fingerprint marker once and thread it into both the dedup
+    # lookup and the issue body, rather than recomputing it for each.
+    marker = _scope_finding_marker(_scope_finding_fingerprint(item))
+    if _scope_finding_already_filed(ctx.work.repo, marker):
         return
     title = f"[daydream] out-of-scope finding: {file}"
     body = (
@@ -2004,7 +2010,7 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
         f"- Line: {item.get('line', '?')}\n"
         f"- Evidence: {evidence}\n\n"
         "Filed by daydream fix loop: out of scope for PR.\n"
-        f"{_scope_finding_marker(_scope_finding_fingerprint(item))}"
+        f"{marker}"
     )
     _file_scope_issue(ctx.work.repo, title=title, body=body, noun="finding", ident=file)
 
@@ -2091,7 +2097,7 @@ def _revert_out_of_scope_edits(
         return []
 
     allowed = set(finding_files)
-    if changed_files:
+    if changed_files is not None:
         allowed |= set(changed_files)
     else:
         print_warning(
@@ -2196,7 +2202,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # gate and the post-fix residual net agree on the allowed set (a divergence
     # left the residual net strictly weaker than the gate on the resume path).
     changed_files = _resolve_changed_files(ctx)
-    if changed_files:
+    if changed_files is not None:
         in_scope: list[dict[str, Any]] = []
         out_of_scope: list[dict[str, Any]] = []
         for item in items:
@@ -2210,6 +2216,19 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
                 "issue(s), not fixed.",
             )
         items = in_scope
+        # Issue #336 — every finding routed to issues leaves nothing to
+        # auto-fix, so short-circuit before a no-op fix pass, a full target
+        # test-suite run, and a commit-agent turn. Matches the pre-partition
+        # "no actionable items" Stop(0) above. Keying on identity (``is not
+        # None``) distinguishes an empty reviewed diff — every file is out of
+        # scope, so all findings are filed and the run ends — from ``None``,
+        # which skips the partition entirely because scope cannot be judged.
+        if not items:
+            print_success(
+                console,
+                "All findings outside the reviewed diff -- filed as issues, nothing to fix.",
+            )
+            return Stop(0)
 
     # Severity-ordered (high before medium before low), stable within a
     # tier so equal-severity items keep their canonical merge order.

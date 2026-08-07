@@ -702,6 +702,15 @@ def test_run_git_timeout_retry_behavior(monkeypatch: pytest.MonkeyPatch, tmp_pat
             ),
             id="gh-pr-create",
         ),
+        pytest.param(
+            lambda repo: git_ops.gh_issue_create(
+                repo,
+                title="t",
+                body="b",
+                repo_slug="octocat/hello",
+            ),
+            id="gh-issue-create",
+        ),
     ],
 )
 def test_mutating_wrapper_does_not_retry_on_timeout(
@@ -889,7 +898,13 @@ def test_gh_issue_create_raises_on_non_zero_exit(
     """A non-zero `gh` exit raises GitError, matching sibling gh_* wrappers."""
     repo = _make_repo_with_main(tmp_path)
 
+    body_path: list[str] = []
+
     def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        # Capture the body tempfile path while it still exists (the unlink-in-
+        # finally runs after _run_gh returns).
+        i_body = list(args).index("--body-file")
+        body_path.append(args[i_body + 1])
         return subprocess.CompletedProcess(
             args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n",
         )
@@ -897,6 +912,8 @@ def test_gh_issue_create_raises_on_non_zero_exit(
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
     with pytest.raises(GitError):
         git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
+    # The body tempfile is unlinked on the failure path too (unlink-in-finally).
+    assert body_path and not Path(body_path[0]).exists()
 
 
 def test_gh_issue_list_returns_parsed_rows(
