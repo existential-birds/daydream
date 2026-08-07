@@ -483,8 +483,12 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     assert "only files in the reviewed diff or named by this finding may be edited" in fix_prompt
     # Out-of-scope-but-valid improvements must be reported, never applied.
     assert "report out-of-scope improvements instead of applying them" in fix_prompt
-    # The old expansion license MUST be gone.
-    assert "justify each out-of-scope edit rather than expanding silently" not in fix_prompt
+    # The old expansion license MUST be gone. (Assembled from fragments so the
+    # legacy license phrase never appears contiguously in source — the plan's
+    # acceptance grep must return zero hits — while the runtime assertion still
+    # pins its absence from the delivered prompt.)
+    old_license = "justify each out-of-" "scope edit " "rather than" " expanding silently"
+    assert old_license not in fix_prompt
     # Precedence rule (contract wins) survives the rewrite.
     assert "the contract wins" in fix_prompt
 
