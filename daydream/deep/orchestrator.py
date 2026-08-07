@@ -1944,6 +1944,138 @@ def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
         print_warning(console, f"Could not file out-of-scope finding '{file}' as issue: {exc}")
 
 
+def _file_reverted_edit_issue(repo: Path, path: str, patch: str) -> None:
+    """Best-effort: file one reverted out-of-scope edit as a tracked GitHub issue.
+
+    Issue #336 — the post-fix residual check reverts edits the fix pass made
+    outside the reviewed diff. The reverted edit is still *valid* work, so it
+    is filed as an issue (with the diff as evidence) instead of being lost.
+    Filing is best-effort: a failed ``gh issue create`` logs a warning and the
+    revert stands regardless.
+    """
+    from daydream import git_ops
+
+    title = f"[daydream] out-of-scope edit reverted: {path}"
+    body = (
+        f"The fix pass edited `{path}`, which is outside the reviewed diff. "
+        f"The edit was reverted and is filed here for review.\n\n"
+        f"```diff\n{patch}\n```\n\n"
+        "Filed by daydream fix loop: out of scope for PR."
+    )
+    try:
+        url = git_ops.gh_issue_create(repo, title=title, body=body)
+        print_warning(console, f"Filed out-of-scope edit as issue: {url}")
+    except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
+        print_warning(console, f"Could not file out-of-scope edit '{path}' as issue: {exc}")
+
+
+def _revert_out_of_scope_edits(
+    work: WorkContext,
+    *,
+    pre_fix_ref: str,
+    snapshot_captured: bool,
+    pre_fix_untracked: set[str],
+    changed_files: set[str] | None,
+    finding_files: set[str],
+) -> list[str]:
+    """Revert post-fix edits outside the reviewed diff; file an issue per residual.
+
+    Issue #336 (Task 4): after ``phase_fix_parallel`` returns, enumerate the
+    files the fix pass actually edited (vs the pre-fix snapshot) and subtract
+    the allowed set — the finding files, the reviewed-diff file set, and
+    newly-created generated files. Every residual is reverted unconditionally to
+    its pre-fix content (``git checkout <ref> -- <file>``, the same mechanism
+    the generated-file guard uses) and filed as a best-effort GitHub issue
+    carrying the edit's diff as evidence, so the commit step can never land an
+    edit outside the reviewed diff.
+
+    Only TRACKED edits are considered: a path present at *pre_fix_ref*. Newly
+    created untracked files (e.g. the test harness's ``.fixed-*`` sentinels)
+    have no pre-fix content to restore to and are governed by the generated-file
+    guard and the leftover-untracked bookkeeping instead.
+
+    Args:
+        work: The run's workspace (``work.repo`` is the git working dir).
+        pre_fix_ref: ``git stash create`` SHA captured before fixes, or ``HEAD``
+            when the pre-fix tracked tree was clean.
+        snapshot_captured: Whether the pre-fix snapshot exists. When False the
+            baseline is untrustworthy — skip with a warning rather than guess.
+        pre_fix_untracked: Untracked paths present before the fix pass.
+        changed_files: The reviewed diff's file set, or ``None`` when no diff
+            context is available (resume) — then only finding-file scope is
+            enforced and a warning is logged.
+        finding_files: Files named by the findings being fixed.
+
+    Returns:
+        The repo-relative paths that were reverted (empty when none).
+    """
+    from daydream import git_ops
+    from daydream.git_ops import GitError
+
+    if not snapshot_captured:
+        print_warning(
+            console,
+            "Post-fix scope check skipped: no trustworthy pre-fix snapshot "
+            "(cannot judge which edits the fix pass made).",
+        )
+        return []
+
+    repo = work.repo
+    try:
+        edited = set(
+            git_ops.changed_files_against(repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked)
+        )
+    except GitError as exc:
+        print_warning(console, f"Post-fix scope check skipped: could not enumerate edited files: {exc}")
+        return []
+
+    allowed = set(finding_files)
+    if changed_files:
+        allowed |= set(changed_files)
+    else:
+        print_warning(
+            console,
+            "Post-fix scope check: no reviewed-diff file set; enforcing finding-file scope only.",
+        )
+    # Newly-created generated files (e.g. new migrations) are deliberately
+    # permitted by the generated-file guard; never treat them as residuals here.
+    allowed |= {path for path in edited if is_generated_file(path)}
+
+    residual: list[str] = []
+    for path in sorted(edited):
+        # Only tracked files (present at the pre-fix ref) are revertible to a
+        # pre-fix baseline; skip untracked new files (see docstring).
+        try:
+            git_ops.show(repo, pre_fix_ref, path)
+        except GitError:
+            continue
+        if path in allowed:
+            continue
+        residual.append(path)
+
+    for path in residual:
+        # Capture the diff as evidence BEFORE reverting (the revert destroys it).
+        try:
+            patch = git_ops.diff_worktree_against(repo, pre_fix_ref, [path])
+        except GitError as exc:
+            patch = ""
+            print_warning(console, f"Could not diff out-of-scope edit '{path}': {exc}")
+        # Revert unconditionally — same mechanism as the generated-file guard.
+        try:
+            git_ops.restore_paths_from_ref(repo, pre_fix_ref, [path])
+        except GitError as exc:
+            print_warning(console, f"Could not revert out-of-scope edit '{path}': {exc}")
+            continue
+        _file_reverted_edit_issue(repo, path, patch)
+    if residual:
+        print_warning(
+            console,
+            f"Reverted {len(residual)} post-fix edit(s) outside the reviewed diff and "
+            f"filed issue(s): {residual}.",
+        )
+    return residual
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
@@ -2593,6 +2725,21 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     )
     if generated_guard_result is None:
         return Stop(1)
+    # Issue #336 (Task 4) — post-fix residual scope check: revert any edit the
+    # fix pass made outside the reviewed diff and file an issue per residual, so
+    # the commit step below can only land in-scope changes. Runs AFTER the
+    # generated-file guard (which already reverted generated-file edits, so no
+    # double-revert) and BEFORE the quality gate (which then measures the
+    # now-scoped edited set).
+    pre_fix_ref = pre_fix_snapshot or "HEAD"
+    _revert_out_of_scope_edits(
+        work,
+        pre_fix_ref=pre_fix_ref,
+        snapshot_captured=pre_fix_snapshot_captured,
+        pre_fix_untracked=pre_fix_untracked,
+        changed_files=changed_files,
+        finding_files={item["file"] for item in ctx.data["items"] if item.get("file")},
+    )
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
@@ -2612,7 +2759,6 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     quality_candidates: set[str] | None
     if quality_gate_enabled:
         try:
-            pre_fix_ref = pre_fix_snapshot or "HEAD"
             changed_after_fix = git_ops.changed_files_against(
                 work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
             )

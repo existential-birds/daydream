@@ -969,6 +969,29 @@ def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
     return project
 
 
+def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
+    """A python-only fixture repo whose diff does NOT include a tracked module.
+
+    ``api.py`` changes on the feature branch (so ``changed_files`` names only
+    it), while ``unrelated.py`` is a tracked file committed on ``main`` and left
+    untouched by the diff — the exact shape issue #336's post-fix residual check
+    must protect: a fix agent editing ``unrelated.py`` is editing outside the
+    reviewed diff.
+    """
+    project = tmp_path / name
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "unrelated.py").write_text("def util():\n    return 'untouched'\n")
+    _init_repo(project)
+    _git(project, "add", "api.py", "unrelated.py")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    _git(project, "add", "api.py")
+    _commit(project, "change")
+    return project
+
+
 class _SecondaryEditBackend(_StubBackend):
     """Fix stub that ALSO edits a second tracked python file (#329/Finding 6).
 
@@ -1000,6 +1023,58 @@ class _SecondaryEditBackend(_StubBackend):
             yield event
         if prompt.lower().startswith(("fix this issue", "fix these")):
             self._secondary.write_text(self._secondary.read_text() + self._secondary_edit)
+
+
+class _ScopeCreepBackend(_StubBackend):
+    """Fix stub that ALSO edits a tracked file OUTSIDE the reviewed diff (#336).
+
+    The in-scope fix turn edits the group's named file (via ``fix_edit_line``)
+    AND appends a scope-creep marker to *creep* — a tracked file not in the
+    reviewed diff. This is the issue #336 post-fix residual shape: without the
+    residual check the creep edit would be committed alongside the fix.
+
+    The commit prompt is answered with a REAL ``git add -u`` + ``git commit``
+    (tracked changes only — the stub's untracked sentinels must not leak into
+    the committed tree), so the test can assert the commit step's actual output.
+    """
+
+    def __init__(self, target: Path, creep: Path, creep_edit: str) -> None:
+        super().__init__(target)
+        self._creep = creep
+        self._creep_edit = creep_edit
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        if prompt.startswith("Stage all changes and commit"):
+            run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
+            version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
+            assert run_id is not None
+            assert version is not None
+            message = (
+                "fix: align scope-creep test\n\n"
+                f"Daydream-Run: {run_id.group(1)}\n"
+                f"Daydream-Version: {version.group(1)}"
+            )
+            _git(cwd, "add", "-u")
+            _git(cwd, "commit", "-m", message)
+            yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+        if prompt.lower().startswith(("fix this issue", "fix these")):
+            self._creep.write_text(self._creep.read_text() + self._creep_edit)
 
 
 def _read_quality_gate(target: Path) -> dict[str, Any]:
@@ -1791,6 +1866,81 @@ async def test_parallel_fix_commit_runs_once_after_all(
     )
     assert exit_code == 0
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
+
+
+async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: the post-fix residual check reverts out-of-scope edits.
+
+    The fix agent fixes api.py (inside the reviewed diff) AND appends a
+    scope-creep marker to unrelated.py (a tracked file NOT in the diff). After
+    ``_step_fix``:
+
+      1. unrelated.py is reverted to its pre-fix content (git shows no change);
+      2. ``gh_issue_create`` was called with unrelated.py in the body;
+      3. the commit step lands a commit whose tree contains ONLY api.py;
+      4. the committed tree contains zero files outside ``changed_files``.
+
+    Discriminating: without the residual check, unrelated.py's edit survives to
+    the commit — ``git show --name-only`` would name it and assertions 1/2/3/4
+    all fail.
+    """
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
+    pre_fix_unrelated = (target / "unrelated.py").read_text()
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    # Commit runs for real (the scope-creep backend answers the commit prompt
+    # with a real `git add -u` + commit); heal is stubbed to pass.
+    mute_side_effects(commit=False)
+    stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
+    stub.fix_edit_line = "\n# daydream fix\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+    assert exit_code == 0
+
+    # 1. unrelated.py reverted to pre-fix content (git shows no change there).
+    assert (target / "unrelated.py").read_text() == pre_fix_unrelated
+    unrelated_diff = _git(target, "diff", "HEAD", "--", "unrelated.py")
+    assert unrelated_diff == "", f"unrelated.py still differs from HEAD:\n{unrelated_diff}"
+
+    # 2. gh_issue_create called once, naming unrelated.py.
+    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
+    assert "unrelated.py" in issues[0][2]
+
+    # 3/4. The commit's tree contains zero files outside the reviewed diff.
+    committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed_paths == ["api.py"], (
+        f"commit tree leaks out-of-scope files: {committed_paths}"
+    )
+    # The fix itself landed (api.py carries the daydream edit).
+    assert "# daydream fix" in (target / "api.py").read_text()
 
 
 INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
