@@ -131,6 +131,21 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
     }
 
 
+def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
+    """Commit *files* to the current branch so they land in the reviewed diff.
+
+    Issue #336 bounds the fix loop to the reviewed diff's file set: findings on
+    files OUTSIDE the diff are filed as GitHub issues instead of auto-fixed.
+    Fix-loop-mechanics tests that feed synthetic merge items must therefore put
+    those files IN the diff, or the partition correctly routes them to issues
+    and the fix never runs.
+    """
+    for name in files:
+        (target / name).touch()
+    _git(target, "add", *files)
+    _commit(target, f"test: add {' '.join(files)} to the reviewed diff")
+
+
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
     project = tmp_path / name
@@ -574,6 +589,7 @@ async def test_parallel_fix_applies_all_disjoint_files(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
+    _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     exit_code = await run(
         make_config(
@@ -655,6 +671,7 @@ async def test_parallel_fix_same_file_no_race(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     shared = multi_stack_target / "shared.py"
+    _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
     stub.fix_append_path = shared
     stub.merge_items = [
         _merge_item(1, "shared.py", "high", desc="marker-1"),
@@ -686,6 +703,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _add_to_reviewed_diff(multi_stack_target, ["good1.py", "bad.py", "good2.py"])
     stub.fix_fail_file = "bad.py"
     stub.merge_items = [
         _merge_item(1, "good1.py", "high"),
@@ -1585,10 +1603,19 @@ async def test_fix_guard_reverts_generated_migration_edit(
     bare = _bare_remote(tmp_path / "remote.git")
     _git(project, "remote", "add", "origin", str(bare))
 
-    pre_migration = migration.read_bytes()
-    head_before = _git(project, "rev-parse", "HEAD")
+    # Issue #336: the fix loop only auto-fixes findings whose file is in the
+    # reviewed diff. The draft migration finding must therefore be part of the
+    # diff (committed) or the gate would route it to a GitHub issue instead of
+    # exercising the generated-file guard. Pin core.autocrlf so the CRLF draft
+    # round-trips byte-identically through git.
+    _git(project, "config", "core.autocrlf", "false")
     preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
     preexisting_untracked.write_bytes(b"-- local draft\r\n")
+    _git(project, "add", "migrations/0000_local_draft.sql")
+    _commit(project, "test: commit local draft to the reviewed diff")
+
+    pre_migration = migration.read_bytes()
+    head_before = _git(project, "rev-parse", "HEAD")
     untouched_untracked = project / "migrations" / "0000_untouched.sql"
     untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
@@ -1623,9 +1650,11 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert violations.exists()
-    assert json.loads(violations.read_text()) == {
-        "violations": ["migrations/0001_init.sql", "migrations/0000_local_draft.sql"],
-        "ref": "HEAD",
+    violations_payload = json.loads(violations.read_text())
+    assert violations_payload["ref"] == "HEAD"
+    assert set(violations_payload["violations"]) == {
+        "migrations/0001_init.sql",
+        "migrations/0000_local_draft.sql",
     }
     patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
     assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
@@ -1745,6 +1774,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
     mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py"]
+    _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     seen_at_commit: list[bool] = []
 
@@ -2318,6 +2348,67 @@ async def test_yes_auto_applies_fix(
     ), f"fix gate prompted under --yes: {prompt_calls}"
     # Observable consequence: the fix landed.
     assert fix_marker.exists(), "phase_fix never ran -> --yes did not auto-apply"
+
+
+async def test_fix_gate_routes_out_of_scope_finding_to_issue(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: the fix gate files out-of-scope findings as issues.
+
+    merged-items.json carries item A on api.py (inside the reviewed diff) and
+    item B on notes.txt (outside it). Under ``assume="yes"`` the gate must:
+
+      1. exclude item B from the fix list — no fix prompt names notes.txt;
+      2. file exactly one GitHub issue carrying item B's file + description;
+      3. run ``phase_fix`` only for item A's file group.
+
+    Discriminating: without the pre-fix partition, item B would be auto-fixed
+    (a fix prompt would name notes.txt) and no issue would be filed — both
+    assertions fail.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
+    # 1. Item B (notes.txt) is NOT in the fix list.
+    assert not any("notes.txt" in p for p in fix_prompts), (
+        "out-of-scope finding was auto-fixed instead of filed as an issue"
+    )
+    # 3. Fix phase ran for item A's file group (api.py).
+    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
+
+    # 2. Exactly one issue filed, carrying item B's file + description.
+    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
+    _, title, body = issues[0]
+    assert "notes.txt" in body
+    assert "out-of-scope finding" in body
+    assert "out of scope for PR" in body
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:

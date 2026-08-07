@@ -1914,6 +1914,36 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
+    """Best-effort: file one out-of-scope finding as a tracked GitHub issue.
+
+    Issue #336 — the fix loop auto-fixes only findings inside the reviewed
+    diff. A finding on a file outside the diff is still *valid*, so instead of
+    silently dropping it we route it to a GitHub issue where it stays tracked.
+    Filing is best-effort by design: a failed ``gh issue create`` (no auth,
+    cross-org, offline) logs a warning and the item is still excluded from
+    auto-fix — the scope decision never depends on issue-filing success.
+    """
+    from daydream import git_ops
+
+    file = item.get("file") or "<unknown>"
+    description = item.get("description", "No description")
+    evidence = item.get("evidence", "")
+    title = f"[daydream] out-of-scope finding: {file}"
+    body = (
+        f"{description}\n\n"
+        f"- File: `{file}`\n"
+        f"- Line: {item.get('line', '?')}\n"
+        f"- Evidence: {evidence}\n\n"
+        "Filed by daydream fix loop: out of scope for PR."
+    )
+    try:
+        url = git_ops.gh_issue_create(ctx.work.repo, title=title, body=body)
+        print_warning(console, f"Filed out-of-scope finding as issue: {url}")
+    except Exception as exc:  # noqa: BLE001 -- best-effort issue filing
+        print_warning(console, f"Could not file out-of-scope finding '{file}' as issue: {exc}")
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
@@ -1938,6 +1968,28 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     if not items:
         print_success(console, "No actionable items -- done.")
         return Stop(0)
+
+    # Issue #336 — pre-fix scope partition. When the reviewed diff's file set is
+    # known, findings on files OUTSIDE that set are filed as GitHub issues
+    # (best-effort) and excluded from auto-fix: the loop must not expand the
+    # PR's scope. Without a diff file set (no diff context, e.g. a resume that
+    # lost ctx.data["diff"]) no partition happens — every item auto-fixes as
+    # today, because scope cannot be judged without the diff.
+    changed_files: set[str] | None = ctx.data.get("changed_files")
+    if changed_files:
+        in_scope: list[dict[str, Any]] = []
+        out_of_scope: list[dict[str, Any]] = []
+        for item in items:
+            (in_scope if (item.get("file") or "") in changed_files else out_of_scope).append(item)
+        for item in out_of_scope:
+            _file_out_of_scope_issue(ctx, item)
+        if out_of_scope:
+            print_warning(
+                console,
+                f"{len(out_of_scope)} finding(s) outside the reviewed diff filed as "
+                "issue(s), not fixed.",
+            )
+        items = in_scope
 
     # Severity-ordered (high before medium before low), stable within a
     # tier so equal-severity items keep their canonical merge order.
