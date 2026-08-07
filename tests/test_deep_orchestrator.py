@@ -1943,6 +1943,54 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     assert "# daydream fix" in (target / "api.py").read_text()
 
 
+async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: a failed residual revert aborts before commit.
+
+    Mirror of ``test_fix_reverts_post_fix_edit_outside_reviewed_diff`` plus the
+    generated-file guard's ``test_fix_guard_restore_failure_aborts_before_commit``:
+    the fix agent edits unrelated.py (outside the reviewed diff) and the
+    residual revert's ``restore_paths_from_ref`` raises. The run must fail-close
+    (exit 1) and the commit step must never run — HEAD stays at the pre-fix SHA.
+    """
+    from daydream.git_ops import GitError
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "scope_creep_residual_fail")
+    head_before = _git(target, "rev-parse", "HEAD")
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(commit=False)
+    stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
+    stub.fix_edit_line = "\n# daydream fix\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr(
+        "daydream.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+
+    assert exit_code == 1
+    assert _git(target, "rev-parse", "HEAD") == head_before
+
+
 INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
 
 
@@ -2577,7 +2625,7 @@ async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
     reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
     called even though the finding is still excluded from auto-fix.
     """
-    from daydream.deep.orchestrator import (
+    from daydream.deep.scope_issues import (
         _scope_finding_fingerprint,
         _scope_finding_marker,
     )
