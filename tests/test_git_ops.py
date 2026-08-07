@@ -899,6 +899,65 @@ def test_gh_issue_create_raises_on_non_zero_exit(
         git_ops.gh_issue_create(repo, title="t", body="b", repo_slug="octocat/hello")
 
 
+def test_gh_issue_list_returns_parsed_rows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`gh_issue_list` parses ``number/title/body/url`` rows; best-effort dedup.
+
+    Issue #336 — the fix loop dedups out-of-scope findings against already-filed
+    open issues (GitHub is the store), so the wrapper returns the parsed rows
+    it needs to scan bodies for the finding's fingerprint marker.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    rows = [
+        {
+            "number": 42,
+            "title": "[daydream] out-of-scope finding: notes.txt",
+            "body": "desc\n<!-- daydream-scope-finding: abc123 -->",
+            "url": "https://github.com/octocat/hello/issues/42",
+        },
+        {"number": 7, "title": "unrelated", "body": "", "url": ""},
+    ]
+    captured: dict[str, Any] = {}
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        captured["argv"] = list(args)
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=0, stdout=json.dumps(rows), stderr="",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    result = git_ops.gh_issue_list(repo, search="out-of-scope", repo_slug="octocat/hello")
+    assert result == rows
+
+    argv = captured["argv"]
+    assert argv[:3] == ["gh", "issue", "list"]
+    assert "--state" in argv and argv[argv.index("--state") + 1] == "open"
+    assert "--json" in argv and "number,title,body,url" in argv
+    assert "--search" in argv and argv[argv.index("--search") + 1] == "out-of-scope"
+    assert "--repo" in argv and "octocat/hello" in argv
+
+
+def test_gh_issue_list_returns_empty_on_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Best-effort: a non-zero ``gh`` exit returns [] (never raises).
+
+    Dedup must fail open: a failed lookup degrades to filing (the prior
+    behavior) rather than blocking the scope decision or dropping the finding.
+    """
+    repo = _make_repo_with_main(tmp_path)
+
+    def fake_run(args: Any, *pargs: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            args=list(args), returncode=1, stdout="", stderr="gh: not authenticated\n",
+        )
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    assert git_ops.gh_issue_list(repo) == []
+
+
 def test_wrong_branch_error_is_raisable() -> None:
     with pytest.raises(WrongBranchError):
         raise WrongBranchError("expected feat, got main")

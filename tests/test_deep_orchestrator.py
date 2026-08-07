@@ -1684,8 +1684,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
     # exercising the generated-file guard. Pin core.autocrlf so the CRLF draft
     # round-trips byte-identically through git.
     _git(project, "config", "core.autocrlf", "false")
-    preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
-    preexisting_untracked.write_bytes(b"-- local draft\r\n")
+    preexisting_tracked = project / "migrations" / "0000_local_draft.sql"
+    preexisting_tracked.write_bytes(b"-- local draft\r\n")
     _git(project, "add", "migrations/0000_local_draft.sql")
     _commit(project, "test: commit local draft to the reviewed diff")
 
@@ -1719,7 +1719,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert exit_code == 0
     assert migration.read_bytes() == pre_migration
     assert b"FORBIDDEN EDIT" not in migration.read_bytes()
-    assert preexisting_untracked.read_bytes() == b"-- local draft\r\n"
+    assert preexisting_tracked.read_bytes() == b"-- local draft\r\n"
     assert untouched_untracked.read_bytes() == b"-- untouched draft\r\n"
     assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
     assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
@@ -2559,6 +2559,81 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
     assert "notes.txt" in body
     assert "out-of-scope finding" in body
     assert "out of scope for PR" in body
+
+
+async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: an out-of-scope finding already filed is not re-filed.
+
+    Out-of-scope findings are never fixed, so a re-run/resume re-derives them.
+    Without cross-run dedup they would be re-filed as a duplicate issue every
+    run (#336 finding). The gate embeds the finding's fingerprint as a hidden
+    marker in the issue body and skips filing when an open issue already
+    carries it (GitHub is the store — same stateless-dedup model as
+    reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
+    called even though the finding is still excluded from auto-fix.
+    """
+    from daydream.deep.orchestrator import (
+        _scope_finding_fingerprint,
+        _scope_finding_marker,
+    )
+    from daydream.pr_review import compute_fingerprint
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+
+    # The marker the gate would embed for item 2 — pre-filed in an open issue,
+    # simulating a prior run. Confirm the local helper reproduces the same
+    # identity compute_fingerprint produces, so the dedup key is stable.
+    item_b = _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding")
+    fp = compute_fingerprint(item_b["file"], item_b["description"], item_b["evidence"])
+    marker = _scope_finding_marker(fp)
+    assert marker == _scope_finding_marker(_scope_finding_fingerprint(item_b))
+
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list",
+        lambda repo, **kw: [
+            {
+                "number": 9,
+                "title": "[daydream] out-of-scope finding: notes.txt",
+                "body": f"prior run\n{marker}",
+                "url": "https://github.com/owner/repo/issues/9",
+            }
+        ],
+    )
+
+    created: list[tuple[Any, ...]] = []
+
+    def _record_create(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        created.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_create)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    # Deduped: the already-filed finding is NOT re-filed.
+    assert created == [], f"out-of-scope finding re-filed as a duplicate: {created!r}"
+
+    # And it is still excluded from auto-fix (no fix prompt names notes.txt).
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
+    assert not any("notes.txt" in p for p in fix_prompts), "deduped finding was auto-fixed"
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1950,3 +1950,61 @@ def gh_issue_create(
     if proc.returncode != 0:
         raise _gh_error_for(f"gh issue create failed: {proc.stderr.strip()}", proc.stderr)
     return proc.stdout.strip()
+
+
+def gh_issue_list(
+    repo: Path,
+    *,
+    state: str = "open",
+    search: str | None = None,
+    limit: int = 100,
+    repo_slug: str | None = None,
+) -> list[dict[str, Any]]:
+    """List issues via ``gh issue list``; best-effort (empty list on failure).
+
+    Used by the fix loop (issue #336) for cross-run dedup of out-of-scope
+    findings filed as issues: before filing, the caller checks whether an open
+    issue already carries the finding's fingerprint marker, so a re-run/resume
+    does not re-file the same finding (GitHub is the store — same stateless
+    cross-run dedup model as :mod:`daydream.reconcile`). Best-effort by design
+    so a failed ``gh issue list`` (no auth, offline, cross-org) degrades to
+    filing rather than blocking the scope decision.
+
+    Args:
+        repo: Worktree the call is rooted in (cwd for ``gh``).
+        state: Issue state filter (``--state``); defaults to ``open``.
+        search: Optional ``--search`` qualifier to narrow results.
+        limit: Cap on the number of issues returned (``--limit``).
+        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
+            the ambient ``gh`` context (cwd) is used.
+
+    Returns:
+        List of issue dicts (``number``, ``title``, ``body``, ``url``) — empty
+        when no issues match or the call fails.
+    """
+    args: list[str] = [
+        "issue",
+        "list",
+        "--state",
+        state,
+        "--json",
+        "number,title,body,url",
+        "--limit",
+        str(limit),
+    ]
+    if search:
+        args += ["--search", search]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
+    try:
+        proc = _run_gh(repo, args, retries=_gh_retries())
+    except GitError as exc:
+        _logger.warning("gh issue list failed (%s, returning []): %s", type(exc).__name__, exc)
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return rows if isinstance(rows, list) else []

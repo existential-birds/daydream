@@ -520,7 +520,8 @@ async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
     prompt_with = backend_with.prompts[0]
     # The clause is present and lists both files (sorted).
     assert "Allowed files" in prompt_with
-    assert "src/handler.py" in prompt_with
+    # src/handler.py already appears via the finding's own File: line, so only
+    # src/util.py (which appears nowhere else) isolates the Allowed-files clause.
     assert "src/util.py" in prompt_with
 
     # --- Without changed_files: no allowed-files clause (legacy callers). ---

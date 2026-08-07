@@ -1932,26 +1932,79 @@ def _file_scope_issue(repo: Path, *, title: str, body: str, noun: str, ident: st
         print_warning(console, f"Could not file out-of-scope {noun} '{ident}' as issue: {exc}")
 
 
+def _scope_finding_fingerprint(item: dict[str, Any]) -> str:
+    """Stable cross-run identity for an out-of-scope finding.
+
+    Reuses :func:`daydream.pr_review.compute_fingerprint` (path + normalized
+    description + rationale), so minor wording drift across runs still maps to
+    the same fingerprint and a re-review reproducing an out-of-scope finding is
+    recognized as already-filed.
+    """
+    from daydream.pr_review import compute_fingerprint
+
+    return compute_fingerprint(
+        item.get("file") or "",
+        item.get("description", ""),
+        item.get("evidence", ""),
+    )
+
+
+def _scope_finding_marker(fingerprint: str) -> str:
+    """Hidden HTML comment embedding a finding fingerprint in an issue body.
+
+    Distinct from :func:`daydream.pr_review.finding_marker` (the PR-comment
+    store) so the two stores never collide: scope issues are deduped only
+    against scope issues, PR comments only against PR comments.
+    """
+    return f"<!-- daydream-scope-finding: {fingerprint} -->"
+
+
+def _scope_finding_already_filed(repo: Path, item: dict[str, Any]) -> bool:
+    """Best-effort: has an open issue already filed this out-of-scope finding?
+
+    Issue #336 — out-of-scope findings are never fixed, so a re-run/resume
+    re-derives them and would re-file a duplicate issue every time. GitHub is
+    the store: scan open issues for the finding's fingerprint marker and skip
+    filing when present. Best-effort — a failed ``gh issue list`` returns
+    ``False`` so the call degrades to filing (the prior behavior) rather than
+    silently dropping the finding.
+    """
+    from daydream import git_ops
+
+    marker = _scope_finding_marker(_scope_finding_fingerprint(item))
+    try:
+        issues = git_ops.gh_issue_list(repo, search="out-of-scope")
+    except Exception:  # noqa: BLE001 -- best-effort dedup lookup
+        return False
+    return any(marker in (issue.get("body") or "") for issue in issues)
+
+
 def _file_out_of_scope_issue(ctx: FlowContext, item: dict[str, Any]) -> None:
     """Best-effort: file one out-of-scope finding as a tracked GitHub issue.
 
     Issue #336 — the fix loop auto-fixes only findings inside the reviewed
     diff. A finding on a file outside the diff is still *valid*, so instead of
     silently dropping it we route it to a GitHub issue where it stays tracked.
-    Filing is best-effort by design: a failed ``gh issue create`` (no auth,
+    Cross-run dedup: the finding's fingerprint is embedded as a hidden marker
+    in the body, and a re-run/resume skips filing when an open issue already
+    carries it, so the same out-of-scope finding is filed once, not on every
+    run. Filing is best-effort by design: a failed ``gh issue create`` (no auth,
     cross-org, offline) logs a warning and the item is still excluded from
     auto-fix — the scope decision never depends on issue-filing success.
     """
     file = item.get("file") or "<unknown>"
     description = item.get("description", "No description")
     evidence = item.get("evidence", "")
+    if _scope_finding_already_filed(ctx.work.repo, item):
+        return
     title = f"[daydream] out-of-scope finding: {file}"
     body = (
         f"{description}\n\n"
         f"- File: `{file}`\n"
         f"- Line: {item.get('line', '?')}\n"
         f"- Evidence: {evidence}\n\n"
-        "Filed by daydream fix loop: out of scope for PR."
+        "Filed by daydream fix loop: out of scope for PR.\n"
+        f"{_scope_finding_marker(_scope_finding_fingerprint(item))}"
     )
     _file_scope_issue(ctx.work.repo, title=title, body=body, noun="finding", ident=file)
 
@@ -2091,6 +2144,26 @@ def _revert_out_of_scope_edits(
     return None if restoration_failed else residual
 
 
+def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:
+    """Resolve the reviewed-diff file set for the fix-loop scope bound.
+
+    Issue #336 — the reviewed-diff file set is computed once in the
+    ``_run_review_spine`` preamble and carried in ``ctx.data["changed_files"]``.
+    On a ``--start-at fix`` resume that lost it but retained ``diff`` it is
+    recomputed via ``_diff_changed_files``. Shared by ``_step_fix_gate`` (the
+    pre-fix partition) and ``_step_fix`` (the post-fix residual net + the
+    "Allowed files" prompt clause) so the gate and the net agree on the allowed
+    set — a divergence left the residual net strictly weaker than the gate on
+    the resume path.
+    """
+    changed_files: set[str] | None = ctx.data.get("changed_files")
+    if changed_files is None:
+        diff_str = ctx.data.get("diff") or ""
+        if diff_str:
+            changed_files = set(_diff_changed_files(diff_str))
+    return changed_files
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     # Fix-apply gate across the two interaction axes. ``--yes`` auto-applies;
@@ -2119,16 +2192,10 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # Issue #336 — pre-fix scope partition. Findings on files OUTSIDE the
     # reviewed diff are filed as GitHub issues (best-effort) and excluded from
     # auto-fix: the loop must not expand the PR's scope. The reviewed-diff file
-    # set is computed once in the preamble and carried in ctx.data; on a
-    # ``--start-at fix`` resume that lost it but retained ``diff`` it is
-    # recomputed via _diff_changed_files, mirroring _step_fix, so the gate and
-    # the post-fix residual net agree on the allowed set (a divergence left the
-    # residual net strictly weaker than the gate on that resume path).
-    changed_files: set[str] | None = ctx.data.get("changed_files")
-    if changed_files is None:
-        diff_str = ctx.data.get("diff") or ""
-        if diff_str:
-            changed_files = set(_diff_changed_files(diff_str))
+    # set is resolved via _resolve_changed_files (shared with _step_fix) so the
+    # gate and the post-fix residual net agree on the allowed set (a divergence
+    # left the residual net strictly weaker than the gate on the resume path).
+    changed_files = _resolve_changed_files(ctx)
     if changed_files:
         in_scope: list[dict[str, Any]] = []
         out_of_scope: list[dict[str, Any]] = []
@@ -2650,14 +2717,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # Issue #336 — fix-loop scope bound. Thread the reviewed diff's file set
     # into every fix prompt as an explicit "Allowed files" clause. ``None``
     # (no diff context, e.g. a resume that lost ctx.data["diff"]) leaves the
-    # prompt unchanged; the prose scope boundary still applies. Recomputable
-    # from ctx.data["diff"] via _diff_changed_files so a missing key never
-    # crashes.
-    changed_files: set[str] | None = ctx.data.get("changed_files")
-    if changed_files is None:
-        diff_str = ctx.data.get("diff") or ""
-        if diff_str:
-            changed_files = set(_diff_changed_files(diff_str))
+    # prompt unchanged; the prose scope boundary still applies. Resolved via
+    # _resolve_changed_files (shared with the gate) so a missing key never
+    # crashes and the gate and post-fix residual net agree on the allowed set.
+    changed_files = _resolve_changed_files(ctx)
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
