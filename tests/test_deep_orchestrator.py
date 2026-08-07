@@ -2577,7 +2577,7 @@ async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
     reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
     called even though the finding is still excluded from auto-fix.
     """
-    from daydream.deep.orchestrator import (
+    from daydream.deep.scope_issues import (
         _scope_finding_fingerprint,
         _scope_finding_marker,
     )
