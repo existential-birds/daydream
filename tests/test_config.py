@@ -199,8 +199,8 @@ def test_plan_write_is_pinned_to_the_top_model_tier(backend):
     assert models["plan_write"] == models["review"] == models["arbiter"]
 
 
-def test_default_pi_model_is_glm_5_2():
-    assert DEFAULT_PI_MODEL == "glm-5.2"
+def test_default_pi_model_is_nous_deepseek_flash():
+    assert DEFAULT_PI_MODEL == "deepseek/deepseek-v4-flash-0731"
 
 
 def test_default_exploration_model_matches_claude_phase_default():

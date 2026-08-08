@@ -39,12 +39,19 @@ for _git_env_var in (
     os.environ.pop(_git_env_var, None)
 
 # Test-created repositories commit non-interactively and must not inherit a
-# developer's global signing requirement. Append an environment-scoped Git
-# override so every descendant git process is deterministic, including helpers
-# defined outside this file.
+# developer's global signing requirement. Append environment-scoped Git
+# overrides so every descendant git process is deterministic, including
+# helpers defined outside this file. core.excludesFile=/dev/null neutralizes
+# the ambient global ignores file (~/.config/git/ignore): a machine that
+# globally ignores `.env*` would otherwise make tests that `git add` such
+# files fail with "The following paths are ignored by one of your .gitignore
+# files".
 _git_config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
 os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "commit.gpgsign"
 os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "false"
+_git_config_count += 1
+os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "core.excludesFile"
+os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "/dev/null"
 os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
 
 # --- Real-git fixtures ------------------------------------------------------

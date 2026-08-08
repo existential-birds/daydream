@@ -24,7 +24,7 @@ claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (z.ai GLM models).
+Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models).
 
 ### Golden paths
 
@@ -344,15 +344,25 @@ applies its own ambient default (for Codex, `model_reasoning_effort` from
 `~/.codex/config.toml`; for Pi, the `PI_THINKING` environment variable).
 
 For the `pi` backend, an unset daydream model leaves Pi's own configured
-`defaultModel` intact. The built-in `glm-5.2` value is used only when neither
-daydream nor Pi has selected a model.
+`defaultModel` intact. The built-in `deepseek/deepseek-v4-flash-0731` value
+(nous provider) is used only when neither daydream nor Pi has selected a model.
 
 Pi accepts `PI_PROVIDER`, `PI_API_KEY`, and `PI_THINKING` as compatibility
 overrides. `PI_THINKING` is Pi's ambient default and is used only when no
-resolved `reasoning_effort` applies; a per-phase level always outranks it. For the built-in `zai` provider, daydream passes `PI_API_KEY` to the
-child process as `ZAI_API_KEY`; credentials are never placed in process
-arguments. Providers without a known native credential environment variable
-must be configured through Pi directly instead of `PI_API_KEY`.
+resolved `reasoning_effort` applies; a per-phase level always outranks it. For
+the built-in `nous` and `zai` providers, daydream passes `PI_API_KEY` to the
+child process as `NOUS_API_KEY` / `ZAI_API_KEY`; credentials are never placed
+in process arguments. Providers without a known native credential environment
+variable must be configured through Pi directly instead of `PI_API_KEY`.
+
+The Pi default moved from a z.ai GLM model (`glm-5.2` on the `zai` provider)
+to `deepseek/deepseek-v4-flash-0731` on the built-in `nous` provider. To
+migrate an existing z.ai setup: unset `PI_PROVIDER` (or set it to `nous`) and
+either drop the pinned `glm-*` model or switch it to a model the nous
+registry serves. A pinned `glm-*` model with `PI_PROVIDER` unset, or
+`PI_PROVIDER` set (e.g. `zai`) with no configured model, is a stale pairing:
+daydream warns about it and the run fails at runtime unless the provider
+serves the model.
 
 Daydream schedules Pi fan-outs with a default concurrency hint of 10 for
 standard and deep workflows; quick improve remains serial. Set

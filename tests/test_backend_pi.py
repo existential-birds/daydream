@@ -12,7 +12,9 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -48,6 +50,14 @@ from daydream.backends.pi import (
     _schema_instruction,
 )
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.stub_backend import force_interactive as _force_interactive
+from tests.harness.stub_backend import silence as _silence
+
+if TYPE_CHECKING:
+    from daydream.runner import RunConfig
+
+MakeConfig = Callable[..., "RunConfig"]
+Mute = Callable[..., None]
 
 
 async def _run_and_capture_args(backend, prompt="p", *, fixture="simple_text.jsonl", **kwargs):
@@ -942,22 +952,23 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Default --provider is zai; PI_PROVIDER overrides (extension-based provider)
+# Default --provider is nous; PI_PROVIDER overrides (extension-based provider)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("env_provider", "expected"),
-    [(None, "zai"), ("my-proxy", "my-proxy")],
-    ids=["default-zai", "PI_PROVIDER-override"],
+    [(None, "nous"), ("my-proxy", "my-proxy")],
+    ids=["default-nous", "PI_PROVIDER-override"],
 )
 @pytest.mark.asyncio
 async def test_provider_flag(monkeypatch, env_provider, expected):
-    """--provider defaults to ``zai`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
+    """--provider defaults to ``nous`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
 
-    The z.ai provider is registered by the ``~/.pi/extensions/zai-provider``
-    pi extension; daydream must always point pi at it so the default GLM model
-    resolves without relying on a user-configured models.json entry.
+    The nous provider is configured via pi's ``~/.pi/agent/models.json``
+    custom-provider registry; daydream must always point pi at it so the
+    default DeepSeek model resolves without relying on a user-configured
+    models.json entry.
     """
     if env_provider is None:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -1024,16 +1035,175 @@ async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_glm_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
-    """GLM remains the fallback when neither daydream nor Pi selects a model."""
+async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
+    """DeepSeek on the nous provider remains the fallback when neither daydream nor Pi selects a model."""
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
 
     backend = PiBackend()
     flat_args, _ = await _run_and_capture_args(backend)
 
+    assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
+    assert flat_args[flat_args.index("--provider") + 1] == "nous"
+
+
+# ---------------------------------------------------------------------------
+# Migration guards: GLM-pin and provider/model mismatch warnings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_fires_with_unset_provider(monkeypatch, caplog):
+    """An explicit glm-* model with PI_PROVIDER unset warns about the zai->nous default change."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert any("z.ai-hosted GLM" in r.getMessage() for r in caplog.records)
+    # The run still proceeds, pairing the pinned model with the nous default.
     assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
+    assert flat_args[flat_args.index("--provider") + 1] == "nous"
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_silent_when_provider_set(monkeypatch, caplog):
+    """PI_PROVIDER=zai opts back into the zai provider: no warning, provider honored."""
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert not any("z.ai-hosted GLM" in r.getMessage() for r in caplog.records)
     assert flat_args[flat_args.index("--provider") + 1] == "zai"
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_fires_once_across_executes(monkeypatch, caplog):
+    """The migration warning is once-guarded, not re-logged per phase or retry."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        await _run_and_capture_args(backend)
+        await _run_and_capture_args(backend)
+
+    glm_warnings = [r for r in caplog.records if "z.ai-hosted GLM" in r.getMessage()]
+    assert len(glm_warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_zai_provider_with_fallback_model_warns(tmp_path, monkeypatch, caplog):
+    """PI_PROVIDER=zai with no configured model pairs the old provider with the new fallback model and warns."""
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend()
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert any("no configured model" in r.getMessage() for r in caplog.records)
+    # The stale pairing is still passed through (warn-and-continue).
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
+
+
+# ---------------------------------------------------------------------------
+# Real-path through runner.run: real PiBackend, only the pi subprocess mocked
+# ---------------------------------------------------------------------------
+
+
+def _capture_pi_subprocess(monkeypatch, captured: list[list[str]]) -> None:
+    """Replace only the pi subprocess spawn; keep the real PiBackend/create_backend.
+
+    Each pi spawn captures its argv and replays a canned no-op session so the
+    deep flow can complete without a real pi CLI. The argv is the observable
+    contract under test: which --model/--provider daydream hands pi.
+
+    pi.py does a plain ``import asyncio``, so the patch lands on the shared
+    asyncio module. Only pi invocations (first argv element ``pi``) are
+    intercepted; any other ``create_subprocess_exec`` caller falls through to
+    the real executor so the patch never reshapes non-pi spawns.
+    """
+
+    # Type the fallthrough as Any: the real create_subprocess_exec signature is
+    # keyword-typed, so an opaque *args/**kwargs passthrough would otherwise fail
+    # mypy even though it is exactly the forwarding this helper needs.
+    real_exec: Any = asyncio.create_subprocess_exec
+
+    async def _fake_exec(*args: object, **kwargs: object) -> MagicMock:
+        if args and args[0] == "pi":
+            captured.append([str(a) for a in args])
+            return make_mock_process_from_fixture("simple_text.jsonl")
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "daydream.backends.pi.asyncio.create_subprocess_exec", _fake_exec
+    )
+
+
+def _assert_pi_model_and_provider(captured: list[list[str]], *, model: str, provider: str) -> None:
+    """Every spawned pi invocation carries the expected --model and --provider."""
+    assert captured, "expected at least one pi subprocess spawn"
+    for argv in captured:
+        assert argv[argv.index("--model") + 1] == model
+        assert argv[argv.index("--provider") + 1] == provider
+
+
+@pytest.mark.parametrize(
+    ("env_provider", "expected_provider"),
+    [(None, "nous"), ("custom-proxy", "custom-proxy")],
+    ids=["default-nous", "PI_PROVIDER-override"],
+)
+@pytest.mark.asyncio
+async def test_runner_real_path_pi_provider_axis(
+    tiny_diff_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+    env_provider: str | None,
+    expected_provider: str,
+) -> None:
+    """Real runner path: no model selected → pi gets the fallback --model and the default/overridden --provider.
+
+    Runs ``runner.run`` with the real ``create_backend`` (real PiBackend) on a
+    real git worktree, mocking ONLY the pi subprocess spawn. The pi agent dir
+    is isolated to an empty temp dir so no settings.json exists and the
+    code-level fallback fires.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    if env_provider is None:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("PI_PROVIDER", env_provider)
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tiny_diff_target / "pi-agent"))
+
+    captured: list[list[str]] = []
+    _capture_pi_subprocess(monkeypatch, captured)
+
+    rc = await run(
+        make_config(
+            tiny_diff_target,
+            backend="pi",
+            assume="yes",
+        )
+    )
+    assert rc == 0
+    _assert_pi_model_and_provider(
+        captured,
+        model="deepseek/deepseek-v4-flash-0731",
+        provider=expected_provider,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1046,9 +1216,9 @@ async def test_append_system_prompt_preamble_in_args():
     """The tool-efficiency preamble is passed via --append-system-prompt.
 
     Pi's built-in system prompt is minimal compared to Claude Code / Codex; the
-    GLM model needs the budget-awareness guidance appended or it exhausts its
-    tool-call budget during exploration. The flag must appear in every run,
-    not gated on env vars or read_only.
+    default DeepSeek model needs the budget-awareness guidance appended or it
+    exhausts its tool-call budget during exploration. The flag must appear in
+    every run, not gated on env vars or read_only.
     """
     from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
@@ -1078,6 +1248,8 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ("message", "expected"),
     [
         ("429 Too Many Requests", "RATE_LIMIT"),
+        ("503 status code (no body)", "SERVER_ERROR"),
+        ("service unavailable", "SERVER_ERROR"),
         ("request timed out after 30 seconds", "TIMEOUT"),
         ("socket hang up", "STREAM_DROP"),
         ("Pi CLI exited with return code 1", "PROCESS_EXIT"),
@@ -1086,6 +1258,8 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ],
     ids=[
         "rate-limit",
+        "server-error-503",
+        "server-error-service-unavailable",
         "timeout",
         "stream-drop",
         "process-exit",
@@ -1109,6 +1283,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ("message", "expected"),
     [
         ("429 Too Many Requests", True),
+        ("503 status code (no body)", True),
+        ("503 Service Unavailable", True),
         ("Service is currently overloaded", True),
         ("rate limit exceeded", True),
         ("rate_limit hit", True),
@@ -1132,6 +1308,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ],
     ids=[
         "429",
+        "503-status-code",
+        "503-service-unavailable",
         "overload",
         "rate-limit-space",
         "rate_limit-underscore",
