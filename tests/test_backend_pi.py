@@ -942,22 +942,23 @@ async def test_pi_trajectory_is_valid_atif_v1_6(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Default --provider is zai; PI_PROVIDER overrides (extension-based provider)
+# Default --provider is nous; PI_PROVIDER overrides (extension-based provider)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("env_provider", "expected"),
-    [(None, "zai"), ("my-proxy", "my-proxy")],
-    ids=["default-zai", "PI_PROVIDER-override"],
+    [(None, "nous"), ("my-proxy", "my-proxy")],
+    ids=["default-nous", "PI_PROVIDER-override"],
 )
 @pytest.mark.asyncio
 async def test_provider_flag(monkeypatch, env_provider, expected):
-    """--provider defaults to ``zai`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
+    """--provider defaults to ``nous`` (matches DEFAULT_PI_MODEL) unless PI_PROVIDER overrides it.
 
-    The z.ai provider is registered by the ``~/.pi/extensions/zai-provider``
-    pi extension; daydream must always point pi at it so the default GLM model
-    resolves without relying on a user-configured models.json entry.
+    The nous provider is configured via pi's ``~/.pi/agent/models.json``
+    custom-provider registry; daydream must always point pi at it so the
+    default DeepSeek model resolves without relying on a user-configured
+    models.json entry.
     """
     if env_provider is None:
         monkeypatch.delenv("PI_PROVIDER", raising=False)
@@ -1024,16 +1025,16 @@ async def test_explicit_model_overrides_pi_settings(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_glm_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
-    """GLM remains the fallback when neither daydream nor Pi selects a model."""
+async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path, monkeypatch):
+    """DeepSeek on the nous provider remains the fallback when neither daydream nor Pi selects a model."""
     monkeypatch.delenv("PI_PROVIDER", raising=False)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
 
     backend = PiBackend()
     flat_args, _ = await _run_and_capture_args(backend)
 
-    assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
-    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
+    assert flat_args[flat_args.index("--provider") + 1] == "nous"
 
 
 # ---------------------------------------------------------------------------

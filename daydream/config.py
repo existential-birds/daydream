@@ -18,8 +18,8 @@ Exports:
     UNKNOWN_SKILL_PATTERN: str - Regex pattern for detecting unknown skill errors.
     DEFAULT_CLAUDE_MODEL: str - Default Claude model id when no override is given.
     DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
-    DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (z.ai
-        coding plan GLM default).
+    DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (Nous
+        research DeepSeek V4 Flash default).
     DEFAULT_EXPLORATION_MODEL: str - Default model for the EXPLORE phase.
     PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
         model mapping. Outer key is backend name ("claude" or "codex"),
@@ -43,7 +43,7 @@ from enum import Enum
 # as required and does no fallback of its own.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
-DEFAULT_PI_MODEL = "glm-5.2"
+DEFAULT_PI_MODEL = "deepseek/deepseek-v4-flash-0731"
 DEFAULT_EXPLORATION_MODEL = "claude-sonnet-5"
 
 # Caps the 1.5–5h time tail from a single unbounded run_agent turn (issue #169).

@@ -11,16 +11,15 @@ pattern; it emits the same event vocabulary so the existing
 :class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.7
 trajectories indistinguishable in shape from the other two backends.
 
-z.ai coding plan wiring (GLM models) is registered via a pi extension at
-``~/.pi/extensions/zai-provider/`` that calls ``pi.registerProvider()`` with
-``baseUrl``, ``apiKey``, ``api: "openai-completions"``, and the six GLM
-models (see https://pi.dev/docs/latest/custom-provider). When no model is
-selected by daydream, Pi's configured ``defaultModel`` is respected; only when
-Pi has no configured model does daydream pass ``glm-5.2`` with provider
-``zai`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
-``PI_THINKING`` values remain CLI overrides. The provider extension is
-installed once via ``pi install ~/.pi/extensions/zai-provider``; daydream never
-fabricates a base URL or writes a models.json override.
+Nous research wiring (DeepSeek models) is configured via pi's
+``~/.pi/agent/`` provider registry (``models.json`` custom ``nous`` provider
+pointing at ``https://inference-api.nousresearch.com/v1``, key in
+``auth.json``). When no model is selected by daydream, Pi's configured
+``defaultModel`` is respected; only when Pi has no configured model does
+daydream pass ``deepseek/deepseek-v4-flash-0731`` with provider
+``nous`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
+``PI_THINKING`` values remain CLI overrides. Daydream never fabricates a base
+URL or writes a models.json override.
 """
 
 from __future__ import annotations
@@ -83,6 +82,7 @@ _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
 _PI_PROVIDER_API_KEY_ENV = {
     "zai": "ZAI_API_KEY",
+    "nous": "NOUS_API_KEY",
 }
 
 
@@ -571,7 +571,7 @@ class PiBackend:
         if self._model_override is not None:
             self.model = self._model_override
             args.extend(["--model", self.model])
-            provider = os.environ.get("PI_PROVIDER", "zai")
+            provider = os.environ.get("PI_PROVIDER", "nous")
         else:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
@@ -582,7 +582,7 @@ class PiBackend:
                 args.extend(["--model", self.model])
             provider = os.environ.get("PI_PROVIDER")
             if provider is None and configured_model is None:
-                provider = "zai"
+                provider = "nous"
 
         api_key = os.environ.get("PI_API_KEY")
         thinking = self.reasoning_effort or os.environ.get("PI_THINKING")
