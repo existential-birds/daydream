@@ -11,16 +11,15 @@ pattern; it emits the same event vocabulary so the existing
 :class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.7
 trajectories indistinguishable in shape from the other two backends.
 
-z.ai coding plan wiring (GLM models) is registered via a pi extension at
-``~/.pi/extensions/zai-provider/`` that calls ``pi.registerProvider()`` with
-``baseUrl``, ``apiKey``, ``api: "openai-completions"``, and the six GLM
-models (see https://pi.dev/docs/latest/custom-provider). When no model is
-selected by daydream, Pi's configured ``defaultModel`` is respected; only when
-Pi has no configured model does daydream pass ``glm-5.2`` with provider
-``zai`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
-``PI_THINKING`` values remain CLI overrides. The provider extension is
-installed once via ``pi install ~/.pi/extensions/zai-provider``; daydream never
-fabricates a base URL or writes a models.json override.
+Nous research wiring (DeepSeek models) is configured via pi's
+``~/.pi/agent/`` provider registry (``models.json`` custom ``nous`` provider
+pointing at ``https://inference-api.nousresearch.com/v1``, key in
+``auth.json``). When no model is selected by daydream, Pi's configured
+``defaultModel`` is respected; only when Pi has no configured model does
+daydream pass ``deepseek/deepseek-v4-flash-0731`` with provider
+``nous`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
+``PI_THINKING`` values remain CLI overrides. Daydream never fabricates a base
+URL or writes a models.json override.
 """
 
 from __future__ import annotations
@@ -83,6 +82,7 @@ _PI_READ_ONLY_TOOLS = "read,find,ls,grep"
 
 _PI_PROVIDER_API_KEY_ENV = {
     "zai": "ZAI_API_KEY",
+    "nous": "NOUS_API_KEY",
 }
 
 
@@ -103,7 +103,7 @@ def _configured_pi_model(cwd: Path) -> str | None:
 
     Pi merges project settings over global settings. We mirror only the
     ``defaultModel`` field because that is the setting daydream must not replace
-    with its GLM fallback.
+    with its DeepSeek fallback.
     """
     agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent"))
     settings_paths = (cwd / ".pi" / "settings.json", agent_dir / "settings.json")
@@ -124,10 +124,11 @@ _SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
 
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
-# the CLI layer; Pi does not, so the GLM model burns its tool-call budget on
-# exploratory reads during LISTEN. This preamble is appended (via
-# ``--append-system-prompt``) to Pi's built-in coding-assistant prompt to
-# mirror that guidance. Keep it concise — the model re-reads it every turn.
+# the CLI layer; Pi does not, so the default DeepSeek model burns its
+# tool-call budget on exploratory reads during LISTEN. This preamble is
+# appended (via ``--append-system-prompt``) to Pi's built-in coding-assistant
+# prompt to mirror that guidance. Keep it concise — the model re-reads it
+# every turn.
 _PI_SYSTEM_PREAMBLE = """\
 You are an efficient coding agent operating under a strict tool-call budget.
 You have a LIMITED number of tool calls per turn (typically 50). Every call is
@@ -173,6 +174,24 @@ STREAM_DROP_SIGNATURES = (
 )
 
 logger = logging.getLogger(__name__)
+
+# The provider half of the daydream-supplied default pairing (the model half
+# is ``DEFAULT_PI_MODEL``). Single source of truth so the argv fallback
+# branches, the migration warnings, and the module docs cannot drift.
+_PI_DEFAULT_PROVIDER = "nous"
+
+# One-shot migration-warning guard: ``execute`` runs once per phase,
+# invocation, and retry attempt, so a stale pre-migration configuration would
+# otherwise re-log the identical warning for every call. Keys are per-mismatch.
+_warned_migration_mismatches: set[str] = set()
+
+
+def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None:
+    """Log a stale-configuration warning at most once per ``key`` per process."""
+    if key in _warned_migration_mismatches:
+        return
+    _warned_migration_mismatches.add(key)
+    logger.warning(message, *args)
 
 
 def _pi_fanout_concurrency() -> int:
@@ -281,17 +300,25 @@ def _pi_retry_max_delay() -> float:
     return value
 
 
+# Shared error-taxonomy tokens, used by both the retryable-message check and
+# the stable diagnostic category so the two views of the taxonomy cannot drift
+# out of sync.
+_RATE_LIMIT_TOKENS = ("429", "rate limit", "rate_limit", "too many requests")
+_SERVER_ERROR_TOKENS = ("503", "service unavailable", "server error")
+
+
 def _is_retryable_error_message(message: str) -> bool:
     """Return True if the error message signals a transient overload or rate-limit.
 
-    High-precision literals (429, rate limit/rate_limit, too many requests) are
-    matched as plain substrings — they are extremely unlikely to appear in a
-    non-transient context. Ambiguous terms require positive overload/capacity
-    wording and explicitly reject negated or planning contexts.
+    High-precision literals (429, rate limit/rate_limit, too many requests,
+    503, service unavailable, server error) are matched as plain substrings —
+    they are extremely unlikely to appear in a non-transient context. Ambiguous
+    terms require positive overload/capacity wording and explicitly reject
+    negated or planning contexts.
     """
     lower = message.lower()
     # Unambiguous literals — plain substring is safe.
-    if any(token in lower for token in ("429", "rate limit", "rate_limit", "too many requests")):
+    if any(token in lower for token in _RATE_LIMIT_TOKENS + _SERVER_ERROR_TOKENS):
         return True
     if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
         return False
@@ -325,11 +352,10 @@ def _is_retryable_exit_code(code: int) -> bool:
 def _pi_error_category(message: str) -> str:
     """Classify Pi failures into stable host-owned diagnostic categories."""
     lower = message.casefold()
-    if any(
-        token in lower
-        for token in ("429", "rate limit", "rate_limit", "too many requests")
-    ):
+    if any(token in lower for token in _RATE_LIMIT_TOKENS):
         return "RATE_LIMIT"
+    if any(token in lower for token in _SERVER_ERROR_TOKENS):
+        return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
     if any(signature in lower for signature in STREAM_DROP_SIGNATURES):
@@ -486,7 +512,7 @@ class PiBackend:
     so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
     """
 
-    concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
+    concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
         self,
@@ -571,7 +597,24 @@ class PiBackend:
         if self._model_override is not None:
             self.model = self._model_override
             args.extend(["--model", self.model])
-            provider = os.environ.get("PI_PROVIDER", "zai")
+            provider = os.environ.get("PI_PROVIDER")
+            if provider is None:
+                provider = _PI_DEFAULT_PROVIDER
+                if self.model.casefold().startswith("glm-"):
+                    # The default provider moved zai -> nous; a pinned z.ai
+                    # GLM model silently loses its provider and fails at
+                    # runtime unless the user opts back in explicitly.
+                    _warn_migration_mismatch_once(
+                        f"glm-pin:{self.model}",
+                        "Explicit model %r is a z.ai-hosted GLM model, but the "
+                        "Pi backend now defaults to the %s provider and "
+                        "PI_PROVIDER is unset; the pinned model will fail at "
+                        "runtime unless PI_PROVIDER=zai is set or the model is "
+                        "migrated to the %s registry.",
+                        self.model,
+                        _PI_DEFAULT_PROVIDER,
+                        _PI_DEFAULT_PROVIDER,
+                    )
         else:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
@@ -582,7 +625,25 @@ class PiBackend:
                 args.extend(["--model", self.model])
             provider = os.environ.get("PI_PROVIDER")
             if provider is None and configured_model is None:
-                provider = "zai"
+                provider = _PI_DEFAULT_PROVIDER
+            elif configured_model is None and provider and provider != _PI_DEFAULT_PROVIDER:
+                # The previous default paired the zai provider with a GLM
+                # model; an explicit PI_PROVIDER from that setup now pairs
+                # with the DeepSeek fallback model and fails at runtime
+                # unless the provider actually serves it.
+                _warn_migration_mismatch_once(
+                    f"fallback-provider:{provider}",
+                    "PI_PROVIDER=%r is set with no configured model, so the Pi "
+                    "backend falls back to %r, which is served by the %s "
+                    "provider; if %r does not serve that model the run will "
+                    "fail at runtime. Unset PI_PROVIDER or set it to %s to "
+                    "adopt the new default, or configure a model explicitly.",
+                    provider,
+                    self.model,
+                    _PI_DEFAULT_PROVIDER,
+                    provider,
+                    _PI_DEFAULT_PROVIDER,
+                )
 
         api_key = os.environ.get("PI_API_KEY")
         thinking = self.reasoning_effort or os.environ.get("PI_THINKING")
@@ -610,7 +671,7 @@ class PiBackend:
                 child_env[native_key_name] = api_key
 
         # Pi's built-in system prompt is minimal; append the daydream preamble
-        # so the GLM model gets the same tool-efficiency / budget-awareness
+        # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
         args.extend(["--append-system-prompt", _PI_SYSTEM_PREAMBLE])
 

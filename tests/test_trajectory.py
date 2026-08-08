@@ -862,11 +862,13 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                     observe_text_and_result(inv)
-                # Sabotage the write path: its parent is a regular file, so
-                # creating the child must fail even when the test user can
-                # write the filesystem root (container/root sandbox).
-                blocker = tmp_path / "blocker"
-                blocker.write_text("file, not a directory")
+                # Sabotage the write path: make the parent an existing
+                # regular file so atomic_write_json's parent mkdir fails no
+                # matter the filesystem permissions (a fixed
+                # /nonexistent-dir-xyz path silently succeeds on containers
+                # with a writable root).
+                blocker = tmp_path / "not-a-dir"
+                blocker.write_text("x")
                 child.path = blocker / "child.json"
 
         assert get_current_recorder() is recorder
