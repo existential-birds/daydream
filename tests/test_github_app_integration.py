@@ -62,8 +62,10 @@ async def test_app_identity_shown_and_token_injected(feature_branch_repo, monkey
 
     # Pin a wide recording console so the identity line is captured at the
     # rendered content level, independent of terminal width / TTY / Live state.
+    # The identity banner prints from the deep orchestrator's info block (#330).
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=200, height=25)
     monkeypatch.setattr("daydream.runner.console", rec)
+    monkeypatch.setattr("daydream.deep.orchestrator.console", rec)
 
     with patch("daydream.github_app._mint_installation_token",
                return_value=SimpleNamespace(

@@ -1104,42 +1104,6 @@ def _settled_decisions_block(prior_commits: str | None) -> str:
     )
 
 
-def build_review_prompt(
-    *,
-    skill_invocation: str = "",
-    diff_instruction: str = "",
-    review_output_path: str = "",
-    exploration_dir: Path | None = None,
-    prior_commits: str | None = None,
-) -> str:
-    """Assemble the prompt for `phase_review`.
-
-    Args:
-        skill_invocation: Backend-formatted skill invocation string.
-        diff_instruction: Diff scope instruction text.
-        review_output_path: Absolute path the agent should write its review to.
-        exploration_dir: Optional path to exploration output directory.
-        prior_commits: Oneline log of prior daydream commits on this branch.
-            When present, injected as settled-decisions context.
-    """
-    parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    settled = _settled_decisions_block(prior_commits)
-    if settled:
-        parts.append(settled)
-    parts.append(_confidence_and_convention_instructions())
-    parts.append(_dependency_impact_instructions())
-    body = (
-        f"{skill_invocation}\n"
-        f"{diff_instruction}\n"
-        f"Write the full review output to {review_output_path}.\n"
-    )
-    parts.append(body)
-    return "\n".join(parts)
-
-
 def _inlineable_diff(diff_text: str | None) -> str | None:
     """The diff to inline, or ``None`` when it is absent or over budget.
 
@@ -1278,25 +1242,6 @@ def build_alternative_review_prompt(
 FixResult = tuple[dict[str, Any], bool, str | None]
 
 
-def revert_uncommitted_changes(cwd: Path) -> bool:
-    """Discard all uncommitted changes (tracked and untracked).
-
-    Used after a failed iteration to restore the last committed state.
-
-    Returns:
-        True if revert succeeded, False otherwise.
-
-    """
-    try:
-        git_ops.checkout_paths(cwd, [Path(".")])
-        git_ops.clean_untracked(cwd)
-    except GitError as e:
-        if not get_quiet_mode():
-            print_warning(console, f"Revert failed: {type(e).__name__}: {e}")
-        return False
-    return True
-
-
 def _prior_daydream_commits(work: WorkContext) -> str | None:
     """Return oneline log of prior daydream commits on this branch."""
     return git_ops.daydream_commits(work.repo, work.base_branch)
@@ -1381,80 +1326,6 @@ Expected: {review_output_path}
 Run a full review first:
   daydream {target_dir}"""
         raise FileNotFoundError(msg)
-
-
-async def phase_review(
-    backend: Backend,
-    work: WorkContext,
-    skill: str,
-    *,
-    diff_base: str | None = None,
-    exploration_dir: Path | None = None,
-    exclude: list[str] | None = None,
-) -> None:
-    """Phase 1: Run review skill, write output to .review-output.md.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context for the run; ``work.repo`` is the agent cwd
-            and ``work.base_branch`` / ``work.base_sha`` drive the diff
-            instruction. Base resolution happens once in ``open_workspace``.
-        skill: The review skill to invoke (e.g., beagle:review-python)
-        diff_base: Optional commit SHA to diff against. When provided, the review
-            covers only changes since that commit (used for incremental reviews
-            in loop mode). When None, diffs against the resolved base branch.
-        exclude: Optional list of paths the agent should exclude when it runs
-            `git diff` itself. Applied via git's `:(exclude)` magic pathspec.
-
-    Raises:
-        Exception: If the agent fails to execute the review skill.
-    """
-    print_phase_hero(console, "BREATHE", "\"Be guided by beauty\" —Jim Simons")
-    print_dim(console, f"Model: {backend.model}")
-
-    # Use absolute path to prevent model hallucination of paths from training data
-    review_output_path = work.repo / REVIEW_OUTPUT_FILE
-    skill_invocation = backend.format_skill_invocation(skill)
-
-    if diff_base:
-        diff_instruction = (
-            f"\nReview ONLY the changes since commit {diff_base}. "
-            f"Use `git diff {diff_base}...HEAD` to get the diff.\n"
-        )
-    else:
-        # Full branch review: hand the agent the workspace's resolved base
-        # branch so Codex / Claude don't re-detect (and possibly disagree).
-        diff_instruction = (
-            f"\nReview the changes on the current branch compared to `{work.base_branch}`. "
-            f"Use `git diff {work.base_branch}...HEAD` to get the diff.\n"
-        )
-
-    if exclude:
-        excluded_paths = ", ".join(exclude)
-        pathspec_args = " ".join(f"':(exclude){p.rstrip('/')}'" for p in exclude)
-        base_for_example = diff_base or work.base_branch
-        ref = f"{base_for_example}...HEAD" if not diff_base else f"{diff_base}...HEAD"
-        diff_instruction += (
-            f"\nExclude these paths from the diff: {excluded_paths}. "
-            f"Use git pathspec magic, e.g. `git diff {ref} -- . {pathspec_args}`.\n"
-        )
-
-    prior_commits = _prior_daydream_commits(work)
-    prompt = get_registry().prompt("review")(
-        skill_invocation=skill_invocation,
-        diff_instruction=diff_instruction,
-        review_output_path=str(review_output_path),
-        exploration_dir=exploration_dir,
-        prior_commits=prior_commits,
-    )
-
-    await run_agent(backend, work.repo, prompt, phase=DaydreamPhase.REVIEW)
-
-    output_path = work.repo / REVIEW_OUTPUT_FILE
-    if output_path.exists():
-        print_success(console, f"Review output written to: {output_path}")
-    else:
-        print_warning(console, "Review output file was not created")
 
 
 async def phase_parse_feedback(
@@ -1701,6 +1572,14 @@ async def phase_verify_recommendations(
 # Shared scope/precedence/contract guardrails appended to every fix prompt
 # (single-finding ``phase_fix`` and batched ``phase_fix_batched``). Kept in one
 # place so the two prompt paths can never drift.
+#
+# Issue #336 — fix-loop scope expansion: this prose is now a HARD BOUNDARY, not
+# a license. Edits are confined to files in the reviewed diff or named by the
+# finding; out-of-scope-but-valid improvements (maintainability, architecture,
+# deferred-behavior implementation) are reported in the agent's final message
+# (the caller routes them to GitHub issues via ``git_ops.gh_issue_create``),
+# never applied. The earlier "make it, but name and justify" license was the
+# root cause of fix-loop scope creep and is gone.
 _FIX_GUARDRAILS = (
     """Do NOT change error handling semantics
 (e.g., converting warn-and-continue to error propagation, or vice versa)
@@ -1709,11 +1588,16 @@ handling strategy is wrong for that code path.
 
 Anchor the change to what this finding names — the file/symbol/line above. Do
 NOT make gratuitous edits to adjacent fields, keys, or functions the fix does
-not require; naming one issue is not license to "tidy" its neighbours. If a
-correct fix genuinely requires an edit the finding didn't name — a caller that
-must change in step, or a file the review step missed — make it, but name and
-justify each out-of-scope edit rather than expanding silently. If the change
-balloons far beyond the named site, stop and report.
+not require; naming one issue is not license to "tidy" its neighbours.
+
+SCOPE BOUNDARY (issue #336): only files in the reviewed diff or named by this finding may be edited.
+Out-of-scope-but-valid improvements — maintainability, architecture, a refactor
+this finding suggests but does not require, or behavior a plan/issue explicitly
+deferred — must NOT be applied. Instead, report out-of-scope improvements instead of applying them:
+name each one in your final message (file + the change you would have made), so
+the caller can file them as tracked issues. Implementing behavior a plan or
+dependent issue explicitly deferred is forbidden, even if the fix looks obviously
+correct.
 
 If this finding conflicts with an explicit in-code contract — a JSON schema, a
 type signature, or a comment documenting intent — the contract wins (unless
@@ -1725,6 +1609,20 @@ here.
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
 )
+
+
+def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
+    """Build the explicit "Allowed files" clause for a fix prompt.
+
+    Issue #336 threads the reviewed diff's file set into the fix prompt so the
+    prose boundary above is also concrete and checkable. ``None`` (legacy
+    callers, resume without diff context) yields an empty string — the prose
+    boundary still applies, but no enumerated file set is injected (behavior
+    unchanged for those callers).
+    """
+    if not changed_files:
+        return ""
+    return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
 
 
 def _build_intent_suffix(intent_path: Path | None) -> str:
@@ -1803,6 +1701,7 @@ async def phase_fix(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    changed_files: set[str] | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1820,6 +1719,11 @@ async def phase_fix(
             with a rule forbidding fixes that undo a deliberate decision. The
             read is best-effort enrichment: a missing or unreadable file is
             skipped silently so an intent-read failure can never block the fix.
+        changed_files: Optional set of files in the reviewed diff (issue #336).
+            When non-None, an explicit "Allowed files" clause is appended to
+            the prompt so the prose scope boundary is also concrete. ``None``
+            (legacy/resume callers) leaves the prompt without the clause; the
+            prose boundary still applies.
     """
     description = item.get("description", "No description")
     file_path = item.get("file", "Unknown file")
@@ -1838,6 +1742,9 @@ File: {file_ref}
 Line: {line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
+    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
+    # the prose boundary in place without an enumerated set.
+    prompt += _build_allowed_files_clause(changed_files)
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
     # deliberate decision. A read failure skips the block; it is never coerced
@@ -1879,6 +1786,7 @@ async def phase_fix_batched(
     *,
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
+    changed_files: set[str] | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1899,11 +1807,16 @@ async def phase_fix_batched(
             ``None`` for serial callers.
         intent_path: Optional path to the confirmed author-intent file, injected
             verbatim (same best-effort handling as ``phase_fix``).
+        changed_files: Optional set of files in the reviewed diff (issue #336),
+            forwarded to the single-item delegation and appended to the batched
+            prompt as an explicit "Allowed files" clause. ``None`` for
+            legacy/resume callers leaves the prompt without the clause.
     """
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
+            changed_files=changed_files,
         )
         return
 
@@ -1915,6 +1828,7 @@ async def phase_fix_batched(
             await phase_fix(
                 backend, work, item, item_num, total,
                 console_lock=console_lock, intent_path=intent_path,
+                changed_files=changed_files,
             )
         return
 
@@ -1938,6 +1852,9 @@ async def phase_fix_batched(
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
 Make the minimal changes needed to address ALL of the above findings in one coherent patch. {_FIX_GUARDRAILS}"""
+    # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
+    # the prose boundary in place without an enumerated set.
+    prompt += _build_allowed_files_clause(changed_files)
 
     prompt += _build_intent_suffix(intent_path)
     for idx, item in enumerate(items, start=1):
@@ -1989,6 +1906,7 @@ async def phase_fix_parallel(
     intent_path: Path | None = None,
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
+    changed_files: set[str] | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -1999,7 +1917,11 @@ async def phase_fix_parallel(
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
     Same-file serialization prevents concurrent writes to the *same named file*;
     it does not guarantee disjoint edits if an agent touches files other than the
-    one named in the item's ``file`` key. Commit stays serial and after.
+    one named in the item's ``file`` key. Issue #336 bounds that: the caller
+    passes ``changed_files`` (the reviewed diff's file set) so every fix prompt
+    carries an explicit allowed-files clause, and the post-fix residual check
+    in ``_step_fix`` reverts any edited file outside ``changed_files ∪ finding
+    files ∪ generated whitelist``. Commit stays serial and after.
 
     Each file group is bounded by a :class:`FileGroupBudget` (#201): the budget
     is consulted before every fix call (including the batched call), and if a
@@ -2022,6 +1944,10 @@ async def phase_fix_parallel(
             fix call so every fix carries the deliberate-intent guard.
         group_max_wall_s: Per-file-group wall-clock ceiling (#201).
         group_max_serial_items: Per-file-group serial fix-call ceiling (#201).
+        changed_files: Optional set of files in the reviewed diff (issue #336),
+            forwarded to every ``phase_fix_batched`` / ``phase_fix`` call so each
+            prompt carries an explicit "Allowed files" clause. ``None`` for
+            legacy/resume callers (no diff context) leaves prompts unchanged.
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
@@ -2098,6 +2024,7 @@ async def phase_fix_parallel(
                 backend, work, item, item_num, total,
                 console_lock=_console_lock,
                 intent_path=intent_path,
+                changed_files=changed_files,
             )
             budget.record_item()
 
@@ -2139,6 +2066,7 @@ async def phase_fix_parallel(
                                         backend, work, grp_items, grp_nums, total,
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
+                                        changed_files=changed_files,
                                     )
                                     budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
@@ -2559,7 +2487,6 @@ async def _do_commit(
     *,
     push: bool = False,
     interactive: bool = False,
-    iteration: int | None = None,
     items: list[dict[str, Any]] | None = None,
 ) -> bool:
     """Stage, commit, and optionally push with daydream trailers.
@@ -2570,8 +2497,6 @@ async def _do_commit(
         push: If True, push to the remote after committing.
         interactive: If True, prompt the user for confirmation before
             committing.
-        iteration: When set, append an ``Iteration: <n>`` trailer to the
-            commit message body.
         items: Optional list of fix dicts (with ``file`` and ``description``
             keys) summarising changes applied in this run; included in the
             agent prompt so the commit message is accurate.
@@ -2597,7 +2522,6 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return False
 
-    iteration_line = f"End the body with: Iteration: {iteration}\n\n" if iteration is not None else ""
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
     if items:
@@ -2621,7 +2545,6 @@ async def _do_commit(
         "If multiple categories of changes exist, pick the dominant one. "
         "Keep the subject line under 72 characters. "
         "Add a body with bullet points if there are multiple distinct changes. "
-        f"{iteration_line}"
         "Add these EXACT git trailers as the last lines of the commit message "
         "(after a blank line following the body):\n\n"
         f"Daydream-Run: {work.run_id}\n"
@@ -2705,17 +2628,6 @@ async def phase_fetch_pr_feedback(
         print_success(console, f"PR feedback written to: {output_path}")
     else:
         print_warning(console, "PR feedback file was not created")
-
-
-async def phase_commit_iteration(backend: Backend, work: WorkContext, iteration: int) -> None:
-    """Commit all changes from the current loop iteration.
-
-    Ensures a clean working tree before the next review iteration starts.
-    Does NOT push — the final push happens at the end of the loop.
-    """
-    print_info(console, f"Committing iteration {iteration} changes...")
-    await _do_commit(backend, work, iteration=iteration)
-    print_success(console, f"Iteration {iteration} changes committed")
 
 
 async def phase_commit_push_auto(

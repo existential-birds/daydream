@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Any
@@ -419,12 +420,13 @@ async def test_post_skips_when_no_pr(
         "print_warning",
         lambda _c, msg: warnings.append(msg),
     )
-    await pr_review._post(
+    status = await pr_review._post(
         tmp_path,
         [ParsedIssue(path="x.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
     )
     assert warnings and "No open PR" in warnings[0]
+    assert status == pr_review.PostStatus.NO_PR
 
 
 @pytest.mark.asyncio
@@ -460,7 +462,7 @@ async def test_post_succeeds_and_prints_url(
     )
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
-    await pr_review._post(
+    status = await pr_review._post(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
@@ -469,6 +471,7 @@ async def test_post_succeeds_and_prints_url(
     assert captured["payload"]["commit_id"] == pr.head_sha
     assert captured["payload"]["event"] == "COMMENT"
     assert successes and "pullrequestreview" in successes[0]
+    assert status == pr_review.PostStatus.POSTED
 
 
 @pytest.mark.asyncio
@@ -498,7 +501,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     )
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
-    await pr_review._post(
+    status = await pr_review._post(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
@@ -507,6 +510,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     assert "no comments were posted" in warnings[0].lower()
     # The git_ops error text -- including the preserved payload path -- is forwarded.
     assert "payload preserved at /tmp/x.json" in warnings[0]
+    assert status == pr_review.PostStatus.FAILED
 
 
 @pytest.mark.asyncio
@@ -533,12 +537,28 @@ async def test_post_skipped_when_user_declines(
     monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
     monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
 
-    await pr_review._post(
+    status = await pr_review._post(
         tmp_path,
         [ParsedIssue(path="a.py", line=1, title="t", body="b")],
         console=_FakeConsole(),  # type: ignore[arg-type]
     )
     assert not submit_called
+    assert status == pr_review.PostStatus.NOTHING_TO_POST
+
+
+@pytest.mark.asyncio
+async def test_post_review_from_report_empty_items_is_nothing_to_post(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Empty merged items skip the post cleanly (NOTHING_TO_POST, not a failure)."""
+    merged = tmp_path / "merged-items.json"
+    merged.write_text(json.dumps({"items": []}))
+    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+
+    status = await pr_review.post_review_to_pr_from_report(
+        tmp_path, merged, console=_FakeConsole()  # type: ignore[arg-type]
+    )
+    assert status == pr_review.PostStatus.NOTHING_TO_POST
 
 
 def _commit_file(repo: Path, path: str, contents: str, message: str) -> str:

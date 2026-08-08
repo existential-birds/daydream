@@ -45,7 +45,6 @@ from daydream.ui.summary import (
     print_fix_complete,
     print_fix_progress,
     print_issues_table,
-    print_iteration_divider,
     print_preflight_notice,
     print_stage_progress,
     print_summary,

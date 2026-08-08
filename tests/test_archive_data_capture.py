@@ -317,10 +317,10 @@ async def test_shallow_run_captures_recommended_patch(
     """AC3 (shallow): the shallow single-pass fix path archives a recommended.patch
     carrying daydream's edit.
 
-    The shallow review-fix-test path never persists a ``diff.patch`` (the review
-    agent runs ``git diff`` itself), so recommended.patch is the sole patch here;
-    the "distinct from diff.patch" comparison is covered by the deep test where
-    both artifacts exist.
+    Shallow mode is the deep flow with a forced single stack (#330), so it
+    persists ``diff.patch`` like any deep run; recommended.patch must still be
+    the distinct artifact carrying daydream's own edit (the deep test asserts
+    the same distinctness where both artifacts exist).
     """
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
@@ -333,7 +333,6 @@ async def test_shallow_run_captures_recommended_patch(
             skill="python",
             quiet=True,
             cleanup=False,
-            loop=False,
             shallow=True,
             assume="yes",
         )
@@ -342,13 +341,17 @@ async def test_shallow_run_captures_recommended_patch(
 
     run_dir = _only_archived_run(archive_dir)
     recommended = run_dir / "recommended.patch"
+    diff = run_dir / "diff.patch"
     assert recommended.is_file()
+    assert diff.is_file()
     recommended_text = recommended.read_text()
-    # The captured patch is daydream's fix edit as an ADDED line, diffed against
-    # the pre-fix HEAD. It is NOT the reviewed world->universe change: 'world'
-    # exists only on the base branch, so it never appears in this post-HEAD diff.
+    diff_text = diff.read_text()
+    # recommended.patch is daydream's proposed diff, distinct from the
+    # PR-under-review diff.patch — both carry the reviewed change, but only the
+    # recommended patch carries the fix daydream applied.
+    assert recommended_text != diff_text
     assert "+# daydream recommended change" in recommended_text
-    assert "world" not in recommended_text
+    assert "+# daydream recommended change" not in diff_text
 
 
 # --- git_ops.capture_recommended_patch (the shared helper) ---

@@ -131,6 +131,21 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
     }
 
 
+def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
+    """Commit *files* to the current branch so they land in the reviewed diff.
+
+    Issue #336 bounds the fix loop to the reviewed diff's file set: findings on
+    files OUTSIDE the diff are filed as GitHub issues instead of auto-fixed.
+    Fix-loop-mechanics tests that feed synthetic merge items must therefore put
+    those files IN the diff, or the partition correctly routes them to issues
+    and the fix never runs.
+    """
+    for name in files:
+        (target / name).touch()
+    _git(target, "add", *files)
+    _commit(target, f"test: add {' '.join(files)} to the reviewed diff")
+
+
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
     project = tmp_path / name
@@ -574,6 +589,7 @@ async def test_parallel_fix_applies_all_disjoint_files(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
+    _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     exit_code = await run(
         make_config(
@@ -655,6 +671,7 @@ async def test_parallel_fix_same_file_no_race(
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     shared = multi_stack_target / "shared.py"
+    _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
     stub.fix_append_path = shared
     stub.merge_items = [
         _merge_item(1, "shared.py", "high", desc="marker-1"),
@@ -686,6 +703,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _add_to_reviewed_diff(multi_stack_target, ["good1.py", "bad.py", "good2.py"])
     stub.fix_fail_file = "bad.py"
     stub.merge_items = [
         _merge_item(1, "good1.py", "high"),
@@ -951,6 +969,29 @@ def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
     return project
 
 
+def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
+    """A python-only fixture repo whose diff does NOT include a tracked module.
+
+    ``api.py`` changes on the feature branch (so ``changed_files`` names only
+    it), while ``unrelated.py`` is a tracked file committed on ``main`` and left
+    untouched by the diff — the exact shape issue #336's post-fix residual check
+    must protect: a fix agent editing ``unrelated.py`` is editing outside the
+    reviewed diff.
+    """
+    project = tmp_path / name
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    (project / "unrelated.py").write_text("def util():\n    return 'untouched'\n")
+    _init_repo(project)
+    _git(project, "add", "api.py", "unrelated.py")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'galaxy'\n")
+    _git(project, "add", "api.py")
+    _commit(project, "change")
+    return project
+
+
 class _SecondaryEditBackend(_StubBackend):
     """Fix stub that ALSO edits a second tracked python file (#329/Finding 6).
 
@@ -982,6 +1023,58 @@ class _SecondaryEditBackend(_StubBackend):
             yield event
         if prompt.lower().startswith(("fix this issue", "fix these")):
             self._secondary.write_text(self._secondary.read_text() + self._secondary_edit)
+
+
+class _ScopeCreepBackend(_StubBackend):
+    """Fix stub that ALSO edits a tracked file OUTSIDE the reviewed diff (#336).
+
+    The in-scope fix turn edits the group's named file (via ``fix_edit_line``)
+    AND appends a scope-creep marker to *creep* — a tracked file not in the
+    reviewed diff. This is the issue #336 post-fix residual shape: without the
+    residual check the creep edit would be committed alongside the fix.
+
+    The commit prompt is answered with a REAL ``git add -u`` + ``git commit``
+    (tracked changes only — the stub's untracked sentinels must not leak into
+    the committed tree), so the test can assert the commit step's actual output.
+    """
+
+    def __init__(self, target: Path, creep: Path, creep_edit: str) -> None:
+        super().__init__(target)
+        self._creep = creep
+        self._creep_edit = creep_edit
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        if prompt.startswith("Stage all changes and commit"):
+            run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
+            version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
+            assert run_id is not None
+            assert version is not None
+            message = (
+                "fix: align scope-creep test\n\n"
+                f"Daydream-Run: {run_id.group(1)}\n"
+                f"Daydream-Version: {version.group(1)}"
+            )
+            _git(cwd, "add", "-u")
+            _git(cwd, "commit", "-m", message)
+            yield TextEvent(text="Committed.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+        if prompt.lower().startswith(("fix this issue", "fix these")):
+            self._creep.write_text(self._creep.read_text() + self._creep_edit)
 
 
 def _read_quality_gate(target: Path) -> dict[str, Any]:
@@ -1585,10 +1678,19 @@ async def test_fix_guard_reverts_generated_migration_edit(
     bare = _bare_remote(tmp_path / "remote.git")
     _git(project, "remote", "add", "origin", str(bare))
 
+    # Issue #336: the fix loop only auto-fixes findings whose file is in the
+    # reviewed diff. The draft migration finding must therefore be part of the
+    # diff (committed) or the gate would route it to a GitHub issue instead of
+    # exercising the generated-file guard. Pin core.autocrlf so the CRLF draft
+    # round-trips byte-identically through git.
+    _git(project, "config", "core.autocrlf", "false")
+    preexisting_tracked = project / "migrations" / "0000_local_draft.sql"
+    preexisting_tracked.write_bytes(b"-- local draft\r\n")
+    _git(project, "add", "migrations/0000_local_draft.sql")
+    _commit(project, "test: commit local draft to the reviewed diff")
+
     pre_migration = migration.read_bytes()
     head_before = _git(project, "rev-parse", "HEAD")
-    preexisting_untracked = project / "migrations" / "0000_local_draft.sql"
-    preexisting_untracked.write_bytes(b"-- local draft\r\n")
     untouched_untracked = project / "migrations" / "0000_untouched.sql"
     untouched_untracked.write_bytes(b"-- untouched draft\r\n")
     monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
@@ -1617,15 +1719,17 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert exit_code == 0
     assert migration.read_bytes() == pre_migration
     assert b"FORBIDDEN EDIT" not in migration.read_bytes()
-    assert preexisting_untracked.read_bytes() == b"-- local draft\r\n"
+    assert preexisting_tracked.read_bytes() == b"-- local draft\r\n"
     assert untouched_untracked.read_bytes() == b"-- untouched draft\r\n"
     assert (project / "migrations" / "0002_add_x.sql").read_text() == "-- new migration\n"
     assert "FORBIDDEN EDIT" in (project / "api.py").read_text()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
     assert violations.exists()
-    assert json.loads(violations.read_text()) == {
-        "violations": ["migrations/0001_init.sql", "migrations/0000_local_draft.sql"],
-        "ref": "HEAD",
+    violations_payload = json.loads(violations.read_text())
+    assert violations_payload["ref"] == "HEAD"
+    assert set(violations_payload["violations"]) == {
+        "migrations/0001_init.sql",
+        "migrations/0000_local_draft.sql",
     }
     patches = list((project / ".daydream" / "partial-fixes").glob("*.patch"))
     assert any("migrations/0001_init.sql" in patch.read_text() for patch in patches)
@@ -1745,6 +1849,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
     mute_side_effects(commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     files = ["f1.py", "f2.py", "f3.py"]
+    _add_to_reviewed_diff(multi_stack_target, files)
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     seen_at_commit: list[bool] = []
 
@@ -1761,6 +1866,129 @@ async def test_parallel_fix_commit_runs_once_after_all(
     )
     assert exit_code == 0
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
+
+
+async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: the post-fix residual check reverts out-of-scope edits.
+
+    The fix agent fixes api.py (inside the reviewed diff) AND appends a
+    scope-creep marker to unrelated.py (a tracked file NOT in the diff). After
+    ``_step_fix``:
+
+      1. unrelated.py is reverted to its pre-fix content (git shows no change);
+      2. ``gh_issue_create`` was called with unrelated.py in the body;
+      3. the commit step lands a commit whose tree contains ONLY api.py;
+      4. the committed tree contains zero files outside ``changed_files``.
+
+    Discriminating: without the residual check, unrelated.py's edit survives to
+    the commit — ``git show --name-only`` would name it and assertions 1/2/3/4
+    all fail.
+    """
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "scope_creep_residual")
+    pre_fix_unrelated = (target / "unrelated.py").read_text()
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    # Commit runs for real (the scope-creep backend answers the commit prompt
+    # with a real `git add -u` + commit); heal is stubbed to pass.
+    mute_side_effects(commit=False)
+    stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
+    stub.fix_edit_line = "\n# daydream fix\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+    assert exit_code == 0
+
+    # 1. unrelated.py reverted to pre-fix content (git shows no change there).
+    assert (target / "unrelated.py").read_text() == pre_fix_unrelated
+    unrelated_diff = _git(target, "diff", "HEAD", "--", "unrelated.py")
+    assert unrelated_diff == "", f"unrelated.py still differs from HEAD:\n{unrelated_diff}"
+
+    # 2. gh_issue_create called once, naming unrelated.py.
+    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
+    assert "unrelated.py" in issues[0][2]
+
+    # 3/4. The commit's tree contains zero files outside the reviewed diff.
+    committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed_paths == ["api.py"], (
+        f"commit tree leaks out-of-scope files: {committed_paths}"
+    )
+    # The fix itself landed (api.py carries the daydream edit).
+    assert "# daydream fix" in (target / "api.py").read_text()
+
+
+async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: a failed residual revert aborts before commit.
+
+    Mirror of ``test_fix_reverts_post_fix_edit_outside_reviewed_diff`` plus the
+    generated-file guard's ``test_fix_guard_restore_failure_aborts_before_commit``:
+    the fix agent edits unrelated.py (outside the reviewed diff) and the
+    residual revert's ``restore_paths_from_ref`` raises. The run must fail-close
+    (exit 1) and the commit step must never run — HEAD stays at the pre-fix SHA.
+    """
+    from daydream.git_ops import GitError
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "scope_creep_residual_fail")
+    head_before = _git(target, "rev-parse", "HEAD")
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(commit=False)
+    stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
+    stub.fix_edit_line = "\n# daydream fix\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    monkeypatch.setattr(
+        "daydream.git_ops.restore_paths_from_ref",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
+    )
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=False,
+            skill_availability=frozenset(SKILL_MAP),
+        )
+    )
+
+    assert exit_code == 1
+    assert _git(target, "rev-parse", "HEAD") == head_before
 
 
 INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
@@ -2318,6 +2546,210 @@ async def test_yes_auto_applies_fix(
     ), f"fix gate prompted under --yes: {prompt_calls}"
     # Observable consequence: the fix landed.
     assert fix_marker.exists(), "phase_fix never ran -> --yes did not auto-apply"
+
+
+async def test_fix_gate_routes_out_of_scope_finding_to_issue(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: the fix gate files out-of-scope findings as issues.
+
+    merged-items.json carries item A on api.py (inside the reviewed diff) and
+    item B on notes.txt (outside it). Under ``assume="yes"`` the gate must:
+
+      1. exclude item B from the fix list — no fix prompt names notes.txt;
+      2. file exactly one GitHub issue carrying item B's file + description;
+      3. run ``phase_fix`` only for item A's file group.
+
+    Discriminating: without the pre-fix partition, item B would be auto-fixed
+    (a fix prompt would name notes.txt) and no issue would be filed — both
+    assertions fail.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
+    # 1. Item B (notes.txt) is NOT in the fix list.
+    assert not any("notes.txt" in p for p in fix_prompts), (
+        "out-of-scope finding was auto-fixed instead of filed as an issue"
+    )
+    # 3. Fix phase ran for item A's file group (api.py).
+    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
+
+    # 2. Exactly one issue filed, carrying item B's file + description.
+    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
+    _, title, body = issues[0]
+    assert "notes.txt" in body
+    assert "out-of-scope finding" in body
+    assert "out of scope for PR" in body
+
+
+async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: an out-of-scope finding already filed is not re-filed.
+
+    Out-of-scope findings are never fixed, so a re-run/resume re-derives them.
+    Without cross-run dedup they would be re-filed as a duplicate issue every
+    run (#336 finding). The gate embeds the finding's fingerprint as a hidden
+    marker in the issue body and skips filing when an open issue already
+    carries it (GitHub is the store — same stateless-dedup model as
+    reconcile.py). Discriminating: with dedup ``gh_issue_create`` is never
+    called even though the finding is still excluded from auto-fix.
+    """
+    from daydream.deep.scope_issues import (
+        _scope_finding_fingerprint,
+        _scope_finding_marker,
+    )
+    from daydream.pr_review import compute_fingerprint
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "api.py", "high", desc="in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
+    ]
+    mute_side_effects()
+
+    # The marker the gate would embed for item 2 — pre-filed in an open issue,
+    # simulating a prior run. Confirm the local helper reproduces the same
+    # identity compute_fingerprint produces, so the dedup key is stable.
+    item_b = _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding")
+    fp = compute_fingerprint(item_b["file"], item_b["description"], item_b["evidence"])
+    marker = _scope_finding_marker(fp)
+    assert marker == _scope_finding_marker(_scope_finding_fingerprint(item_b))
+
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list",
+        lambda repo, **kw: [
+            {
+                "number": 9,
+                "title": "[daydream] out-of-scope finding: notes.txt",
+                "body": f"prior run\n{marker}",
+                "url": "https://github.com/owner/repo/issues/9",
+            }
+        ],
+    )
+
+    created: list[tuple[Any, ...]] = []
+
+    def _record_create(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        created.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/9"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_create)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    # Deduped: the already-filed finding is NOT re-filed.
+    assert created == [], f"out-of-scope finding re-filed as a duplicate: {created!r}"
+
+    # And it is still excluded from auto-fix (no fix prompt names notes.txt).
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
+    assert not any("notes.txt" in p for p in fix_prompts), "deduped finding was auto-fixed"
+
+
+async def test_fix_gate_short_circuits_when_all_findings_out_of_scope(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#336 real-path: when every finding routes to issues, the gate Stop(0)s.
+
+    merged-items.json carries ONLY out-of-scope findings (files outside the
+    reviewed diff {api.py, App.tsx, README.md}). The host also appends a
+    structural finding, so ``parse_by_stack`` routes THAT one to an
+    out-of-scope file too -- otherwise it would default to ``api.py`` (in
+    scope) and keep the gate open. With every merged item out of scope the
+    gate files them all and short-circuits before the no-op fix pass, the
+    full target test-suite run, and the commit-agent turn. Discriminating:
+    without the post-partition ``Stop(0)`` the flow continues into
+    ``phase_fix`` with nothing to fix -- a fix prompt would be dispatched.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "notes.txt", "high", desc="out-of-scope finding")]
+    # Route the appended structural finding to an out-of-scope file too; the
+    # stub's default structural parse emits ``file=api.py`` (in scope).
+    stub.parse_by_stack = {
+        "structure": {
+            "severity": "high",
+            "confidence": "HIGH",
+            "file": "docs/elsewhere.md",
+            "line": 1,
+            "description": "structural finding outside the reviewed diff",
+        }
+    }
+    mute_side_effects()
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    # Every finding filed as an issue, all on out-of-scope files.
+    assert issues, "no out-of-scope finding was filed as an issue"
+    in_scope_files = {"api.py", "App.tsx", "README.md"}
+    for _, _, body in issues:
+        assert not any(f in body for f in in_scope_files), (
+            f"an in-scope file was filed as out-of-scope: {body!r}"
+        )
+
+    # No fix prompt dispatched -- the gate short-circuited before phase_fix,
+    # so the run skipped a no-op fix pass + the full target test suite + the
+    # commit-agent turn.
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert fix_prompts == [], (
+        f"fix phase ran with nothing to fix (gate did not short-circuit): {fix_prompts!r}"
+    )
 
 
 async def test_preflight_notice(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3530,6 +3962,134 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     )
 
 
+# --cleanup / --no-cleanup (finding #6, R2 round on #330)
+
+
+async def test_cleanup_true_removes_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--cleanup`` deletes ``.review-output.md`` after a
+    successful shallow run.
+
+    Drives ``runner.run`` -> ``run_deep`` (shallow mode) with the stub backend
+    through the full fix cycle (fix gate auto-accepted via ``assume="yes"``,
+    test green, commit stubbed) and asserts the observable outcome: the report
+    is gone by the time the run returns 0.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a successful run"
+
+
+async def test_no_cleanup_retains_review_output_shallow(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: ``--no-cleanup`` keeps ``.review-output.md``."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, shallow=True, cleanup=False, assume="yes"))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=False must keep .review-output.md after a successful run"
+
+
+async def test_cleanup_true_removes_review_output_default_loop(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6 real-path: the terminal cleanup also applies to the default
+    (deep loop) mode, not just shallow."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, cleanup=True, assume="yes"))
+
+    assert exit_code == 0
+    assert not report.exists(), "cleanup=True must remove .review-output.md after a deep run"
+
+
+async def test_cleanup_none_unattended_defaults_to_keep(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: an unspecified cleanup flag on an unattended run defaults to
+    KEEPING the report (the old ``safe_default=False``), without touching stdin.
+
+    Drives review mode (no fix cycle, so no ``assume`` is needed to reach the
+    terminal step) non-interactively. The report is written by ``load-items``
+    and must survive the terminal cleanup step untouched.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    def _forbidden_input(*_a: Any, **_kw: Any) -> str:
+        raise AssertionError("input() called in unattended mode -- cleanup gate must not read stdin")
+
+    monkeypatch.setattr("builtins.input", _forbidden_input)
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, output_mode="review", cleanup=None))
+
+    assert exit_code == 0
+    assert report.exists(), "cleanup=None unattended must keep the report (safe_default=False)"
+
+
+async def test_cleanup_none_interactive_prompts_before_keeping(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#330 R2/#6: with cleanup unspecified and interactive stdin, the terminal
+    step prompts the user (the old shallow preamble's question); a "n" answer
+    keeps the report."""
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+    # Pin interactivity ON so the cleanup gate reaches the real prompt_user seam
+    # (review mode has no fix cycle, so this is the run's only prompt).
+    _force_interactive(monkeypatch)
+
+    asked: list[str] = []
+
+    def _record_prompt(console, message, default=""):
+        asked.append(message)
+        return "n"  # decline cleanup
+
+    monkeypatch.setattr("daydream.agent.prompt_user", _record_prompt)
+    # Confirm the intent gate so the review spine proceeds; the cleanup prompt is
+    # the one under observation (routed through daydream.agent.prompt_user).
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(
+        make_config(multi_stack_target, output_mode="review", cleanup=None, non_interactive=False)
+    )
+
+    assert exit_code == 0
+    assert any("cleanup" in msg.lower() for msg in asked), (
+        f"cleanup=None interactive run must prompt; saw prompts: {asked!r}"
+    )
+    assert report.exists(), "declining the cleanup prompt must keep .review-output.md"
+
+
 # Git timeout under load (issue #120)
 
 
@@ -4125,6 +4685,28 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
     raise AssertionError(f"no batched fix turn found for {file_basename}")
 
 
+def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict[str, Any]]:
+    """Single-finding ``phase_fix`` calls whose ``File:`` line names *file_basename*.
+
+    Robust to issue #336's "Allowed files" clause, which legitimately lists every
+    reviewed-diff file in every prompt: a substring check like
+    ``"api.py" in prompt`` would over-count by also matching the App.tsx prompt
+    (whose allowed-files clause names api.py). Filtering on the ``File:`` line
+    captures only the calls actually fixing *file_basename*.
+    """
+    import re as _re
+
+    out: list[dict[str, Any]] = []
+    for c in stub.calls:
+        prompt = c["prompt"]
+        if not prompt.lower().startswith("fix this issue"):
+            continue
+        m = _re.search(r"^File: (.+)$", prompt, _re.M)
+        if m is not None and Path(m.group(1).strip()).name == file_basename:
+            out.append(c)
+    return out
+
+
 async def test_run_caps_runaway_file_group_serial_fixes(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -4176,11 +4758,7 @@ async def test_run_caps_runaway_file_group_serial_fixes(
 
     # Only 3 fallback fixes ran (the ceiling) before the group budget tripped --
     # NOT the full group, which is the runaway #186 behaviour the guard bounds.
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == 3, f"expected 3 fallback fixes, got {len(api_singles)}"
 
     # The skipped group is recorded as a budget failure (surfaces to the user).
@@ -4235,11 +4813,7 @@ async def test_run_leaves_small_file_group_unbudgeted(
     assert isinstance(exit_code, int)
 
     group_size = _batched_group_size(stub, "api.py")
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == group_size, f"all {group_size} fallback fixes should run, got {len(api_singles)}"
 
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
@@ -4308,11 +4882,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     # ZERO fallback fixes ran: the batched turn's carried-over wall tripped the
     # group budget on the fallback's very first check -- the #186 runaway is fully
     # bounded, not merely trimmed.
-    api_singles = [
-        c
-        for c in stub.calls
-        if c["prompt"].lower().startswith("fix this issue") and "api.py" in c["prompt"]
-    ]
+    api_singles = _single_fix_calls_for(stub, "api.py")
     assert len(api_singles) == 0, f"expected 0 fallback fixes (wall carried over), got {len(api_singles)}"
 
     # The skipped group is recorded as a WALL budget failure (surfaces to the user).
@@ -4749,6 +5319,69 @@ def test_collapse_stacks_for_tiny_diff_disabled_at_threshold_zero() -> None:
     )
     assert single_stack_mode is False
     assert collapsed == stacks  # unchanged
+
+
+def test_collapse_stacks_for_shallow_preserves_sole_language_skill() -> None:
+    """#6: shallow with no ``--skill`` keeps the sole detected language skill.
+
+    A python-only diff routes via ``detect_stacks`` to ``python`` + ``generic``
+    (if any docs) + ``structure``. Shallow collapse must preserve the python
+    stack's Beagle skill instead of downgrading the combined assignment to the
+    generic-fallback reviewer.
+    """
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "README.md"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "README.md"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
+    # The docs file is absorbed into the preserved language stack.
+    assert set(combined.files) == {"api.py", "README.md"}
+
+
+def test_collapse_stacks_for_shallow_two_languages_falls_back_to_generic() -> None:
+    """#6: two real-language stacks cannot share one agent -> generic fallback."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True)
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "generic"
+    assert combined.skill_invocation is None
+    assert set(combined.files) == {"api.py", "App.tsx"}
+
+
+def test_collapse_stacks_for_shallow_explicit_skill_wins() -> None:
+    """#6: an explicit ``--skill`` still names the combined assignment."""
+    from daydream.deep.detection import detect_stacks
+    from daydream.deep.orchestrator import _collapse_stacks_for_shallow
+    from daydream.runner import RunConfig
+
+    stacks = detect_stacks(["api.py", "App.tsx"])
+    collapsed, single_stack_mode = _collapse_stacks_for_shallow(
+        stacks, ["api.py", "App.tsx"], RunConfig(shallow=True, skill="python")
+    )
+    assert single_stack_mode is True
+    non_structural = [s for s in collapsed if s.stack_name != "structure"]
+    assert len(non_structural) == 1
+    combined = non_structural[0]
+    assert combined.stack_name == "python"
+    assert combined.skill_invocation == "beagle-python:review-python"
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
@@ -5630,11 +6263,11 @@ async def test_skip_tier_writes_empty_alternatives(
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 
-def test_extension_api_version_is_four_and_alternatives_step_is_gone() -> None:
+def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:
     from daydream.deep.orchestrator import STEPS
     from daydream.extensions.api import EXTENSION_API_VERSION
 
-    assert EXTENSION_API_VERSION == 4
+    assert EXTENSION_API_VERSION == 5
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names

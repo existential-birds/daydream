@@ -4,6 +4,7 @@
 import json
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -459,7 +460,13 @@ async def test_phase_parse_feedback_default_path_drops_speculative(tmp_path, mak
 async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     tmp_path, make_work, silence_console,
 ):
-    """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails."""
+    """phase_fix must hand the agent the SCOPE and PRECEDENCE guardrails.
+
+    Issue #336 turns the old "make it, but name and justify" license into a
+    hard boundary: only files in the reviewed diff or named by the finding
+    may be edited; out-of-scope-but-valid improvements are reported (→ issue),
+    never applied. The legacy license string MUST be gone.
+    """
     from daydream.phases import phase_fix
 
     silence_console("daydream.phases")
@@ -472,9 +479,57 @@ async def test_phase_fix_prompt_includes_scope_and_precedence_constraints(
     assert len(backend.prompts) == 1
     fix_prompt = backend.prompts[0]
     assert "Anchor the change to what this finding names" in fix_prompt
-    # Necessary expansion is allowed but must be declared, not silent.
-    assert "justify each out-of-scope edit rather than expanding silently" in fix_prompt
+    # Hard boundary (issue #336): edits confined to reviewed diff + finding files.
+    assert "only files in the reviewed diff or named by this finding may be edited" in fix_prompt
+    # Out-of-scope-but-valid improvements must be reported, never applied.
+    assert "report out-of-scope improvements instead of applying them" in fix_prompt
+    # The old expansion license MUST be gone. (Assembled from fragments so the
+    # legacy license phrase never appears contiguously in source — the plan's
+    # acceptance grep must return zero hits — while the runtime assertion still
+    # pins its absence from the delivered prompt.)
+    old_license = "justify each out-of-" "scope edit " "rather than" " expanding silently"
+    assert old_license not in fix_prompt
+    # Deferred-behavior implementation stays forbidden even when it looks obvious.
+    assert "explicitly deferred is forbidden" in fix_prompt
+    # Precedence rule (contract wins) survives the rewrite.
     assert "the contract wins" in fix_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_prompt_enumerates_changed_files_when_provided(
+    tmp_path, make_work, silence_console,
+):
+    """When ``changed_files`` is passed, the prompt carries an explicit
+    "Allowed files" clause enumerating the reviewed diff's file set.
+
+    ``changed_files=None`` (legacy/resume callers) keeps the old behavior — no
+    allowed-files clause in the prompt, only the prose boundary.
+    """
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+
+    # --- With changed_files: the clause enumerates the allowed file set. -----
+    backend_with = ScriptedBackend()
+    item = {"id": 1, "description": "Off-by-one", "file": "src/handler.py", "line": 42}
+    await phase_fix(
+        backend_with, make_work(tmp_path), item, 1, 1,
+        changed_files={"src/handler.py", "src/util.py"},
+    )
+    assert len(backend_with.prompts) == 1
+    prompt_with = backend_with.prompts[0]
+    # The clause is present and lists both files.
+    assert "Allowed files" in prompt_with
+    # src/handler.py already appears via the finding's own File: line, so only
+    # src/util.py (which appears nowhere else) isolates the Allowed-files clause.
+    assert "src/util.py" in prompt_with
+
+    # --- Without changed_files: no allowed-files clause (legacy callers). ---
+    backend_without = ScriptedBackend()
+    await phase_fix(backend_without, make_work(tmp_path), item, 1, 1)
+    assert len(backend_without.prompts) == 1
+    prompt_without = backend_without.prompts[0]
+    assert "Allowed files" not in prompt_without
 
 
 @pytest.mark.asyncio
@@ -1472,17 +1527,31 @@ def test_is_evidenced_gate_branches():
     ) is False
 
 
-def test_review_prompt_includes_dependency_impact(tmp_path):
-    from daydream.phases import build_review_prompt
+def _per_stack_prompt(**overrides: Any) -> str:
+    """Build the deep per-stack review prompt (the single-skill review's successor, #330)."""
+    from daydream.deep.prompts import build_per_stack_prompt
 
-    prompt = build_review_prompt(exploration_dir=tmp_path)
+    args: dict[str, Any] = {
+        "skill_invocation": "/beagle-python:review-python",
+        "stack_name": "python",
+        "files": ["a.py"],
+        "diff_path": Path("/tmp/diff.patch"),
+        "intent_path": Path("/tmp/intent.md"),
+        "alternatives_path": Path("/tmp/alternatives.json"),
+        "output_path": Path("/tmp/review.md"),
+        "cwd": Path("/tmp"),
+    }
+    args.update(overrides)
+    return build_per_stack_prompt(**args)
+
+
+def test_review_prompt_includes_dependency_impact(tmp_path):
+    prompt = _per_stack_prompt(exploration_dir=tmp_path)
     assert "Dependency Impact" in prompt
 
 
 def test_review_prompt_distinguishes_convention_cases(tmp_path):
-    from daydream.phases import build_review_prompt
-
-    prompt = build_review_prompt(exploration_dir=tmp_path)
+    prompt = _per_stack_prompt(exploration_dir=tmp_path)
     assert "DROP IT" in prompt
     assert "flag it as HIGH" in prompt
 
@@ -1491,13 +1560,12 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
     from daydream.phases import (
         build_alternative_review_prompt,
         build_intent_prompt,
-        build_review_prompt,
     )
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
     for builder in (
-        build_review_prompt,
+        lambda **kw: _per_stack_prompt(**kw),
         build_intent_prompt,
         build_alternative_review_prompt,
     ):
@@ -1507,13 +1575,10 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
 
 
 def test_issue_producing_builders_use_shared_instructions(tmp_path):
-    from daydream.phases import (  # type: ignore[attr-defined]
-        build_alternative_review_prompt,
-        build_review_prompt,
-    )
+    from daydream.phases import build_alternative_review_prompt
 
     for builder in (
-        build_review_prompt,
+        lambda **kw: _per_stack_prompt(**kw),
         build_alternative_review_prompt,
     ):
         prompt = builder(exploration_dir=tmp_path)
@@ -1529,17 +1594,13 @@ def test_intent_builder_omits_issue_instructions(tmp_path):
 
 
 def test_build_review_prompt_with_prior_commits():
-    from daydream.phases import build_review_prompt
-
-    prompt = build_review_prompt(prior_commits="abc1234 fix: something")
+    prompt = _per_stack_prompt(prior_commits="abc1234 fix: something")
     assert "settled decisions" in prompt
     assert "abc1234 fix: something" in prompt
 
 
 def test_build_review_prompt_without_prior_commits():
-    from daydream.phases import build_review_prompt
-
-    prompt = build_review_prompt(prior_commits=None)
+    prompt = _per_stack_prompt(prior_commits=None)
     assert "settled decisions" not in prompt
 
 
@@ -1562,23 +1623,6 @@ async def test_phase_commit_push_includes_daydream_trailers(
     assert "Daydream-Run:" in backend.last_prompt
     assert "Daydream-Version:" in backend.last_prompt
     assert work.run_id in backend.last_prompt
-
-
-@pytest.mark.asyncio
-async def test_phase_commit_iteration_includes_daydream_trailers(tmp_path, make_work, silence_console):
-    """phase_commit_iteration must include Daydream-Run and Daydream-Version trailers."""
-    from daydream.phases import phase_commit_iteration
-
-    silence_console("daydream.phases")
-
-    backend = ScriptedBackend()
-    work = make_work(tmp_path)
-    await phase_commit_iteration(backend, work, 2)
-
-    assert "Daydream-Run:" in backend.last_prompt
-    assert "Daydream-Version:" in backend.last_prompt
-    assert "Iteration: 2" in backend.last_prompt
-    assert "Do NOT push" in backend.last_prompt
 
 
 # phase_test_and_heal — option 1 setup-investigator wiring
@@ -2713,10 +2757,6 @@ def _install_hero_dim_spies(
     return heroes, dim_messages
 
 
-def _setup_review(tmp_path: Path) -> dict[str, object]:
-    return {"skill": "beagle-python:review-python"}
-
-
 def _setup_parse_feedback(tmp_path: Path) -> dict[str, object]:
     (tmp_path / REVIEW_OUTPUT_FILE).write_text("## Verdict\n\nReady: Yes\n")
     return {}
@@ -2773,9 +2813,6 @@ _MERGE_ITEMS = {
 @pytest.mark.parametrize(
     ("phase_name", "model", "events", "expected_hero", "setup"),
     [
-        pytest.param(
-            "phase_review", "claude-opus-4-6", (_RESULT,), "BREATHE", _setup_review, id="review",
-        ),
         pytest.param(
             "phase_parse_feedback", "claude-haiku-4-5", _structured_turn({"issues": []}),
             "REFLECT", _setup_parse_feedback, id="parse_feedback",

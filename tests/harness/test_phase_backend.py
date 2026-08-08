@@ -1,9 +1,10 @@
 """Real-path test for the shared ``PhaseDispatchBackend`` (Task 10).
 
-Drives the production shallow loop through ``runner.run`` with the shared
+Drives the production shallow mode through ``runner.run`` with the shared
 phase-dispatch fake injected at the ``daydream.runner.create_backend`` seam.
-Asserts the observable outcome (exit code + parse-call count proving the loop
-sequenced twice: an issue on iteration 1, clean on iteration 2 → exit 0).
+Asserts the observable outcome (exit code + parse-call count proving the
+single review→parse pass ran once and the run completed cleanly — ``--loop``
+was removed in the single-flow collapse (#330)).
 """
 
 import pytest
@@ -17,15 +18,15 @@ ISSUE = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
 
 @pytest.fixture
 def mock_ui_loop(monkeypatch):
-    """Decline interactive gates so the loop runs unattended (mirrors test_loop.py)."""
+    """Decline interactive gates so the run runs unattended."""
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "n")
     monkeypatch.setattr("daydream.runner.prompt_user", lambda *a, **kw: "n")
 
 
 @pytest.mark.asyncio
-async def test_shared_phase_backend_drives_shallow_loop(feature_branch_repo, mock_ui_loop, monkeypatch):
-    """An issue on iteration 1, clean on iteration 2 → the loop runs twice and exits 0."""
-    backend = PhaseDispatchBackend(parse_results=[[ISSUE], []])
+async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, mock_ui_loop, monkeypatch):
+    """One issue on the single pass → the shallow deep run completes and exits 0."""
+    backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
 
     exit_code = await run(
@@ -34,11 +35,12 @@ async def test_shared_phase_backend_drives_shallow_loop(feature_branch_repo, moc
             skill="python",
             quiet=True,
             cleanup=False,
-            loop=True,
-            max_iterations=5,
             shallow=True,
         )
     )
 
     assert exit_code == 0
+    # One review→parse pass, not a loop: deep shallow mode collapses to the
+    # combined python stack + the structural meta-stack, so exactly two stacks
+    # reach the parse phase in the single pass.
     assert backend.parse_calls == 2

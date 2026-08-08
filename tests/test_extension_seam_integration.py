@@ -154,7 +154,7 @@ async def test_post_review_uses_published_items_path(
     posted_paths: list[Path] = []
     monkeypatch.setattr(
         "daydream.pr_review.post_review_to_pr_from_report",
-        lambda repo, path, *, console: _record_path(posted_paths, path),
+        lambda repo, path, *, console, post: _record_path(posted_paths, path),
     )
 
     await _step_post_review(ctx)
@@ -363,7 +363,7 @@ async def test_fork_disables_respond_step(
     """
     ext_dir.write_module(
         "def register(r):\n"
-        "    r.remove('pr-feedback', 'respond-feedback')\n"
+        "    r.remove('deep', 'respond-feedback')\n"
     )
     backend = RecordingBackend()
     install_backend(backend)
@@ -377,14 +377,14 @@ async def test_fork_disables_respond_step(
 
 async def test_fork_inserts_custom_phase_into_review_flow(
     ext_dir: ExtDir,
-    multi_stack_target: Path,
+    tiny_diff_target: Path,
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext phase inserted after ``review-alternatives`` runs in ``--review``.
+    """A daydream_ext phase inserted after ``intent`` runs in ``--review`` mode.
 
     Observable outcomes: exit 0 and the custom phase's prompt reached the
-    backend through the registered ``review`` flow.
+    backend through the deep flow (review is now a mode of ``deep``, #330).
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
@@ -395,12 +395,12 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "                    phase=DaydreamPhase.REVIEW)\n"
         "def register(r):\n"
         "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
-        "    r.insert_after('review', anchor='review-alternatives', step='ro_audit')\n"
+        "    r.insert_after('deep', anchor='intent', step='ro_audit')\n"
     )
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
-    rc = await runner.run(make_config(multi_stack_target, output_mode="review"))
+    rc = await runner.run(make_config(tiny_diff_target, output_mode="review"))
 
     idx = [i for i, p in enumerate(backend.prompts) if p == "RO-AUDIT-PROMPT"]
     assert idx, "custom phase never reached the backend"
@@ -442,11 +442,11 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
     install_backend: InstallBackend,
     make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext phase inserted before ``summary`` runs in ``--shallow``.
+    """A daydream_ext phase inserted before ``post-review`` runs in ``--shallow``.
 
     Observable outcomes: exit 0 and the custom phase's prompt reached the
-    backend through the registered ``shallow`` flow (after the iterate loop
-    group, before the summary step).
+    backend through the deep flow (shallow is now a single-stack mode of
+    ``deep``, #330).
     """
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
@@ -457,7 +457,7 @@ async def test_fork_inserts_phase_before_summary_in_shallow(
         "                    phase=DaydreamPhase.REVIEW)\n"
         "def register(r):\n"
         "    r.register_phase(FlowStep(name='ro_shallow', run=_ro))\n"
-        "    r.insert_before('shallow', anchor='summary', step='ro_shallow')\n"
+        "    r.insert_before('deep', anchor='post-review', step='ro_shallow')\n"
     )
     backend = ShallowRecordingBackend(
         parse_results=[[{"id": 1, "description": "Align hello() return value", "file": "api.py", "line": 1}]]
@@ -503,7 +503,7 @@ async def test_fork_disables_arbiter_in_deep(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any, post: bool = False) -> None:
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -792,7 +792,7 @@ async def test_custom_phase_full_stack(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any) -> None:
+    async def _no_post(target_dir: Path, report_path: Path, *, console: Any, post: bool = False) -> None:
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -818,7 +818,7 @@ async def test_flow_deep_routes_to_deep_helper(
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console) -> None:
+    async def _no_post(target_dir: Path, report_path: Path, *, console, post: bool = False) -> None:
         return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 
@@ -830,14 +830,14 @@ async def test_flow_deep_routes_to_deep_helper(
 
 
 async def test_flow_review_routes_to_review_helper(
-    multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
+    tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow review runs the real review pipeline: the alternatives prompt
     reaches the backend via the review flow, exit 0."""
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
 
-    rc = await runner.run(make_config(multi_stack_target, flow_name="review"))
+    rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))
 
     assert rc == 0
     assert any(ALTERNATIVES_MARKER in p for p in backend.prompts)  # review pipeline ran

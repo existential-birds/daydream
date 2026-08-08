@@ -2,21 +2,19 @@
 
 The runner is unified around a single :func:`run` entry point. ``run`` opens
 the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
-to a private helper based on ``config.bot`` / ``config.flow_name`` /
-``config.output_mode`` / ``config.shallow``::
+to the single deep flow, which now carries every PR-process mode (#330)::
 
-    bot set (feedback mode)  -> _run_pr_feedback (registered "pr-feedback" flow)
-    flow_name set (--flow)   -> _dispatch_selected_flow:
-        "review"             -> _run_review     (registered "review" flow, report only, no posting)
-        "shallow"            -> _run_loop_shallow (registered "shallow" flow)
-        "deep"               -> _run_loop_deep  (deep multi-stack pipeline)
-        "improve"            -> _run_improve    (repo-wide read-only advisor)
-        other registered     -> _run_custom_flow (fork-registered custom flow)
-    output_mode == "comment" -> _run_comment    (registered "review" flow, posts inline PR comments)
-    output_mode == "review"  -> _run_review     (registered "review" flow, report only, no posting)
+    bot set (feedback mode)   -> deep feedback mode
+    flow_name set (--flow):
+        "review" / "shallow"  -> deep review / shallow mode
+        "deep"                -> deep (default)
+        "improve"             -> _run_improve    (repo-wide read-only advisor)
+        other registered      -> _run_custom_flow (fork-registered custom flow)
+    output_mode == "comment"  -> deep comment mode (posts inline, no fix cycle)
+    output_mode == "review"   -> deep review mode (report only, no fix cycle)
     output_mode == "loop":
-        config.shallow       -> _run_loop_shallow (registered "shallow" flow, single-stack review-fix-test)
-        else                 -> _run_loop_deep    (deep multi-stack pipeline, default)
+        config.shallow        -> deep shallow mode (single-stack deep)
+        else                  -> deep (default)
 
 ``run_feedback`` is the entry point used by the ``daydream feedback <pr#>``
 subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
@@ -24,9 +22,9 @@ subcommand and is a thin wrapper that sets ``pr_number`` and re-enters
 
 ``run`` builds the per-run extension registry (builtins + optional
 ``daydream_ext``) and sets it on the registry ContextVar before dispatch;
-migrated flows (pr-feedback, review/comment, shallow) keep their preamble in
-the flow helper and run their phase sequence through
-:func:`daydream.flows.run_flow` against the registered flow definition.
+the ``deep`` flow's preambles stay in :func:`daydream.deep.orchestrator.run_deep`
+and run the phase sequence through :func:`daydream.flows.run_flow` against the
+registered flow definition.
 """
 
 import os
@@ -42,22 +40,13 @@ from rich.markup import escape as escape_markup
 from daydream import git_ops, github_app
 from daydream.agent import (
     console,
-    get_assume,
-    get_non_interactive,
-    resolve_or_prompt,
     set_assume,
     set_log_mode,
     set_non_interactive,
     set_quiet_mode,
 )
 from daydream.backends import Backend, create_backend
-from daydream.config import (
-    EFFORT_TIERS,
-    PHASE_DEFAULT_EFFORT,
-    PHASE_DEFAULT_MODELS,
-    REVIEW_SKILLS,
-    ReviewSkillChoice,
-)
+from daydream.config import EFFORT_TIERS, PHASE_DEFAULT_EFFORT, PHASE_DEFAULT_MODELS
 from daydream.config_file import DaydreamFileConfig
 from daydream.exploration import ExplorationContext
 from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
@@ -67,7 +56,6 @@ from daydream.phases import (
     _detect_default_branch,
     _git_branch,
     _git_log,
-    check_review_file_exists,
 )
 from daydream.trajectory import (
     DaydreamRunFlow,
@@ -79,11 +67,8 @@ from daydream.ui import (
     print_dim,
     print_error,
     print_info,
-    print_menu,
     print_phase_hero,
-    print_skipped_phases,
     print_success,
-    print_warning,
     prompt_user,
 )
 from daydream.workspace import WorkContext, open_workspace
@@ -96,26 +81,6 @@ if TYPE_CHECKING:
 OutputMode = Literal["loop", "comment", "review"]
 
 
-# Shallow reviews emit ``confidence``; map it onto the canonical ``severity``
-# axis so the shallow fix loop orders findings like the deep pipeline.
-_CONFIDENCE_TO_SEVERITY = {"HIGH": "high", "MEDIUM": "medium", "LOW": "low"}
-
-
-def to_canonical_shallow(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Tag shallow parse items with the canonical ``lens``/``severity`` axes.
-
-    Sets ``lens="per-stack"`` on every item and derives ``severity`` from the
-    item's ``confidence`` (HIGH→high, MEDIUM→medium, LOW→low), defaulting to
-    ``"medium"`` when ``confidence`` is absent. Items are mutated in place and
-    returned for convenience.
-    """
-    for item in items:
-        item["lens"] = "per-stack"
-        confidence = item.get("confidence") or ""
-        item["severity"] = _CONFIDENCE_TO_SEVERITY.get(confidence, "medium")
-    return items
-
-
 @dataclass
 class RunConfig:
     """Configuration for a daydream run.
@@ -126,8 +91,9 @@ class RunConfig:
             or "ios"). If None and shallow, prompts user.
         cleanup: Remove review output file after completion. If None, prompts user.
         quiet: Suppress verbose output from the agent.
-        start_at: Phase to start at ("review", "parse", "fix", "test", "ttt",
-            "per-stack", or "merge").
+        start_at: Phase to start at ("review", "fix", "ttt", "per-stack", or
+            "merge"). parse/test are legacy shallow-loop stages with no mapping
+            in the unified pipeline and are rejected at the CLI.
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
         backend: Default backend to use ("claude" or "codex"). Default is None;
@@ -157,8 +123,6 @@ class RunConfig:
             ``PHASE_DEFAULT_MODELS[backend_name]["fix"]`` then backend default.
         test_model: Model override for the test phase. When None, resolves via
             ``PHASE_DEFAULT_MODELS[backend_name]["test"]`` then backend default.
-        loop: Enable continuous review/fix/test iterations. Default is False.
-        max_iterations: Maximum number of loop iterations before exiting. Default is 5.
         exploration_model: Model override for exploration subagents. When set, a separate
             backend is created for the exploration phase using this model. Defaults to
             :data:`config.DEFAULT_EXPLORATION_MODEL`.
@@ -256,8 +220,6 @@ class RunConfig:
     parse_model: str | None = None
     fix_model: str | None = None
     test_model: str | None = None
-    loop: bool = False
-    max_iterations: int = 5
     exploration_context: ExplorationContext | None = None
     exploration_depth: int = 1
     exploration_model: str | None = None
@@ -587,13 +549,13 @@ def _get_head_sha(cwd: Path) -> str | None:
 
 
 def _run_posts_to_github(config: RunConfig) -> bool:
-    """Return whether the flow selected by ``config`` can write to GitHub.
+    """Return whether the deep single flow (as selected by ``config``) can write to GitHub.
 
-    This mirrors :func:`_dispatch`'s precedence: feedback mode may reply to
-    PR comments; an explicit ``--flow deep`` and the default non-shallow loop
-    both execute deep's ``post-review`` step; and ``--comment`` posts inline
-    comments. ``--review``, shallow loops, and generic custom flows are
-    report-only from the runner's perspective, so they retain the ambient
+    This mirrors the mode dispatch's write-capable paths: feedback mode may
+    reply to PR comments; an explicit ``--flow deep`` and the default
+    non-shallow loop both execute deep's ``post-review`` step; and ``--comment``
+    posts inline comments. ``--review``, shallow mode, and generic custom flows
+    are report-only from the runner's perspective, so they retain the ambient
     ``gh`` identity. A custom flow that gains a GitHub write must explicitly
     add its dispatch contract here before it can use App credentials.
     """
@@ -615,11 +577,11 @@ def _run_posts_to_github(config: RunConfig) -> bool:
 async def run(config: RunConfig | None = None) -> int:
     """Execute a daydream run end-to-end.
 
-    Opens the workspace via :func:`open_workspace` and dispatches to the
-    appropriate flow helper based on ``config.bot`` / ``config.output_mode``
-    / ``config.shallow``. Centralising workspace lifecycle means every flow gets
-    a real :class:`WorkContext` (in-place or ephemeral) with consistent
-    base/branch resolution.
+    Opens the workspace via :func:`open_workspace` and dispatches to the single
+    deep flow based on ``config.bot`` / ``config.output_mode`` / ``config.shallow``
+    (feedback / review / comment / shallow modes, #330). Centralising workspace
+    lifecycle means every flow gets a real :class:`WorkContext` (in-place or
+    ephemeral) with consistent base/branch resolution.
 
     Args:
         config: Optional configuration. Defaults to a fresh :class:`RunConfig`
@@ -708,8 +670,8 @@ async def run(config: RunConfig | None = None) -> int:
         return 1
     config.identity = identity
 
-    # ``--comment``/``--review`` skip the test phase, hence the .env copy too.
-    # ``--flow review`` matches this behaviour for parity.
+    # ``--comment``/``--review`` (and ``--flow review``) stop after post-review,
+    # so they skip the test phase, hence the .env copy too.
     skip_tests = (
         config.output_mode != "loop"
         or _flow_is_review
@@ -784,51 +746,42 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
 async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
     """Route an explicit ``--flow <name>`` selection.
 
-    Validates registration first (unknown names raise
+    ``review`` / ``shallow`` / ``deep`` route to the single deep flow (as
+    review / shallow / default mode, #330) — these are not registered flow
+    names, so they are resolved before the registry lookup. ``improve`` runs
+    its own flow. Any other registered name runs the generic
+    :func:`_run_custom_flow`; unknown names raise
     ``UnresolvedExtensionError``, which propagates to :func:`run`'s Extension
-    Error panel). Built-in names route to their existing dedicated helper so
-    behavior matches the default / ``--shallow`` / ``--review`` paths;
-    ``pr-feedback`` is not selectable this way (it needs a PR number + bot);
-    any other registered name runs the generic :func:`_run_custom_flow`.
+    Error panel.
     """
     name = config.flow_name
     assert name is not None
 
-    # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
-    # by run()'s Extension Error panel (exit 1). Do not swallow it here.
-    get_registry().flow(name)
-
-    if name == "pr-feedback":
-        print_error(
-            console,
-            "Flow not selectable",
-            "The pr-feedback flow needs a PR number and bot identity; "
-            "use: daydream feedback <pr#> --bot <name>.",
-        )
-        return 1
-    if name == "review":
-        return await _run_review(work, config)
-    if name == "shallow":
-        _require_reviewable_branch(work, config)
-        return await _run_loop_shallow(work, config)
-    if name == "deep":
-        _require_reviewable_branch(work, config)
+    # Built-in mode aliases: resolve before the registry lookup so the deep
+    # routing wins over the "not registered" error.
+    if name in ("review", "shallow", "deep"):
+        if name in ("shallow", "deep"):
+            _require_reviewable_branch(work, config)
         return await _run_loop_deep(work, config)
     if name == "improve":
         return await _run_improve(work, config)
 
+    # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
+    # by run()'s Extension Error panel (exit 1). Do not swallow it here.
+    get_registry().flow(name)
     return await _run_custom_flow(work, config)
 
 
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
-    """Pick the flow helper for the resolved workspace + config.
+    """Route the resolved workspace + config to the single deep flow.
 
-    Order matters: ``bot`` signals PR feedback mode (set only by the
-    ``daydream feedback <pr#>`` subcommand). Then an explicit ``flow_name``
-    (``--flow``) routes via :func:`_dispatch_selected_flow`. Then output_mode
-    picks comment vs review vs loop. Inside loop, ``config.shallow`` selects
-    the single-stack pipeline; otherwise the deep multi-stack pipeline runs
-    (default).
+    Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
+    :func:`daydream.deep.orchestrator.run_deep`): feedback mode (``bot`` set by
+    the ``daydream feedback <pr#>`` subcommand) runs the feedback prefix,
+    ``--review`` / ``--comment`` run the review spine and stop after
+    post-review, ``--shallow`` forces single-stack mode, and the default loop
+    mode is unchanged. An explicit ``flow_name`` (``--flow``) routes via
+    :func:`_dispatch_selected_flow`.
 
     Note: ``config.pr_number`` can be auto-detected from the current branch
     for metadata (trajectory/archive) without implying feedback mode.
@@ -838,127 +791,19 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
             GitHub identity set by :func:`run`).
     """
     if config.bot is not None:
-        return await _run_pr_feedback(work, config)
+        return await _run_loop_deep(work, config)
 
     if config.flow_name is not None:
         return await _dispatch_selected_flow(work, config)
 
-    if config.output_mode == "comment":
-        return await _run_comment(work, config)
+    if config.output_mode in ("comment", "review"):
+        return await _run_loop_deep(work, config)
 
-    if config.output_mode == "review":
-        return await _run_review(work, config)
-
-    # output_mode == "loop".
+    # output_mode == "loop" (default deep) and --shallow both fix against a
+    # base branch, so both must refuse to review the base branch against
+    # itself (the guard was shared by loop + shallow pre-collapse, #330).
     _require_reviewable_branch(work, config)
-
-    if config.shallow:
-        return await _run_loop_shallow(work, config)
-    # Default: deep multi-stack pipeline (--shallow opts into single-stack).
     return await _run_loop_deep(work, config)
-
-
-# Helper: PR feedback flow
-
-
-async def _run_pr_feedback(work: WorkContext, config: RunConfig) -> int:
-    """PR-feedback preamble; the phase sequence runs through the flow registry.
-
-    Validates args, opens the trajectory recorder, prints the info block,
-    then delegates to the registered ``pr-feedback`` flow (fetch -> parse ->
-    fix -> commit/push -> respond; steps in ``daydream/flows/pr_feedback.py``).
-    """
-    if config.pr_number is None or config.bot is None:
-        print_error(
-            console,
-            "Invalid PR config",
-            "PR number and --bot are required (use: daydream feedback <pr#> --bot <name>).",
-        )
-        return 1
-
-    pr_number = config.pr_number
-    bot = config.bot
-    target_dir = work.repo
-
-    async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.PR,
-    ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
-        ctx.data["pr_number"] = pr_number
-        ctx.data["bot"] = bot
-
-        console.print()
-        print_info(console, f"PR feedback mode: PR #{pr_number}")
-        print_info(console, f"Bot: {bot}")
-        print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {ctx.backend_for('review').model}")
-        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
-        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
-        console.print()
-
-        return await run_flow(ctx.registry, "pr-feedback", ctx)
-
-
-# Helper: comment mode (--comment)
-
-
-async def _run_comment(work: WorkContext, config: RunConfig) -> int:
-    """Review + post inline PR comments + exit.
-
-    Pre-flight: when a branch is explicitly requested but no open PR exists
-    for it, refuse early with an actionable error rather than running a
-    review that has nowhere to land.
-    """
-    if config.branch is not None:
-        try:
-            prs = git_ops.gh_pr_list_for_branch(work.source, config.branch)
-        except GitError as exc:
-            print_error(console, "GitHub Error", str(exc))
-            return 1
-        if not prs:
-            print_error(
-                console,
-                "No Open PR",
-                f"no open PR for branch {config.branch} — push first or use --review",
-            )
-            return 1
-
-    return await _run_review_or_comment(work, config, post_to_pr=True)
-
-
-# Helper: review mode (--review)
-
-
-async def _run_review(work: WorkContext, config: RunConfig) -> int:
-    """Review + write a report and exit. No PR posting, no fix, no test."""
-    return await _run_review_or_comment(work, config, post_to_pr=False)
-
-
-def _emit_findings_artifact(
-    target_dir: Path, config: RunConfig, issues: list[dict[str, Any]],
-) -> int:
-    """Write the Phase A findings artifact declared by ``--findings-out``.
-
-    Resolves the target PR — via :func:`daydream.pr_review.find_pr_by_number`
-    when ``config.pr_number`` is pinned, else :func:`daydream.pr_review.find_open_pr`
-    — then classifies the alt-review issues and writes the strict-schema
-    artifact. The artifact must declare its target, so an unresolvable PR (or
-    a ``GitError`` from the lookup) is an actionable error, never a silently
-    absent artifact. An empty issue list still writes an (empty) artifact so
-    Phase B can resolve all stale comments.
-
-    Args:
-        target_dir: Repo root containing the PR checkout.
-        config: Run configuration; ``config.findings_out`` must be set.
-        issues: Raw issue dicts from ``phase_alternative_review`` (may be empty).
-
-    Returns:
-        ``0`` on success, ``1`` when no PR is resolvable.
-    """
-    from daydream import pr_review
-
-    parsed = pr_review.alt_issues_to_parsed(issues)
-    return _write_findings_for_parsed(target_dir, config, parsed)
 
 
 def _emit_findings_from_items(
@@ -966,10 +811,9 @@ def _emit_findings_from_items(
 ) -> int:
     """Write the Phase A findings artifact from canonical merged items.
 
-    Sibling of :func:`_emit_findings_artifact` for the deep-review path:
-    converts canonical merged items (``file``/``line`` already resolved) via
+    Converts canonical merged items (``file``/``line`` already resolved) via
     :func:`daydream.pr_review.parsed_issues_from_items` and routes them through
-    the same shared PR-resolution + build + write path.
+    the shared PR-resolution + build + write path (:func:`_write_findings_for_parsed`).
 
     Args:
         target_dir: Repo root containing the PR checkout.
@@ -990,8 +834,7 @@ def _write_findings_for_parsed(
 ) -> int:
     """Resolve the target PR and write the strict-schema findings artifact.
 
-    Shared body for :func:`_emit_findings_artifact` and
-    :func:`_emit_findings_from_items`. Resolves the target PR — via
+    Resolves the target PR — via
     :func:`daydream.pr_review.find_pr_by_number` when ``config.pr_number`` is
     pinned, else :func:`daydream.pr_review.find_open_pr` — then writes the
     artifact. The artifact must declare its target, so an unresolvable PR (or a
@@ -1044,62 +887,6 @@ def _gather_diff_seed(work: WorkContext, config: RunConfig) -> tuple[str | None,
     log = _git_log(work.repo)
     branch = work.head_branch or _git_branch(work.repo)
     return diff, log, branch
-
-
-async def _run_review_or_comment(
-    work: WorkContext, config: RunConfig, *, post_to_pr: bool,
-) -> int:
-    """Shared preamble for ``--comment`` and ``--review``.
-
-    Gathers git context, writes the diff file, opens the trajectory recorder,
-    prints the info block, then delegates to the registered ``review`` flow
-    (exploration -> intent -> alternatives -> emit-findings -> no-issues-exit
-    -> post-comments; steps in ``daydream/flows/review.py``).
-    ``ctx.data["post_to_pr"]`` carries the mode: only ``--comment`` posts the
-    alternative-review issues to the PR via
-    :func:`daydream.pr_review.post_review_to_pr_from_alt_issues`, and only
-    ``--review`` honours ``config.findings_out`` (Phase A artifact emission
-    via :func:`_emit_findings_artifact`).
-    """
-    target_dir = work.repo
-
-    # Gather git context using the resolved base branch from work (no
-    # double-detection — base resolution is locked at workspace open time).
-    diff, log, branch = _gather_diff_seed(work, config)
-
-    if diff is None:
-        print_error(console, "Git Error", "Unable to determine base branch for diff")
-        return 1
-    if not diff.strip():
-        print_warning(console, "No diff found — nothing to review")
-        return 0
-
-    # Write diff to file to avoid exceeding prompt size limits
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir(exist_ok=True)
-    diff_path = daydream_dir / "diff.patch"
-    diff_path.write_text(diff)
-
-    async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.TTT,
-    ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
-        ctx.data["post_to_pr"] = post_to_pr
-        ctx.data["diff"] = diff
-        ctx.data["log"] = log
-        ctx.data["branch"] = branch
-        ctx.data["daydream_dir"] = daydream_dir
-        ctx.data["diff_path"] = diff_path
-
-        console.print()
-        print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Branch: {branch}")
-        print_info(console, f"Model: {ctx.backend_for('review').model}")
-        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
-        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
-        console.print()
-
-        return await run_flow(ctx.registry, "review", ctx)
 
 
 # Helper: generic custom flow (--flow <name>)
@@ -1182,137 +969,11 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
         return await run_flow(ctx.registry, flow_name, ctx)
 
 
-# Helper: shallow loop (single-stack review-fix-test)
-
-
-async def _run_loop_shallow(work: WorkContext, config: RunConfig) -> int:
-    """Single-stack review → fix → test preamble.
-
-    Keeps the preamble (skill resolution incl. the ``phase:review`` slot,
-    review-file check, cleanup gate, trajectory recorder + info block,
-    pre-fix snapshot/HEAD capture) and delegates the phase sequence to the
-    registered ``shallow`` flow (exploration -> loop-preflight ->
-    [review -> parse -> fix -> test -> commit-iteration]* -> loop-exhausted
-    -> summary -> commit-gate; steps in ``daydream/flows/shallow.py``).
-    The ``--loop`` iteration is the flow's ``iterate`` loop group, run once
-    in single-pass mode.
-    """
-    target_dir = work.repo
-
-    # Resolve skill only when the review phase will run.
-    skill: str | None = None
-    if config.start_at == "review":
-        if config.skill is not None:
-            if (resolved := get_registry().skill_if_registered(f"stack:{config.skill}")) is not None:
-                skill = resolved
-            elif config.skill in get_registry().skill_slots().values():
-                skill = config.skill
-            else:
-                print_error(console, "Invalid Skill", f"'{config.skill}' is not a valid skill")
-                return 1
-        elif (slot_skill := get_registry().skill_if_registered("phase:review")) is not None:
-            # Precedence: --skill (CLI) > phase:review slot (extension) > prompt/error.
-            skill = slot_skill
-        else:
-            if get_non_interactive():
-                print_error(
-                    console,
-                    "Missing --skill",
-                    "Non-interactive mode requires --skill (e.g. --skill python). "
-                    "Valid values: python, react, elixir, go, rust, ios.",
-                )
-                return 1
-            console.print()
-            print_menu(console, "Select review skill", [
-                ("1", "Python/FastAPI backend (review-python)"),
-                ("2", "React/TypeScript (review-frontend)"),
-                ("3", "Elixir/Phoenix (review-elixir)"),
-                ("4", "Go backend (review-go)"),
-                ("5", "Rust (review-rust)"),
-                ("6", "iOS/SwiftUI (review-ios)"),
-            ])
-
-            skill_choice = prompt_user(console, "Choice", "1")
-
-            try:
-                skill_enum = ReviewSkillChoice(skill_choice)
-            except ValueError:
-                print_error(console, "Invalid Choice", f"'{skill_choice}' is not a valid option")
-                return 1
-
-            skill = REVIEW_SKILLS[skill_enum]
-
-    # Early validation: check review file exists when starting at parse or fix.
-    if config.start_at in ("parse", "fix"):
-        try:
-            check_review_file_exists(target_dir)
-        except FileNotFoundError as e:
-            print_error(console, "Missing Review File", str(e))
-            return 1
-
-    # Explicit --cleanup/--no-cleanup wins; otherwise gate it (unattended keeps
-    # the review output, safe_default=False).
-    if config.cleanup is not None:
-        cleanup_enabled = config.cleanup
-    else:
-        cleanup_enabled = resolve_or_prompt(
-            assume=get_assume(),
-            interactive=not get_non_interactive(),
-            safe_default=False,
-            question="Cleanup review output after completion? [y/N]",
-            default="n",
-        )
-
-    async with _open_recorder(
-        config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.NORMAL,
-    ):
-        ctx = FlowContext(config=config, work=work, registry=get_registry())
-        ctx.data["skill"] = skill
-        ctx.data["cleanup_enabled"] = cleanup_enabled
-        ctx.data["feedback_items"] = []
-        ctx.data["fixes_applied"] = 0
-        ctx.data["test_retries"] = 0
-        ctx.data["tests_passed"] = True
-        ctx.data["test_proceed"] = True
-        ctx.data["iteration"] = 0
-        ctx.data["diff_base"] = None
-        ctx.data["exploration_dir"] = None
-        ctx.data["loop_broke"] = False
-
-        console.print()
-        print_info(console, f"Target directory: {target_dir}")
-        print_info(console, f"Model: {ctx.backend_for('review').model}")
-        # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
-        print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
-        if skill:
-            print_info(console, f"Review skill: {skill}")
-        if config.start_at != "review":
-            print_skipped_phases(console, config.start_at)
-        console.print()
-
-        # Recommended-change patch base: snapshot the tracked tree + HEAD BEFORE
-        # any fix runs. stash_create returns None on a clean tree (the common
-        # pre-fix case), so the pre-fix HEAD SHA is the fallback base. HEAD is
-        # captured now because the commit gate advances it past the fixes.
-        # Captured once before the flow so the final file is the cumulative fix
-        # against the pre-first-fix base (recommended.patch is overwritten each iteration).
-        try:
-            ctx.data["pre_fix_snapshot"] = git_ops.stash_create(target_dir)
-        except GitError:
-            ctx.data["pre_fix_snapshot"] = None
-        try:
-            ctx.data["pre_fix_head"] = git_ops.head_sha(target_dir)
-        except GitError:
-            ctx.data["pre_fix_head"] = None
-
-        return await run_flow(ctx.registry, "shallow", ctx)
-
-
-# Helper: deep loop (multi-stack pipeline)
+# Helper: deep (single-flow dispatch)
 
 
 async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
-    """Delegate to the deep-mode orchestrator."""
+    """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
     from daydream.deep.orchestrator import run_deep
 
     return await run_deep(config, work)

@@ -1892,3 +1892,119 @@ def gh_pr_create(
     if proc.returncode != 0:
         raise _gh_error_for(f"gh pr create failed: {proc.stderr.strip()}", proc.stderr)
     return proc.stdout.strip()
+
+
+def gh_issue_create(
+    repo: Path,
+    *,
+    title: str,
+    body: str,
+    repo_slug: str | None = None,
+    labels: list[str] | None = None,
+) -> str:
+    """Open a GitHub issue via ``gh issue create`` and return its URL.
+
+    Used by the fix loop (issue #336) to route out-of-scope-but-valid findings
+    — files outside the reviewed diff or residuals after a fix round — into a
+    tracked issue instead of auto-applying them to the PR.
+
+    The body is written to a temp file and passed via ``--body-file`` so it
+    never appears on the process argument vector (process-list hygiene; bodies
+    can be large). Same pattern as ``gh secret set``'s stdin path.
+
+    Args:
+        repo: Worktree the call is rooted in (cwd for ``gh``).
+        title: Issue title (inline ``--title``).
+        body: Issue body markdown (written to a tempfile, passed as
+            ``--body-file``).
+        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
+            the ambient ``gh`` context (cwd) is used.
+        labels: Optional labels applied verbatim as repeated ``--label`` flags.
+            *None* (the default) emits no ``--label`` flag.
+
+    Returns:
+        The created issue's URL (parsed from ``gh``'s stdout).
+
+    Raises:
+        GitError: If the ``gh issue create`` call fails (stderr included).
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".md", delete=False, encoding="utf-8"
+    ) as bf:
+        bf.write(body)
+        body_path = bf.name
+    args: list[str] = ["issue", "create"]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
+    args += ["--title", title, "--body-file", body_path]
+    if labels:
+        for label in labels:
+            args += ["--label", label]
+    try:
+        proc = _run_gh(repo, args)
+    finally:
+        try:
+            Path(body_path).unlink()
+        except OSError:
+            pass
+    if proc.returncode != 0:
+        raise _gh_error_for(f"gh issue create failed: {proc.stderr.strip()}", proc.stderr)
+    return proc.stdout.strip()
+
+
+def gh_issue_list(
+    repo: Path,
+    *,
+    state: str = "open",
+    search: str | None = None,
+    limit: int = 100,
+    repo_slug: str | None = None,
+) -> list[dict[str, Any]]:
+    """List issues via ``gh issue list``; best-effort (empty list on failure).
+
+    Used by the fix loop (issue #336) for cross-run dedup of out-of-scope
+    findings filed as issues: before filing, the caller checks whether an open
+    issue already carries the finding's fingerprint marker, so a re-run/resume
+    does not re-file the same finding (GitHub is the store — same stateless
+    cross-run dedup model as :mod:`daydream.reconcile`). Best-effort by design
+    so a failed ``gh issue list`` (no auth, offline, cross-org) degrades to
+    filing rather than blocking the scope decision.
+
+    Args:
+        repo: Worktree the call is rooted in (cwd for ``gh``).
+        state: Issue state filter (``--state``); defaults to ``open``.
+        search: Optional ``--search`` qualifier to narrow results.
+        limit: Cap on the number of issues returned (``--limit``).
+        repo_slug: Explicit ``owner/repo`` target (``--repo``). When *None*
+            the ambient ``gh`` context (cwd) is used.
+
+    Returns:
+        List of issue dicts (``number``, ``title``, ``body``, ``url``) — empty
+        when no issues match or the call fails.
+    """
+    args: list[str] = [
+        "issue",
+        "list",
+        "--state",
+        state,
+        "--json",
+        "number,title,body,url",
+        "--limit",
+        str(limit),
+    ]
+    if search:
+        args += ["--search", search]
+    if repo_slug is not None:
+        args += ["--repo", repo_slug]
+    try:
+        proc = _run_gh(repo, args, retries=_gh_retries())
+    except GitError as exc:
+        _logger.warning("gh issue list failed (%s, returning []): %s", type(exc).__name__, exc)
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        rows = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    return rows if isinstance(rows, list) else []

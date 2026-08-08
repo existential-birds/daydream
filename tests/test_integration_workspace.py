@@ -12,7 +12,7 @@ Test inventory (keyed to the Stage 4.2 spec):
 1. ``test_default_loop_on_base_branch_raises_wrong_branch_error``
 2. ``test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up``
 3. ``test_branch_also_checked_out_locally_warns_uses_origin``
-4. ``test_comment_mode_no_pr_errors_clearly``
+4. ``test_comment_mode_without_open_pr_runs_deep_flow``
 5. ``test_comment_mode_with_open_pr_uses_pr_base``
 6. ``test_feedback_subcommand_works_like_legacy_pr``
 7. ``test_review_mode_on_base_branch_does_not_error``
@@ -108,7 +108,6 @@ def silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
         "print_phase_hero",
         "print_info",
         "print_success",
-        "print_warning",
         "print_dim",
     ):
         monkeypatch.setattr(f"daydream.runner.{name}", lambda *a, **kw: None)
@@ -182,7 +181,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     captured: dict[str, Any] = {}
     worktree_path_at_dispatch: dict[str, Path] = {}
 
-    async def fake_run_loop_shallow(work, config):
+    async def fake_run_loop_deep(work, config):
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         captured["head_sha"] = work.head_sha
@@ -191,7 +190,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
         assert work.repo.is_dir()
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_shallow", fake_run_loop_shallow)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -251,13 +250,13 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
     captured: dict[str, Any] = {}
 
-    async def fake_run_loop_shallow(work, config):
+    async def fake_run_loop_deep(work, config):
         captured["head_sha"] = work.head_sha
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_shallow", fake_run_loop_shallow)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -284,18 +283,21 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 
 
 @pytest.mark.asyncio
-async def test_comment_mode_no_pr_errors_clearly(
+async def test_comment_mode_without_open_pr_runs_deep_flow(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    install_mock_backend: MockBackend,
     silence_ui: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``--comment --branch feat/X`` with no open PR exits 1 with actionable error."""
-    _make_feature_branch_on_origin(
-        tmp_path, repo_with_origin, bare_origin, branch="feat/Z"
-    )
+    """``--comment --branch feat/Z`` with no open PR runs the deep flow.
+
+    The review flow's early "No Open PR" refusal is gone in the single-flow
+    collapse (#330): comment mode runs the deep flow and ``_step_post_review``
+    warns-and-skips when no PR is resolvable. The workspace layer still resolves
+    the origin-only branch into an ephemeral worktree before dispatch.
+    """
+    _make_feature_branch_on_origin(tmp_path, repo_with_origin, bare_origin, branch="feat/Z")
     monkeypatch.setattr(
         "daydream.workspace.git_ops.gh_pr_list_for_branch",
         lambda _repo, _branch: [],
@@ -304,13 +306,15 @@ async def test_comment_mode_no_pr_errors_clearly(
         "daydream.runner.git_ops.gh_pr_list_for_branch",
         lambda _repo, _branch: [],
     )
-    captured: dict[str, str] = {}
+    captured: dict[str, Any] = {}
 
-    def fake_print_error(_console: Any, title: str, body: str) -> None:
-        captured["title"] = title
-        captured["body"] = body
+    async def fake_run_loop_deep(work, config):
+        captured["is_ephemeral"] = work.is_ephemeral
+        captured["head_sha"] = work.head_sha
+        captured["output_mode"] = config.output_mode
+        return 0
 
-    monkeypatch.setattr("daydream.runner.print_error", fake_print_error)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -320,12 +324,9 @@ async def test_comment_mode_no_pr_errors_clearly(
     )
     exit_code = await runner.run(config)
 
-    assert exit_code == 1
-    assert captured["title"] == "No Open PR"
-    assert "no open PR for branch feat/Z" in captured["body"]
-    assert "push first or use --review" in captured["body"]
-    # No backend call: the pre-flight aborts before review runs.
-    assert install_mock_backend.calls == []
+    assert exit_code == 0
+    assert captured["is_ephemeral"] is True
+    assert captured["output_mode"] == "comment"
 
 
 # --- Test 5: --comment + open PR resolves base from PR ---------------------
@@ -364,16 +365,16 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
             }
         ],
     )
-    # Stop _run_comment after open_workspace resolves; assertions below check
+    # Stop _run_loop_deep after open_workspace resolves; assertions below check
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
-    async def fake_run_comment(work, config):
+    async def fake_run_loop_deep(work, config):
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_comment", fake_run_comment)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -412,15 +413,15 @@ async def test_review_mode_on_base_branch_does_not_error(
     monkeypatch.setattr("daydream.runner.print_error", fake_print_error)
 
     # Stop after open_workspace resolves; assertions check we routed past the
-    # WrongBranchError guard into _run_review.
+    # WrongBranchError guard into the deep flow.
     routed: dict[str, Any] = {}
 
-    async def fake_run_review(work, config):
+    async def fake_run_loop_deep(work, config):
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_review", fake_run_review)
+    monkeypatch.setattr("daydream.runner._run_loop_deep", fake_run_loop_deep)
 
     config = RunConfig(
         target=str(repo_with_origin),
@@ -432,6 +433,6 @@ async def test_review_mode_on_base_branch_does_not_error(
     assert exit_code == 0
     # WrongBranchError must NOT have been raised.
     assert captured.get("title") != "Wrong Branch"
-    # _run_review was reached.
+    # _run_loop_deep was reached.
     assert routed["base_branch"] == "main"
     assert routed["head_branch"] == "main"

@@ -137,7 +137,10 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
         "severity": "medium",
         "confidence": "HIGH",
         "files": ["main.py"],
+        "file": "main.py",
+        "line": 1,
         "rationale": "",
+        "evidence": "main.py:1",
     }
     # Scripted backend: every phase replays the same event stream; the
     # alternative-review phase consumes the structured issues, the intent and

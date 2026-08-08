@@ -365,20 +365,23 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     mute_side_effects: Any,
 ) -> None:
     """Shallow single-pass run writes trajectory and manifest timing data."""
-    from daydream.config import REVIEW_OUTPUT_FILE
     from daydream.runner import RunConfig, run
 
-    # Pre-create review output so check_review_file_exists passes for start_at="fix".
-    (feature_branch_repo / REVIEW_OUTPUT_FILE).write_text("## Issues\n\n1. foo.py:1\n")
+    issue = {
+        "id": 1,
+        "description": "Add type hints",
+        "file": "main.py",
+        "line": 1,
+    }
 
     monkeypatch.setattr(
         "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: PhaseDispatchBackend(),
+        lambda name, model=None, **kwargs: PhaseDispatchBackend(parse_results=[[issue]]),
     )
 
-    mute_side_effects("daydream.flows.shallow")
+    mute_side_effects()
     silence_console("daydream.runner")
-    silence_console("daydream.flows.shallow")
+    silence_console("daydream.deep.orchestrator")
 
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
@@ -387,8 +390,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
         shallow=True,
         cleanup=False,
         non_interactive=True,
-        assume="no",  # decline commit gate
-        start_at="fix",
+        assume="yes",  # accept the fix gate so the fix/test cycle runs
         trajectory_path=traj,
     )
     exit_code = await run(config)
@@ -398,7 +400,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Phase events: parse and test must appear (review is skipped via start_at).
+    # Phase events: the review spine's parse and the fix cycle's test must appear.
     events = data["extra"].get("phase_events", [])
     event_phases = [e["phase"] for e in events]
     assert "parse" in event_phases, f"parse phase event missing; got {event_phases!r}"
@@ -610,74 +612,58 @@ async def test_parallel_fix_registers_subtrajectories(
 
 
 async def test_review_flow_emits_phase_events_and_manifest_timings(
-    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Any,
 ) -> None:
-    """Review-only flow records intent and alternatives timings, and no plan.
+    """Review-only mode records review-spine timings and stops before fix/test.
 
-    ``--review`` emits the findings artifact and stops; the plan phase only feeds
-    ``--comment`` output, so it must never run here (and must not appear in the
+    ``--review`` (a mode of the single deep flow, #330) runs the review spine —
+    intent, alternatives, per-stack parse — and stops at ``findings-out``, so
+    the fix cycle's fix/test/verify must never run (and must not appear in the
     recorded phase events or manifest timings).
     """
-    import subprocess
-    from unittest.mock import patch
+    from tests.test_deep_orchestrator import _install_stub_backend, _pin_findings_pr, _silence
 
-    from daydream import git_ops
-    from daydream.backends import ResultEvent, TextEvent
-    from daydream.pr_review import PRInfo
+    _silence(monkeypatch)
+    mute_side_effects()
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
     from daydream.runner import RunConfig, run
-
-    issue = {
-        "id": 1,
-        "title": "Greeting changed without tests",
-        "description": "`hello` now returns a different greeting with no test coverage",
-        "recommendation": "Add a regression test for the new greeting",
-        "severity": "medium",
-        "confidence": "HIGH",
-        "files": ["main.py"],
-        "rationale": "",
-    }
-    # Same scripted stream replays for every phase in this review-only path.
-    backend = PhaseDispatchBackend(events=[
-        TextEvent(text="Review complete."),
-        ResultEvent(structured_output={"issues": [issue]}, continuation=None),
-    ])
-    head = git_ops.head_sha(feature_branch_repo)
-    base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
-        ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
-        cwd=feature_branch_repo, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main",
-                owner="o", repo="r", url="https://example.invalid/pr/7")
 
     findings_out = tmp_path / "findings.json"
     traj = tmp_path / "trajectory.json"
     config = RunConfig(
-        target=str(feature_branch_repo),
+        target=str(multi_stack_target),
         output_mode="review",
         pr_number=7,
         findings_out=str(findings_out),
         trajectory_path=traj,
         non_interactive=True,
+        cleanup=False,
     )
 
-    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    with patch("daydream.runner.create_backend", return_value=backend), \
-         patch("daydream.github_app.resolve_user_identity", return_value="tester"), \
-         patch("daydream.pr_review.find_pr_by_number", return_value=pr):
-        exit_code = await run(config)
+    exit_code = await run(config)
     assert exit_code == 0
+    assert findings_out.is_file(), "review mode must emit the findings artifact"
 
     assert traj.exists(), "review run must write the trajectory to disk"
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Review-only flow records intent and alternatives phases.
+    # Review-only mode records intent + alternatives + parse phases.
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
-    for phase in ("intent", "alternatives"):
+    for phase in ("intent", "alternatives", "parse"):
         assert phase in event_phases, (
             f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
+        )
+    # The fix cycle must never run in review mode.
+    for phase in ("fix", "test", "verify"):
+        assert phase not in event_phases, (
+            f"review mode ran the fix cycle phase {phase!r}; got: {sorted(event_phases)!r}"
         )
 
     # Manifest: phase_timings must be non-null (was null before the fix) and
@@ -687,7 +673,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None, "review flow phase_timings must not be null"
-    for phase in ("intent", "alternatives"):
+    for phase in ("intent", "alternatives", "parse"):
         assert phase in phase_timings, (
             f"{phase} missing from review phase_timings: {phase_timings!r}"
         )

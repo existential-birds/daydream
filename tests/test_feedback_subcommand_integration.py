@@ -58,7 +58,7 @@ async def test_feedback_subcommand_argv_to_body(
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
-    # Call the REAL body — no _run_pr_feedback / _dispatch / phase stub.
+    # Call the REAL body — no flow/dispatch stub (feedback mode of the deep flow, #330).
     exit_code = await run_feedback(config, config.pr_number)
 
     assert exit_code == 0
