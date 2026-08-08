@@ -103,7 +103,7 @@ def _configured_pi_model(cwd: Path) -> str | None:
 
     Pi merges project settings over global settings. We mirror only the
     ``defaultModel`` field because that is the setting daydream must not replace
-    with its GLM fallback.
+    with its DeepSeek fallback.
     """
     agent_dir = Path(os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent"))
     settings_paths = (cwd / ".pi" / "settings.json", agent_dir / "settings.json")
@@ -124,7 +124,8 @@ _SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
 
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
-# the CLI layer; Pi does not, so the GLM model burns its tool-call budget on
+# the CLI layer; Pi does not, so the default DeepSeek model burns its tool-call
+# budget on
 # exploratory reads during LISTEN. This preamble is appended (via
 # ``--append-system-prompt``) to Pi's built-in coding-assistant prompt to
 # mirror that guidance. Keep it concise — the model re-reads it every turn.
@@ -281,28 +282,25 @@ def _pi_retry_max_delay() -> float:
     return value
 
 
+# Shared error-taxonomy tokens, used by both the retryable-message check and
+# the stable diagnostic category so the two views of the taxonomy cannot drift
+# out of sync.
+_RATE_LIMIT_TOKENS = ("429", "rate limit", "rate_limit", "too many requests")
+_SERVER_ERROR_TOKENS = ("503", "service unavailable", "server error")
+
+
 def _is_retryable_error_message(message: str) -> bool:
     """Return True if the error message signals a transient overload or rate-limit.
 
-    High-precision literals (429, rate limit/rate_limit, too many requests) are
-    matched as plain substrings — they are extremely unlikely to appear in a
-    non-transient context. Ambiguous terms require positive overload/capacity
-    wording and explicitly reject negated or planning contexts.
+    High-precision literals (429, rate limit/rate_limit, too many requests,
+    503, service unavailable, server error) are matched as plain substrings —
+    they are extremely unlikely to appear in a non-transient context. Ambiguous
+    terms require positive overload/capacity wording and explicitly reject
+    negated or planning contexts.
     """
     lower = message.lower()
     # Unambiguous literals — plain substring is safe.
-    if any(
-        token in lower
-        for token in (
-            "429",
-            "503",
-            "service unavailable",
-            "server error",
-            "rate limit",
-            "rate_limit",
-            "too many requests",
-        )
-    ):
+    if any(token in lower for token in _RATE_LIMIT_TOKENS + _SERVER_ERROR_TOKENS):
         return True
     if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
         return False
@@ -336,12 +334,9 @@ def _is_retryable_exit_code(code: int) -> bool:
 def _pi_error_category(message: str) -> str:
     """Classify Pi failures into stable host-owned diagnostic categories."""
     lower = message.casefold()
-    if any(
-        token in lower
-        for token in ("429", "rate limit", "rate_limit", "too many requests")
-    ):
+    if any(token in lower for token in _RATE_LIMIT_TOKENS):
         return "RATE_LIMIT"
-    if any(token in lower for token in ("503", "service unavailable", "server error")):
+    if any(token in lower for token in _SERVER_ERROR_TOKENS):
         return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
@@ -499,7 +494,7 @@ class PiBackend:
     so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
     """
 
-    concise_fix_prompts = True  # GLM produces verbose reasoning in fix prompts
+    concise_fix_prompts = True  # DeepSeek produces verbose reasoning in fix prompts
 
     def __init__(
         self,
@@ -585,6 +580,18 @@ class PiBackend:
             self.model = self._model_override
             args.extend(["--model", self.model])
             provider = os.environ.get("PI_PROVIDER", "nous")
+            if os.environ.get("PI_PROVIDER") is None and self.model.casefold().startswith("glm-"):
+                # The default provider moved zai -> nous; a pinned z.ai GLM
+                # model silently loses its provider and fails at runtime unless
+                # the user opts back in explicitly.
+                logger.warning(
+                    "Explicit model %r is a z.ai-hosted GLM model, but the Pi "
+                    "backend now defaults to the nous provider and PI_PROVIDER "
+                    "is unset; the pinned model will fail at runtime unless "
+                    "PI_PROVIDER=zai is set or the model is migrated to the "
+                    "nous registry.",
+                    self.model,
+                )
         else:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
@@ -623,7 +630,7 @@ class PiBackend:
                 child_env[native_key_name] = api_key
 
         # Pi's built-in system prompt is minimal; append the daydream preamble
-        # so the GLM model gets the same tool-efficiency / budget-awareness
+        # so the default DeepSeek model gets the same tool-efficiency / budget-awareness
         # guidance that Claude Code and Codex inject natively via their CLIs.
         args.extend(["--append-system-prompt", _PI_SYSTEM_PREAMBLE])
 

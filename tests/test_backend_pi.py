@@ -14,7 +14,7 @@ import shutil
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1055,14 +1055,26 @@ async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path
 def _capture_pi_subprocess(monkeypatch, captured: list[list[str]]) -> None:
     """Replace only the pi subprocess spawn; keep the real PiBackend/create_backend.
 
-    Each spawn captures its argv and replays a canned no-op session so the deep
-    flow can complete without a real pi CLI. The argv is the observable
+    Each pi spawn captures its argv and replays a canned no-op session so the
+    deep flow can complete without a real pi CLI. The argv is the observable
     contract under test: which --model/--provider daydream hands pi.
+
+    pi.py does a plain ``import asyncio``, so the patch lands on the shared
+    asyncio module. Only pi invocations (first argv element ``pi``) are
+    intercepted; any other ``create_subprocess_exec`` caller falls through to
+    the real executor so the patch never reshapes non-pi spawns.
     """
 
+    # Type the fallthrough as Any: the real create_subprocess_exec signature is
+    # keyword-typed, so an opaque *args/**kwargs passthrough would otherwise fail
+    # mypy even though it is exactly the forwarding this helper needs.
+    real_exec: Any = asyncio.create_subprocess_exec
+
     async def _fake_exec(*args: object, **kwargs: object) -> MagicMock:
-        captured.append([str(a) for a in args])
-        return make_mock_process_from_fixture("simple_text.jsonl")
+        if args and args[0] == "pi":
+            captured.append([str(a) for a in args])
+            return make_mock_process_from_fixture("simple_text.jsonl")
+        return await real_exec(*args, **kwargs)
 
     monkeypatch.setattr(
         "daydream.backends.pi.asyncio.create_subprocess_exec", _fake_exec
@@ -1077,26 +1089,36 @@ def _assert_pi_model_and_provider(captured: list[list[str]], *, model: str, prov
         assert argv[argv.index("--provider") + 1] == provider
 
 
+@pytest.mark.parametrize(
+    ("env_provider", "expected_provider"),
+    [(None, "nous"), ("custom-proxy", "custom-proxy")],
+    ids=["default-nous", "PI_PROVIDER-override"],
+)
 @pytest.mark.asyncio
-async def test_runner_real_path_pi_nous_fallback(
+async def test_runner_real_path_pi_provider_axis(
     tiny_diff_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
+    env_provider: str | None,
+    expected_provider: str,
 ) -> None:
-    """Real runner path: no model selected → pi gets --model deepseek-v4-flash-0731 --provider nous.
+    """Real runner path: no model selected → pi gets the fallback --model and the default/overridden --provider.
 
     Runs ``runner.run`` with the real ``create_backend`` (real PiBackend) on a
-    real git worktree, mocking ONLY ``asyncio.create_subprocess_exec``. The pi
-    agent dir is isolated to an empty temp dir so no settings.json exists and
-    the code-level fallback fires.
+    real git worktree, mocking ONLY the pi subprocess spawn. The pi agent dir
+    is isolated to an empty temp dir so no settings.json exists and the
+    code-level fallback fires.
     """
     from daydream.runner import run
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
-    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    if env_provider is None:
+        monkeypatch.delenv("PI_PROVIDER", raising=False)
+    else:
+        monkeypatch.setenv("PI_PROVIDER", env_provider)
     monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tiny_diff_target / "pi-agent"))
 
     captured: list[list[str]] = []
@@ -1113,41 +1135,7 @@ async def test_runner_real_path_pi_nous_fallback(
     _assert_pi_model_and_provider(
         captured,
         model="deepseek/deepseek-v4-flash-0731",
-        provider="nous",
-    )
-
-
-@pytest.mark.asyncio
-async def test_runner_real_path_pi_provider_override(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Real runner path: PI_PROVIDER overrides the default provider, model stays the fallback."""
-    from daydream.runner import run
-
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
-    monkeypatch.setenv("PI_PROVIDER", "custom-proxy")
-    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tiny_diff_target / "pi-agent"))
-
-    captured: list[list[str]] = []
-    _capture_pi_subprocess(monkeypatch, captured)
-
-    rc = await run(
-        make_config(
-            tiny_diff_target,
-            backend="pi",
-            assume="yes",
-        )
-    )
-    assert rc == 0
-    _assert_pi_model_and_provider(
-        captured,
-        model="deepseek/deepseek-v4-flash-0731",
-        provider="custom-proxy",
+        provider=expected_provider,
     )
 
 
@@ -1161,9 +1149,9 @@ async def test_append_system_prompt_preamble_in_args():
     """The tool-efficiency preamble is passed via --append-system-prompt.
 
     Pi's built-in system prompt is minimal compared to Claude Code / Codex; the
-    GLM model needs the budget-awareness guidance appended or it exhausts its
-    tool-call budget during exploration. The flag must appear in every run,
-    not gated on env vars or read_only.
+    default DeepSeek model needs the budget-awareness guidance appended or it
+    exhausts its tool-call budget during exploration. The flag must appear in
+    every run, not gated on env vars or read_only.
     """
     from daydream.backends.pi import _PI_SYSTEM_PREAMBLE
 
