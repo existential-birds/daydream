@@ -45,6 +45,13 @@ for _git_env_var in (
 _git_config_count = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
 os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "commit.gpgsign"
 os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = "false"
+_git_config_count += 1
+# ... nor the developer's global excludes file (~/.config/git/ignore): a
+# machine-global ``.env`` ignore would make ``git add .env`` fail in tests that
+# deliberately track env-style files. Neutralize it (empty core.excludesFile
+# means no excludes file) so each repo's own .gitignore stays authoritative.
+os.environ[f"GIT_CONFIG_KEY_{_git_config_count}"] = "core.excludesFile"
+os.environ[f"GIT_CONFIG_VALUE_{_git_config_count}"] = ""
 os.environ["GIT_CONFIG_COUNT"] = str(_git_config_count + 1)
 
 # --- Real-git fixtures ------------------------------------------------------

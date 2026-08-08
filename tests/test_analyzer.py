@@ -307,24 +307,25 @@ def test_files_read_claude_read_and_grep_unchanged():
 # --- unbalanced-quote tokenization (issue #327) ---
 
 
-_UNBALANCED_QUOTE_COMMANDS = [
-    "rg -l '\"unclosed",
-    "BASE=$(for ref in main origin/master master origin/master; do git rev-parse --verify \"$ref\" ...)",
-    "printf \\'\\\"\\'base=%s... x",
-]
+# Only a quote opened and never closed (``rg -l '"unclosed``) genuinely
+# makes shlex raise. The two other candidates once parametrized here —
+# ``BASE=$(... "$ref" ...)`` with balanced quotes and ``printf \'\"\'base=%s...``
+# with backslash-escaped quotes — tokenize cleanly under shlex and only
+# exercised the normal path, so they were dropped rather than left as
+# trivially-passing duplicates of coverage that already exists elsewhere.
 
 
-@pytest.mark.parametrize("command", _UNBALANCED_QUOTE_COMMANDS)
-def test_tokenize_command_never_raises_on_unbalanced_quotes(command: str) -> None:
+def test_tokenize_command_never_raises_on_unbalanced_quotes() -> None:
     # must not raise
-    tokens = _tokenize_command(command)
+    tokens = _tokenize_command("rg -l '\"unclosed")
     assert isinstance(tokens, list)
 
 
 def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
-    # a command whose first segment is clean but later segment is unparseable
-    paths = _shell_reads("cat README.md; printf \\'\\\"\\'base=%s... x")
-    assert "README.md" in paths
+    # the unclosed quote makes shlex raise mid-token; the whitespace-split
+    # fallback still surfaces the ``a.py`` operand preceding it
+    paths = _shell_reads("rg -n 'pat' a.py '\"unclosed")
+    assert "a.py" in paths
 
 
 def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):

@@ -208,7 +208,9 @@ def _tokenize_command(command: str) -> list[str]:
 
     Malformed tool-call data (unbalanced quotes) must never crash the
     eval/archive pipeline; on ``ValueError`` we fall back to a whitespace
-    split so recoverable path operands still surface (issue #327).
+    split so recoverable path operands still surface, except recoverable
+    operands adjacent to a separator, which the whitespace split glues to
+    the separator and are lost (issue #327).
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&")
     lexer.whitespace_split = True

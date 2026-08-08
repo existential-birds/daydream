@@ -862,8 +862,12 @@ async def test_fork_write_failure_degrades(tmp_path: Path) -> None:
             async with recorder.fork("fail-child") as child:
                 async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                     observe_text_and_result(inv)
-                # Sabotage the write path to be an unwritable directory
-                child.path = Path("/nonexistent-dir-xyz/child.json")
+                # Sabotage the write path: its parent is a regular file, so
+                # creating the child must fail even when the test user can
+                # write the filesystem root (container/root sandbox).
+                blocker = tmp_path / "blocker"
+                blocker.write_text("file, not a directory")
+                child.path = blocker / "child.json"
 
         assert get_current_recorder() is recorder
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
