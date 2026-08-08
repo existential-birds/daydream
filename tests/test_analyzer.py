@@ -307,12 +307,8 @@ def test_files_read_claude_read_and_grep_unchanged():
 # --- unbalanced-quote tokenization (issue #327) ---
 
 
-# Only a quote opened and never closed (``rg -l '"unclosed``) genuinely
-# makes shlex raise. The two other candidates once parametrized here —
-# ``BASE=$(... "$ref" ...)`` with balanced quotes and ``printf \'\"\'base=%s...``
-# with backslash-escaped quotes — tokenize cleanly under shlex and only
-# exercised the normal path, so they were dropped rather than left as
-# trivially-passing duplicates of coverage that already exists elsewhere.
+# Only a quote opened and never closed makes shlex raise; the two other
+# former candidates had balanced/escaped quotes and tokenize cleanly.
 
 
 def test_tokenize_command_never_raises_on_unbalanced_quotes() -> None:
