@@ -355,6 +355,15 @@ child process as `NOUS_API_KEY` / `ZAI_API_KEY`; credentials are never placed
 in process arguments. Providers without a known native credential environment
 variable must be configured through Pi directly instead of `PI_API_KEY`.
 
+The Pi default moved from a z.ai GLM model (`glm-5.2` on the `zai` provider)
+to `deepseek/deepseek-v4-flash-0731` on the built-in `nous` provider. To
+migrate an existing z.ai setup: unset `PI_PROVIDER` (or set it to `nous`) and
+either drop the pinned `glm-*` model or switch it to a model the nous
+registry serves. A pinned `glm-*` model with `PI_PROVIDER` unset, or
+`PI_PROVIDER` set (e.g. `zai`) with no configured model, is a stale pairing:
+daydream warns about it and the run fails at runtime unless the provider
+serves the model.
+
 Daydream schedules Pi fan-outs with a default concurrency hint of 10 for
 standard and deep workflows; quick improve remains serial. Set
 `DAYDREAM_PI_FANOUT_CONCURRENCY` to a positive integer to lower or raise the

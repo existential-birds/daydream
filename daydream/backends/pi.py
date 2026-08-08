@@ -124,11 +124,11 @@ _SKILL_TOKEN_RE = re.compile(r"/skill:([a-z0-9-]+)")
 
 # Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
 # inject rich guidance (tool efficiency, exploration strategy, conciseness) at
-# the CLI layer; Pi does not, so the default DeepSeek model burns its tool-call
-# budget on
-# exploratory reads during LISTEN. This preamble is appended (via
-# ``--append-system-prompt``) to Pi's built-in coding-assistant prompt to
-# mirror that guidance. Keep it concise — the model re-reads it every turn.
+# the CLI layer; Pi does not, so the default DeepSeek model burns its
+# tool-call budget on exploratory reads during LISTEN. This preamble is
+# appended (via ``--append-system-prompt``) to Pi's built-in coding-assistant
+# prompt to mirror that guidance. Keep it concise — the model re-reads it
+# every turn.
 _PI_SYSTEM_PREAMBLE = """\
 You are an efficient coding agent operating under a strict tool-call budget.
 You have a LIMITED number of tool calls per turn (typically 50). Every call is
@@ -174,6 +174,24 @@ STREAM_DROP_SIGNATURES = (
 )
 
 logger = logging.getLogger(__name__)
+
+# The provider half of the daydream-supplied default pairing (the model half
+# is ``DEFAULT_PI_MODEL``). Single source of truth so the argv fallback
+# branches, the migration warnings, and the module docs cannot drift.
+_PI_DEFAULT_PROVIDER = "nous"
+
+# One-shot migration-warning guard: ``execute`` runs once per phase,
+# invocation, and retry attempt, so a stale pre-migration configuration would
+# otherwise re-log the identical warning for every call. Keys are per-mismatch.
+_warned_migration_mismatches: set[str] = set()
+
+
+def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None:
+    """Log a stale-configuration warning at most once per ``key`` per process."""
+    if key in _warned_migration_mismatches:
+        return
+    _warned_migration_mismatches.add(key)
+    logger.warning(message, *args)
 
 
 def _pi_fanout_concurrency() -> int:
@@ -579,19 +597,24 @@ class PiBackend:
         if self._model_override is not None:
             self.model = self._model_override
             args.extend(["--model", self.model])
-            provider = os.environ.get("PI_PROVIDER", "nous")
-            if os.environ.get("PI_PROVIDER") is None and self.model.casefold().startswith("glm-"):
-                # The default provider moved zai -> nous; a pinned z.ai GLM
-                # model silently loses its provider and fails at runtime unless
-                # the user opts back in explicitly.
-                logger.warning(
-                    "Explicit model %r is a z.ai-hosted GLM model, but the Pi "
-                    "backend now defaults to the nous provider and PI_PROVIDER "
-                    "is unset; the pinned model will fail at runtime unless "
-                    "PI_PROVIDER=zai is set or the model is migrated to the "
-                    "nous registry.",
-                    self.model,
-                )
+            provider = os.environ.get("PI_PROVIDER")
+            if provider is None:
+                provider = _PI_DEFAULT_PROVIDER
+                if self.model.casefold().startswith("glm-"):
+                    # The default provider moved zai -> nous; a pinned z.ai
+                    # GLM model silently loses its provider and fails at
+                    # runtime unless the user opts back in explicitly.
+                    _warn_migration_mismatch_once(
+                        f"glm-pin:{self.model}",
+                        "Explicit model %r is a z.ai-hosted GLM model, but the "
+                        "Pi backend now defaults to the %s provider and "
+                        "PI_PROVIDER is unset; the pinned model will fail at "
+                        "runtime unless PI_PROVIDER=zai is set or the model is "
+                        "migrated to the %s registry.",
+                        self.model,
+                        _PI_DEFAULT_PROVIDER,
+                        _PI_DEFAULT_PROVIDER,
+                    )
         else:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
@@ -602,7 +625,25 @@ class PiBackend:
                 args.extend(["--model", self.model])
             provider = os.environ.get("PI_PROVIDER")
             if provider is None and configured_model is None:
-                provider = "nous"
+                provider = _PI_DEFAULT_PROVIDER
+            elif configured_model is None and provider and provider != _PI_DEFAULT_PROVIDER:
+                # The previous default paired the zai provider with a GLM
+                # model; an explicit PI_PROVIDER from that setup now pairs
+                # with the DeepSeek fallback model and fails at runtime
+                # unless the provider actually serves it.
+                _warn_migration_mismatch_once(
+                    f"fallback-provider:{provider}",
+                    "PI_PROVIDER=%r is set with no configured model, so the Pi "
+                    "backend falls back to %r, which is served by the %s "
+                    "provider; if %r does not serve that model the run will "
+                    "fail at runtime. Unset PI_PROVIDER or set it to %s to "
+                    "adopt the new default, or configure a model explicitly.",
+                    provider,
+                    self.model,
+                    _PI_DEFAULT_PROVIDER,
+                    provider,
+                    _PI_DEFAULT_PROVIDER,
+                )
 
         api_key = os.environ.get("PI_API_KEY")
         thinking = self.reasoning_effort or os.environ.get("PI_THINKING")

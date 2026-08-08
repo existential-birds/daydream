@@ -46,6 +46,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from daydream.config import DEFAULT_PI_MODEL
 from daydream.config_file import load_toml_or_empty
 
 logger = logging.getLogger(__name__)
@@ -118,7 +119,8 @@ MODEL_PRICES: dict[str, ModelPrice] = {
     "claude-sonnet-5": ModelPrice(input=3.00, cached_input=0.30, output=15.00),
     "glm-5.2": ModelPrice(input=1.40, cached_input=0.26, output=4.40),
     # Nous-hosted DeepSeek V4 Flash — the Pi backend default (DEFAULT_PI_MODEL).
-    "deepseek/deepseek-v4-flash-0731": ModelPrice(input=0.28, cached_input=0.028, output=0.42),
+    # Keyed by the constant so the default model and its price entry cannot drift apart.
+    DEFAULT_PI_MODEL: ModelPrice(input=0.28, cached_input=0.028, output=0.42),
 }
 
 _GPT56_LONG_CONTEXT_THRESHOLD = 272_000

@@ -1048,6 +1048,73 @@ async def test_nous_deepseek_is_pi_fallback_when_no_model_is_configured(tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Migration guards: GLM-pin and provider/model mismatch warnings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_fires_with_unset_provider(monkeypatch, caplog):
+    """An explicit glm-* model with PI_PROVIDER unset warns about the zai->nous default change."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert any("z.ai-hosted GLM" in r.getMessage() for r in caplog.records)
+    # The run still proceeds, pairing the pinned model with the nous default.
+    assert flat_args[flat_args.index("--model") + 1] == "glm-5.2"
+    assert flat_args[flat_args.index("--provider") + 1] == "nous"
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_silent_when_provider_set(monkeypatch, caplog):
+    """PI_PROVIDER=zai opts back into the zai provider: no warning, provider honored."""
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert not any("z.ai-hosted GLM" in r.getMessage() for r in caplog.records)
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+
+
+@pytest.mark.asyncio
+async def test_glm_pin_warning_fires_once_across_executes(monkeypatch, caplog):
+    """The migration warning is once-guarded, not re-logged per phase or retry."""
+    monkeypatch.delenv("PI_PROVIDER", raising=False)
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend(model="glm-5.2")
+    with caplog.at_level("WARNING"):
+        await _run_and_capture_args(backend)
+        await _run_and_capture_args(backend)
+
+    glm_warnings = [r for r in caplog.records if "z.ai-hosted GLM" in r.getMessage()]
+    assert len(glm_warnings) == 1
+
+
+@pytest.mark.asyncio
+async def test_zai_provider_with_fallback_model_warns(tmp_path, monkeypatch, caplog):
+    """PI_PROVIDER=zai with no configured model pairs the old provider with the new fallback model and warns."""
+    monkeypatch.setenv("PI_PROVIDER", "zai")
+    monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "pi-agent"))
+    monkeypatch.setattr("daydream.backends.pi._warned_migration_mismatches", set())
+
+    backend = PiBackend()
+    with caplog.at_level("WARNING"):
+        flat_args, _ = await _run_and_capture_args(backend)
+
+    assert any("no configured model" in r.getMessage() for r in caplog.records)
+    # The stale pairing is still passed through (warn-and-continue).
+    assert flat_args[flat_args.index("--provider") + 1] == "zai"
+    assert flat_args[flat_args.index("--model") + 1] == "deepseek/deepseek-v4-flash-0731"
+
+
+# ---------------------------------------------------------------------------
 # Real-path through runner.run: real PiBackend, only the pi subprocess mocked
 # ---------------------------------------------------------------------------
 
