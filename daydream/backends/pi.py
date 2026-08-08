@@ -291,7 +291,18 @@ def _is_retryable_error_message(message: str) -> bool:
     """
     lower = message.lower()
     # Unambiguous literals — plain substring is safe.
-    if any(token in lower for token in ("429", "rate limit", "rate_limit", "too many requests")):
+    if any(
+        token in lower
+        for token in (
+            "429",
+            "503",
+            "service unavailable",
+            "server error",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+        )
+    ):
         return True
     if re.search(r"\bnot\s+overloaded\b|\bcapacity\s+planning\b", lower):
         return False
@@ -330,6 +341,8 @@ def _pi_error_category(message: str) -> str:
         for token in ("429", "rate limit", "rate_limit", "too many requests")
     ):
         return "RATE_LIMIT"
+    if any(token in lower for token in ("503", "service unavailable", "server error")):
+        return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
     if any(signature in lower for signature in STREAM_DROP_SIGNATURES):

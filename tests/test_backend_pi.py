@@ -1193,6 +1193,8 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ("message", "expected"),
     [
         ("429 Too Many Requests", "RATE_LIMIT"),
+        ("503 status code (no body)", "SERVER_ERROR"),
+        ("service unavailable", "SERVER_ERROR"),
         ("request timed out after 30 seconds", "TIMEOUT"),
         ("socket hang up", "STREAM_DROP"),
         ("Pi CLI exited with return code 1", "PROCESS_EXIT"),
@@ -1201,6 +1203,8 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ],
     ids=[
         "rate-limit",
+        "server-error-503",
+        "server-error-service-unavailable",
         "timeout",
         "stream-drop",
         "process-exit",
@@ -1224,6 +1228,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ("message", "expected"),
     [
         ("429 Too Many Requests", True),
+        ("503 status code (no body)", True),
+        ("503 Service Unavailable", True),
         ("Service is currently overloaded", True),
         ("rate limit exceeded", True),
         ("rate_limit hit", True),
@@ -1247,6 +1253,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ],
     ids=[
         "429",
+        "503-status-code",
+        "503-service-unavailable",
         "overload",
         "rate-limit-space",
         "rate_limit-underscore",
