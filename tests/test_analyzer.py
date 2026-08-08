@@ -18,6 +18,7 @@ import pytest
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import (
     _files_read,
+    _tokenize_command,
     analyze_costs,
     analyze_coverage,
     analyze_grounding,
@@ -301,6 +302,26 @@ def test_files_read_claude_read_and_grep_unchanged():
     paths = _files_read(calls)
 
     assert paths == {"/repo/api.py", "src/"}
+
+
+# --- unbalanced-quote tokenization (issue #327) ---
+
+
+# Only a quote opened and never closed makes shlex raise; the two other
+# former candidates had balanced/escaped quotes and tokenize cleanly.
+
+
+def test_tokenize_command_never_raises_on_unbalanced_quotes() -> None:
+    # must not raise
+    tokens = _tokenize_command("rg -l '\"unclosed")
+    assert isinstance(tokens, list)
+
+
+def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
+    # the unclosed quote makes shlex raise mid-token; the whitespace-split
+    # fallback still surfaces the ``a.py`` operand preceding it
+    paths = _shell_reads("rg -n 'pat' a.py '\"unclosed")
+    assert "a.py" in paths
 
 
 def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):

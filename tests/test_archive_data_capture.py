@@ -174,6 +174,69 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert "# daydream recommended change" not in diff_text
 
 
+async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    """A shell command ``shlex`` cannot tokenize must not lose the archive's
+    evaluation.json (issue #327).
+
+    The offending call contributes no read paths while sibling calls in the
+    same trajectory are still analyzed; the eval completes (archive never
+    blocks) and the run keeps non-null manifest eval metrics.
+    """
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    stub.fix_edit_line = "# daydream recommended change\n"
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    session_id = run_dir.name
+
+    # Inject an unbalanced-quote shell command into the SOURCE trajectory (the
+    # tree analyze_session reads) and re-run the production archive eval seam
+    # against it. Drop the stale evaluation.json from the clean run first so
+    # the assertions below observe the eval of the INJECTED trajectory.
+    source_traj = multi_stack_target / ".daydream" / "runs" / session_id / "trajectory.json"
+    traj = json.loads(source_traj.read_text())
+    traj["steps"].append(
+        {
+            "step_id": len(traj["steps"]) + 1,
+            "extra": {"daydream_phase": "deep"},
+            "tool_calls": [
+                {"function_name": "shell", "arguments": {"command": "rg -l '\"unclosed"}},
+                {"function_name": "shell", "arguments": {"command": "cat api.py"}},
+            ],
+        }
+    )
+    source_traj.write_text(json.dumps(traj))
+
+    eval_path = run_dir / "evaluation.json"
+    eval_path.unlink(missing_ok=True)
+
+    from daydream.archive import _run_eval
+
+    result = _run_eval(multi_stack_target, session_id, run_dir)
+    assert result is not None
+    assert eval_path.is_file()
+
+    # Coverage degrades gracefully for the offending call only: the clean
+    # sibling call still contributes its read, so api.py stays covered.
+    evaluation = json.loads(eval_path.read_text())
+    assert evaluation["coverage"]["files_read_by_reviewers"] >= 1
+    assert "api.py" not in evaluation["coverage"]["uncovered_files"]
+
+    # The archive as a whole keeps non-null eval metrics.
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    metrics = manifest["metrics"]
+    assert metrics["grounding_rate"] is not None
+    assert metrics["total_findings"] is not None
+    assert metrics["coverage_ratio"] is not None
+    assert metrics["cost_per_finding_usd"] is not None
+
+
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path
 ) -> None:

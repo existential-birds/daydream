@@ -15,6 +15,7 @@ Exports:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -24,6 +25,8 @@ from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest
 from daydream.config import REVIEW_OUTPUT_FILE
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -326,6 +329,10 @@ def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any
         eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
     except Exception:  # noqa: BLE001 - eval failure should not block archive
+        logger.exception(
+            "eval analysis failed for session %s; archive missing evaluation.json",
+            session_id,
+        )
         from daydream.ui import create_console, print_warning
 
         print_warning(
