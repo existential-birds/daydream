@@ -18,6 +18,7 @@ import pytest
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.eval.analyzer import (
     _files_read,
+    _tokenize_command,
     analyze_costs,
     analyze_coverage,
     analyze_grounding,
@@ -301,6 +302,29 @@ def test_files_read_claude_read_and_grep_unchanged():
     paths = _files_read(calls)
 
     assert paths == {"/repo/api.py", "src/"}
+
+
+# --- unbalanced-quote tokenization (issue #327) ---
+
+
+_UNBALANCED_QUOTE_COMMANDS = [
+    "rg -l '\"unclosed",
+    "BASE=$(for ref in main origin/master master origin/master; do git rev-parse --verify \"$ref\" ...)",
+    "printf \\'\\\"\\'base=%s... x",
+]
+
+
+@pytest.mark.parametrize("command", _UNBALANCED_QUOTE_COMMANDS)
+def test_tokenize_command_never_raises_on_unbalanced_quotes(command: str) -> None:
+    # must not raise
+    tokens = _tokenize_command(command)
+    assert isinstance(tokens, list)
+
+
+def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
+    # a command whose first segment is clean but later segment is unparseable
+    paths = _shell_reads("cat README.md; printf \\'\\\"\\'base=%s... x")
+    assert "README.md" in paths
 
 
 def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path):
