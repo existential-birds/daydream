@@ -8,6 +8,33 @@ import pytest
 from daydream.archive import hub
 
 
+class _RepoInfo:
+    """Minimal stand-in for huggingface_hub's ``RepoInfo`` (visibility only)."""
+
+    def __init__(self, private: bool) -> None:
+        self.private = private
+
+
+class _BaseFakeApi:
+    """Fake ``HfApi`` defaults shared by upload tests: a private target repo."""
+
+    def create_repo(self, repo_id: str, **kw) -> None:
+        pass
+
+    def repo_info(self, repo_id: str, *, repo_type: str) -> _RepoInfo:
+        return _RepoInfo(private=True)
+
+
+@pytest.fixture
+def hf_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A populated run-bundle dir with ``HF_TOKEN`` set (shared upload scaffold)."""
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    run_dir = tmp_path / "runs" / "session-123"
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
+    return run_dir
+
+
 def test_resolve_hub_repo_precedence_cli_over_env_over_file(monkeypatch: pytest.MonkeyPatch) -> None:
     from daydream.config_file import DaydreamFileConfig
     from daydream.runner import RunConfig
@@ -43,14 +70,9 @@ def test_resolve_hub_repo_empty_strings_treated_as_unset(monkeypatch: pytest.Mon
 
 
 def test_upload_run_bundle_creates_private_repo_and_uploads(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "session-123"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
-
     calls: dict = {}
 
     class FakeApi:
@@ -60,126 +82,129 @@ def test_upload_run_bundle_creates_private_repo_and_uploads(
         def create_repo(self, repo_id: str, *, repo_type: str, private: bool, exist_ok: bool) -> None:
             calls["create_repo"] = (repo_id, repo_type, private, exist_ok)
 
+        def repo_info(self, repo_id: str, *, repo_type: str) -> _RepoInfo:
+            calls["repo_info"] = (repo_id, repo_type)
+            return _RepoInfo(private=True)
+
         def upload_folder(
             self, *, folder_path: str, repo_id: str, repo_type: str, path_in_repo: str, commit_message: str
         ) -> None:
             calls["upload_folder"] = (folder_path, repo_id, repo_type, path_in_repo, commit_message)
 
     monkeypatch.setattr(hub, "HfApi", FakeApi)
-    assert hub.upload_run_bundle(run_dir, "acme/dd-trajectories", "session-123") is True
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd-trajectories", "session-123") is True
     assert calls["create_repo"] == ("acme/dd-trajectories", "dataset", True, True)
-    assert calls["upload_folder"][:4] == (str(run_dir), "acme/dd-trajectories", "dataset", "session-123")
+    assert calls["repo_info"] == ("acme/dd-trajectories", "dataset")
+    assert calls["upload_folder"][:4] == (str(hf_run_dir), "acme/dd-trajectories", "dataset", "session-123")
 
 
-def test_upload_run_bundle_skips_without_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upload_run_bundle_warns_on_existing_public_repo(
+    hf_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: dict = {}
+
+    class PublicRepoApi(_BaseFakeApi):
+        def create_repo(self, repo_id: str, **kw) -> None:
+            calls["create_repo"] = True
+
+        def repo_info(self, repo_id: str, *, repo_type: str) -> _RepoInfo:
+            calls["repo_info"] = (repo_id, repo_type)
+            return _RepoInfo(private=False)
+
+        def upload_folder(self, **kw) -> None:
+            calls["upload_folder"] = True
+
+    monkeypatch.setattr(hub, "HfApi", PublicRepoApi)
+    # A pre-existing public repo is reused with its current visibility (documented
+    # behavior) — the operator is warned, but the upload still proceeds.
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s") is True
+    assert calls["repo_info"] == ("acme/dd", "dataset")
+    assert calls.get("upload_folder") is True
+
+
+def test_upload_run_bundle_skips_without_token(
+    hf_run_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
-    run_dir = tmp_path / "runs" / "s"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(hub, "HfApi", _BoomApi)  # would raise if instantiated
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s") is False
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s") is False
 
 
 def test_upload_run_bundle_hfapi_instantiation_failure(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "s3"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(hub, "HfApi", _BoomApi)  # HfApi() raises
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s3") is False
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s3") is False
 
 
 def test_upload_run_bundle_create_repo_failure(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "s4"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
-
-    class CreateRepoBoomApi:
+    class CreateRepoBoomApi(_BaseFakeApi):
         def create_repo(self, repo_id: str, **kw) -> None:
             raise RuntimeError("401 Unauthorized: invalid token")
 
     monkeypatch.setattr(hub, "HfApi", CreateRepoBoomApi)
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s4") is False
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s4") is False
 
 
 def test_upload_run_bundle_non_conflict_upload_error(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "s5"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
-
     attempts: list[int] = []
 
-    class NonConflictApi:
-        def create_repo(self, repo_id: str, **kw) -> None:
-            pass
-
+    class NonConflictApi(_BaseFakeApi):
         def upload_folder(self, **kw) -> None:
             attempts.append(1)
             raise RuntimeError("some unrelated error")
 
     monkeypatch.setattr(hub, "HfApi", NonConflictApi)
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s5") is False
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s5") is False
     assert len(attempts) == 1
 
 
 def test_upload_run_bundle_retry_exhaustion(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "s6"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
-
     attempts: list[int] = []
+    monkeypatch.setattr(hub, "_UPLOAD_RETRY_BASE_DELAY_S", 0.0)
 
-    class AlwaysConflictApi:
-        def create_repo(self, repo_id: str, **kw) -> None:
-            pass
-
+    class AlwaysConflictApi(_BaseFakeApi):
         def upload_folder(self, **kw) -> None:
             attempts.append(1)
             raise RuntimeError("Commit failed: concurrent update to refs/heads/main")
 
     monkeypatch.setattr(hub, "HfApi", AlwaysConflictApi)
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s6") is False
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s6") is False
     assert len(attempts) == 3
 
 
 def test_upload_run_bundle_retries_commit_conflict(
-    tmp_path: Path,
+    hf_run_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
-    run_dir = tmp_path / "runs" / "s2"
-    run_dir.mkdir(parents=True)
-    (run_dir / "trajectory.json").write_text("{}", encoding="utf-8")
-
     attempts: list[int] = []
+    delays: list[float] = []
+    monkeypatch.setattr(hub, "_UPLOAD_RETRY_BASE_DELAY_S", 0.01)
+    monkeypatch.setattr(hub.time, "sleep", lambda seconds: delays.append(seconds))
 
-    class ConflictApi:
-        def create_repo(self, repo_id: str, **kw) -> None:
-            pass
-
+    class ConflictApi(_BaseFakeApi):
         def upload_folder(self, **kw) -> None:
             attempts.append(1)
             if len(attempts) < 3:
                 raise RuntimeError("Commit failed: concurrent update to refs/heads/main")
 
     monkeypatch.setattr(hub, "HfApi", ConflictApi)
-    assert hub.upload_run_bundle(run_dir, "acme/dd", "s2") is True
+    assert hub.upload_run_bundle(hf_run_dir, "acme/dd", "s2") is True
     assert len(attempts) == 3
+    # Exponential backoff between the three attempts: 0.01s then 0.02s.
+    assert delays == [0.01, 0.02]
 
 
 class _BoomApi:
