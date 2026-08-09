@@ -6114,6 +6114,47 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
 
 
+async def test_cleanup_keeps_report_on_findings_out_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
+    """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``.
+
+    A ``--findings-out`` run stops with exit 0 (``_step_findings_out``) after
+    ``load-items`` has rendered the report, so the success-path cleanup guard
+    would delete the very report the run was asked to emit unless the
+    ``findings_out is None`` clause excludes it. This test pins that clause:
+    the run must exit 0, write the findings artifact, and still leave
+    ``.review-output.md`` in place despite ``cleanup=True``.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _silence_gate_noise(monkeypatch)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _post_forbidden(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        raise AssertionError("--findings-out must not post to the PR")
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+
+    out = multi_stack_target / "findings.json"
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+
+    rc = await run(
+        make_config(multi_stack_target, pr_number=7, findings_out=str(out), cleanup=True)
+    )
+
+    assert rc == 0
+    assert out.exists(), "--findings-out must still write the findings artifact"
+    assert report.exists(), (
+        "--findings-out --cleanup must keep .review-output.md: the run exits 0 but "
+        "was asked to emit the report, so cleanup must not delete it"
+    )
+
+
 async def test_test_verdict_artifact_written_on_passing_suite(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

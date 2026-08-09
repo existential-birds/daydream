@@ -135,6 +135,14 @@ not bump the version.
   retarget: shallow/comment/review run the `deep` flow (replacing the per-stack
   prompt, or inserting a step anchored to a `deep` step name), and the feedback
   prefix is a mode of `deep`, not a separately registered flow.
+  Also removed in this series: the `cleanup` step name is gone from the `deep`
+  flow inventory — terminal `.review-output.md` cleanup now runs as a
+  success-path helper invoked by the review spine after `run_flow` returns
+  (gated on a zero exit, the loop/shallow/review/comment modes, and no
+  `--findings-out`), not as a registered step (#335). Forks that did
+  `r.remove("deep", "cleanup")` or
+  `insert_after("deep", anchor="cleanup", ...)` must retarget — `cleanup` is
+  no longer a step name (the step table below reflects the reduced inventory).
 - **Version 4** — **hard-breaking**. The `alternatives` step is removed from
   the `deep` flow: the TTT alternative-review (wonder) now runs concurrently
   with the per-stack fan-out inside the `per-stack-reviews` step, so on a fresh
