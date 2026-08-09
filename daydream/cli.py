@@ -765,6 +765,16 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--approve-on-clean",
+        action="store_true",
+        default=False,
+        dest="approve_on_clean",
+        help="Approve the PR when a deep review has zero high/medium findings "
+             "(issue #343): post event: 'APPROVE' instead of 'COMMENT'. Also "
+             "settable via [tool.daydream] approve_on_clean in a config file."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--copy",
         action="append",
         default=[],
@@ -1001,6 +1011,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         shallow=args.shallow,
         flow_name=args.flow_name,
         precision_mode=args.precision,
+        approve_on_clean=args.approve_on_clean,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,
@@ -1485,6 +1496,16 @@ def _build_post_findings_parser() -> argparse.ArgumentParser:
         help="Bot login (App slug) for prior-finding author filtering. "
         "Defaults to $DAYDREAM_BOT_HANDLE.",
     )
+    parser.add_argument(
+        "--approve-on-clean",
+        action="store_true",
+        default=False,
+        dest="approve_on_clean",
+        help="Approve the PR when the posted findings contain no high/medium "
+        "severity issues (issue #343): post event: 'APPROVE' instead of "
+        "'COMMENT'. Also settable via [tool.daydream] approve_on_clean in a "
+        "repo config file.",
+    )
     return parser
 
 
@@ -1508,6 +1529,7 @@ def _handle_post_findings_command(argv: list[str]) -> int:
     if "/" not in args.repo:
         parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
 
+    approve = args.approve_on_clean or bool(load_file_config(Path.cwd()).approve_on_clean)
     return pr_review.post_findings_from_artifact(
         args.artifact,
         pr_number=args.pr_number,
@@ -1515,6 +1537,7 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         repo=args.repo,
         console=create_console(),
         bot_login=args.bot_login,
+        approve_on_clean=approve,
     )
 
 

@@ -120,6 +120,19 @@ def test_precision_mode_non_bool_degrades_to_none(tmp_path: Path) -> None:
     assert cfg.precision_mode is None
 
 
+def test_approve_on_clean_true_parses_as_bool(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text("approve_on_clean = true\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.approve_on_clean is True
+
+
+def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
+    # bool-only coercion: a truthy int is NOT enabled, it degrades to None (unset).
+    (tmp_path / ".daydream.toml").write_text("approve_on_clean = 1\n")
+    cfg = load_file_config(tmp_path)
+    assert cfg.approve_on_clean is None
+
+
 def test_uncovered_sweep_toggle_is_bool_only(tmp_path: Path) -> None:
     """``uncovered_sweep`` is bool-only: an accidental int degrades to unset."""
     (tmp_path / ".daydream.toml").write_text("uncovered_sweep = false\n")

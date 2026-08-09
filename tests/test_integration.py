@@ -488,7 +488,7 @@ async def test_run_comment_full_flow(tmp_path, monkeypatch, make_config):
     posted: list[dict[str, Any]] = []
     posted_posts: list[bool] = []
 
-    async def fake_post(target_dir, merged_items_path, *, console, post):
+    async def fake_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)
 

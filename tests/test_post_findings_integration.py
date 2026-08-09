@@ -43,7 +43,8 @@ def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:
     return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", "h" * 40, "--repo", "o/r"]
 
 
-def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str) -> dict:
+def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str,
+             severity: str = "high") -> dict:
     return {
         "fingerprint": fingerprint,
         "path": path,
@@ -51,7 +52,7 @@ def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, t
         "placement": placement,
         "title": title,
         "body": "Body text",
-        "severity": "high",
+        "severity": severity,
         "confidence": "HIGH",
         "is_cross_stack": False,
     }
@@ -184,3 +185,31 @@ def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
     code = cli_main(_forged_marker_argv(artifact))  # env supplies the login
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
+
+
+def test_post_findings_approve_when_clean_and_flag(fake_gh, tmp_path) -> None:
+    """low-severity-only artifact + --approve-on-clean -> review event APPROVE."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "APPROVE"
+    assert "no high/medium findings" in posts[0].payload["body"]
+
+
+def test_post_findings_keeps_comment_when_high_finding(fake_gh, tmp_path) -> None:
+    """high-severity finding + --approve-on-clean -> event stays COMMENT."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Real finding"),  # default severity="high"
+    ])
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in posts[0].payload["body"]

@@ -167,6 +167,15 @@ class RunConfig:
             (precedence CLI > file > default, mirroring
             ``shallow_fanout_threshold``; resolved by ``_precision_mode``), so the
             suppression pass never runs and arbiter output is byte-identical.
+        approve_on_clean: Opt-in approval of clean deep reviews (issue #343). When
+            True, a deep review with zero high/medium findings posts
+            ``event: "APPROVE"`` (with a prepended approval line) instead of the
+            default ``event: "COMMENT"``, satisfying a repo's
+            ``required_approving_review_count`` without a human. ``False`` falls
+            through to ``file_config.approve_on_clean`` then the built-in default
+            ``False`` (precedence CLI > file > default, mirroring
+            ``precision_mode``; resolved by ``_approve_on_clean``), so the posted
+            event stays COMMENT unless a repo explicitly opts in.
         flow_name: Name of a registered flow to dispatch (``--flow``); built-in
             names route to their dedicated helper, other registered names to the
             generic custom-flow runner.
@@ -251,6 +260,13 @@ class RunConfig:
     # cannot confirm (fail-closed). Default False => byte-identical behavior; the
     # suppression predicate is never called and arbiter output is unchanged.
     precision_mode: bool = False
+    # Issue #343: opt-in approval of clean deep reviews. When True, a deep review
+    # with zero high/medium findings posts event: "APPROVE" (prepended approval
+    # line) instead of event: "COMMENT", satisfying a repo's
+    # required_approving_review_count without a human. Default False =>
+    # byte-identical behavior; the posted event stays COMMENT unless a repo
+    # explicitly opts in.
+    approve_on_clean: bool = False
     flow_name: str | None = None
     improve_effort: str = "standard"
     improve_focus: str | None = None

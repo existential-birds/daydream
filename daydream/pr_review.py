@@ -157,6 +157,7 @@ async def post_review_to_pr_from_report(
     *,
     console: Console,
     post: bool = False,
+    approve_on_clean: bool = False,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -166,6 +167,9 @@ async def post_review_to_pr_from_report(
     findings, which live under ``## Structural Review``.
 
     ``post=True`` bypasses the interactive confirm gate (comment mode, #330).
+
+    ``approve_on_clean=True`` (issue #343) opts into posting
+    ``event: "APPROVE"`` when the review has zero high/medium findings.
 
     Returns:
         A :class:`PostStatus` describing the outcome so the caller can decide
@@ -179,7 +183,9 @@ async def post_review_to_pr_from_report(
     if not issues:
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
-    return await _post(target_dir, issues, console=console, post=post)
+    return await _post(
+        target_dir, issues, console=console, post=post, approve_on_clean=approve_on_clean
+    )
 
 
 # --- Parsers ---------------------------------------------------------------
@@ -916,6 +922,7 @@ def build_payload(
     classified: _ClassifiedIssues,
     *,
     run_info_override: str | None = None,
+    approve_on_clean: bool = False,
 ) -> dict[str, Any]:
     """Assemble the review payload for `POST /repos/.../pulls/<n>/reviews`.
 
@@ -931,10 +938,21 @@ def build_payload(
             the live recorder block (``post-findings`` posts from artifact
             data; there is no recorder in that process). ``None`` renders the
             live block as usual.
+        approve_on_clean: Opt-in approval (issue #343). When True AND the
+            classified review has zero high/medium severity findings, the
+            payload's event becomes ``"APPROVE"`` with a prepended approval
+            line; otherwise the event stays ``"COMMENT"`` and the body is
+            byte-identical to the non-approve path.
     """
     all_issues_with_inline_meta = classified.all_issues()
 
+    clean = approve_on_clean and not any(
+        issue.severity in ("high", "medium") for issue in all_issues_with_inline_meta
+    )
+
     body_chunks: list[str] = []
+    if clean:
+        body_chunks.insert(0, "✅ **Deep review passed with no high/medium findings.**")
     body_chunks.append("**Code Review Summary**")
 
     body_section = _format_body_section(classified.body_only)
@@ -978,7 +996,7 @@ def build_payload(
 
     payload: dict[str, Any] = {
         "commit_id": pr.head_sha,
-        "event": "COMMENT",
+        "event": "APPROVE" if clean else "COMMENT",
         "body": "\n\n".join(body_chunks),
         "comments": classified.inline,
     }
@@ -994,6 +1012,7 @@ async def _post(
     *,
     console: Console,
     post: bool = False,
+    approve_on_clean: bool = False,
 ) -> PostStatus:
     pr = find_open_pr(target_dir)
     if pr is None:
@@ -1040,7 +1059,7 @@ async def _post(
             f"{len(failed)} file-level comment(s) failed to post; folded into the review body.",
         )
 
-    payload = build_payload(pr, classified)
+    payload = build_payload(pr, classified, approve_on_clean=approve_on_clean)
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         # ``error_msg`` carries the GitError text from git_ops, which includes
@@ -1126,6 +1145,7 @@ def post_findings_from_artifact(
     repo: str,
     console: Console,
     bot_login: str | None = None,
+    approve_on_clean: bool = False,
 ) -> int:
     """Post a Phase A findings artifact to the PR (the Phase B privileged poster).
 
@@ -1147,6 +1167,9 @@ def post_findings_from_artifact(
             if still unresolved, dedup degrades safely (GraphQL is still
             protected by ``viewerDidAuthor``; REST dedup is unavailable) and
             a warning is printed. Never suppresses on an unresolved login.
+        approve_on_clean: Opt-in approval (issue #343). When True AND the new
+            findings contain no high/medium severity issues, the review is
+            posted with ``event: "APPROVE"``; otherwise ``event: "COMMENT"``.
 
     Returns:
         ``0`` on success (including "no new findings"); ``1`` when the
@@ -1234,7 +1257,9 @@ def post_findings_from_artifact(
             f"{len(failed_files)} file-level comment(s) failed to post; folded into the review body.",
         )
 
-    payload = build_payload(pr, classified, run_info_override=artifact.run_info)
+    payload = build_payload(
+        pr, classified, run_info_override=artifact.run_info, approve_on_clean=approve_on_clean
+    )
     review_url, error_msg = _submit_review(target_dir, pr, payload)
     if review_url is None:
         suffix = f" ({error_msg})" if error_msg else ""
