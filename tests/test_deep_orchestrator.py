@@ -4092,8 +4092,16 @@ async def test_cleanup_none_interactive_prompts_before_keeping(
     assert report.exists(), "declining the cleanup prompt must keep .review-output.md"
 
 
-async def test_cleanup_true_removes_review_output_when_gate_declines(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+@pytest.mark.parametrize(
+    ("cleanup", "expected_exists"), [(True, False), (False, True)]
+)
+async def test_cleanup_gate_declines_honors_cleanup_flag(
+    cleanup: bool,
+    expected_exists: bool,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
 ) -> None:
     """#335 real-path: ``--cleanup`` is honored even when the fix gate declines.
 
@@ -4101,7 +4109,8 @@ async def test_cleanup_true_removes_review_output_when_gate_declines(
     ``_step_fix_gate``), which short-circuits the flow before the old terminal
     step. Cleanup is tied to the run's exit code, not its position in the
     flow, so an interactive ``--cleanup`` run that declines the fix gate still
-    removes ``.review-output.md`` by the time the run returns 0.
+    removes ``.review-output.md`` (and ``--no-cleanup`` keeps it) by the time
+    the run returns 0.
     """
     from daydream.config import REVIEW_OUTPUT_FILE
     from daydream.runner import run
@@ -4119,32 +4128,15 @@ async def test_cleanup_true_removes_review_output_when_gate_declines(
     monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
 
     report = multi_stack_target / REVIEW_OUTPUT_FILE
-    exit_code = await run(make_config(multi_stack_target, cleanup=True, non_interactive=False))
-
-    assert exit_code == 0
-    assert not report.exists(), (
-        "cleanup=True must remove .review-output.md even when the fix gate declines"
+    exit_code = await run(
+        make_config(multi_stack_target, cleanup=cleanup, non_interactive=False)
     )
 
-
-async def test_cleanup_false_retains_review_output_when_gate_declines(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
-) -> None:
-    """#335 real-path: ``--no-cleanup`` keeps the report on a declined fix gate."""
-    from daydream.config import REVIEW_OUTPUT_FILE
-    from daydream.runner import run
-
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    mute_side_effects()
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
-    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
-
-    report = multi_stack_target / REVIEW_OUTPUT_FILE
-    exit_code = await run(make_config(multi_stack_target, cleanup=False, non_interactive=False))
-
     assert exit_code == 0
-    assert report.exists(), "cleanup=False must keep .review-output.md when the fix gate declines"
+    assert report.exists() is expected_exists, (
+        f"cleanup={cleanup} must {'remove' if expected_exists is False else 'keep'} "
+        ".review-output.md when the fix gate declines"
+    )
 
 
 async def test_cleanup_skips_on_failure_keeps_evidence(

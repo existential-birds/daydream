@@ -3316,12 +3316,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.
         #
-        # Terminal cleanup (#330) is tied to a SUCCESSFUL outcome, not to a
-        # position in STEPS: an early `Stop(0)` (e.g. the fix gate declining) is
-        # a successful end of review mode and still honors `--cleanup`, while a
-        # non-zero (failure) exit returns before the guard so evidence survives
-        # (#335).
+        # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
         exit_code = await run_flow(ctx.registry, "deep", ctx)
-        if exit_code == 0 and _cleanup_applies(ctx):
+        if exit_code == 0 and _cleanup_applies(ctx) and ctx.config.findings_out is None:
             await _perform_cleanup(ctx)
         return exit_code
