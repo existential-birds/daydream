@@ -563,13 +563,21 @@ def _render_index(
 
 
 def _index_row(entry: PlanIndexEntry) -> str:
-    """Render one durable entry as an execution-order row."""
+    """Render one durable entry as an execution-order row.
+
+    A re-anchored entry names a plan file that lives inside a ``*-reanchor``
+    worktree, not as a sibling of this index, so its plan cell is the bare
+    number (the landing path is carried in the Status cell instead).
+    """
     filename = entry.path
-    plan_cell = (
-        f"[{entry.number:03d}]({filename})"
-        if filename is not None
-        else f"{entry.number:03d}"
-    )
+    if entry.status.startswith("REANCHORED"):
+        plan_cell = f"{entry.number:03d}"
+    else:
+        plan_cell = (
+            f"[{entry.number:03d}]({filename})"
+            if filename is not None
+            else f"{entry.number:03d}"
+        )
     return (
         f"| {plan_cell} <!-- fingerprint:{entry.fingerprint} --> | "
         f"{markdown_cell(entry.title)} | {markdown_cell(entry.priority)} | "
@@ -1037,6 +1045,24 @@ class PlanWriteSession:
             self._write_index_files(
                 plans_dir,
                 [entries[index] for index in sorted(entries)],
+            )
+            landed_rel = (
+                (worktree / "daydream_plans" / filename)
+                .relative_to(self._repo)
+                .as_posix()
+            )
+            self._entries[number] = PlanIndexEntry(
+                number=number,
+                slug=slug,
+                title=_index_field(selection.get("title") or title),
+                fingerprint=reservation.fingerprint,
+                priority=plan_priority(finding),
+                effort=_index_field(finding.get("effort")),
+                risk=_index_field(finding.get("risk")),
+                category=_index_field(finding.get("category")),
+                planned_at=new_head,
+                status=f"REANCHORED (landed at {landed_rel})",
+                host_blocked=False,
             )
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
             return _reanchor_failed()

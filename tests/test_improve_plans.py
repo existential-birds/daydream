@@ -1563,6 +1563,23 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
         (entry["number"], entry["slug"], entry["planned_at"], entry["status"])
         for entry in sidecar["plans"]
     ] == [(1, "batch-catalog-queries", new_head, "TODO")]
+    # main repo durable surface now lists the re-anchored plan
+    main_index = (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
+    assert "REANCHORED" in main_index
+    assert (
+        reanchor_plans.relative_to(repo).as_posix() + "/001-batch-catalog-queries.md"
+        in main_index
+    )
+    main_sidecar = json.loads(
+        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    reanchored = [e for e in main_sidecar["plans"] if e["number"] == 1]
+    assert len(reanchored) == 1
+    assert reanchored[0]["status"].startswith("REANCHORED")
+    assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
+    # the README row must NOT mislink a main-dir sibling (file lives in the worktree)
+    assert "](001-batch-catalog-queries.md)" not in main_index
+    assert "REANCHORED" in main_index
 
 
 def test_planned_at_still_matching_head_writes_in_place(
