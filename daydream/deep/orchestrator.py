@@ -2685,16 +2685,17 @@ async def _step_commit(ctx: FlowContext) -> None:
     await phase_commit_push(ctx.backend_for("fix"), ctx.work)
 
 
-async def _step_cleanup(ctx: FlowContext) -> None:
+async def _perform_cleanup(ctx: FlowContext) -> None:
     """Terminal cleanup: remove the review output when enabled (#330).
 
     Restores the shallow ``commit-gate`` semantics the single-flow collapse
     dropped: ``--cleanup`` removes ``.review-output.md`` after a successful
     run, ``--no-cleanup`` keeps it, and an unspecified flag falls back to the
     old preamble gate (``--yes`` cleans up, unattended runs keep the artifact
-    via ``safe_default=False``, interactive runs prompt). This is the LAST
-    step, so every failure path (``Stop(1)`` short-circuits) skips it — a
-    failed or partial run keeps its evidence.
+    via ``safe_default=False``, interactive runs prompt). Not a flow step: it
+    is invoked by ``_run_review_spine`` on any successful exit, so an early
+    ``Stop(0)`` (e.g. a declined fix gate) still honors ``--cleanup`` while
+    every failure path (a non-zero exit) skips it to keep evidence.
     """
     config = ctx.config
     target_dir = ctx.work.repo
@@ -2941,7 +2942,7 @@ def _spine_findings_out(ctx: FlowContext) -> bool:
 #     per-stack reviews -> per-stack parse + dedup -> uncovered-file sweep (#309)
 #     -> arbiter -> cross-stack merge (or the tiny-diff single-stack bypass) ->
 #     supervise -> findings-out stop / post-review -> fix gate -> verify -> fix ->
-#     test -> commit -> cleanup.
+#     test -> commit.
 #
 # ``register_builtins`` registers :data:`STEPS` and the ``deep`` flow
 # definition; ``run_deep`` keeps the preamble and delegates here via
@@ -2952,6 +2953,12 @@ def _spine_findings_out(ctx: FlowContext) -> bool:
 # feedback mode runs only the prefix (the review spine is gated off and
 # ``respond-feedback`` ends the flow), and review/comment modes stop after
 # ``post-review`` (the fix cycle is gated off).
+#
+# Terminal cleanup (#330) is NOT a step: it is a success-path helper invoked by
+# ``_run_review_spine`` after ``run_flow`` returns. Tying it to the run's exit
+# code (rather than the end of this tuple) means an early successful ``Stop(0)``
+# -- the fix gate declining -- still honors ``--cleanup``, while any non-zero
+# (failure) exit skips it to keep evidence (#335).
 STEPS: tuple[FlowStep, ...] = (
     # Feedback-mode prefix (was the ``pr-feedback`` flow): runs first and
     # ``respond-feedback`` ends the flow, so the review spine below never runs.
@@ -2988,10 +2995,6 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),
-    # Terminal cleanup (#330): the last step, so it only runs on successful
-    # completion. Review modes fall off the end after post-review; loop/shallow
-    # reach it after commit; feedback mode never writes the report.
-    FlowStep(name="cleanup", run=_step_cleanup, enabled=_cleanup_applies),
 )
 
 
@@ -3312,4 +3315,13 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # on an exact head+diff+tier+depth match and rewrites on a miss, and
         # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
         # subsequent --start-at resumes can find the artifacts they need.
-        return await run_flow(ctx.registry, "deep", ctx)
+        #
+        # Terminal cleanup (#330) is tied to a SUCCESSFUL outcome, not to a
+        # position in STEPS: an early `Stop(0)` (e.g. the fix gate declining) is
+        # a successful end of review mode and still honors `--cleanup`, while a
+        # non-zero (failure) exit returns before the guard so evidence survives
+        # (#335).
+        exit_code = await run_flow(ctx.registry, "deep", ctx)
+        if exit_code == 0 and _cleanup_applies(ctx):
+            await _perform_cleanup(ctx)
+        return exit_code
