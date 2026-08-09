@@ -114,6 +114,10 @@ class DaydreamFileConfig:
         improve_service_roots: Repository-relative glob patterns identifying
             service roots for the improve flow.
         improve_service_groups: Named groups of repository-relative service roots.
+        trajectory_hub_repo: Opt-in HuggingFace dataset repo id that each run's
+            archive bundle is uploaded to. ``None`` (the default when the key is
+            absent or junk) leaves the feature off; only a string value is
+            honored -- any non-string degrades to unset.
     """
 
     model: str | None = None
@@ -142,6 +146,7 @@ class DaydreamFileConfig:
     improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
     improve_partition_max_files: int | None = None
     improve_max_partition_groups: int | None = None
+    trajectory_hub_repo: str | None = None
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -362,6 +367,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # an accidental ``approve_on_clean = 1`` is treated as unset, not enabled.
     raw_approve = merged.get("approve_on_clean")
     approve_on_clean: bool | None = raw_approve if isinstance(raw_approve, bool) else None
+    # trajectory_hub_repo: string only. Any non-str value (int/bool/list)
+    # degrades to None (feature off) rather than crashing the loader or coercing.
+    raw_hub_repo = merged.get("trajectory_hub_repo")
+    trajectory_hub_repo: str | None = raw_hub_repo if isinstance(raw_hub_repo, str) else None
     # uncovered_sweep: bool only, same degrade-to-None rule as precision_mode so
     # an accidental ``uncovered_sweep = 1`` is treated as unset, not enabled.
     raw_uncovered_sweep = merged.get("uncovered_sweep")
@@ -412,4 +421,5 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         },
         improve_partition_max_files=_coerce_positive_int(improve, "partition_max_files"),
         improve_max_partition_groups=_coerce_positive_int(improve, "max_partition_groups"),
+        trajectory_hub_repo=trajectory_hub_repo,
     )

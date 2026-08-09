@@ -133,6 +133,21 @@ def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
     assert cfg.approve_on_clean is None
 
 
+def test_trajectory_hub_repo_parses_as_string(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream]\ntrajectory_hub_repo = "existential-birds/daydream-trajectories"\n',
+        encoding="utf-8",
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.trajectory_hub_repo == "existential-birds/daydream-trajectories"
+
+
+def test_trajectory_hub_repo_non_string_degrades_to_none(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.daydream]\ntrajectory_hub_repo = 42\n", encoding="utf-8")
+    cfg = load_file_config(tmp_path)
+    assert cfg.trajectory_hub_repo is None
+
+
 def test_uncovered_sweep_toggle_is_bool_only(tmp_path: Path) -> None:
     """``uncovered_sweep`` is bool-only: an accidental int degrades to unset."""
     (tmp_path / ".daydream.toml").write_text("uncovered_sweep = false\n")

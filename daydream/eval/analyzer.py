@@ -205,11 +205,20 @@ def _tokenize_command(command: str) -> list[str]:
     ``shlex`` preserves quoted operands as single tokens (``'my file.py'``
     stays intact) while punctuation mode keeps ``&&``/``;``/``&`` as distinct
     separator tokens even without surrounding whitespace.
+
+    Malformed tool-call data (unbalanced quotes) must never crash the
+    eval/archive pipeline; on ``ValueError`` we fall back to a whitespace
+    split so recoverable path operands still surface, except recoverable
+    operands adjacent to a separator, which the whitespace split glues to
+    the separator and are lost (issue #327).
     """
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&")
     lexer.whitespace_split = True
     lexer.commenters = ""
-    return list(lexer)
+    try:
+        return list(lexer)
+    except ValueError:
+        return command.split()
 
 
 def _rg_option_info(tok: str) -> tuple[int, bool]:

@@ -15,6 +15,7 @@ Exports:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -24,6 +25,8 @@ from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
 from daydream.archive.manifest import build_manifest
 from daydream.config import REVIEW_OUTPUT_FILE
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
@@ -57,6 +60,7 @@ def archive_run(
     status: str = "complete",
     run_eval: bool = True,
     work: WorkContext | None = None,
+    upload: bool = True,
 ) -> None:
     """Copy artifact bundle to archive and index in SQLite.
 
@@ -75,6 +79,9 @@ def archive_run(
             workspace snapshot instead of re-deriving them (which can fail
             when the default-branch probe or merge-base computation fails
             at archive time).
+        upload: Whether to run the opt-in HF bundle upload. Disabled for
+            signal-flush (partial) archives so a blocking network call never
+            runs inside the SIGINT/SIGTERM handler path.
     """
     try:
         _archive_run_inner(
@@ -84,6 +91,7 @@ def archive_run(
             status=status,
             run_eval=run_eval,
             work=work,
+            upload=upload,
         )
     except Exception:  # noqa: BLE001 - archive failure must never affect the run
         # Import lazily to avoid circular imports at module level
@@ -103,6 +111,7 @@ def _archive_run_inner(
     status: str,
     run_eval: bool,
     work: WorkContext | None = None,
+    upload: bool = True,
 ) -> None:
     """Core archive logic, not exception-wrapped."""
     archive_dir = get_archive_dir()
@@ -165,6 +174,19 @@ def _archive_run_inner(
 
     # 5. Index in SQLite
     upsert_run(archive_dir, manifest)
+
+    # 5b. Opt-in HuggingFace dataset repo upload of the complete bundle. Fires
+    #     only when centralized archiving is enabled AND this is not a
+    #     signal-flush (partial) archive — a blocking network upload (create_repo
+    #     + upload_folder, retries) must never run inside the SIGINT/SIGTERM
+    #     handler path. The uploader is internally non-fatal (never raises), and
+    #     the surrounding archive try/except is a second net.
+    from daydream.archive import hub
+
+    if config.archive and upload:
+        hub_repo_id = hub.resolve_hub_repo(config)
+        if hub_repo_id:
+            hub.upload_run_bundle(run_dir, hub_repo_id, recorder.session_id)
 
     # 6. Optionally copy the fully-assembled bundle to a user-specified directory
     #    (``--dump-artifacts``) so CI can upload it. Copied wholesale from run_dir
@@ -326,6 +348,10 @@ def _run_eval(target_dir: Path, session_id: str, run_dir: Path) -> dict[str, Any
         eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
         return result
     except Exception:  # noqa: BLE001 - eval failure should not block archive
+        logger.exception(
+            "eval analysis failed for session %s; archive missing evaluation.json",
+            session_id,
+        )
         from daydream.ui import create_console, print_warning
 
         print_warning(

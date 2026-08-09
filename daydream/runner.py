@@ -146,6 +146,11 @@ class RunConfig:
             (trajectory, review-output, deep artifacts, diffs, findings, manifest,
             evaluation) so CI can upload it. Opt-in via ``--dump-artifacts`` because
             the logs may contain sensitive data. Default None.
+        trajectory_hub_repo: HuggingFace dataset repo id (``owner/repo``) that each
+            run's archive bundle is uploaded to, keyed by session id. Opt-in via
+            ``--trajectory-hub-repo`` / ``DAYDREAM_TRAJECTORY_HUB_REPO`` /
+            ``trajectory_hub_repo`` file config; requires ``HF_TOKEN``. Default None
+            (feature off).
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
@@ -243,6 +248,7 @@ class RunConfig:
     output_mode: OutputMode = "loop"
     findings_out: str | None = None
     dump_artifacts: str | None = None
+    trajectory_hub_repo: str | None = None
     force_worktree: bool = False
     shallow: bool = False
     extra_copy: list[Path] = field(default_factory=list)
@@ -327,6 +333,7 @@ def _make_archive_callback(
             status=status,
             run_eval=config.run_eval,
             work=work,
+            upload=status != "partial",
         )
 
     return _cb
