@@ -1614,6 +1614,24 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(
     assert len(later["skipped"]) == 1
 
 
+def test_stale_reanchor_worktrees_are_pruned_at_next_run(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """The start of a plan run prunes stale *-reanchor worktrees from prior runs."""
+    stale_dir = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(stale_dir), "HEAD")
+    (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
+
+    from daydream.improve.plans import prune_stale_reanchor_worktrees
+
+    removed = prune_stale_reanchor_worktrees(repo)
+
+    assert removed == 1
+    assert not stale_dir.exists()
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
 def test_planned_at_still_matching_head_writes_in_place(
     repo: Path,
     head_sha: str,

@@ -500,6 +500,26 @@ def planned_fingerprints(plans_dir: Path) -> set[str]:
     }
 
 
+def prune_stale_reanchor_worktrees(repo: Path) -> int:
+    """Remove leftover ``*-reanchor`` worktrees from prior plan runs.
+
+    Repeated head-drift runs accumulate detached worktrees under
+    ``.daydream/worktrees/<run_id>-reanchor``; each new plan run prunes them so
+    the directory does not grow unboundedly. Individual failures are tolerated
+    so one stale worktree never blocks a plan run.
+    """
+    removed = 0
+    for path in (repo / ".daydream" / "worktrees").glob("*-reanchor"):
+        if not path.is_dir():
+            continue
+        try:
+            git_ops.worktree_remove(repo, path, force=True)
+        except git_ops.GitError:
+            continue
+        removed += 1
+    return removed
+
+
 def _highest_plan_number(
     plans_dir: Path, entries: Iterable[PlanIndexEntry]
 ) -> int:

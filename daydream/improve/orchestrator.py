@@ -59,6 +59,7 @@ from daydream.improve.plans import (
     _attempt_diagnostic,
     load_rejections,
     plan_slug,
+    prune_stale_reanchor_worktrees,
     record_plan_write_diagnostics,
     record_rejections,
 )
@@ -1531,6 +1532,7 @@ def _description_finding(description: str) -> dict[str, Any]:
 
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
+    prune_stale_reanchor_worktrees(ctx.work.repo)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]
