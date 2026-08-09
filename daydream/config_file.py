@@ -45,6 +45,10 @@ class DaydreamFileConfig:
         precision_mode: Opt-in precision suppression (issue #232). ``None`` falls
             through to the RunConfig field / orchestrator default; ``True`` runs
             the skeptical suppression pass over borderline findings.
+        approve_on_clean: Opt-in approval of clean deep reviews (issue #343).
+            ``None`` falls through to the RunConfig field / orchestrator default;
+            ``True`` posts ``event: "APPROVE"`` when a deep review has zero
+            high/medium findings. Explicit opt-in: never coerced from a non-bool.
         group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
             (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
             wall-clock of all fix ``run_agent`` turns targeting one file group so
@@ -123,6 +127,7 @@ class DaydreamFileConfig:
     bench: dict[str, Any] = field(default_factory=dict)
     shallow_fanout_threshold: int | None = None
     precision_mode: bool | None = None
+    approve_on_clean: bool | None = None
     group_max_wall_s: float | None = None
     group_max_serial_items: int | None = None
     uncovered_sweep: bool | None = None
@@ -358,6 +363,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     # so an accidental ``precision_mode = 1`` is treated as unset, not enabled.
     raw_precision = merged.get("precision_mode")
     precision: bool | None = raw_precision if isinstance(raw_precision, bool) else None
+    # approve_on_clean: bool only, same degrade-to-None rule as precision_mode so
+    # an accidental ``approve_on_clean = 1`` is treated as unset, not enabled.
+    raw_approve = merged.get("approve_on_clean")
+    approve_on_clean: bool | None = raw_approve if isinstance(raw_approve, bool) else None
     # trajectory_hub_repo: string only. Any non-str value (int/bool/list)
     # degrades to None (feature off) rather than crashing the loader or coercing.
     raw_hub_repo = merged.get("trajectory_hub_repo")
@@ -390,6 +399,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         bench=dict(merged["bench"]) if isinstance(merged.get("bench"), dict) else {},
         shallow_fanout_threshold=threshold,
         precision_mode=precision,
+        approve_on_clean=approve_on_clean,
         group_max_wall_s=_coerce_float(merged.get("group_max_wall_s")),
         group_max_serial_items=_coerce_int(merged.get("group_max_serial_items")),
         uncovered_sweep=uncovered_sweep,

@@ -334,6 +334,206 @@ def test_build_payload_shape(
     assert body.rstrip().endswith("</sub>")
 
 
+def test_build_payload_approves_when_clean_and_enabled(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """approve_on_clean=True + zero high/medium findings -> event APPROVE."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="low",
+            )
+        ],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="LOW",
+                severity="low",
+            )
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "APPROVE"
+    assert "no high/medium findings" in payload["body"]
+    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
+    assert payload["commit_id"] == pr.head_sha
+    # Approval prefix added; rest of body format intact.
+    assert "**Code Review Summary**" in payload["body"]
+    # The approval line is first, before the summary header.
+    assert payload["body"].index("no high/medium findings") < payload["body"].index(
+        "**Code Review Summary**"
+    )
+
+
+def test_build_payload_keeps_comment_when_high_finding(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """approve_on_clean=True but a high-severity finding -> event COMMENT."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="HIGH",
+                severity="high",
+            )
+        ],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="HIGH",
+                severity="high",
+            )
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in payload["body"]
+
+
+def test_build_payload_keeps_comment_when_medium_finding(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """approve_on_clean=True but a medium-severity finding -> event COMMENT."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        body_only=[
+            ParsedIssue(
+                path="b.py",
+                line=None,
+                title="File note",
+                body="desc",
+                confidence="MEDIUM",
+                severity="medium",
+            )
+        ],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="MEDIUM",
+                severity="medium",
+            )
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in payload["body"]
+
+
+def test_build_payload_none_severity_does_not_crash_on_approve_check(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A None-severity issue must not crash the clean computation."""
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[
+            ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "APPROVE"
+
+
+@pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
+def test_build_payload_keeps_comment_when_off_vocabulary_severity(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, off_vocabulary_severity: str
+) -> None:
+    """F1: approve_on_clean=True but an off-vocabulary severity -> event COMMENT.
+
+    The findings schema permits any string, so 'critical'/'blocker' must block
+    the approval (fail-closed) just like 'high'/'medium'.
+    """
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="HIGH",
+                severity=off_vocabulary_severity,
+            )
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in payload["body"]
+
+
+def test_non_blocking_severities_fail_closed() -> None:
+    """F1: any severity outside _NON_BLOCKING_SEVERITIES blocks; low and None do not."""
+    assert pr_review._NON_BLOCKING_SEVERITIES == frozenset({"low"})
+    for off_vocabulary in (
+        "high",
+        "medium",
+        "critical",
+        "blocker",
+        "major",
+        "warning",
+        "info",
+        "INFO",
+        " High ",
+    ):
+        assert pr_review._severity_blocks_approval(off_vocabulary) is True
+    assert pr_review._severity_blocks_approval("low") is False
+    assert pr_review._severity_blocks_approval("LOW") is False
+    assert pr_review._severity_blocks_approval(None) is False
+
+
 def test_find_open_pr_returns_none_on_empty_list(
     monkeypatch: pytest.MonkeyPatch, git_repo: Path
 ) -> None:
@@ -471,6 +671,55 @@ async def test_post_succeeds_and_prints_url(
     assert captured["payload"]["commit_id"] == pr.head_sha
     assert captured["payload"]["event"] == "COMMENT"
     assert successes and "pullrequestreview" in successes[0]
+    assert status == pr_review.PostStatus.POSTED
+
+
+@pytest.mark.asyncio
+async def test_post_payload_approves_when_clean_and_enabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo
+) -> None:
+    """_post with approve_on_clean=True + clean classified -> APPROVE payload."""
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda _td: pr)
+    monkeypatch.setattr(
+        pr_review,
+        "classify",
+        lambda *_a, **_k: pr_review._ClassifiedIssues(
+            inline=[{"path": "a.py", "line": 1, "side": "RIGHT", "body": "x"}],
+            inline_issues=[
+                ParsedIssue(
+                    path="a.py",
+                    line=1,
+                    title="t",
+                    body="b",
+                    confidence="LOW",
+                    severity="low",
+                )
+            ],
+        ),
+    )
+    monkeypatch.setattr(pr_review, "resolve_or_prompt", lambda **_k: True)
+    captured: dict[str, Any] = {}
+
+    def fake_submit(
+        _td: Path, _pr: PRInfo, payload: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        captured["payload"] = payload
+        return "https://github.com/acme/widgets/pull/42#pullrequestreview-1", None
+
+    monkeypatch.setattr(pr_review, "_submit_review", fake_submit)
+    monkeypatch.setattr(pr_review, "print_success", lambda *_a, **_k: None)
+    monkeypatch.setattr(pr_review, "print_info", lambda *_a, **_k: None)
+
+    status = await pr_review._post(
+        tmp_path,
+        [ParsedIssue(path="a.py", line=1, title="t", body="b", severity="low")],
+        console=_FakeConsole(),  # type: ignore[arg-type]
+        approve_on_clean=True,
+    )
+    assert captured["payload"]["event"] == "APPROVE"
+    assert "no high/medium findings" in captured["payload"]["body"]
+    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
+    assert captured["payload"]["commit_id"] == pr.head_sha
     assert status == pr_review.PostStatus.POSTED
 
 

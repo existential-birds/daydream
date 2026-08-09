@@ -154,7 +154,7 @@ async def test_post_review_uses_published_items_path(
     posted_paths: list[Path] = []
     monkeypatch.setattr(
         "daydream.pr_review.post_review_to_pr_from_report",
-        lambda repo, path, *, console, post: _record_path(posted_paths, path),
+        lambda repo, path, *, console, post, approve_on_clean=False: _record_path(posted_paths, path),
     )
 
     await _step_post_review(ctx)
@@ -503,7 +503,10 @@ async def test_fork_disables_arbiter_in_deep(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any, post: bool = False) -> None:
+    async def _no_post(
+        target_dir: Path, report_path: Path, *, console: Any, post: bool = False,
+        approve_on_clean: bool = False,
+    ) -> None:
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -792,7 +795,10 @@ async def test_custom_phase_full_stack(
     _silence(monkeypatch)
 
     # The PR post runs before the fix gate; stub the non-idempotent GitHub write.
-    async def _no_post(target_dir: Path, report_path: Path, *, console: Any, post: bool = False) -> None:
+    async def _no_post(
+        target_dir: Path, report_path: Path, *, console: Any, post: bool = False,
+        approve_on_clean: bool = False,
+    ) -> None:
         return None
 
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
@@ -818,7 +824,10 @@ async def test_flow_deep_routes_to_deep_helper(
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
 
-    async def _no_post(target_dir: Path, report_path: Path, *, console, post: bool = False) -> None:
+    async def _no_post(
+        target_dir: Path, report_path: Path, *, console, post: bool = False,
+        approve_on_clean: bool = False,
+    ) -> None:
         return None
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
 

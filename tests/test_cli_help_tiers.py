@@ -13,6 +13,7 @@ def test_default_help_hides_advanced(capsys):
     assert "--comment" in out and "--start-at" not in out and "--ignore-path" not in out
     assert "--findings-out" not in out and "--pr-number" not in out
     assert "--precision" not in out  # #232: opt-in precision mode is an advanced flag
+    assert "--approve-on-clean" not in out  # #343: opt-in auto-approval is an advanced flag
 
 
 def test_help_all_shows_advanced(capsys):
@@ -22,6 +23,7 @@ def test_help_all_shows_advanced(capsys):
     assert "--start-at" in out
     assert "--findings-out" in out and "--pr-number" in out
     assert "--precision" in out  # #232: reachable from --help-all
+    assert "--approve-on-clean" in out  # #343: reachable from --help-all
 
 
 def test_advanced_flags_still_parse():

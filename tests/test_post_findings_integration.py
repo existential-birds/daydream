@@ -43,7 +43,8 @@ def _post_argv(artifact: Path, *, pr: int = 7) -> list[str]:
     return ["post-findings", str(artifact), "--pr", str(pr), "--head-sha", "h" * 40, "--repo", "o/r"]
 
 
-def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str) -> dict:
+def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, title: str,
+             severity: str = "high") -> dict:
     return {
         "fingerprint": fingerprint,
         "path": path,
@@ -51,7 +52,7 @@ def _finding(fingerprint: str, *, path: str, line: int | None, placement: str, t
         "placement": placement,
         "title": title,
         "body": "Body text",
-        "severity": "high",
+        "severity": severity,
         "confidence": "HIGH",
         "is_cross_stack": False,
     }
@@ -138,6 +139,21 @@ def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
     assert rc == 1 and fake_gh.calls("POST") == []
 
 
+def test_malformed_repo_config_warns_and_still_posts(fake_gh, tmp_path, monkeypatch) -> None:
+    """A malformed .daydream.toml in the checkout must not abort the unattended post.
+
+    post-findings never consulted the repo config before issue #343; the new
+    approve-on-clean lookup is best-effort, so a malformed TOML degrades to a
+    warning plus the CLI flag instead of a Fatal Error (exit 1).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    code = cli_main(_forged_marker_argv(artifact))
+    assert code == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
 def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
     """``post-findings`` argv for a single-finding artifact, plus extra flags."""
     return ["post-findings", str(artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r", *extra]
@@ -184,3 +200,93 @@ def test_bot_login_env_fallback(monkeypatch, fake_gh, tmp_path) -> None:
     code = cli_main(_forged_marker_argv(artifact))  # env supplies the login
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
+
+
+def test_post_findings_approve_when_clean_and_flag(fake_gh, tmp_path) -> None:
+    """low-severity-only artifact + --approve-on-clean -> review event APPROVE."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "APPROVE"
+    assert "no high/medium findings" in posts[0].payload["body"]
+
+
+def test_post_findings_keeps_comment_when_high_finding(fake_gh, tmp_path) -> None:
+    """high-severity finding + --approve-on-clean -> event stays COMMENT."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Real finding"),  # default severity="high"
+    ])
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in posts[0].payload["body"]
+
+
+def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh, tmp_path) -> None:
+    """F2: an all-matched clean artifact + --approve-on-clean still posts APPROVE.
+
+    The post-findings spine previously returned 0 on its unconditional empty
+    guard, so a re-run with nothing new to comment on never posted the
+    approval and ``required_approving_review_count`` stayed unsatisfied — the
+    headline two-phase CI use case.
+    """
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "APPROVE"
+    assert "no high/medium findings" in posts[0].payload["body"]
+
+
+def test_post_findings_all_matched_no_approve_without_flag(fake_gh, tmp_path) -> None:
+    """F2: without --approve-on-clean the same all-matched artifact posts nothing."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
+    assert code == 0
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+
+
+def test_post_findings_matched_high_blocks_approval(fake_gh, tmp_path) -> None:
+    """F2b: a still-live matched high finding blocks APPROVE.
+
+    The approval decision must count the severities of already-posted
+    (matched) findings, not just the new ones: a re-run whose only NEW
+    finding is low must not post APPROVE over the bot's own open high finding
+    on the PR.
+    """
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Old high finding"),
+        _finding("b" * 64, path="b.py", line=5, placement="inline",
+                 title="New nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in posts[0].payload["body"]

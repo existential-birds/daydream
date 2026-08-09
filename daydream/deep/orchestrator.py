@@ -268,6 +268,22 @@ def _precision_mode(config: RunConfig) -> bool:
     return False
 
 
+def _approve_on_clean(config: RunConfig) -> bool:
+    """Resolve the approve-on-clean opt-in (issue #343).
+
+    Precedence mirrors ``_precision_mode``: 1) ``RunConfig.approve_on_clean``
+    (CLI tier), 2) ``DaydreamFileConfig.approve_on_clean`` (file-config
+    scalar), 3) built-in default ``False`` (byte-identical behavior: the
+    event stays COMMENT unless a repo explicitly opts in).
+    """
+    if config.approve_on_clean:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.approve_on_clean:
+        return True
+    return False
+
+
 def _supervisor_mode(config: RunConfig) -> str:
     """Resolve the file-config-only findings supervisor mode."""
     file_config = config.file_config
@@ -1912,7 +1928,11 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
 
     items_file: Path = ctx.data["items_file"]
     outcome = await post_review_to_pr_from_report(
-        ctx.work.repo, items_file, console=console, post=_mode_of(ctx) == "comment"
+        ctx.work.repo,
+        items_file,
+        console=console,
+        post=_mode_of(ctx) == "comment",
+        approve_on_clean=_approve_on_clean(ctx.config),
     )
     if _mode_of(ctx) == "comment" and outcome in (PostStatus.NO_PR, PostStatus.FAILED):
         return Stop(1)
