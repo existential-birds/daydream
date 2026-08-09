@@ -2891,6 +2891,18 @@ def _cleanup_applies(ctx: FlowContext) -> bool:
     return _mode_of(ctx) in ("loop", "shallow", "review", "comment")
 
 
+def _cleanup_should_run(ctx: FlowContext, exit_code: int) -> bool:
+    """Whether terminal cleanup runs after a deep flow — success-path only.
+
+    A zero exit is a successful completion (an early ``Stop(0)``, e.g. a
+    declined fix gate, still honors ``--cleanup``); any non-zero (failure)
+    exit skips cleanup so evidence survives (#335). ``--findings-out`` runs
+    stop with exit 0 but must keep the rendered report the run was asked to
+    produce, so they are excluded (``findings_out is None``).
+    """
+    return exit_code == 0 and _cleanup_applies(ctx) and ctx.config.findings_out is None
+
+
 def _spine_enabled(ctx: FlowContext) -> bool:
     """The review spine is skipped entirely in feedback mode."""
     return not _feedback_mode(ctx)
@@ -3318,6 +3330,6 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         #
         # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
         exit_code = await run_flow(ctx.registry, "deep", ctx)
-        if exit_code == 0 and _cleanup_applies(ctx) and ctx.config.findings_out is None:
+        if _cleanup_should_run(ctx, exit_code):
             await _perform_cleanup(ctx)
         return exit_code
