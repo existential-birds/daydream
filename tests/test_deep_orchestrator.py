@@ -4474,6 +4474,15 @@ async def test_precision_on_keeps_low_finding_with_evidence(
 # poster actually sees -- not that a function was merely called.
 
 
+def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[bool]) -> None:
+    """Stub the PR-posting boundary, recording the ``approve_on_clean`` kwarg."""
+
+    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
+        received.append(approve_on_clean)
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+
+
 async def test_deep_flow_forwards_approve_on_clean(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4483,11 +4492,7 @@ async def test_deep_flow_forwards_approve_on_clean(
     _install_model_capturing_stubs(monkeypatch, multi_stack_target)
 
     received: list[bool] = []
-
-    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
-        received.append(approve_on_clean)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+    _install_post_recorder(monkeypatch, received)
 
     exit_code = await _run_deep(multi_stack_target, approve_on_clean=True)
     assert exit_code == 0
@@ -4505,11 +4510,7 @@ async def test_deep_flow_approve_on_clean_defaults_off(
     _install_model_capturing_stubs(monkeypatch, multi_stack_target)
 
     received: list[bool] = []
-
-    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
-        received.append(approve_on_clean)
-
-    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+    _install_post_recorder(monkeypatch, received)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
