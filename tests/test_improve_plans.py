@@ -1582,6 +1582,38 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     assert "REANCHORED" in main_index
 
 
+def test_reanchored_finding_is_not_replanned_on_a_later_run(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """A plan re-anchored at a moved HEAD is durably fingerprinted, so a later
+    run in the same repo does not re-plan the same finding (no duplicate number).
+    """
+    assembled = _assembled(repo)
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "README.md")
+    new_head = commit(repo, "advance head after plan fan-out")
+
+    first = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=head_sha,
+    )
+    assert len(first["written"]) == 1  # re-anchored as written
+
+    # a later run in the same repo (HEAD now == new_head) must skip the same finding
+    later = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=new_head,
+    )
+    assert later["written"] == []
+    assert len(later["skipped"]) == 1
+
+
 def test_planned_at_still_matching_head_writes_in_place(
     repo: Path,
     head_sha: str,
