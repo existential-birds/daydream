@@ -278,7 +278,7 @@ per-run folder keyed by session id:
 [tool.daydream]
 trajectory_hub_repo = "existential-birds/daydream-trajectories"
 
-# or env var (sprite deployments: one line in the bootstrap profile)
+# or env var (remote/hosted deployments: one line in the bootstrap profile)
 export DAYDREAM_TRAJECTORY_HUB_REPO="existential-birds/daydream-trajectories"
 ```
 

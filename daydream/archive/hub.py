@@ -69,8 +69,8 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
     ``HF_TOKEN`` is absent. A pre-existing repo is reused with its current
     visibility (documented behavior), but a public one triggers a warning
     before the upload proceeds. Retries the upload commit up to 3 total
-    attempts on a commit-conflict shape (concurrent commits), backing off
-    exponentially between attempts.
+    attempts on a commit-conflict shape (concurrent commits from parallel
+    processes), backing off exponentially between attempts.
 
     Returns:
         True on success, False when skipped or failed.

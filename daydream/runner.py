@@ -317,6 +317,7 @@ def _make_archive_callback(
             status=status,
             run_eval=config.run_eval,
             work=work,
+            upload=status != "partial",
         )
 
     return _cb

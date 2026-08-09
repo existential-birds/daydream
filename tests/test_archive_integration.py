@@ -267,3 +267,97 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
         pass
 
     assert calls == []
+
+
+# Signal-flush (partial) archives must never trigger the blocking HF upload
+async def test_archive_callback_partial_status_skips_hf_upload(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial (signal-flush) archive never uploads; a complete one does."""
+    from daydream.runner import RunConfig, _make_archive_callback
+    from tests.harness.trajectory import make_recorder
+    from tests.test_archive_integration import _add_user_step
+
+    uploaded: list[tuple] = []
+
+    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
+        uploaded.append((str(run_dir), repo_id, session_id))
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+
+    config = RunConfig(
+        trajectory_hub_repo="acme/dd-trajectories",
+        archive=True,
+        run_eval=False,
+        dump_artifacts=None,
+    )
+    cb = _make_archive_callback(config, target_dir)
+    assert cb is not None
+
+    recorder = make_recorder(tmp_path, on_write=cb)
+    _add_user_step(recorder)
+
+    # Signal flush fires on_write("partial") synchronously; the blocking HF
+    # upload must be skipped so Ctrl-C/Ctrl-\ shutdown never hangs on a network call.
+    recorder.write_partial()
+    assert uploaded == []
+
+    # Normal completion fires on_write("complete"); the upload must run.
+    async with recorder:
+        pass
+
+    assert len(uploaded) == 1
+    assert uploaded[0][1] == "acme/dd-trajectories"
+    assert uploaded[0][2] == recorder.session_id
+
+
+# --no-archive + --dump-artifacts: bundle still dumped, upload never fires
+async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--no-archive with --dump-artifacts still copies the bundle to the dump dir but never uploads."""
+    from daydream.runner import RunConfig, _make_archive_callback
+    from tests.harness.trajectory import make_recorder
+    from tests.test_archive_integration import _add_user_step
+
+    uploaded: list = []
+
+    def _fake_upload(*args: object, **kwargs: object) -> bool:
+        uploaded.append(args)
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
+
+    dump_dir = tmp_path / "dump"
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+
+    config = RunConfig(
+        trajectory_hub_repo="acme/dd-trajectories",
+        archive=False,
+        run_eval=False,
+        dump_artifacts=str(dump_dir),
+    )
+    cb = _make_archive_callback(config, target_dir)
+    assert cb is not None
+
+    recorder = make_recorder(tmp_path, on_write=cb)
+    _add_user_step(recorder)
+    async with recorder:
+        pass
+
+    assert uploaded == []
+    # Existing --dump-artifacts behavior is preserved: the full bundle lands in
+    # the dump dir even though centralized archiving + the HF upload are off.
+    assert (dump_dir / "manifest.json").is_file()
+    assert (dump_dir / "review-output.md").is_file()
