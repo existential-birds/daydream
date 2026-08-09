@@ -236,6 +236,16 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--trajectory-hub-repo",
+        default=None,
+        metavar="REPO",
+        dest="trajectory_hub_repo",
+        help="Upload each run's archive bundle to this HuggingFace dataset repo "
+             "(owner/repo), one folder per run keyed by session id. Opt-in and "
+             "requires HF_TOKEN; creates the repo private if it does not exist."
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--backend", "-b",
         choices=["claude", "codex", "pi"],
         default=None,
@@ -620,6 +630,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         archive=not args.no_archive,
         run_eval=args.run_eval,
         dump_artifacts=args.dump_artifacts,
+        trajectory_hub_repo=args.trajectory_hub_repo,
         non_interactive=args.non_interactive,
         assume=args.assume,
         flow_name="improve",
@@ -997,6 +1008,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         output_mode=output_mode,  # type: ignore[arg-type]
         findings_out=args.findings_out,
         dump_artifacts=args.dump_artifacts,
+        trajectory_hub_repo=args.trajectory_hub_repo,
         force_worktree=args.force_worktree,
         shallow=args.shallow,
         flow_name=args.flow_name,
@@ -1053,6 +1065,7 @@ def _build_feedback_config(args: argparse.Namespace) -> RunConfig:
         assume=args.assume,
         log_mode=args.log_mode,
         dump_artifacts=args.dump_artifacts,
+        trajectory_hub_repo=args.trajectory_hub_repo,
     )
 
 
