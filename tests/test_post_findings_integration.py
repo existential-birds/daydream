@@ -228,3 +228,65 @@ def test_post_findings_keeps_comment_when_high_finding(fake_gh, tmp_path) -> Non
     assert len(posts) == 1
     assert posts[0].payload["event"] == "COMMENT"
     assert "no high/medium findings" not in posts[0].payload["body"]
+
+
+def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh, tmp_path) -> None:
+    """F2: an all-matched clean artifact + --approve-on-clean still posts APPROVE.
+
+    The post-findings spine previously returned 0 on its unconditional empty
+    guard, so a re-run with nothing new to comment on never posted the
+    approval and ``required_approving_review_count`` stayed unsatisfied — the
+    headline two-phase CI use case.
+    """
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "APPROVE"
+    assert "no high/medium findings" in posts[0].payload["body"]
+
+
+def test_post_findings_all_matched_no_approve_without_flag(fake_gh, tmp_path) -> None:
+    """F2: without --approve-on-clean the same all-matched artifact posts nothing."""
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
+    assert code == 0
+    assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
+
+
+def test_post_findings_matched_high_blocks_approval(fake_gh, tmp_path) -> None:
+    """F2b: a still-live matched high finding blocks APPROVE.
+
+    The approval decision must count the severities of already-posted
+    (matched) findings, not just the new ones: a re-run whose only NEW
+    finding is low must not post APPROVE over the bot's own open high finding
+    on the PR.
+    """
+    artifact = _write_artifact(tmp_path / "f.json", [
+        _finding("a" * 64, path="a.py", line=3, placement="inline",
+                 title="Old high finding"),
+        _finding("b" * 64, path="b.py", line=5, placement="inline",
+                 title="New nit", severity="low"),
+    ])
+    fake_gh.serve_prior_threads(
+        fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True
+    )
+    code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
+    assert code == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in posts[0].payload["body"]

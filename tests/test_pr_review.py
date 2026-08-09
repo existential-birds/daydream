@@ -371,6 +371,8 @@ def test_build_payload_approves_when_clean_and_enabled(
     payload = build_payload(pr, classified, approve_on_clean=True)
     assert payload["event"] == "APPROVE"
     assert "no high/medium findings" in payload["body"]
+    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
+    assert payload["commit_id"] == pr.head_sha
     # Approval prefix added; rest of body format intact.
     assert "**Code Review Summary**" in payload["body"]
     # The approval line is first, before the summary header.
@@ -476,6 +478,60 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(
 
     payload = build_payload(pr, classified, approve_on_clean=True)
     assert payload["event"] == "APPROVE"
+
+
+@pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
+def test_build_payload_keeps_comment_when_off_vocabulary_severity(
+    pr: PRInfo, monkeypatch: pytest.MonkeyPatch, off_vocabulary_severity: str
+) -> None:
+    """F1: approve_on_clean=True but an off-vocabulary severity -> event COMMENT.
+
+    The findings schema permits any string, so 'critical'/'blocker' must block
+    the approval (fail-closed) just like 'high'/'medium'.
+    """
+    classified = pr_review._ClassifiedIssues(
+        inline=[{"path": "a.py", "line": 10, "side": "RIGHT", "body": "x"}],
+        inline_issues=[
+            ParsedIssue(
+                path="a.py",
+                line=10,
+                title="t",
+                body="b",
+                confidence="HIGH",
+                severity=off_vocabulary_severity,
+            )
+        ],
+    )
+    fixture = (
+        Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+    )
+    monkeypatch.setattr(
+        pr_review, "_resolve_trajectory_paths", lambda _r: ([fixture], None)
+    )
+
+    payload = build_payload(pr, classified, approve_on_clean=True)
+    assert payload["event"] == "COMMENT"
+    assert "no high/medium findings" not in payload["body"]
+
+
+def test_non_blocking_severities_fail_closed() -> None:
+    """F1: any severity outside _NON_BLOCKING_SEVERITIES blocks; low and None do not."""
+    assert pr_review._NON_BLOCKING_SEVERITIES == frozenset({"low"})
+    for off_vocabulary in (
+        "high",
+        "medium",
+        "critical",
+        "blocker",
+        "major",
+        "warning",
+        "info",
+        "INFO",
+        " High ",
+    ):
+        assert pr_review._severity_blocks_approval(off_vocabulary) is True
+    assert pr_review._severity_blocks_approval("low") is False
+    assert pr_review._severity_blocks_approval("LOW") is False
+    assert pr_review._severity_blocks_approval(None) is False
 
 
 def test_find_open_pr_returns_none_on_empty_list(
@@ -662,6 +718,8 @@ async def test_post_payload_approves_when_clean_and_enabled(
     )
     assert captured["payload"]["event"] == "APPROVE"
     assert "no high/medium findings" in captured["payload"]["body"]
+    # F3: the reviewed SHA is pinned on every payload, APPROVE included.
+    assert captured["payload"]["commit_id"] == pr.head_sha
     assert status == pr_review.PostStatus.POSTED
 
 
