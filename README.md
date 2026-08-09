@@ -185,6 +185,7 @@ daydream --ignore-path vendor /path/to/project
 daydream --worktree /path/to/project          # force ephemeral worktree
 daydream --no-eval /path/to/project           # skip the deterministic evaluation analysis (on by default)
 daydream --no-archive /path/to/project        # skip run archival
+daydream --trajectory-hub-repo owner/repo /path/to/project  # upload each run's archive bundle to a private HF dataset repo
 daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
 ```
 
@@ -260,6 +261,26 @@ time and again at resolution time: a negative value would flag every unchanged
 file (a zero delta exceeds it) and a `NaN`/`inf` value would silently disable
 the metric, so any
 invalid value degrades to the named default.
+
+HuggingFace trajectory upload is opt-in across three tiers (highest first): the
+`--trajectory-hub-repo` CLI flag, the `DAYDREAM_TRAJECTORY_HUB_REPO` env var, and
+the `trajectory_hub_repo` file key. When unset, nothing leaves your machine.
+When set, every run's complete archive bundle
+(`~/.daydream/archive/runs/<session_id>/`) is uploaded to that dataset repo as a
+per-run folder keyed by session id:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `trajectory_hub_repo` | _(unset)_ | HuggingFace dataset repo id (`owner/repo`) to upload each run's archive bundle to. Requires `HF_TOKEN`; creates the repo **private** if it does not exist (never public). Missing token or any upload failure skips with a one-line warning — never fails the run. Requires `huggingface_hub` installed (`pip install huggingface-hub`); a non-string value is treated as unset. |
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+trajectory_hub_repo = "existential-birds/daydream-trajectories"
+
+# or env var (sprite deployments: one line in the bootstrap profile)
+export DAYDREAM_TRAJECTORY_HUB_REPO="existential-birds/daydream-trajectories"
+```
 
 The LLM supervisor uses one batched call. Configure its model under
 `[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).
