@@ -37,8 +37,12 @@ def resolve_hub_repo(config: RunConfig) -> str | None:
     env = os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO")
     if env:
         return env
-    if config.file_config is not None and config.file_config.trajectory_hub_repo:
-        return config.file_config.trajectory_hub_repo
+    # Deferred import breaks the module-level cycle: archive.hub -> runner -> (lazy) archive.
+    from daydream.runner import _file_config_or_empty  # noqa: PLC0415 - deferred import avoids cycle
+
+    file_config = _file_config_or_empty(config)
+    if file_config.trajectory_hub_repo:
+        return file_config.trajectory_hub_repo
     return None
 
 
@@ -75,8 +79,15 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
             )
             return False
 
-    api = HfApi()
-    api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True)
+    try:
+        api = HfApi()
+        api.create_repo(repo_id=repo_id, repo_type="dataset", private=True, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001 - absorb, the run must not fail
+        print_warning(
+            create_console(),
+            f"HF upload of {session_id} to {repo_id} failed (non-fatal): {exc}",
+        )
+        return False
 
     for attempt in range(1, 4):
         try:
@@ -97,5 +108,5 @@ def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
                 create_console(),
                 f"HF upload of {session_id} to {repo_id} failed (non-fatal): {message}",
             )
-            return False
+            break
     return False

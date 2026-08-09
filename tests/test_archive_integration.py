@@ -249,6 +249,7 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     from tests.test_archive_integration import _add_user_step
 
     calls: list = []
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
 
     def _fake_upload(*args: object, **kwargs: object) -> bool:
         calls.append(args)

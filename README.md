@@ -271,7 +271,7 @@ per-run folder keyed by session id:
 
 | Key | Default | Semantics |
 |-----|---------|-----------|
-| `trajectory_hub_repo` | _(unset)_ | HuggingFace dataset repo id (`owner/repo`) to upload each run's archive bundle to. Requires `HF_TOKEN`; creates the repo **private** if it does not exist (never public). Missing token or any upload failure skips with a one-line warning — never fails the run. Requires `huggingface_hub` installed (`pip install huggingface-hub`); a non-string value is treated as unset. |
+| `trajectory_hub_repo` | _(unset)_ | HuggingFace dataset repo id (`owner/repo`) to upload each run's archive bundle to. Requires `HF_TOKEN`; creates the repo **private** if it does not exist (a pre-existing repo with the same id is reused with its current visibility). Missing token or any upload failure skips with a one-line warning — never fails the run. Requires `huggingface_hub` installed (`pip install huggingface-hub`); a non-string value is treated as unset. |
 
 ```toml
 # pyproject.toml  →  [tool.daydream]
