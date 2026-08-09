@@ -135,6 +135,14 @@ not bump the version.
   retarget: shallow/comment/review run the `deep` flow (replacing the per-stack
   prompt, or inserting a step anchored to a `deep` step name), and the feedback
   prefix is a mode of `deep`, not a separately registered flow.
+  Also removed in this series: the `cleanup` step name is gone from the `deep`
+  flow inventory — terminal `.review-output.md` cleanup now runs as a
+  success-path helper invoked by the review spine after `run_flow` returns
+  (gated on a zero exit, the loop/shallow/review/comment modes, and no
+  `--findings-out`), not as a registered step (#335). Forks that did
+  `r.remove("deep", "cleanup")` or
+  `insert_after("deep", anchor="cleanup", ...)` must retarget — `cleanup` is
+  no longer a step name (the step table below reflects the reduced inventory).
 - **Version 4** — **hard-breaking**. The `alternatives` step is removed from
   the `deep` flow: the TTT alternative-review (wonder) now runs concurrently
   with the per-stack fan-out inside the `per-stack-reviews` step, so on a fresh
@@ -284,7 +292,6 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 20 | `fix` | `fix` |
 | 21 | `test` | `test` |
 | 22 | `commit` | `fix` |
-| 23 | `cleanup` | `cleanup` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble: `feedback` runs only the prefix (steps 1-5, ending at
@@ -293,11 +300,13 @@ preamble: `feedback` runs only the prefix (steps 1-5, ending at
 `comment`); `shallow` forces `single_stack_mode` (no arbiter / cross-stack
 merge); `loop` is the unchanged default fixing everything.
 
-`cleanup` (step 23) is the terminal step in every mode that writes the rendered
-report: it only runs on successful completion (any `Stop` short-circuits before
-it) and removes `.review-output.md` per `--cleanup` / `--no-cleanup` /
-interactive-or-unattended prompt defaults. It is gated off in `feedback` mode
-(no report is written there).
+`.review-output.md` cleanup is not a flow step; it runs in `_run_review_spine`
+after `run_flow` returns, tied to a successful outcome (`exit_code == 0`), the
+mode gate (loop/shallow/review/comment — never `feedback`, which writes no
+report), and `config.findings_out is None` (a `--findings-out` run keeps the
+rendered report the user asked it to produce). It is skipped entirely on any
+non-zero (failure) exit so evidence survives, and removes the report per
+`--cleanup` / `--no-cleanup` / interactive-or-unattended prompt defaults (#335).
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of

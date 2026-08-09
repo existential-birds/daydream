@@ -4092,6 +4092,93 @@ async def test_cleanup_none_interactive_prompts_before_keeping(
     assert report.exists(), "declining the cleanup prompt must keep .review-output.md"
 
 
+@pytest.mark.parametrize(
+    ("cleanup", "expected_exists"), [(True, False), (False, True)]
+)
+async def test_cleanup_gate_declines_honors_cleanup_flag(
+    cleanup: bool,
+    expected_exists: bool,
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#335 real-path: ``--cleanup`` is honored even when the fix gate declines.
+
+    A declined fix gate is a SUCCESSFUL end of review mode (``Stop(0)`` from
+    ``_step_fix_gate``), which short-circuits the flow before the old terminal
+    step. Cleanup is tied to the run's exit code, not its position in the
+    flow, so an interactive ``--cleanup`` run that declines the fix gate still
+    removes ``.review-output.md`` (and ``--no-cleanup`` keeps it) by the time
+    the run returns 0.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+    # Pin interactivity ON so the fix-gate prompt path runs (resolve_gate
+    # returns None when interactive with no assumption, then prompts).
+    _force_interactive(monkeypatch)
+
+    # Decline the apply-fixes gate: the fix-gate prompt is the one under
+    # observation (routed through daydream.agent.prompt_user).
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "n")
+    # Accept the intent gate so the review spine proceeds.
+    monkeypatch.setattr("daydream.phases.prompt_user", lambda *a, **kw: "y")
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(
+        make_config(multi_stack_target, cleanup=cleanup, non_interactive=False)
+    )
+
+    assert exit_code == 0
+    assert report.exists() is expected_exists, (
+        f"cleanup={cleanup} must {'remove' if expected_exists is False else 'keep'} "
+        ".review-output.md when the fix gate declines"
+    )
+
+
+async def test_cleanup_skips_on_failure_keeps_evidence(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """#335 real-path: a non-zero exit skips ``--cleanup`` so evidence survives.
+
+    Cleanup is tied to a SUCCESSFUL outcome (exit 0). A step that returns
+    ``Stop(1)`` from inside the flow must leave ``.review-output.md`` in place
+    even with ``--cleanup``. The merged report is rendered by ``load-items``
+    before the fix gate, so a failing fix gate is exactly the post-report
+    failure a user would want to keep as evidence.
+    """
+    import dataclasses
+
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.deep import orchestrator as deep_orchestrator
+    from daydream.extensions.api import Stop
+    from daydream.runner import run
+
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    mute_side_effects()
+
+    async def _fail_fix_gate(_ctx: object) -> Stop:
+        return Stop(1)
+
+    # build_registry() reads deep.STEPS fresh on every run(), so swapping the
+    # fix-gate step's body makes the real runner entry fail cleanly after the
+    # report is written, without touching the flow engine or any other step.
+    patched_steps = tuple(
+        dataclasses.replace(step, run=_fail_fix_gate) if step.name == "fix-gate" else step
+        for step in deep_orchestrator.STEPS
+    )
+    monkeypatch.setattr(deep_orchestrator, "STEPS", patched_steps)
+
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+    exit_code = await run(make_config(multi_stack_target, cleanup=True))
+
+    assert exit_code == 1
+    assert report.exists(), "a failed run must keep .review-output.md as evidence even with --cleanup"
+
+
 # Git timeout under load (issue #120)
 
 
@@ -6025,6 +6112,47 @@ async def test_deep_findings_out_emits_artifact_and_stops(
         assert (multi_stack_target / name).read_text() == source_before[name], f"{name} was modified -- a fix ran"
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
+
+
+async def test_cleanup_keeps_report_on_findings_out_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
+    """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``.
+
+    A ``--findings-out`` run stops with exit 0 (``_step_findings_out``) after
+    ``load-items`` has rendered the report, so the success-path cleanup guard
+    would delete the very report the run was asked to emit unless the
+    ``findings_out is None`` clause excludes it. This test pins that clause:
+    the run must exit 0, write the findings artifact, and still leave
+    ``.review-output.md`` in place despite ``cleanup=True``.
+    """
+    from daydream.config import REVIEW_OUTPUT_FILE
+    from daydream.runner import run
+
+    _silence_gate_noise(monkeypatch)
+    monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    async def _post_forbidden(target_dir: Path, report_path: Path, *, console: Any) -> None:
+        raise AssertionError("--findings-out must not post to the PR")
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
+
+    out = multi_stack_target / "findings.json"
+    report = multi_stack_target / REVIEW_OUTPUT_FILE
+
+    rc = await run(
+        make_config(multi_stack_target, pr_number=7, findings_out=str(out), cleanup=True)
+    )
+
+    assert rc == 0
+    assert out.exists(), "--findings-out must still write the findings artifact"
+    assert report.exists(), (
+        "--findings-out --cleanup must keep .review-output.md: the run exits 0 but "
+        "was asked to emit the report, so cleanup must not delete it"
+    )
 
 
 async def test_test_verdict_artifact_written_on_passing_suite(
