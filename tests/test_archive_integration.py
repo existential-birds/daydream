@@ -192,3 +192,70 @@ def test_cli_defaults_archive_and_eval(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _parse_args()
     assert config.archive is True
     assert config.run_eval is True
+
+
+# HF upload hook fires through the archive callback when configured
+async def test_archive_callback_uploads_to_hub_when_configured(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A configured trajectory_hub_repo makes _archive_run_inner call the uploader after manifest write."""
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    uploaded: list[tuple] = []
+    monkeypatch.setattr(
+        "daydream.archive.hub.upload_run_bundle",
+        lambda run_dir, repo_id, session_id: uploaded.append((str(run_dir), repo_id, session_id)) or True,
+    )
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n", encoding="utf-8")
+
+    config = RunConfig(
+        trajectory_hub_repo="acme/dd-trajectories",
+        archive=True,
+        run_eval=False,
+        dump_artifacts=None,
+    )
+    cb = _make_archive_callback(config, target_dir)
+    assert cb is not None
+
+    from tests.harness.trajectory import make_recorder
+    recorder = make_recorder(tmp_path, on_write=cb)
+    from tests.test_archive_integration import _add_user_step  # reuse the step helper
+    _add_user_step(recorder)
+    async with recorder:
+        pass
+
+    assert len(uploaded) == 1
+    repo_id, session = uploaded[0][1], uploaded[0][2]
+    assert repo_id == "acme/dd-trajectories"
+    assert session == recorder.session_id
+    # run_dir on disk contains the manifest the hook must wait for
+    run_dir = Path(uploaded[0][0])
+    assert (run_dir / "manifest.json").is_file()
+
+
+async def test_archive_callback_does_not_upload_when_unconfigured(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a configured trajectory_hub_repo, the uploader is never called."""
+    from daydream.runner import RunConfig, _make_archive_callback
+    from tests.harness.trajectory import make_recorder
+    from tests.test_archive_integration import _add_user_step
+
+    calls: list = []
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", lambda *a, **k: calls.append(a) or True)
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(archive=True, run_eval=False)
+    cb = _make_archive_callback(config, target_dir)
+    recorder = make_recorder(tmp_path, on_write=cb)
+    _add_user_step(recorder)
+    async with recorder:
+        pass
+
+    assert calls == []

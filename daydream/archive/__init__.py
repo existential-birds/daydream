@@ -169,6 +169,16 @@ def _archive_run_inner(
     # 5. Index in SQLite
     upsert_run(archive_dir, manifest)
 
+    # 5b. Opt-in HuggingFace dataset repo upload of the complete bundle. Fires
+    #     only when a trajectory_hub_repo is configured; the uploader is
+    #     internally non-fatal (never raises), and the surrounding archive
+    #     try/except is a second net.
+    from daydream.archive import hub
+
+    hub_repo_id = hub.resolve_hub_repo(config)
+    if hub_repo_id:
+        hub.upload_run_bundle(run_dir, hub_repo_id, recorder.session_id)
+
     # 6. Optionally copy the fully-assembled bundle to a user-specified directory
     #    (``--dump-artifacts``) so CI can upload it. Copied wholesale from run_dir
     #    so it includes the manifest and evaluation written above.
