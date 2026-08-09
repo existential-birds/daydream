@@ -202,10 +202,12 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     from daydream.runner import RunConfig, _make_archive_callback
 
     uploaded: list[tuple] = []
-    monkeypatch.setattr(
-        "daydream.archive.hub.upload_run_bundle",
-        lambda run_dir, repo_id, session_id: uploaded.append((str(run_dir), repo_id, session_id)) or True,
-    )
+
+    def _fake_upload(run_dir: Path, repo_id: str, session_id: str) -> bool:
+        uploaded.append((str(run_dir), repo_id, session_id))
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
 
     target_dir = tmp_path / "project"
     target_dir.mkdir()
@@ -247,7 +249,12 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     from tests.test_archive_integration import _add_user_step
 
     calls: list = []
-    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", lambda *a, **k: calls.append(a) or True)
+
+    def _fake_upload(*args: object, **kwargs: object) -> bool:
+        calls.append(args)
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
 
     target_dir = tmp_path / "project"
     target_dir.mkdir()

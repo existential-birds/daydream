@@ -1,7 +1,6 @@
 # tests/test_hub_upload.py
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -10,8 +9,8 @@ from daydream.archive import hub
 
 
 def test_resolve_hub_repo_precedence_cli_over_env_over_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.runner import RunConfig
     from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import RunConfig
 
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     file_cfg = DaydreamFileConfig(trajectory_hub_repo="file/repo")
