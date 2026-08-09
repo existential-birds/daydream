@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from daydream import git_ops
 from daydream.improve.prioritize import plan_priority
 from daydream.improve.render import (
     _redact_model_value,
@@ -39,6 +40,10 @@ _INDEX_ROW_NUMBER = re.compile(r"\b(\d{3})\b")
 # The slug class admits no separator or dot, so a recovered link can never name
 # anything but a sibling plan file.
 _INDEX_ROW_LINK = re.compile(r"\[\d{3}\]\(\d{3}-([a-z0-9-]+)\.md\)")
+# Re-anchor worktree directory names are built from the run session id, so only
+# a filesystem-safe run id may reach the path; anything else falls back to an
+# anchor-derived name.
+_SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 
 def load_rejections(plans_dir: Path) -> dict[str, dict[str, Any]]:
@@ -304,16 +309,6 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         text=True,
         check=False,
-    )
-
-
-def _head_matches(repo: Path, planned_at: str) -> bool:
-    planned = _git(repo, "rev-parse", "--verify", f"{planned_at}^{{commit}}")
-    head = _git(repo, "rev-parse", "--verify", "HEAD")
-    return (
-        planned.returncode == 0
-        and head.returncode == 0
-        and planned.stdout.strip() == head.stdout.strip()
     )
 
 
@@ -685,6 +680,8 @@ class PlanWriteSession:
         self._skipped: list[tuple[int, dict[str, Any]]] = []
         self._failed: list[tuple[int, dict[str, Any]]] = []
         self._diagnostics: list[tuple[int, dict[str, Any]]] = []
+        self._reanchored: dict[int, PlanIndexEntry] = {}
+        self._reanchor_worktree: Path | None = None
         self._planned_at_errors: tuple[str, ...] = ()
         commit = _git(self._repo, "cat-file", "-e", f"{planned_at}^{{commit}}")
         if commit.returncode != 0:
@@ -874,10 +871,7 @@ class PlanWriteSession:
             )
 
         plan_result = _plan_payload(selection)
-        errors = self._planned_at_errors
-        if not errors and not _head_matches(self._repo, self._planned_at):
-            errors = ("PLAN_HEAD_CHANGED",)
-        if errors:
+        if self._planned_at_errors:
             return self._block(
                 reservation,
                 selection,
@@ -885,11 +879,25 @@ class PlanWriteSession:
                 finding=finding,
                 status=(
                     "BLOCKED (PLAN_VALIDATION_FAILED: "
-                    f"{','.join(errors)})"
+                    f"{','.join(self._planned_at_errors)})"
                 ),
-                stage=_validation_stage(errors),
-                errors=errors,
+                stage=_validation_stage(self._planned_at_errors),
+                errors=self._planned_at_errors,
                 received=plan_result,
+            )
+
+        try:
+            current_head = git_ops.head_sha(self._repo)
+        except git_ops.GitError:
+            current_head = None
+        if current_head != self._planned_at:
+            return self._reanchor_and_write(
+                reservation,
+                selection,
+                plan_result,
+                number=number,
+                title=title,
+                slug=slug,
             )
 
         filename = f"{number:03d}-{slug}.md"
@@ -911,19 +919,6 @@ class PlanWriteSession:
                 status="BLOCKED (PLAN_VALIDATION_FAILED: RENDER_FAILED)",
                 stage="render",
                 errors=("RENDER_FAILED",),
-                received=plan_result,
-            )
-        if not _head_matches(self._repo, self._planned_at):
-            return self._block(
-                reservation,
-                selection,
-                number=number,
-                finding=finding,
-                status=(
-                    "BLOCKED (PLAN_VALIDATION_FAILED: PLAN_HEAD_CHANGED)"
-                ),
-                stage=_validation_stage(("PLAN_HEAD_CHANGED",)),
-                errors=("PLAN_HEAD_CHANGED",),
                 received=plan_result,
             )
         (self._plans_dir / filename).write_text(text, encoding="utf-8")
@@ -963,6 +958,117 @@ class PlanWriteSession:
         self._write_index()
         return PlanOutcome("written", number, filename, title)
 
+    def _reanchor_and_write(
+        self,
+        reservation: PlanReservation,
+        selection: dict[str, Any],
+        plan_result: dict[str, Any],
+        *,
+        number: int,
+        title: str,
+        slug: str,
+    ) -> PlanOutcome:
+        """Write a finished plan into a fresh detached worktree at current HEAD.
+
+        The plan's content is complete; only the ``planned_at`` anchor is stale
+        because HEAD advanced past the commit captured at session start. The
+        plan lands in a fresh detached worktree at the current HEAD, re-anchored
+        to it, and returns ``written`` with the full path it landed at — a stale
+        anchor alone must not discard a valid plan. Any sub-failure falls back to
+        :meth:`_block` with ``PLAN_REANCHOR_FAILED``; nothing is silently dropped.
+        """
+        finding = selection["finding"]
+        attempt = self._attempt_of(selection)
+        filename = f"{number:03d}-{slug}.md"
+
+        def _reanchor_failed() -> PlanOutcome:
+            return self._block(
+                reservation,
+                selection,
+                number=number,
+                finding=finding,
+                status="BLOCKED (PLAN_WRITER_FAILED: PLAN_REANCHOR_FAILED)",
+                stage="transport",
+                errors=("PLAN_REANCHOR_FAILED",),
+                received=plan_result,
+            )
+
+        try:
+            new_head = git_ops.head_sha(self._repo)
+        except git_ops.GitError:
+            return _reanchor_failed()
+        try:
+            worktree = self._reanchor_worktree
+            if worktree is None:
+                run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
+                if _SAFE_DIRNAME.fullmatch(run_id) is None:
+                    run_id = f"run-{self._planned_at[:12]}"
+                worktree = (
+                    self._repo / ".daydream" / "worktrees" / f"{run_id}-reanchor"
+                )
+                git_ops.worktree_add(self._repo, worktree, "HEAD", detach=True)
+                self._reanchor_worktree = worktree
+            text = render_plan(
+                finding,
+                plan=plan_result,
+                planned_at=new_head,
+                number=number,
+                planned_on=self._planned_on,
+                run_session_id=self._run_session_id,
+            )
+            plans_dir = worktree / "daydream_plans"
+            plans_dir.mkdir(parents=True, exist_ok=True)
+            (plans_dir / filename).write_text(text, encoding="utf-8")
+            self._reanchored[number] = PlanIndexEntry(
+                number=number,
+                slug=slug,
+                title=_index_field(selection.get("title") or title),
+                fingerprint=reservation.fingerprint,
+                priority=plan_priority(finding),
+                effort=_index_field(finding.get("effort")),
+                risk=_index_field(finding.get("risk")),
+                category=_index_field(finding.get("category")),
+                planned_at=new_head,
+                status="TODO",
+                host_blocked=False,
+            )
+            entries = dict(self._entries)
+            entries.update(self._reanchored)
+            self._write_index_files(
+                plans_dir,
+                [entries[index] for index in sorted(entries)],
+            )
+        except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
+            return _reanchor_failed()
+
+        landed_path = (worktree / "daydream_plans" / filename).as_posix()
+        self._written.append(
+            (
+                reservation.index,
+                {**selection, "number": number, "path": landed_path},
+            )
+        )
+        self._diagnostics.append(
+            (
+                reservation.index,
+                _attempt_diagnostic(
+                    finding=finding,
+                    attempt=attempt,
+                    received=plan_result,
+                    disposition="success",
+                    stage="success",
+                    artifact={
+                        "path": landed_path,
+                        "status": "TODO",
+                        "reanchored": True,
+                        "planned_at": new_head,
+                    },
+                ),
+            )
+        )
+        self._fingerprints.add(reservation.fingerprint)
+        return PlanOutcome("written", number, landed_path, title)
+
     def _write_index(self) -> None:
         """Rewrite the sidecar and its rendered index from the entries so far.
 
@@ -971,7 +1077,13 @@ class PlanWriteSession:
         files already on disk.
         """
         entries = [self._entries[number] for number in sorted(self._entries)]
-        self._sidecar_path.write_text(
+        self._write_index_files(self._plans_dir, entries)
+
+    def _write_index_files(
+        self, plans_dir: Path, entries: Sequence[PlanIndexEntry]
+    ) -> None:
+        """Write the sidecar and its rendered index for *entries* into *plans_dir*."""
+        (plans_dir / PLAN_INDEX_FILENAME).write_text(
             json.dumps(
                 {
                     "schema_version": PLAN_INDEX_SCHEMA_VERSION,
@@ -984,10 +1096,10 @@ class PlanWriteSession:
             + "\n",
             encoding="utf-8",
         )
-        self._index_path.write_text(
+        (plans_dir / "README.md").write_text(
             _render_index(
                 [_index_row(entry) for entry in entries],
-                plans_dir=self._plans_dir,
+                plans_dir=plans_dir,
                 planned_on=self._planned_on,
                 non_interactive_default=self._non_interactive_default,
                 run_session_id=self._run_session_id,

@@ -1517,14 +1517,23 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     ).read_text()
 
 
-def test_head_change_after_planning_blocks_stale_todo(repo: Path, head_sha: str) -> None:
+def test_head_change_after_planning_reanchors_into_new_worktree(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """HEAD advancing after assembling re-anchors the plan instead of blocking.
+
+    The plan's content is finished; only the ``planned_at`` anchor is stale, so
+    the plan lands in a fresh detached worktree at the current HEAD, re-anchored
+    to it, and is reported as written — never silently dropped.
+    """
     assembled = _assembled(repo)
     (repo / "README.md").write_text(
         "# Catalog service\n\nConcurrent branch update.\n",
         encoding="utf-8",
     )
     git(repo, "add", "README.md")
-    git(repo, "commit", "-m", "advance head after plan fan-out")
+    new_head = commit(repo, "advance head after plan fan-out")
 
     result = _write_plans(
         repo / "daydream_plans",
@@ -1532,11 +1541,48 @@ def test_head_change_after_planning_blocks_stale_todo(repo: Path, head_sha: str)
         planned_at=head_sha,
     )
 
-    assert result["written"] == []
-    assert not list((repo / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
-    assert "PLAN_HEAD_CHANGED" in (
-        repo / "daydream_plans/README.md"
-    ).read_text()
+    assert len(result["written"]) == 1
+    landed = result["written"][0]["path"]
+    assert ".daydream/worktrees/" in landed
+    assert landed.endswith("daydream_plans/001-batch-catalog-queries.md")
+    assert not (repo / "daydream_plans/001-batch-catalog-queries.md").is_file()
+    plan_file = Path(landed)
+    assert plan_file.is_file()
+    text = plan_file.read_text(encoding="utf-8")
+    assert f"**Planned at**: commit `{new_head[:7]}`" in text
+    assert f"`{new_head}`" in text
+    reanchor_plans = plan_file.parent
+    assert (reanchor_plans / PLAN_INDEX_FILENAME).is_file()
+    index = (reanchor_plans / "README.md").read_text(encoding="utf-8")
+    assert "| [001](001-batch-catalog-queries.md) " in index
+    assert "| TODO |" in index
+    sidecar = json.loads(
+        (reanchor_plans / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    assert [
+        (entry["number"], entry["slug"], entry["planned_at"], entry["status"])
+        for entry in sidecar["plans"]
+    ] == [(1, "batch-catalog-queries", new_head, "TODO")]
+
+
+def test_planned_at_still_matching_head_writes_in_place(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """The common case is unchanged: a matching anchor writes in place."""
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert len(result["written"]) == 1
+    assert result["written"][0]["path"] == "001-batch-catalog-queries.md"
+    plan_file = repo / "daydream_plans/001-batch-catalog-queries.md"
+    assert plan_file.is_file()
+    text = plan_file.read_text(encoding="utf-8")
+    assert f"**Planned at**: commit `{head_sha[:7]}`" in text
+    assert not list((repo / ".daydream" / "worktrees").glob("*-reanchor"))
 
 
 @pytest.mark.parametrize(

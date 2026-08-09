@@ -1578,10 +1578,14 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         landed += 1
         if outcome.status == "written" and outcome.number is not None:
             announced.add(outcome.number)
+            path = outcome.path or ""
+            landing = (
+                path if Path(path).is_absolute() else f"daydream_plans/{path}"
+            )
             print_success(
                 console,
-                f"Plan {outcome.number:03d} written to "
-                f"daydream_plans/{outcome.path} ({landed}/{total}).",
+                f"Plan {outcome.number:03d} written to {landing} "
+                f"({landed}/{total}).",
             )
         else:
             print_info(
