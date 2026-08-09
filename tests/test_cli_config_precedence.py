@@ -194,3 +194,28 @@ def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None
 
     cfg.model = "custom-model"
     assert _resolved_model(cfg, "review") == "custom-model"
+
+
+def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
+    """The ``--trajectory-hub-repo`` shared flag must reach RunConfig via every builder.
+
+    Traces construction paths for the three flows that read shared args: deep
+    (``_parse_args``), improve (``_parse_improve_args``), and feedback
+    (``_parse_args`` dispatching to ``_build_feedback_config``).
+    """
+    from daydream.cli import _parse_args, _parse_improve_args
+
+    target = str(tmp_path)
+
+    deep = _parse_args([target, "--trajectory-hub-repo", "acme/dd-trajectories"])
+    assert deep.trajectory_hub_repo == "acme/dd-trajectories"
+
+    improve = _parse_improve_args(
+        ["improve", target, "--trajectory-hub-repo", "acme/dd-trajectories"]
+    )
+    assert improve.trajectory_hub_repo == "acme/dd-trajectories"
+
+    feedback = _parse_args(
+        ["feedback", "42", "--bot", "bot[bot]", "--trajectory-hub-repo", "acme/dd-trajectories", target]
+    )
+    assert feedback.trajectory_hub_repo == "acme/dd-trajectories"
