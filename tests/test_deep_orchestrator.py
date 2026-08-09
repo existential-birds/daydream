@@ -102,6 +102,7 @@ async def _run_deep(
     start_at: str = "review",
     precision_mode: bool = False,
     uncovered_sweep: bool | None = None,
+    approve_on_clean: bool = False,
 ) -> int:
     from daydream.runner import RunConfig, run
 
@@ -112,6 +113,7 @@ async def _run_deep(
         cleanup=False,
         precision_mode=precision_mode,
         uncovered_sweep=uncovered_sweep,
+        approve_on_clean=approve_on_clean,
     )
     return await run(config)
 
@@ -4459,6 +4461,76 @@ async def test_precision_on_keeps_low_finding_with_evidence(
     files = _merged_item_files(multi_stack_target)
     assert "App.tsx" in files, f"a confirmed borderline finding must be kept:\n{files}"
     assert "api.py" in files
+
+
+# Issue #343: config-gated bot APPROVE for clean deep reviews.
+#
+# The headline wire -- deep flow -> ``_step_post_review`` ->
+# ``_approve_on_clean`` -> ``post_review_to_pr_from_report`` -- is proven through
+# the real ``runner.run`` -> deep orchestrator spine (mirroring the precision-mode
+# tests): real worktree, real flow steps, only the backend and the PR-posting
+# boundary stubbed. The PR-posting stub RECORDS the ``approve_on_clean`` kwarg it
+# receives instead of silently accepting it, so the test asserts the flag the
+# poster actually sees -- not that a function was merely called.
+
+
+async def test_deep_flow_forwards_approve_on_clean(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#343 real-path: the deep flow forwards ``approve_on_clean=True`` to the
+    PR-posting boundary when the runconfig opt-in is set."""
+    _silence(monkeypatch)
+    _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    received: list[bool] = []
+
+    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
+        received.append(approve_on_clean)
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+
+    exit_code = await _run_deep(multi_stack_target, approve_on_clean=True)
+    assert exit_code == 0
+    assert received == [True], (
+        f"deep flow must forward approve_on_clean=True to the poster, got {received}"
+    )
+
+
+async def test_deep_flow_approve_on_clean_defaults_off(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#343 real-path: without the opt-in the deep flow forwards ``False``, so
+    the posted event stays ``COMMENT`` (byte-identical default)."""
+    _silence(monkeypatch)
+    _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    received: list[bool] = []
+
+    async def _record_post(target_dir, merged_items_path, *, console, post, approve_on_clean=False):
+        received.append(approve_on_clean)
+
+    monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+    assert received == [False], (
+        f"default deep flow must forward approve_on_clean=False, got {received}"
+    )
+
+
+def test_approve_on_clean_resolves_from_file_config() -> None:
+    """#343 file-config tier: with NO CLI flag but ``approve_on_clean = true`` in
+    the repo config, ``_approve_on_clean`` returns True; with no opt-in anywhere
+    it stays False (default off)."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _approve_on_clean
+    from daydream.runner import RunConfig
+
+    file_only = RunConfig(target="/t", file_config=DaydreamFileConfig(approve_on_clean=True))
+    assert _approve_on_clean(file_only) is True
+
+    unset = RunConfig(target="/t")
+    assert _approve_on_clean(unset) is False
 
 
 def _prime_merge_resume_records(target: Path, *, python_severity: str | None) -> Path:
