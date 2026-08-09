@@ -1522,20 +1522,28 @@ def _handle_post_findings_command(argv: list[str]) -> int:
         inventory, or post failure.
     """
     from daydream import pr_review
-    from daydream.ui import create_console
+    from daydream.ui import create_console, print_warning
 
     parser = _build_post_findings_parser()
     args = parser.parse_args(argv)
     if "/" not in args.repo:
         parser.error(f"--repo must be an OWNER/REPO slug, got {args.repo!r}")
 
-    approve = args.approve_on_clean or bool(load_file_config(Path.cwd()).approve_on_clean)
+    console = create_console()
+    # Best-effort config read: the poster previously never consulted the repo
+    # config, so a malformed .daydream.toml/pyproject.toml in the CI checkout
+    # must not abort the unattended post — warn and fall back to the CLI flag.
+    approve = args.approve_on_clean
+    try:
+        approve = approve or bool(load_file_config(Path.cwd()).approve_on_clean)
+    except ValueError as exc:
+        print_warning(console, f"Ignoring malformed repo config: {exc}")
     return pr_review.post_findings_from_artifact(
         args.artifact,
         pr_number=args.pr_number,
         head_sha=args.head_sha,
         repo=args.repo,
-        console=create_console(),
+        console=console,
         bot_login=args.bot_login,
         approve_on_clean=approve,
     )

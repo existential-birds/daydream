@@ -139,6 +139,21 @@ def test_malformed_artifact_aborts(fake_gh, tmp_path) -> None:
     assert rc == 1 and fake_gh.calls("POST") == []
 
 
+def test_malformed_repo_config_warns_and_still_posts(fake_gh, tmp_path, monkeypatch) -> None:
+    """A malformed .daydream.toml in the checkout must not abort the unattended post.
+
+    post-findings never consulted the repo config before issue #343; the new
+    approve-on-clean lookup is best-effort, so a malformed TOML degrades to a
+    warning plus the CLI flag instead of a Fatal Error (exit 1).
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
+    artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
+    code = cli_main(_forged_marker_argv(artifact))
+    assert code == 0
+    assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
+
+
 def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
     """``post-findings`` argv for a single-finding artifact, plus extra flags."""
     return ["post-findings", str(artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r", *extra]
