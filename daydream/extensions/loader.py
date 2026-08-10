@@ -9,6 +9,11 @@ extension is a loud, named error.
 Registry propagation uses a ``ContextVar`` (mirroring the trajectory
 recorder's ``_RECORDER_VAR`` in ``daydream/trajectory.py``): access via
 :func:`get_registry` / :func:`set_registry` only.
+
+Round-trips the DAYDREAM_SERVICE_V1 executor/publisher seam: ``build_registry``
+builds the same ``Registry`` a fork mutates, so ``register()`` may call
+``register_executor`` / ``register_publisher`` (the additive seam; it does not
+change the versioned executor contract in ``daydream.executors``).
 """
 
 from __future__ import annotations

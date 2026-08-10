@@ -42,6 +42,8 @@ The `daydream.extensions` package exports these contract symbols:
 |--------|---------|
 | `EXTENSION_API_VERSION` | Running extension contract version |
 | `MIN_SUPPORTED_EXTENSION_API_VERSION` | Oldest extension contract version still accepted (range floor) |
+| `DAYDREAM_SERVICE_V1` | Versioned executor/publisher contract this daydream implements |
+| `MIN_SUPPORTED_DAYDREAM_SERVICE_V1` | Oldest executor/publisher contract accepted (range floor) |
 | `BreakLoop` | End the current loop group and continue the flow |
 | `ExtensionError` | Base error for extension failures |
 | `ExtensionVersionError` | Error for an absent or incompatible extension version |
@@ -53,6 +55,16 @@ The `daydream.extensions` package exports these contract symbols:
 | `ToolDecision` | Continue or veto a tool invocation |
 | `ToolSupervisor` | Callable protocol for tool supervision |
 | `UnresolvedExtensionError` | Error for a missing registered name |
+| `ArtifactEnvelope` | Bounded review outcome from an executor (DAYDREAM_SERVICE_V1) |
+| `ExecutionRef` | Opaque execution identity (kind/version/handle/attempt) |
+| `ExecutionSnapshot` | Lifecycle observation of one execution |
+| `ExecutionStatus` | Neutral execution lifecycle position |
+| `ExecutorCapability` | Capability an executor may declare/require |
+| `ExecutorError` | Base error for the executor seam |
+| `ExecutorJob` | Neutral job handed to `ReviewExecutor.start` |
+| `LocalExecutor` | Hermetic filesystem/time-based conformance executor |
+| `ReviewExecutor` | The versioned executor port (start/inspect/cancel/collect/release) |
+| `ScriptedExecutor` | Hermetic in-memory step-based conformance executor |
 | `build_registry` | Seed and load a per-run registry |
 | `get_registry` | Read the current async context's registry |
 | `set_registry` | Set the current async context's registry |
@@ -248,6 +260,43 @@ Only one tool supervisor may be registered per run. If an extension registers a
 tool supervisor while `tool_supervisor = "rules"` enables the built-in one, the
 run fails at registry construction with a conflict error. Choose the extension
 policy or the built-in policy.
+
+## Executors and publishers (DAYDREAM_SERVICE_V1 seam)
+
+The `Registry` also carries a *versioned executor/publisher seam* for the
+executor-neutral review service (Plan 008 / issue #357). It is additive on the
+extension contract — it does **not** change the meaning of `Backend` (the
+model-agent driver) and does not bump `EXTENSION_API_VERSION`. The seam lets a
+fork register compute/workspace adapters and trusted publishers through the
+same `register(registry)` entrypoint it already uses.
+
+```python
+from daydream.extensions import LocalExecutor, ScriptedExecutor
+
+def register(r):
+    r.register_executor("local", LocalExecutor(root))
+    r.register_executor("scripted", ScriptedExecutor())
+    r.register_publisher("github-checks", MyTrustedPublisher())
+```
+
+`register_executor(name, executor)` enforces **capability admission at
+registration**: the executor must be a conformant `ReviewExecutor` (implements
+`start` / `inspect` / `cancel` / `collect` / `release` and exposes `kind`,
+`adapter_version`, `capabilities`) and must declare every required capability
+(see `ExecutorCapability`). A weak executor, a duplicate name, or an out-of-range
+service contract version raises `ExtensionError`. Registered executors resolve
+via `executor(name)`, `executor_if_registered(name)`, and `executor_names()`.
+
+`register_publisher(name, publisher)` names a trusted publisher object
+(credential-safety is the publisher leaf's contract); resolve via
+`publisher(name)`, `publisher_if_registered(name)`, `publisher_names()`. Unlike
+executors, publishers are not capability-admitted in this registry.
+
+The neutral contract models, ports, capability admission, and vendor-error
+mapping live in `daydream.executors.contract` / `daydream.executors.protocol`
+and are versioned as `DAYDREAM_SERVICE_V1`. Any adapter registers behind the
+same seam and must pass the common conformance suite
+(`tests/test_executor_contract.py`); see `docs/executors/executor-registration.md`.
 
 ## Inventories
 
