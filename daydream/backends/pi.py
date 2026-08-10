@@ -304,15 +304,22 @@ def _pi_retry_max_delay() -> float:
 # the stable diagnostic category so the two views of the taxonomy cannot drift
 # out of sync.
 _RATE_LIMIT_TOKENS = ("429", "rate limit", "rate_limit", "too many requests")
-_SERVER_ERROR_TOKENS = ("503", "service unavailable", "server error")
+_SERVER_ERROR_TOKENS = (
+    "502",
+    "503",
+    "bad gateway",
+    "service unavailable",
+    "server error",
+)
 
 
 def _is_retryable_error_message(message: str) -> bool:
     """Return True if the error message signals a transient overload or rate-limit.
 
     High-precision literals (429, rate limit/rate_limit, too many requests,
-    503, service unavailable, server error) are matched as plain substrings —
-    they are extremely unlikely to appear in a non-transient context. Ambiguous
+    502/503, bad gateway, service unavailable, server error) are matched as
+    plain substrings — they are extremely unlikely to appear in a non-transient
+    context. Ambiguous
     terms require positive overload/capacity wording and explicitly reject
     negated or planning contexts.
     """

@@ -1248,6 +1248,7 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ("message", "expected"),
     [
         ("429 Too Many Requests", "RATE_LIMIT"),
+        ("502 status code (no body)", "SERVER_ERROR"),
         ("503 status code (no body)", "SERVER_ERROR"),
         ("service unavailable", "SERVER_ERROR"),
         ("request timed out after 30 seconds", "TIMEOUT"),
@@ -1258,6 +1259,7 @@ def test_pierror_retryable_default_and_kwarg_and_message():
     ],
     ids=[
         "rate-limit",
+        "server-error-502",
         "server-error-503",
         "server-error-service-unavailable",
         "timeout",
@@ -1283,6 +1285,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ("message", "expected"),
     [
         ("429 Too Many Requests", True),
+        ("502 status code (no body)", True),
+        ("502 Bad Gateway", True),
         ("503 status code (no body)", True),
         ("503 Service Unavailable", True),
         ("Service is currently overloaded", True),
@@ -1308,6 +1312,8 @@ def test_pi_error_categories_are_stable_host_codes(
     ],
     ids=[
         "429",
+        "502-status-code",
+        "502-bad-gateway",
         "503-status-code",
         "503-service-unavailable",
         "overload",
@@ -1358,9 +1364,10 @@ def test_is_retryable_exit_code(code, expected):
     ("error_message", "expected_retryable"),
     [
         ("429 Too Many Requests - rate limit exceeded", True),
+        ("502 status code (no body)", True),
         ("authentication required", False),
     ],
-    ids=["429-retryable", "auth-non-retryable"],
+    ids=["429-retryable", "502-retryable", "auth-non-retryable"],
 )
 @pytest.mark.asyncio
 async def test_error_turn_sets_retryable_via_classifier(error_message, expected_retryable):
