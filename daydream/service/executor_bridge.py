@@ -85,9 +85,11 @@ class ExecutionBridge:
         executor: CanonicalReviewExecutor,
         *,
         resolve_attempt_id: Any = None,
+        max_wait_polls: int = 64,
     ) -> None:
         self._executor = executor
         self._resolve_attempt_id = resolve_attempt_id
+        self._max_wait_polls = max_wait_polls
         self._bindings: dict[str, _Binding] = {}
 
     @property
@@ -113,6 +115,9 @@ class ExecutionBridge:
                 "provider": spec.provider,
                 "model": spec.model,
                 "required_lenses": sorted(spec.required_lenses),
+                # The scripted/canonical adapters materialize lens completion and
+                # outcome from payload["lenses"] / payload["outcome"] when present.
+                "lenses": sorted(spec.required_lenses),
                 "candidate": {
                     "target_kind": spec.candidate.target_kind,
                     "repo": spec.candidate.repo,
@@ -149,8 +154,18 @@ class ExecutionBridge:
         await self._executor.cancel(canonical)
 
     async def collect(self, ref: ExecutionRef) -> ArtifactEnvelope:
-        """Collect the bounded artifacts for *ref* as a controller envelope."""
+        """Collect the bounded artifacts for *ref* as a controller envelope.
+
+        A canonical executor may require the execution to reach a terminal state
+        before it will return artifacts (e.g. a step-based adapter); the bridge
+        first polls ``inspect`` until terminal (bounded), then collects. This
+        models the controller waiting for the execution work to finish.
+        """
         canonical = self._resolve(ref)
+        for _ in range(self._max_wait_polls):
+            snapshot = await self._executor.inspect(canonical)
+            if is_terminal(snapshot.status):
+                break
         envelope = await self._executor.collect(canonical)
         return self._normalize_envelope(envelope)
 

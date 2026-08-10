@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Literal, Tuple
+from typing import Any, Literal
 
 from daydream.service.states import ServiceState
 
@@ -704,7 +704,7 @@ class ControllerRecord:
     job_id: str
     spec: JobSpec
     state: ServiceState = ServiceState.QUEUED
-    execution_ref: object | None = None
+    execution_ref: ExecutionRef | None = None
     artifact_hashes: tuple[str, ...] = ()
     worker_verdict: str | None = None
     retries_used: int = 0
