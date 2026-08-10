@@ -59,6 +59,7 @@ from daydream.improve.plans import (
     _attempt_diagnostic,
     load_rejections,
     plan_slug,
+    prune_stale_reanchor_worktrees,
     record_plan_write_diagnostics,
     record_rejections,
 )
@@ -1531,6 +1532,7 @@ def _description_finding(description: str) -> dict[str, Any]:
 
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
+    prune_stale_reanchor_worktrees(ctx.work.repo)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]
@@ -1578,10 +1580,14 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         landed += 1
         if outcome.status == "written" and outcome.number is not None:
             announced.add(outcome.number)
+            path = outcome.path or ""
+            landing = (
+                path if Path(path).is_absolute() else f"daydream_plans/{path}"
+            )
             print_success(
                 console,
-                f"Plan {outcome.number:03d} written to "
-                f"daydream_plans/{outcome.path} ({landed}/{total}).",
+                f"Plan {outcome.number:03d} written to {landing} "
+                f"({landed}/{total}).",
             )
         else:
             print_info(
@@ -1823,10 +1829,13 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     result = session.finish()
     for entry in result["written"]:
         if entry["number"] not in announced:
+            path = entry["path"] or ""
+            landing = (
+                path if Path(path).is_absolute() else f"daydream_plans/{path}"
+            )
             print_success(
                 console,
-                f"Plan {entry['number']:03d} written to "
-                f"daydream_plans/{entry['path']}.",
+                f"Plan {entry['number']:03d} written to {landing}.",
             )
     record_plan_write_diagnostics(
         plan_write_diagnostics_path(ctx.data["improve_dir"]),
