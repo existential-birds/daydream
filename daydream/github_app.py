@@ -19,11 +19,18 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Generator
+from typing import Callable, Generator
 
 import jwt as pyjwt
 
 from daydream import git_ops
+from daydream.service.models import ReviewTarget, TargetKind
+from daydream.service.publisher import (
+    Publisher,
+    PublishError,
+    PublishReceipt,
+    PublishRequest,
+)
 from daydream.timeutil import parse_iso_timestamp
 
 APP_ID_ENV = "DAYDREAM_APP_ID"
@@ -392,3 +399,176 @@ def _owner_repo_for(pr_repo: str | None, target_dir: Path) -> tuple[str, str] | 
         if parsed is not None:
             return parsed
     return git_ops.gh_repo_view(target_dir)
+
+
+# --- Trusted GitHub Checks publisher (Plan 008 Step 5) -----------------------
+
+
+@dataclass(frozen=True)
+class LiveIdentity:
+    """The live candidate the publisher revalidated right before success.
+
+    Attributes:
+        sha: The currently live exact candidate SHA.
+        tree: The currently live candidate tree digest, when known.
+    """
+
+    sha: str
+    tree: str | None = None
+
+
+LiveIdentityResolver = Callable[[ReviewTarget], LiveIdentity]
+
+
+def github_pr_head_live_identity(
+    repo_dir: Path,
+    owner: str,
+    repo: str,
+) -> LiveIdentityResolver:
+    """Build a live-identity resolver that reads the current PR head from GitHub.
+
+    For ``pr_head`` targets the publisher must, before success, confirm the
+    current PR head still is the exact candidate it reviewed. This resolver
+    queries ``GET /repos/{owner}/{repo}/pulls/{number}`` and returns its
+    ``head.sha``. A changed PR head means the reviewed candidate is stale.
+
+    Args:
+        repo_dir: Working directory for the ``gh`` subprocess.
+        owner: Repository owner.
+        repo: Repository name.
+
+    Returns:
+        A resolver suitable for :class:`GitHubChecksPublisher`.
+    """
+
+    def resolve(target: ReviewTarget) -> LiveIdentity:
+        if target.kind is not TargetKind.PR_HEAD or target.pr_number is None:
+            raise PublishError(
+                "pr_head live-identity resolver cannot resolve "
+                f"{target.kind.value!r} target {target.invalidation_id!r}"
+            )
+        endpoint = f"/repos/{owner}/{repo}/pulls/{target.pr_number}"
+        payload = git_ops.gh_api(repo_dir, endpoint, idempotent=True)
+        head = payload.get("head") if isinstance(payload, dict) else None
+        sha = head.get("sha") if isinstance(head, dict) else None
+        if not isinstance(sha, str) or not sha:
+            raise PublishError(
+                f"live PR head for {owner}/{repo}#{target.pr_number} is missing an sha; "
+                "refusing to publish against an unresolvable candidate"
+            )
+        return LiveIdentity(sha=sha)
+
+    return resolve
+
+
+class GitHubChecksPublisher(Publisher):
+    """Trusted GitHub Checks publisher implementing the generic publisher port.
+
+    This class is the ONLY holder of Checks-write authority in a service run:
+    workers never receive publisher or repository-write credentials, and a Pull
+    Request approval is not the authorization primitive. Before publishing a
+    success it revalidates the live candidate identity appropriate to
+    ``target_kind`` (current PR head for ``pr_head``, or the current exact
+    merge-group candidate SHA/tree for ``merge_group``). A changed PR head or a
+    replaced merge-group candidate means the reviewed candidate is stale: the
+    publisher refuses, and the controller cancels the old check/job so a new
+    policy evaluation starts. ``external_id`` is always bound to the immutable
+    job id, so a check can never be favourably reused across candidates.
+
+    Args:
+        repo_dir: Working directory for the ``gh`` subprocess.
+        owner: Repository owner.
+        repo: Repository name.
+        check_name: Exact Check identity (``name``) to publish.
+        check_run_id_for: Optional callable returning the GitHub check-run id to
+            update/reuse for a job (default None means create a new check run on
+            each publish; useful for an idempotent update of an existing check).
+        live_identity: Live-identity resolver invoked BEFORE a success publish.
+            Defaults to :func:`github_pr_head_live_identity` for ``pr_head``
+            targets; a ``merge_group`` target requires a caller-supplied resolver
+            (the controller tracks the current exact merge-group candidate).
+    """
+
+    def __init__(
+        self,
+        *,
+        repo_dir: Path,
+        owner: str,
+        repo: str,
+        check_name: str,
+        check_run_id_for: Callable[[str], int | None] | None = None,
+        live_identity: LiveIdentityResolver | None = None,
+    ) -> None:
+        self._repo_dir = repo_dir
+        self._owner = owner
+        self._repo = repo
+        self._check_name = check_name
+        self._check_run_id_for = check_run_id_for
+        self._live_identity = live_identity
+
+    def publish(self, req: PublishRequest) -> PublishReceipt:
+        """Durably publish *req*; raises :class:`PublishError` on any failure.
+
+        For ``success`` conclusions the live candidate identity is revalidated
+        immediately before publishing; if it no longer matches the reviewed
+        candidate, release fails closed and nothing is written. A failure on
+        publish is never turned into success.
+        """
+        if not req.repo:
+            raise PublishError("publish request is missing repo; refusing to publish")
+        owner_repo = git_ops.split_owner_repo(req.repo)
+        if owner_repo is None or owner_repo[0] != self._owner or owner_repo[1] != self._repo:
+            raise PublishError(
+                f"publish repo {req.repo!r} does not match publisher scope "
+                f"{self._owner}/{self._repo}; refusing to publish"
+            )
+        target = req.target
+        target_sha = req.target_sha or (target.candidate_sha if target is not None else "")
+        if not target_sha:
+            raise PublishError("publish request has no exact candidate SHA; refusing to publish")
+
+        if req.conclusion == "success":
+            if target is None:
+                raise PublishError(
+                    "cannot validate a success without a ReviewTarget; refusing to publish"
+                )
+            live = self._resolve_live_identity(target)
+            if live.sha != target_sha:
+                raise PublishError(
+                    f"live candidate {live.sha!r} no longer matches the reviewed candidate "
+                    f"{target_sha!r}; the reviewed candidate is stale and cannot be published"
+                )
+
+        endpoint = f"/repos/{self._owner}/{self._repo}/check-runs"
+        payload = {
+            "name": self._check_name,
+            "head_sha": target_sha,
+            "status": "completed",
+            "conclusion": req.conclusion,
+            "external_id": req.external_id,
+            "output": {
+                "title": f"{self._check_name} {req.conclusion}",
+                "summary": req.summary,
+            },
+        }
+        check_run_id = self._check_run_id_for(req.external_id) if self._check_run_id_for else None
+        try:
+            data = git_ops.gh_api(self._repo_dir, endpoint, method="POST", input_data=payload)
+        except Exception as exc:  # noqa: BLE001 - surface any gh failure as PublishError
+            raise PublishError(f"failed to publish GitHub check for {req.external_id}: {exc}") from exc
+
+        new_run_id = data.get("id") if isinstance(data, dict) else None
+        return PublishReceipt(
+            external_id=req.external_id,
+            check_run_id=new_run_id if isinstance(new_run_id, int) else check_run_id,
+        )
+
+    def _resolve_live_identity(self, target: ReviewTarget) -> LiveIdentity:
+        if self._live_identity is not None:
+            return self._live_identity(target)
+        if target.kind is TargetKind.PR_HEAD:
+            return github_pr_head_live_identity(self._repo_dir, self._owner, self._repo)(target)
+        raise PublishError(
+            f"merge_group target {target.invalidation_id!r} requires a caller-supplied "
+            "live-identity resolver; refusing to publish against an unresolvable candidate"
+        )
