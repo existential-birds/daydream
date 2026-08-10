@@ -12,12 +12,17 @@ Exports:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import platform
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import GitContext
+from daydream.config_file import DaydreamFileConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -105,6 +110,11 @@ class Manifest:
             latest ``label_observations`` annotation; ``None`` until a
             ``harvest`` pass scores the run.
         archive_path: Absolute path to the archive directory.
+        provenance: Additive exact-provenance block recording ``backend``,
+            ``model``, ``provider``, ``config``, ``skill``, and ``runtime``
+            (Python/uv versions) EXACTLY as resolved — never raw config
+            defaults. ``None`` only when the manifest was built by a consumer
+            that never populated it.
     """
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
@@ -172,6 +182,10 @@ class Manifest:
     # Archive location
     archive_path: str = ""
 
+    # Additive exact-provenance block (Plan 008 Step 2 leaf). Populated by
+    # build_manifest; a pre-provenance Manifest carries None.
+    provenance: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict."""
         return {
@@ -232,8 +246,102 @@ class Manifest:
                 "labeled_at": self.labeled_at,
                 "composite_reward": self.composite_reward,
             },
+            "provenance": self.provenance,
             "archive_path": self.archive_path,
         }
+
+
+def _uv_version() -> str | None:
+    """Resolve the ``uv`` CLI version locally, or None when unavailable.
+
+    Local subprocess only (no network). ``uv --version`` is the canonical
+    runtime identity of the environment that produced the run.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603 - args are a module-local constant
+            ["uv", "--version"],  # noqa: S607 - uv is a trusted command
+            capture_output=True,
+            text=True,
+            timeout=5,
+            shell=False,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (proc.stdout.strip() or proc.stderr.strip()) or None
+
+
+def _config_provenance(config: "RunConfig") -> dict[str, str] | None:
+    """Record a content digest of the effective file-config overrides.
+
+    Captures exactly what the file config resolved (global model/backend/
+    reasoning effort plus every phase table) — not raw parser defaults. An
+    absent or empty file config records ``None``.
+    """
+    file_config = config.file_config if config.file_config is not None else DaydreamFileConfig()
+    effective: dict[str, Any] = {}
+    for key, value in (
+        ("model", file_config.model),
+        ("backend", file_config.backend),
+        ("reasoning_effort", file_config.reasoning_effort),
+        ("phases", file_config.phases),
+    ):
+        if value:
+            effective[key] = value
+    if not effective:
+        return None
+    payload = json.dumps(effective, sort_keys=True, default=str)
+    return {"digest": hashlib.sha256(payload.encode()).hexdigest()}
+
+
+def _resolved_provider(backend_name: str, model: str | None) -> str | None:
+    """Resolve the provider exactly as the Pi backend would at execute time.
+
+    ``claude``/``codex`` use their native endpoints and have no provider axis;
+    only ``pi`` resolves one: ``PI_PROVIDER`` wins, an explicitly resolved
+    model (a CLI/file-config override, so pi is told to pass ``--provider``)
+    falls back to Pi's default provider, and a Pi-settings-resolved model
+    (nothing daydream selects) leaves the provider unset — mirroring
+    ``PiBackend.execute``.
+    """
+    if backend_name != "pi":
+        return None
+    provider = os.environ.get("PI_PROVIDER")
+    if provider is not None:
+        return provider
+    if model is not None:
+        from daydream.backends.pi import _PI_DEFAULT_PROVIDER
+
+        return _PI_DEFAULT_PROVIDER
+    return None
+
+
+def _build_provenance(config: "RunConfig") -> dict[str, Any]:
+    """Resolve the exact backend/model/provider/config/skill/runtime stack.
+
+    Every value is the *resolved* one (through the full precedence chain),
+    never a raw config default. Guarded against partial/mock config objects
+    so manifest consumers that stand in a minimal config still get a
+    provenance block with the resolvable fields.
+    """
+    from daydream.runner import _resolved_backend_name, _resolved_model
+
+    backend = _resolved_backend_name(config, "review")
+    try:
+        model = _resolved_model(config, "review")
+    except (AttributeError, TypeError):
+        model = None
+    return {
+        "backend": backend,
+        "model": model,
+        "provider": _resolved_provider(backend, model),
+        "config": _config_provenance(config),
+        "skill": getattr(config, "skill", None),
+        "runtime": {
+            "python": platform.python_version(),
+            "uv": _uv_version(),
+        },
+    }
 
 
 def build_manifest(
@@ -318,6 +426,9 @@ def build_manifest(
     m.wall_clock_seconds = recorder.compute_wall_clock_seconds()
     # Per-phase breakdown from explicit phase_start/phase_end events (#203).
     m.phase_timings = recorder.compute_phase_timings()
+
+    # Additive exact-provenance block (Plan 008 Step 2 leaf).
+    m.provenance = _build_provenance(config)
 
     if evaluation:
         timing = evaluation.get("timing", {})

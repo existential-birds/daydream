@@ -1,21 +1,25 @@
 """Phase functions for the review and fix loop."""
 
+import asyncio
 import copy
 import hashlib
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import anyio
+import jsonschema
 from rich.text import Text
 
 import daydream
 from daydream import git_ops
 from daydream.agent import (
+    classify_agent_abort,
     console,
     detect_test_success,
     get_assume,
@@ -56,6 +60,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
+    from daydream.service.models import ReviewJobV1
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
@@ -3678,3 +3683,189 @@ async def phase_cross_stack_merge(
         agent_items, structural_records_path, items_path, report_path, canonical_path
     )
     return canonical_path
+
+
+# --- Service-mode review entry (Plan 008, Step 2 leaf) -----------------------
+#
+# The service-mode review entry inventories lenses, runs the backend strictly
+# READ-ONLY, and returns a complete/failure status the fail-closed worker
+# (``daydream.service.worker``) turns into a passive artifact. It never
+# touches workspace lifecycle, executor identity, or the controller.
+
+SERVICE_REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["completed_lenses", "issues"],
+    "properties": {
+        "completed_lenses": {"type": "array", "items": {"type": "string"}},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["id", "lens", "file", "line", "severity", "confidence", "title", "body"],
+                "properties": {
+                    "id": {"type": "integer"},
+                    "lens": {"type": "string"},
+                    "file": {"type": "string"},
+                    "line": {"type": ["integer", "null"]},
+                    "severity": {"enum": ["high", "medium", "low"]},
+                    "confidence": {"enum": ["HIGH", "MEDIUM"]},
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+@dataclass(frozen=True)
+class ServiceReviewOutcome:
+    """Structured outcome of one service-mode read-only review turn.
+
+    Attributes:
+        inventory_missing: Required lenses absent from the lens inventory,
+            checked BEFORE any dispatch. Non-empty means the review never ran.
+        aborted_reason: The raw ``run_agent`` abort reason, when the turn was
+            cut short (budget / supervisor veto). The worker classifies it.
+        abort_process_outcome: :func:`daydream.agent.classify_agent_abort`
+            applied to ``aborted_reason``.
+        parse_ok: True only when the backend returned a schema-valid envelope.
+        completed_lenses: Agent-declared completed lens names.
+        issues: Schema-validated issue dicts (the worker enforces the
+            :class:`~daydream.service.artifact.WorkerArtifactV1` bound).
+        raw_output: Raw agent text for diagnostics (truncated).
+        process_error: ``(exception type name, backend category)`` when the
+            backend turn raised; the worker maps it to a process outcome.
+    """
+
+    inventory_missing: tuple[str, ...] = ()
+    aborted_reason: str | None = None
+    abort_process_outcome: str | None = None
+    parse_ok: bool = False
+    completed_lenses: tuple[str, ...] = ()
+    issues: tuple[dict[str, Any], ...] = ()
+    raw_output: str = ""
+    process_error: tuple[str, str | None] | None = None
+
+
+def _service_lens_gap(required_lenses: Sequence[str], lens_inventory: Sequence[str]) -> tuple[str, ...]:
+    """Return required lenses missing from the inventory (pre-dispatch gap)."""
+    available = set(lens_inventory)
+    return tuple(name for name in required_lenses if name not in available)
+
+
+def _service_output_tail(result: Any) -> str:
+    """A short diagnostic tail of arbitrary agent output."""
+    text = str(result).strip()
+    return text[:2000]
+
+
+def build_service_review_prompt(job: "ReviewJobV1", lens_inventory: Sequence[str]) -> str:
+    """Assemble the read-only service-mode review prompt.
+
+    Names the exact target (candidate/base SHAs, round/attempt), enumerates the
+    required lenses, and demands the JSON envelope: every lens MUST be listed in
+    ``completed_lenses`` (a lens with no findings is still completed), and
+    findings MUST cite a concrete file and line.
+    """
+    target = job.target
+    kind = "pull-request head" if target.target_kind == "pr_head" else "merge group"
+    required = "\n".join(f"- {name}" for name in job.required_lenses)
+    inventory = "\n".join(f"- {name}" for name in lens_inventory)
+    return (
+        "You are a read-only code reviewer operating under daydream's service-mode contract.\n"
+        f"Repository: {target.repo} ({kind})\n"
+        f"Candidate commit (HEAD): {target.candidate_sha}\n"
+        f"Base commit: {target.base_sha}\n"
+        f"Review round {job.round}, attempt {job.attempt}.\n\n"
+        "HARD RULES:\n"
+        "- You are READ-ONLY. You must not write, edit, delete, stage, commit, push, or run any "
+        "mutating command. Use only read tools and read-only git commands "
+        "(`git diff`, `git log`, `git show`, `git grep`).\n"
+        "- Review the full candidate change set (`git diff <base>..HEAD`) and produce findings "
+        "per lens.\n\n"
+        "Required lenses (every one MUST complete):\n"
+        f"{required}\n\n"
+        "Available lens inventory:\n"
+        f"{inventory}\n\n"
+        "For EVERY required lens, run the review and then include its name in `completed_lenses`. "
+        "A lens with no findings is still a completed lens — its name MUST appear in "
+        "`completed_lenses` with an empty issue list.\n"
+        "Findings must cite a concrete file and line. Severity is high/medium/low; confidence is "
+        "HIGH/MEDIUM.\n"
+        "Respond with ONLY a single JSON object matching the requested schema."
+    )
+
+
+async def phase_service_review(
+    backend: Backend,
+    cwd: Path,
+    job: "ReviewJobV1",
+    *,
+    lens_inventory: Sequence[str],
+) -> ServiceReviewOutcome:
+    """Run the service-mode review entry: inventory lenses, run READ-ONLY, report status.
+
+    The inventory check happens BEFORE any dispatch: a required lens absent
+    from ``lens_inventory`` returns an outcome with ``inventory_missing`` set
+    and the backend is never called. Otherwise the backend runs strictly
+    read-only through :func:`daydream.agent.run_agent` with the service schema,
+    an ephemeral (non-resumed) session, and no turn cap (the plan contract
+    forbids ``max_turns`` on review/fix/verify).
+
+    Failures are surfaced as structured outcome fields — never swallowed and
+    never turned into a clean signal:
+
+    * A budget/supervisor abort sets ``aborted_reason`` (+ ``abort_process_outcome``).
+    * A backend exception sets ``process_error``.
+    * Any non-dict or schema-invalid result leaves ``parse_ok=False``.
+
+    ``asyncio.CancelledError`` propagates so the worker can record the
+    ``cancelled`` terminal.
+    """
+    gap = _service_lens_gap(job.required_lenses, lens_inventory)
+    if gap:
+        return ServiceReviewOutcome(inventory_missing=gap)
+
+    prompt = build_service_review_prompt(job, lens_inventory)
+    try:
+        result, _, aborted_reason = await run_agent(
+            backend,
+            cwd,
+            prompt,
+            output_schema=SERVICE_REVIEW_SCHEMA,
+            phase=DaydreamPhase.REVIEW,
+            read_only=True,
+            persist_session=False,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surfaced to the worker as process_error
+        return ServiceReviewOutcome(process_error=(type(exc).__name__, getattr(exc, "category", None)))
+
+    if aborted_reason is not None:
+        return ServiceReviewOutcome(
+            aborted_reason=aborted_reason,
+            abort_process_outcome=classify_agent_abort(aborted_reason),
+            raw_output=_service_output_tail(result),
+        )
+
+    if not isinstance(result, dict):
+        return ServiceReviewOutcome(raw_output=_service_output_tail(result))
+    try:
+        jsonschema.validate(result, SERVICE_REVIEW_SCHEMA)
+    except jsonschema.ValidationError:
+        return ServiceReviewOutcome(raw_output=_service_output_tail(result))
+
+    completed = result.get("completed_lenses")
+    issues = result.get("issues")
+    if not isinstance(completed, list) or not isinstance(issues, list):
+        return ServiceReviewOutcome(raw_output=_service_output_tail(result))
+    return ServiceReviewOutcome(
+        parse_ok=True,
+        completed_lenses=tuple(completed),
+        issues=tuple(issues),
+        raw_output=_service_output_tail(result),
+    )

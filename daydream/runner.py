@@ -75,6 +75,8 @@ from daydream.workspace import WorkContext, open_workspace
 
 if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
+    from daydream.service.artifact import WorkerArtifactV1
+    from daydream.service.models import ReviewJobV1
 
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
 # comments and exits; ``review`` writes a report and exits.
@@ -1000,3 +1002,92 @@ async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
     from daydream.deep.orchestrator import run_deep
 
     return await run_deep(config, work)
+
+
+async def run_service(config: RunConfig, job: "ReviewJobV1") -> int:
+    """Service-mode dispatch hook: run a read-only service review for *job*.
+
+    The entrypoint for ``DAYDREAM_SERVICE_V1`` executor ports' ``start``:
+    opens the workspace, detaches the checkout at the job's exact candidate
+    SHA (the worker re-verifies every component), resolves the backend through
+    the full precedence chain, calls the fail-closed worker, and returns the
+    terminal exit code for ``job`` (see
+    :func:`daydream.service.worker.terminal_exit_code`).
+
+    The job itself is constructed by the controller leaf from a forge event
+    (``REVIEW_TARGET_V1``); this hook only consumes a validated
+    :class:`~daydream.service.models.ReviewJobV1`.
+
+    Returns:
+        ``0`` for ``clean``/``findings``, ``1`` for ``infra_error`` (or any
+        workspace/extension abort), ``2`` for ``cancelled``.
+    """
+    from daydream.service.worker import run_service_review, terminal_exit_code
+
+    print_phase_hero(console, "DAYDREAM SERVICE", phase_subtitle("SERVICE REVIEW"))
+    set_quiet_mode(config.quiet)
+    set_non_interactive(not _resolve_interactive(config))
+    set_assume(config.assume)
+    set_log_mode(config.log_mode)
+
+    try:
+        registry = build_registry()
+        set_registry(registry)
+    except ExtensionError as exc:
+        print_error(console, "Extension Error", str(exc))
+        return 1
+
+    if config.target is not None:
+        target_dir = Path(config.target).resolve()
+    else:
+        target_dir = Path(".").resolve()
+    if not target_dir.is_dir():
+        print_error(console, "Invalid Path", f"'{target_dir}' is not a valid directory")
+        return 1
+
+    try:
+        git_ops.assert_is_worktree(target_dir)
+    except git_ops.GitError as exc:
+        print_error(console, "Workspace Error", str(exc))
+        return 1
+
+    # Normalize the checkout to a detached HEAD at the exact candidate SHA; the
+    # worker re-verifies the SHA, tree, diff digest, and pristine-ness.
+    try:
+        if git_ops.current_branch(target_dir) is not None or git_ops.head_sha(
+            target_dir
+        ) != job.target.candidate_sha:
+            git_ops.checkout_detach(target_dir, job.target.candidate_sha)
+    except git_ops.GitError as exc:
+        print_error(
+            console,
+            "Workspace Error",
+            f"cannot detach checkout at {job.target.candidate_sha}: {exc}",
+        )
+        return 1
+
+    backend = _resolve_backend(config, "review", cwd=target_dir)
+    artifact = await run_service_review(
+        target_dir, job, backend, lens_inventory=job.required_lenses
+    )
+    _print_service_outcome(artifact)
+    return terminal_exit_code(artifact)
+
+
+def _print_service_outcome(artifact: "WorkerArtifactV1") -> None:
+    """Render the worker artifact terminal for the service-mode hook."""
+    if artifact.terminal in ("clean", "findings"):
+        print_success(
+            console,
+            f"Service review {artifact.terminal}: {len(artifact.completed_lenses)} lens(es) "
+            f"completed, {len(artifact.findings)} finding(s).",
+        )
+    elif artifact.terminal == "cancelled":
+        print_error(console, "Service Review", "cancelled")
+    else:
+        print_error(
+            console,
+            "Service Review",
+            f"infra_error: {artifact.process_outcome} "
+            f"(missing lenses: {', '.join(artifact.missing_lenses) or 'none'})",
+        )

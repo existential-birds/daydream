@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -210,3 +211,87 @@ async def test_review_mode_errored_agent_never_writes_clean_artifact(
             await run(config)
 
     assert not out.exists(), "an errored run must never write a findings artifact"
+
+
+# --- Additive exact-provenance (service leaf, Plan 008) ---------------------
+
+
+def _provenance() -> dict:
+    """A REVIEW_TARGET_V1-derived provenance block for the findings artifact."""
+    return {
+        "target_kind": "pr_head",
+        "candidate_sha": "c" * 40,
+        "candidate_tree_digest": "d" * 40,
+        "base_sha": "b" * 40,
+        "full_diff_digest": "e" * 64,
+    }
+
+
+def test_build_artifact_carries_exact_provenance_when_supplied(tmp_path) -> None:
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+                owner="o", repo="r", url="u")
+    issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
+                          confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)]
+    artifact = build_findings_artifact(
+        tmp_path, pr, issues, run_info=None, provenance=_provenance()
+    )
+    assert artifact["provenance"] == _provenance()
+
+
+def test_artifact_without_provenance_is_unchanged() -> None:
+    pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main",
+                owner="o", repo="r", url="u")
+    issues = [ParsedIssue(path="a.py", line=None, title="T", body="B", severity="high",
+                          confidence="HIGH", fingerprint="f" * 64, is_cross_stack=True)]
+    artifact = build_findings_artifact(Path("."), pr, issues, run_info=None)
+    assert "provenance" not in artifact
+
+
+def test_provenance_round_trips_through_write_and_load(tmp_path, valid_artifact) -> None:
+    valid_artifact["provenance"] = _provenance()
+    path = tmp_path / "f.json"
+    write_findings_artifact(path, valid_artifact)
+    loaded = load_findings_artifact(
+        path,
+        expected_repo="o/r",
+        expected_pr_number=7,
+        expected_head_sha="h" * 40,
+        expected_provenance=_provenance(),
+    )
+    assert loaded.provenance == _provenance()
+
+
+def test_load_rejects_provenance_mismatch(tmp_path, valid_artifact) -> None:
+    valid_artifact["provenance"] = {**_provenance(), "candidate_sha": "9" * 40}
+    path = tmp_path / "f.json"
+    write_findings_artifact(path, valid_artifact)
+    with pytest.raises(FindingsValidationError, match="does not match"):
+        load_findings_artifact(
+            path,
+            expected_repo="o/r",
+            expected_pr_number=7,
+            expected_head_sha="h" * 40,
+            expected_provenance=_provenance(),
+        )
+
+
+def test_load_requires_provenance_when_expected(tmp_path, valid_artifact) -> None:
+    path = tmp_path / "f.json"
+    write_findings_artifact(path, valid_artifact)
+    with pytest.raises(FindingsValidationError, match="provenance"):
+        load_findings_artifact(
+            path,
+            expected_repo="o/r",
+            expected_pr_number=7,
+            expected_head_sha="h" * 40,
+            expected_provenance=_provenance(),
+        )
+
+
+def test_load_rejects_malformed_provenance(tmp_path, valid_artifact) -> None:
+    valid_artifact["provenance"] = {"target_kind": "nightly"}
+    path = tmp_path / "f.json"
+    write_findings_artifact(path, valid_artifact)
+    with pytest.raises(FindingsValidationError, match="schema"):
+        load_findings_artifact(path, expected_repo="o/r", expected_pr_number=7,
+                               expected_head_sha="h" * 40)

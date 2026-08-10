@@ -252,6 +252,29 @@ def get_current_backends() -> list[Backend]:
     return list(_state.current_backends)
 
 
+def classify_agent_abort(aborted_reason: str | None) -> str | None:
+    """Map a ``run_agent`` abort reason onto the service process-outcome vocabulary.
+
+    ``run_agent`` returns an ``aborted_reason`` (e.g. ``"wall_budget_exceeded"``,
+    ``"tool_call_budget_exceeded"``, ``"tool_vetoed:Write"``) when a turn was
+    cut short rather than completed. Service-mode callers need that classified
+    onto the worker's process-outcome vocabulary so a truncated turn can never
+    be mistaken for a clean review.
+
+    Returns:
+        ``None`` for a normal completion (no abort); ``"tool_vetoed"`` for a
+        supervisor veto; ``"budget_exhausted"`` for wall/tool-call budget
+        truncation; ``"process_loss"`` for any other abort signal.
+    """
+    if aborted_reason is None:
+        return None
+    if aborted_reason.startswith("tool_vetoed:"):
+        return "tool_vetoed"
+    if "budget" in aborted_reason:
+        return "budget_exhausted"
+    return "process_loss"
+
+
 def detect_test_success(output: str) -> bool:
     """Detect if tests passed using pattern matching.
 

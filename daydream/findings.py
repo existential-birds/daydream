@@ -50,6 +50,24 @@ FINDINGS_SCHEMA: dict[str, Any] = {
         "pr_number": {"type": "integer"},
         "head_sha": {"type": "string"},
         "run_info": {"type": ["string", "null"]},
+        "provenance": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": [
+                "target_kind",
+                "candidate_sha",
+                "candidate_tree_digest",
+                "base_sha",
+                "full_diff_digest",
+            ],
+            "properties": {
+                "target_kind": {"enum": ["pr_head", "merge_group"]},
+                "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "candidate_tree_digest": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                "full_diff_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            },
+        },
         "findings": {
             "type": "array",
             "items": {
@@ -123,6 +141,10 @@ class FindingsArtifact:
         pr_number: Declared target PR number.
         head_sha: Declared PR head SHA the findings were computed against.
         run_info: Phase A's rendered run-info markdown, or None.
+        provenance: Optional exact-review-target provenance block
+            (``REVIEW_TARGET_V1`` fields: ``target_kind``, ``candidate_sha``,
+            ``candidate_tree_digest``, ``base_sha``, ``full_diff_digest``), or
+            None. Additive: pre-provenance artifacts load with None.
         findings: Validated finding entries.
     """
 
@@ -131,6 +153,7 @@ class FindingsArtifact:
     head_sha: str
     run_info: str | None
     findings: list[ArtifactFinding]
+    provenance: dict[str, Any] | None = None
 
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
@@ -154,6 +177,7 @@ def build_findings_artifact(
     issues: list[ParsedIssue],
     *,
     run_info: str | None,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Classify issues against the PR diff and build the findings artifact.
 
@@ -163,6 +187,10 @@ def build_findings_artifact(
 
     Args:
         issues: Parsed issues, fingerprinted for cross-run dedup.
+        provenance: Optional exact-review-target provenance block
+            (``REVIEW_TARGET_V1`` fields), recorded verbatim so Phase B can
+            verify it reviewed the exact same target. Additive: when omitted,
+            the artifact is byte-identical to a pre-provenance build.
 
     Returns:
         The artifact dict, matching ``FINDINGS_SCHEMA``: inline findings
@@ -178,7 +206,7 @@ def build_findings_artifact(
     ]
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
     findings.extend(_finding_dict(issue, placement="body", line=None) for issue in classified.body_only)
-    return {
+    artifact: dict[str, Any] = {
         "schema_version": FINDINGS_SCHEMA_VERSION,
         "repo": f"{pr.owner}/{pr.repo}",
         "pr_number": pr.number,
@@ -186,6 +214,9 @@ def build_findings_artifact(
         "run_info": run_info,
         "findings": findings,
     }
+    if provenance is not None:
+        artifact["provenance"] = provenance
+    return artifact
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
@@ -200,6 +231,7 @@ def load_findings_artifact(
     expected_repo: str,
     expected_pr_number: int,
     expected_head_sha: str,
+    expected_provenance: dict[str, Any] | None = None,
 ) -> FindingsArtifact:
     """Load an artifact and validate it against event-derived facts.
 
@@ -209,6 +241,13 @@ def load_findings_artifact(
     parse, strict schema validation, then equality of the declared
     ``repo``/``pr_number``/``head_sha`` against the expected (event-derived)
     values. Artifact content is never executed or interpolated.
+
+    Args:
+        expected_provenance: When provided, the artifact MUST declare a
+            ``provenance`` block whose exact-SHA/digest fields
+            (``candidate_sha``, ``candidate_tree_digest``, ``base_sha``,
+            ``full_diff_digest``) match the event-derived target exactly. A
+            missing block or any mismatch is a hard validation failure.
 
     Raises:
         FindingsValidationError: On any failed check, naming the check.
@@ -244,10 +283,24 @@ def load_findings_artifact(
                 f"artifact {field_name} {declared!r} does not match event-derived {field_name} {expected!r}"
             )
 
+    provenance = data.get("provenance")
+    if expected_provenance is not None:
+        if provenance is None:
+            raise FindingsValidationError(
+                "artifact provenance is missing but the event-derived target requires it"
+            )
+        for field_name in ("candidate_sha", "candidate_tree_digest", "base_sha", "full_diff_digest"):
+            if provenance.get(field_name) != expected_provenance.get(field_name):
+                raise FindingsValidationError(
+                    f"artifact provenance {field_name} {provenance.get(field_name)!r} does not match "
+                    f"event-derived {field_name} {expected_provenance.get(field_name)!r}"
+                )
+
     return FindingsArtifact(
         repo=data["repo"],
         pr_number=data["pr_number"],
         head_sha=data["head_sha"],
         run_info=data.get("run_info"),
         findings=[ArtifactFinding(**f) for f in data["findings"]],
+        provenance=provenance,
     )
