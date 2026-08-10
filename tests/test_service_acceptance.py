@@ -37,8 +37,8 @@ from daydream.service.models import (
     TerminalOutcome,
 )
 from daydream.service.policy import PolicyDecision, PolicyEvaluator
-from daydream.service.publisher import PublishError, PublishReceipt, PublishRequest, Publisher
-from daydream.service.runner import ReviewRunner, controller_record_to_round
+from daydream.service.publisher import Publisher, PublishError, PublishReceipt, PublishRequest
+from daydream.service.runner import ReviewRunner
 from tests.harness.service_fakes import InMemoryStorage
 
 CANDIDATE_SHA = "a" * 40
@@ -134,7 +134,9 @@ def _runner(rounds: int = 1) -> tuple[ReviewRunner, RecordingPublisher, InMemory
     return runner, publisher, storage
 
 
-async def _run_clean_round(runner: ReviewRunner, *, attempt: int, target: ReviewTarget | None = None) -> ControllerRecord:
+async def _run_clean_round(
+    runner: ReviewRunner, *, attempt: int, target: ReviewTarget | None = None
+) -> ControllerRecord:
     """Drive one round through the real controller + bridge + scripted executor.
 
     The bridge maps the spec's lens set into the executor's ``payload.lenses``,
