@@ -30,6 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   comment) and only on successful completion; `feedback` mode writes no report
   and is gated off.
 
+- **backends:** Classify pi `502` responses as retryable (#356)
+
+  The pi backend's transient-error guard covered `429`/`503` but treated a
+  `502` (e.g. `502 status code (no body)` from an upstream gateway) as fatal on
+  first occurrence, killing the whole deep cycle mid-run. `502` and
+  `bad gateway` are now matched alongside the existing server-error literals,
+  so a bounded backoff window replaces the fatal path and a sustained `502`
+  window still terminates cleanly with previously written verdicts preserved.
+
 ## [0.25.0] - 2026-07-26
 
 ### Added

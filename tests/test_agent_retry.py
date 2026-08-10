@@ -72,6 +72,20 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
             "Review complete after retry",
             id="stream-drop",
         ),
+        # 502 Bad Gateway (issue #356). First attempt is a 502; second succeeds.
+        # ``retryable`` comes from the PRODUCTION classifier, so this proves a 502 is
+        # actually retried end-to-end through run_agent rather than treated as fatal.
+        pytest.param(
+            lambda: _fail_then_succeed(
+                PiError(
+                    "502 status code (no body)",
+                    retryable=_is_retryable_error_message("502 status code (no body)"),
+                ),
+                text="Review complete after 502 retry",
+            ),
+            "Review complete after 502 retry",
+            id="502-bad-gateway-retried",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -302,5 +316,47 @@ async def test_run_agent_retry_exhausted_marks_trajectory_partial(
     # The trajectory was written and stamped partial=true by the recorder's
     # exception-exit path (TrajectoryRecorder._aborted → _write).
     assert trajectory_path.exists(), "trajectory.json was not written on retry exhaustion"
+    trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+    assert trajectory["extra"]["partial"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_502_exhaustion_preserves_artifacts(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A sustained 502 window terminates cleanly with existing artifacts preserved (#356).
+
+    A stub returns a 502 PiError through every attempt. After the retry bound,
+    ``run_agent`` fails cleanly (raises — never hangs, never silently succeeds) and
+    the trajectory already written is preserved and stamped ``partial``, so verdicts
+    written before the 502 window are not lost.
+    """
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
+    monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "2")
+    # `retryable` from the PRODUCTION classifier proves the exhaustion path is reached
+    # precisely because 502 is retryable — not because of a misclassified fatal.
+    backend = _always_raises(
+        PiError("502 status code (no body)", retryable=_is_retryable_error_message("502 status code (no body)"))
+    )
+
+    trajectory_path = tmp_path / ".daydream" / "trajectory.json"
+    recorder = TrajectoryRecorder(
+        path=trajectory_path,
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="test-model",
+        session_id="test-502-exhaust",
+    )
+
+    with pytest.raises(PiError, match="502 status code"):
+        async with recorder:
+            await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
+
+    # 1 original attempt + 2 retries = 3 total, then re-raised.
+    assert backend.call_count == 3
+
+    # Clean failure, artifacts preserved: the trajectory survived the exhaustion and
+    # is explicitly marked partial so downstream consumers know the run was aborted.
+    assert trajectory_path.exists(), "trajectory.json was not written on 502 exhaustion"
     trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert trajectory["extra"]["partial"] is True
