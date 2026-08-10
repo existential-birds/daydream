@@ -1525,7 +1525,8 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
 
     The plan's content is finished; only the ``planned_at`` anchor is stale, so
     the plan lands in a fresh detached worktree at the current HEAD, re-anchored
-    to it, and is reported as written — never silently dropped.
+    to it, and is reported as written — never silently dropped. The finished
+    text also lands a durable copy in the main index so it survives pruning.
     """
     assembled = _assembled(repo)
     (repo / "README.md").write_text(
@@ -1545,7 +1546,8 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     landed = result["written"][0]["path"]
     assert ".daydream/worktrees/" in landed
     assert landed.endswith("daydream_plans/001-batch-catalog-queries.md")
-    assert not (repo / "daydream_plans/001-batch-catalog-queries.md").is_file()
+    main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
+    assert main_plan.is_file()
     plan_file = Path(landed)
     assert plan_file.is_file()
     text = plan_file.read_text(encoding="utf-8")
@@ -1577,9 +1579,52 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
     assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
-    # the README row must NOT mislink a main-dir sibling (file lives in the worktree)
-    assert "](001-batch-catalog-queries.md)" not in main_index
+    # the README row links the durable main-dir sibling, exactly like any other
+    # row: the re-anchored content now lives in the main index.
+    assert "| [001](001-batch-catalog-queries.md) " in main_index
     assert "REANCHORED" in main_index
+
+
+def test_reanchored_plan_survives_worktree_pruning(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """The durable main-index copy outlives the next run's worktree pruning.
+
+    Regression guard for the HIGH finding: the re-anchored plan used to exist
+    only inside the detached worktree that the next run force-removes, so the
+    deliverable was permanently deleted while the index kept a dead pointer.
+    """
+    assembled = _assembled(repo)
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "README.md")
+    new_head = commit(repo, "advance head after plan fan-out")
+
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=head_sha,
+    )
+    assert len(result["written"]) == 1
+    landed = Path(result["written"][0]["path"])
+    main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
+    assert main_plan.is_file()
+    assert f"`{new_head}`" in main_plan.read_text(encoding="utf-8")
+    assert landed.is_file()
+
+    from daydream.improve.plans import prune_stale_reanchor_worktrees
+
+    removed = prune_stale_reanchor_worktrees(repo)
+
+    assert removed == 1
+    assert not landed.exists()
+    assert main_plan.is_file()
+    assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_reanchored_finding_is_not_replanned_on_a_later_run(

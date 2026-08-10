@@ -44,6 +44,9 @@ _INDEX_ROW_LINK = re.compile(r"\[\d{3}\]\(\d{3}-([a-z0-9-]+)\.md\)")
 # a filesystem-safe run id may reach the path; anything else falls back to an
 # anchor-derived name.
 _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+# Re-anchor worktree dirnames end in this suffix; the prune pass and the
+# re-anchor write share it so a rename can never silently stop pruning.
+_REANCHOR_DIR_SUFFIX = "-reanchor"
 
 
 def load_rejections(plans_dir: Path) -> dict[str, dict[str, Any]]:
@@ -509,7 +512,9 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     so one stale worktree never blocks a plan run.
     """
     removed = 0
-    for path in (repo / ".daydream" / "worktrees").glob("*-reanchor"):
+    for path in (
+        repo / ".daydream" / "worktrees"
+    ).glob(f"*{_REANCHOR_DIR_SUFFIX}"):
         if not path.is_dir():
             continue
         try:
@@ -575,22 +580,29 @@ def _render_index(
         "|------|-------|----------|--------|--------|\n"
         + ("\n".join(rows) if rows else "| — | No plans written. | — | — | — |")
         + "\n\nStatus values: TODO | IN PROGRESS | DONE | BLOCKED "
-        "(with one-line reason) | REJECTED (with one-line rationale)\n\n"
+        "(with one-line reason) | REJECTED (with one-line rationale) | "
+        "REANCHORED (with one-line landing path)\n\n"
         "## Findings considered and rejected\n\n"
         + ("\n".join(rejected_lines) if rejected_lines else "- None.")
         + "\n"
     )
 
 
-def _index_row(entry: PlanIndexEntry) -> str:
+def _index_row(
+    entry: PlanIndexEntry, *, plans_dir: Path | None = None
+) -> str:
     """Render one durable entry as an execution-order row.
 
-    A re-anchored entry names a plan file that lives inside a ``*-reanchor``
-    worktree, not as a sibling of this index, so its plan cell is the bare
-    number (the landing path is carried in the Status cell instead).
+    When *plans_dir* is given, an entry whose plan file is not present there
+    renders as the bare number: the file lives elsewhere (e.g. a re-anchored
+    plan's sibling inside the worktree index), so a link would dangle.
     """
     filename = entry.path
-    if entry.status.startswith("REANCHORED"):
+    if (
+        plans_dir is not None
+        and filename is not None
+        and not _has_plan_file(plans_dir, entry)
+    ):
         plan_cell = f"{entry.number:03d}"
     else:
         plan_cell = (
@@ -626,6 +638,33 @@ def _blocked_entry(
         planned_at=planned_at,
         status=status,
         host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
+    )
+
+
+def _index_entry(
+    *,
+    number: int,
+    slug: str,
+    title: str,
+    fingerprint: str,
+    finding: dict[str, Any],
+    planned_at: str,
+    status: str,
+    host_blocked: bool = False,
+) -> PlanIndexEntry:
+    """Build one durable index entry from a landed plan's finding fields."""
+    return PlanIndexEntry(
+        number=number,
+        slug=slug,
+        title=_index_field(title),
+        fingerprint=fingerprint,
+        priority=plan_priority(finding),
+        effort=_index_field(finding.get("effort")),
+        risk=_index_field(finding.get("risk")),
+        category=_index_field(finding.get("category")),
+        planned_at=planned_at,
+        status=status,
+        host_blocked=host_blocked,
     )
 
 
@@ -843,6 +882,42 @@ class PlanWriteSession:
             str(finding.get("title") or "Selected finding"),
         )
 
+    def _record_written(
+        self,
+        reservation: PlanReservation,
+        selection: dict[str, Any],
+        *,
+        number: int,
+        title: str,
+        finding: dict[str, Any],
+        attempt: dict[str, Any] | None,
+        plan_result: dict[str, Any],
+        path: str,
+        artifact: dict[str, Any],
+    ) -> PlanOutcome:
+        """Record a successfully landed plan and return its outcome."""
+        self._written.append(
+            (
+                reservation.index,
+                {**selection, "number": number, "path": path},
+            )
+        )
+        self._diagnostics.append(
+            (
+                reservation.index,
+                _attempt_diagnostic(
+                    finding=finding,
+                    attempt=attempt,
+                    received=plan_result,
+                    disposition="success",
+                    stage="success",
+                    artifact=artifact,
+                ),
+            )
+        )
+        self._fingerprints.add(reservation.fingerprint)
+        return PlanOutcome("written", number, path, title)
+
     def _land(
         self,
         reservation: PlanReservation,
@@ -950,41 +1025,28 @@ class PlanWriteSession:
                 received=plan_result,
             )
         (self._plans_dir / filename).write_text(text, encoding="utf-8")
-        self._entries[number] = PlanIndexEntry(
+        self._entries[number] = _index_entry(
             number=number,
             slug=slug,
-            title=_index_field(selection.get("title") or title),
+            title=selection.get("title") or title,
             fingerprint=reservation.fingerprint,
-            priority=plan_priority(finding),
-            effort=_index_field(finding.get("effort")),
-            risk=_index_field(finding.get("risk")),
-            category=_index_field(finding.get("category")),
+            finding=finding,
             planned_at=self._planned_at,
             status="TODO",
-            host_blocked=False,
         )
-        self._written.append(
-            (
-                reservation.index,
-                {**selection, "number": number, "path": filename},
-            )
+        outcome = self._record_written(
+            reservation,
+            selection,
+            number=number,
+            title=title,
+            finding=finding,
+            attempt=attempt,
+            plan_result=plan_result,
+            path=filename,
+            artifact={"path": filename, "status": "TODO"},
         )
-        self._diagnostics.append(
-            (
-                reservation.index,
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=plan_result,
-                    disposition="success",
-                    stage="success",
-                    artifact={"path": filename, "status": "TODO"},
-                ),
-            )
-        )
-        self._fingerprints.add(reservation.fingerprint)
         self._write_index()
-        return PlanOutcome("written", number, filename, title)
+        return outcome
 
     def _reanchor_and_write(
         self,
@@ -1001,9 +1063,11 @@ class PlanWriteSession:
         The plan's content is complete; only the ``planned_at`` anchor is stale
         because HEAD advanced past the commit captured at session start. The
         plan lands in a fresh detached worktree at the current HEAD, re-anchored
-        to it, and returns ``written`` with the full path it landed at — a stale
-        anchor alone must not discard a valid plan. Any sub-failure falls back to
-        :meth:`_block` with ``PLAN_REANCHOR_FAILED``; nothing is silently dropped.
+        to it, plus a durable copy in the main index's ``daydream_plans/`` so it
+        survives the next run's worktree pruning, and returns ``written`` with
+        the full worktree path it landed at — a stale anchor alone must not
+        discard a valid plan. Any sub-failure falls back to :meth:`_block` with
+        ``PLAN_REANCHOR_FAILED``; nothing is silently dropped.
         """
         finding = selection["finding"]
         attempt = self._attempt_of(selection)
@@ -1032,9 +1096,14 @@ class PlanWriteSession:
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
                 worktree = (
-                    self._repo / ".daydream" / "worktrees" / f"{run_id}-reanchor"
+                    self._repo
+                    / ".daydream"
+                    / "worktrees"
+                    / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
                 )
-                git_ops.worktree_add(self._repo, worktree, "HEAD", detach=True)
+                git_ops.worktree_add(
+                    self._repo, worktree, new_head, detach=True
+                )
                 self._reanchor_worktree = worktree
             text = render_plan(
                 finding,
@@ -1047,73 +1116,59 @@ class PlanWriteSession:
             plans_dir = worktree / "daydream_plans"
             plans_dir.mkdir(parents=True, exist_ok=True)
             (plans_dir / filename).write_text(text, encoding="utf-8")
-            self._reanchored[number] = PlanIndexEntry(
+            # The plan text is worktree-independent: land the durable copy in the
+            # main index too, so it survives the next run's worktree pruning.
+            (self._plans_dir / filename).write_text(text, encoding="utf-8")
+            self._reanchored[number] = _index_entry(
                 number=number,
                 slug=slug,
-                title=_index_field(selection.get("title") or title),
+                title=selection.get("title") or title,
                 fingerprint=reservation.fingerprint,
-                priority=plan_priority(finding),
-                effort=_index_field(finding.get("effort")),
-                risk=_index_field(finding.get("risk")),
-                category=_index_field(finding.get("category")),
+                finding=finding,
                 planned_at=new_head,
                 status="TODO",
-                host_blocked=False,
             )
             entries = dict(self._entries)
             entries.update(self._reanchored)
             self._write_index_files(
                 plans_dir,
                 [entries[index] for index in sorted(entries)],
+                check_links=True,
             )
             landed_rel = (
                 (worktree / "daydream_plans" / filename)
                 .relative_to(self._repo)
                 .as_posix()
             )
-            self._entries[number] = PlanIndexEntry(
+            self._entries[number] = _index_entry(
                 number=number,
                 slug=slug,
-                title=_index_field(selection.get("title") or title),
+                title=selection.get("title") or title,
                 fingerprint=reservation.fingerprint,
-                priority=plan_priority(finding),
-                effort=_index_field(finding.get("effort")),
-                risk=_index_field(finding.get("risk")),
-                category=_index_field(finding.get("category")),
+                finding=finding,
                 planned_at=new_head,
                 status=f"REANCHORED (landed at {landed_rel})",
-                host_blocked=False,
             )
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
             return _reanchor_failed()
 
         landed_path = (worktree / "daydream_plans" / filename).as_posix()
-        self._written.append(
-            (
-                reservation.index,
-                {**selection, "number": number, "path": landed_path},
-            )
+        return self._record_written(
+            reservation,
+            selection,
+            number=number,
+            title=title,
+            finding=finding,
+            attempt=attempt,
+            plan_result=plan_result,
+            path=landed_path,
+            artifact={
+                "path": landed_path,
+                "status": "TODO",
+                "reanchored": True,
+                "planned_at": new_head,
+            },
         )
-        self._diagnostics.append(
-            (
-                reservation.index,
-                _attempt_diagnostic(
-                    finding=finding,
-                    attempt=attempt,
-                    received=plan_result,
-                    disposition="success",
-                    stage="success",
-                    artifact={
-                        "path": landed_path,
-                        "status": "TODO",
-                        "reanchored": True,
-                        "planned_at": new_head,
-                    },
-                ),
-            )
-        )
-        self._fingerprints.add(reservation.fingerprint)
-        return PlanOutcome("written", number, landed_path, title)
 
     def _write_index(self) -> None:
         """Rewrite the sidecar and its rendered index from the entries so far.
@@ -1126,7 +1181,11 @@ class PlanWriteSession:
         self._write_index_files(self._plans_dir, entries)
 
     def _write_index_files(
-        self, plans_dir: Path, entries: Sequence[PlanIndexEntry]
+        self,
+        plans_dir: Path,
+        entries: Sequence[PlanIndexEntry],
+        *,
+        check_links: bool = False,
     ) -> None:
         """Write the sidecar and its rendered index for *entries* into *plans_dir*."""
         (plans_dir / PLAN_INDEX_FILENAME).write_text(
@@ -1144,7 +1203,13 @@ class PlanWriteSession:
         )
         (plans_dir / "README.md").write_text(
             _render_index(
-                [_index_row(entry) for entry in entries],
+                [
+                    _index_row(
+                        entry,
+                        plans_dir=plans_dir if check_links else None,
+                    )
+                    for entry in entries
+                ],
                 plans_dir=plans_dir,
                 planned_on=self._planned_on,
                 non_interactive_default=self._non_interactive_default,
