@@ -1434,8 +1434,14 @@ def _handle_ext_validate_command() -> int:
         f"registry OK: {len(registry.phase_names())} phases, "
         f"{len(registry.flow_names())} flows, "
         f"{len(registry.skill_slots())} skill slots, "
-        f"{len(registry.prompt_names())} prompts"
+        f"{len(registry.prompt_names())} prompts, "
+        f"{len(registry.executor_names())} executors, "
+        f"{len(registry.publisher_names())} publishers"
     )
+    if registry.executor_names():
+        console.print("executors: " + ", ".join(registry.executor_names()), soft_wrap=True)
+    if registry.publisher_names():
+        console.print("publishers: " + ", ".join(registry.publisher_names()), soft_wrap=True)
     return 0
 
 

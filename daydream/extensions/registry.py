@@ -14,6 +14,13 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 
+from daydream.executors.contract import (
+    DAYDREAM_SERVICE_V1,
+    MIN_SUPPORTED_DAYDREAM_SERVICE_V1,
+    ExecutorError,
+    require_capabilities,
+)
+from daydream.executors.protocol import ReviewExecutor, is_review_executor
 from daydream.extensions.api import (
     ExtensionError,
     FlowStep,
@@ -38,6 +45,8 @@ class Registry:
         self._prompts: dict[str, Callable[..., str]] = {}
         self._stack_rules: dict[str, StackRule] = {}
         self._tool_supervisor: ToolSupervisor | None = None
+        self._executors: dict[str, ReviewExecutor] = {}
+        self._publishers: dict[str, object] = {}
 
     # -- phases -----------------------------------------------------------
 
@@ -185,3 +194,73 @@ class Registry:
     def stack_rules(self) -> tuple[StackRule, ...]:
         """Return all fork stack rules in registration order."""
         return tuple(self._stack_rules.values())
+
+    # -- executors / publishers (DAYDREAM_SERVICE_V1 seam) -----------------
+
+    def register_executor(self, name: str, executor: ReviewExecutor, *, service_api: int = DAYDREAM_SERVICE_V1) -> None:
+        """Register a ``ReviewExecutor`` by name (capability admission at registration).
+
+        Rejects a duplicate name without ``replace`` and rejects any object
+        that is not a conformant ``ReviewExecutor`` or whose declared
+        capabilities miss a required one — capability admission is a contract
+        STOP condition, enforceable as early as the registry seam. The service
+        contract version is asserted (additive extension contract, so this does
+        not change ``EXTENSION_API_VERSION``).
+        """
+        if not is_review_executor(executor):
+            raise ExtensionError(f"executor '{name}' is not a conformant ReviewExecutor (DAYDREAM_SERVICE_V1)")
+        if not (MIN_SUPPORTED_DAYDREAM_SERVICE_V1 <= service_api <= DAYDREAM_SERVICE_V1):
+            raise ExtensionError(
+                f"executor '{name}' declares DAYDREAM_SERVICE_V1 = {service_api!r}; "
+                f"supported {MIN_SUPPORTED_DAYDREAM_SERVICE_V1}..{DAYDREAM_SERVICE_V1}"
+            )
+        if name in self._executors:
+            raise ExtensionError(f"executor '{name}' is already registered")
+        try:
+            declared = set(getattr(executor, "capabilities", frozenset()))
+            require_capabilities(declared, kind=getattr(executor, "kind", name))
+        except ExecutorError as exc:
+            raise ExtensionError(f"executor '{name}' cannot be admitted: {exc}") from exc
+        self._executors[name] = executor
+
+    def executor(self, name: str) -> ReviewExecutor:
+        """Return the registered executor, or raise ``UnresolvedExtensionError``."""
+        try:
+            return self._executors[name]
+        except KeyError:
+            raise UnresolvedExtensionError(f"executor '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def executor_if_registered(self, name: str) -> ReviewExecutor | None:
+        """Return the registered executor, or None; never raises."""
+        return self._executors.get(name)
+
+    def executor_names(self) -> tuple[str, ...]:
+        """Return every registered executor name in registration order."""
+        return tuple(self._executors)
+
+    def register_publisher(self, name: str, publisher: object) -> None:
+        """Register a publisher object by name (the trusted publication seam).
+
+        Unlike executors, publishers are not capability-admitted here — the
+        trusted GitHub publisher carries its own credential-safety contract
+        (implemented by the publisher leaf); this registry only names it so
+        service policy can resolve it without a vendor import.
+        """
+        if name in self._publishers:
+            raise ExtensionError(f"publisher '{name}' is already registered")
+        self._publishers[name] = publisher
+
+    def publisher(self, name: str) -> object:
+        """Return the registered publisher, or raise ``UnresolvedExtensionError``."""
+        try:
+            return self._publishers[name]
+        except KeyError:
+            raise UnresolvedExtensionError(f"publisher '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def publisher_if_registered(self, name: str) -> object | None:
+        """Return the registered publisher, or None; never raises."""
+        return self._publishers.get(name)
+
+    def publisher_names(self) -> tuple[str, ...]:
+        """Return every registered publisher name in registration order."""
+        return tuple(self._publishers)

@@ -24,6 +24,15 @@ EXTENSION_API_VERSION: int = 5
 # Oldest extension contract version still accepted (range floor).
 MIN_SUPPORTED_EXTENSION_API_VERSION: int = 5
 
+# The DAYDREAM_SERVICE_V1 executor/publisher registration seam rides on the
+# existing extension contract (additive — no EXTENSION_API_VERSION bump):
+# a fork registers executors/publishers through the same ``Registry`` it
+# already mutates. The versioned service contract itself (ports, capabilities,
+# common models) lives in ``daydream.executors.contract``; this constant is
+# re-exported so an adapter can assert the service contract it implements.
+DAYDREAM_SERVICE_V1: int = 1
+MIN_SUPPORTED_DAYDREAM_SERVICE_V1: int = 1
+
 
 class ExtensionError(Exception):
     """Base error for the extension seam."""
