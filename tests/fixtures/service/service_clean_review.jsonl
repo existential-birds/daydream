@@ -1,0 +1,7 @@
+{"type":"session","sessionId":"pi_ses_service_clean"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"assistant","content":[{"type":"text","text":"{\"completed_lenses\":[\"python\"],\"issues\":[]}"}]}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"completed_lenses\":[\"python\"],\"issues\":[]}"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"{\"completed_lenses\":[\"python\"],\"issues\":[]}"}],"model":"glm-5.2","usage":{"input":120,"output":60,"cost":{"total":0.0002}},"stopReason":"stop"}}
+{"type":"agent_end","messages":[]}
