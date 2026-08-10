@@ -1829,10 +1829,13 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     result = session.finish()
     for entry in result["written"]:
         if entry["number"] not in announced:
+            path = entry["path"] or ""
+            landing = (
+                path if Path(path).is_absolute() else f"daydream_plans/{path}"
+            )
             print_success(
                 console,
-                f"Plan {entry['number']:03d} written to "
-                f"daydream_plans/{entry['path']}.",
+                f"Plan {entry['number']:03d} written to {landing}.",
             )
     record_plan_write_diagnostics(
         plan_write_diagnostics_path(ctx.data["improve_dir"]),
