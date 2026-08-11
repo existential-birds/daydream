@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from daydream.executors import UnknownExecutionError
 from daydream.service.admission import AdmissionController, Budgets
 from daydream.service.controller import (
     ROUTE_TO_OPERATOR,
@@ -29,7 +30,7 @@ from daydream.service.models import (
     JobSpec,
 )
 from daydream.service.states import ServiceState
-from tests.harness.service_fakes import InMemoryStorage, ScriptedExecutor
+from tests.harness.service_fakes import FakeScriptedExecutor, InMemoryStorage
 
 S = ServiceState
 
@@ -62,9 +63,9 @@ def _fresh(
     lens: frozenset[str] | None = None,
     *,
     retries: int | None = None,
-) -> tuple[ServiceController, InMemoryStorage, ScriptedExecutor]:
+) -> tuple[ServiceController, InMemoryStorage, FakeScriptedExecutor]:
     storage = InMemoryStorage()
-    executor = ScriptedExecutor()
+    executor = FakeScriptedExecutor()
     budgets = Budgets(retries={"svc": retries}) if retries is not None else Budgets()
     admission = AdmissionController(budgets)
     controller = ServiceController(storage, executor, admission=admission)
@@ -232,6 +233,22 @@ async def test_reconcile_fails_closed_when_execution_vanished() -> None:
     assert after.state is S.CANCELLED
 
 
+async def test_reconcile_fails_closed_when_executor_forgot_execution() -> None:
+    """A conformant executor raises ``UnknownExecutionError`` for a lost execution
+    (it never returns a non-running/non-terminal snapshot); the controller must
+    fail closed to cancelled instead of letting the exception wedge the job in
+    its active state across the restart.
+    """
+    controller, _, executor = _fresh(lens=frozenset({"py"}))
+    await controller.enqueue(_record(lens=frozenset({"py"})))
+    await _started(controller)
+    executor.inspect_raises = UnknownExecutionError("execution forgotten across restart")
+    after = await controller.reconcile_restart("j1")
+    assert after.state is S.CANCELLED
+    # The deterministic release ran on the lost ref; nothing is left wedged.
+    assert executor.released and executor.released[0][1] == "cancelled"
+
+
 async def test_reconcile_never_inspects_unstarted_job() -> None:
     controller, _, executor = _fresh()
     await controller.enqueue(_record())
@@ -245,7 +262,7 @@ async def test_reconcile_never_inspects_unstarted_job() -> None:
 
 async def test_infra_start_failure_fails_closed_then_retries_by_budget() -> None:
     storage = InMemoryStorage()
-    executor = ScriptedExecutor(start_raises=RuntimeError("provider 503"))
+    executor = FakeScriptedExecutor(start_raises=RuntimeError("provider 503"))
     admission = AdmissionController(Budgets(retries={"svc": 1}))
     controller = ServiceController(storage, executor, admission=admission)
     await controller.enqueue(_record())
@@ -312,7 +329,7 @@ async def test_blocking_finding_fails_closed_despite_clean_exit() -> None:
 
 async def test_admission_backoff_does_not_start() -> None:
     storage = InMemoryStorage()
-    executor = ScriptedExecutor()
+    executor = FakeScriptedExecutor()
     admission = AdmissionController(Budgets(fleet=0))
     controller = ServiceController(storage, executor, admission=admission)
     await controller.enqueue(_record())

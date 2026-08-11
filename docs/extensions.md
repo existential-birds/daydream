@@ -279,6 +279,11 @@ def register(r):
     r.register_publisher("github-checks", MyTrustedPublisher())
 ```
 
+`LocalExecutor(".")` is development/test infrastructure — it is **not**
+automatically safe for merge-authorizing untrusted code (nothing sandboxes
+ambient credentials, source writes, or egress) and is for conformance and
+local experimentation only.
+
 `register_executor(name, executor)` enforces **capability admission at
 registration**: the executor must be a conformant `ReviewExecutor` (implements
 `start` / `inspect` / `cancel` / `collect` / `release` and exposes `kind` and

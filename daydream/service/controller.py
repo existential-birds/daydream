@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 
+from daydream.executors import UnknownExecutionError
 from daydream.service.admission import AdmissionController
 from daydream.service.models import (
     VERDICT_CLEAN,
@@ -242,6 +243,9 @@ class ServiceController:
         Never parses the handle: asks the registered executor to inspect the
         stored opaque ref, then aligns the neutral state. Settled jobs are left
         as-is; never-started jobs stay queued (for a future dispatch pick-up).
+        An executor that raises ``UnknownExecutionError`` for the stored ref
+        (the execution was lost across the restart) is treated exactly like a
+        vanished execution and fails closed to ``cancelled``.
         """
         async with self._lock(job_id):
             record = await self._require(job_id)
@@ -250,7 +254,14 @@ class ServiceController:
             if record.execution_ref is None:
                 return record  # not started before restart; still queued/starting
 
-            snapshot = await self._executor.inspect(record.execution_ref)
+            try:
+                snapshot = await self._executor.inspect(record.execution_ref)
+            except UnknownExecutionError:
+                # A conformant executor never returns a non-running/
+                # non-terminal snapshot for a vanished execution — it raises
+                # instead. Treat that as a lost execution and fail closed
+                # instead of wedging the job in an active state forever.
+                return await self._cancel(record)
             if not snapshot.running and not snapshot.terminal:
                 # Execution vanished without a terminal — fail closed.
                 return await self._cancel(record)
@@ -310,14 +321,14 @@ class ServiceController:
 
     async def _transition(self, record: ControllerRecord, event: ServiceEvent) -> ControllerRecord:
         # Duplicate no-op: the state machine already reflects this event.
-        if apply(record.state, event) is record.state:
-            return record
         try:
             new_state = apply(record.state, event)
         except InvalidTransition:
             raise ControllerError(
                 f"illegal transition {record.state.value} -[{event.value}]-> ?"
             ) from None
+        if new_state is record.state:
+            return record
         try:
             return await self._storage.transition(
                 record.job_id,

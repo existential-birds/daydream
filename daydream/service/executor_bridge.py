@@ -176,9 +176,17 @@ class ExecutionBridge:
     async def release(self, ref: ExecutionRef, disposition: str) -> None:
         """Deterministically release *ref*."""
         binding = self._bindings.get(ref.opaque_handle)
-        if binding is not None and not binding.released:
+        if binding is not None:
+            if binding.released:
+                return
             await self._executor.release(binding.canonical_ref, disposition)
             binding.released = True
+            return
+        # No in-memory binding (e.g. a fresh bridge after a controller restart
+        # reconciled this ref from the durable store): rebuild the canonical ref
+        # from the controller-shaped ref so the executor still runs its
+        # deterministic release instead of silently leaking the workspace.
+        await self._executor.release(self._resolve(ref), disposition)
 
     def _resolve(self, ref: ExecutionRef) -> CanonicalExecutionRef:
         binding = self._bindings.get(ref.opaque_handle)

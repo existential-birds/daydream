@@ -16,8 +16,7 @@ from daydream.service.config_digest import (
     policy_digest,
     resolve_policy_source,
 )
-
-BASE_SHA = "c" * 40
+from tests.harness.service_fakes import BASE_SHA
 
 
 def _policy_config(**overrides) -> dict:

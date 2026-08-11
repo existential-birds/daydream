@@ -25,45 +25,9 @@ from daydream.github_app import (
     LiveIdentity,
     github_pr_head_live_identity,
 )
-from daydream.service.models import ReviewTarget, SourceOfTruth, TargetKind
+from daydream.service.models import ReviewTarget, TargetKind
 from daydream.service.publisher import PublishError, PublishReceipt, PublishRequest
-
-CANDIDATE_SHA = "a" * 40
-TREE = "b" * 40
-BASE_SHA = "c" * 40
-DIFF_DIGEST = "d" * 64
-CONFIG_DIGEST = "e" * 64
-
-
-def _pr_target(pr_number: int = 77, candidate_sha: str = CANDIDATE_SHA) -> ReviewTarget:
-    return ReviewTarget(
-        repo="acme/widgets",
-        kind=TargetKind.PR_HEAD,
-        candidate_sha=candidate_sha,
-        candidate_tree=TREE,
-        base_sha=BASE_SHA,
-        pr_number=pr_number,
-        merge_group_id=None,
-        diff_digest=DIFF_DIGEST,
-        config_source=SourceOfTruth(ref="refs/heads/main", sha=BASE_SHA, digest=CONFIG_DIGEST),
-        invalidation_id="job-1",
-    )
-
-
-def _merge_group_target(candidate_sha: str = CANDIDATE_SHA) -> ReviewTarget:
-    return ReviewTarget(
-        repo="acme/widgets",
-        kind=TargetKind.MERGE_GROUP,
-        candidate_sha=candidate_sha,
-        candidate_tree=TREE,
-        base_sha=BASE_SHA,
-        pr_number=None,
-        merge_group_id="mg-1",
-        diff_digest=DIFF_DIGEST,
-        config_source=SourceOfTruth(ref="refs/heads/main", sha=BASE_SHA, digest=CONFIG_DIGEST),
-        invalidation_id="job-1",
-    )
-
+from tests.harness.service_fakes import CANDIDATE_SHA, make_target
 
 _DEFAULT = "__default_target__"
 
@@ -77,7 +41,7 @@ def _req(
     target_sha: str | None = None,
 ) -> PublishRequest:
     if target == _DEFAULT:
-        target = _pr_target()
+        target = make_target()
     assert target is None or isinstance(target, ReviewTarget)
     resolved_sha: str = (
         target_sha
@@ -171,7 +135,7 @@ def test_pr_head_success_requires_target() -> None:
 def test_pr_head_live_resolver_rejects_non_pr_head() -> None:
     resolver = github_pr_head_live_identity(Path("/tmp"), "acme", "widgets")
     with pytest.raises(PublishError, match="merg"):
-        resolver(_merge_group_target())
+        resolver(make_target(kind=TargetKind.MERGE_GROUP))
 
 
 # --- merge_group live-identity revalidation ----------------------------------
@@ -188,7 +152,7 @@ def test_merge_group_success_revalidates_supplied_candidate() -> None:
 
     publisher = _publisher(live_identity=_live_resolver(CANDIDATE_SHA))
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        receipt = publisher.publish(_req(target=_merge_group_target()))
+        receipt = publisher.publish(_req(target=make_target(kind=TargetKind.MERGE_GROUP)))
 
     assert receipt.check_run_id == 7
     assert seen["payload"]["head_sha"] == CANDIDATE_SHA
@@ -202,13 +166,13 @@ def test_merge_group_replaced_candidate_fails_closed() -> None:
     publisher = _publisher(live_identity=_live_resolver("1" * 40))  # live candidate replaced
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
         with pytest.raises(PublishError, match="stale"):
-            publisher.publish(_req(target=_merge_group_target()))
+            publisher.publish(_req(target=make_target(kind=TargetKind.MERGE_GROUP)))
 
 
 def test_merge_group_without_resolver_fails_closed() -> None:
     """merge_group requires a caller-supplied live identity; refusal fails closed."""
     with pytest.raises(PublishError, match="resolver"):
-        _publisher().publish(_req(target=_merge_group_target()))
+        _publisher().publish(_req(target=make_target(kind=TargetKind.MERGE_GROUP)))
 
 
 # --- external_id binding and failure handling ---------------------------------
@@ -276,7 +240,7 @@ def test_publisher_failure_never_becomes_success() -> None:
     """A gh write failure surfaces as PublishError; retrying does not invent success."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 422")):
         with pytest.raises(PublishError):
-            _publisher().publish(_req(conclusion="failure", target=_pr_target()))
+            _publisher().publish(_req(conclusion="failure", target=make_target()))
 
 
 def test_repo_scope_mismatch_refused() -> None:
@@ -299,7 +263,7 @@ def test_failure_conclusion_does_not_require_live_identity_validation() -> None:
 
     publisher = _publisher()
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
-        receipt = publisher.publish(_req(conclusion="failure", target=_pr_target()))
+        receipt = publisher.publish(_req(conclusion="failure", target=make_target()))
 
     assert receipt.check_run_id == 3
     # no live PR-head GET was issued for a failure conclusion
@@ -318,7 +282,7 @@ def test_missing_candidate_sha_refused() -> None:
         done["called"] = True
         return {}
 
-    target = _pr_target(candidate_sha="")
+    target = make_target(candidate_sha="")
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
         with pytest.raises(PublishError):
             _publisher().publish(_req(target=target, conclusion="failure"))

@@ -342,7 +342,7 @@ def _build_provenance(config: "RunConfig") -> dict[str, Any]:
     return {
         "backend": backend,
         "model": model,
-        "provider": _resolved_provider(backend),
+        "provider": _resolved_provider(backend) if backend is not None else None,
         "config": config_provenance,
         "skill": getattr(config, "skill", None),
         "runtime": {

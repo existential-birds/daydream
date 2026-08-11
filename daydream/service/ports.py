@@ -6,6 +6,15 @@ recovery) is a separate leaf (leaf-C); the executor registry/conformance suite
 is its own step (Step 4). The controller depends only on these Protocols, so
 either can be swapped without changing the controller state machine.
 
+Wiring status: :class:`ControllerStorage` currently has exactly one
+implementor — the in-memory test fake
+(``tests.harness.service_fakes.InMemoryStorage``). Leaf-C's ``ServiceStore``
+(:mod:`daydream.service.store`) is a *different*, claim/attempt/lease-shaped
+ABI; the production SQLite store is exercised under the real controller only
+through the test-side adapter
+(``tests.harness.service_fakes.ServiceStoreStorageAdapter``). Nothing in
+production wires the two surfaces together yet.
+
 Rules:
 
 - ``ControllerStorage`` methods may raise ``StoreConflict`` to mean "the
@@ -139,7 +148,13 @@ class ReviewExecutor(Protocol):
         ...
 
     async def inspect(self, ref: ExecutionRef) -> ExecutionSnapshot:
-        """Report the live state of a stored opaque ref (restart reconciliation)."""
+        """Report the live state of a stored opaque ref (restart reconciliation).
+
+        A ref the executor no longer knows (never started, or already forgotten
+        after a restart) raises :class:`daydream.executors.UnknownExecutionError`
+        rather than returning a non-running/non-terminal snapshot; the
+        controller fails such a job closed to ``cancelled``.
+        """
         ...
 
     async def cancel(self, ref: ExecutionRef) -> None:

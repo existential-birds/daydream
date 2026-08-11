@@ -6,7 +6,7 @@
 **issue:** https://github.com/existential-birds/daydream/issues/357
 **branch:** `feat/executor-neutral-review-service`
 **base_commit:** `0b422abf53a510792267ddfffb833472ec5c7ff6`
-**output_commit:** `11da65366bbd7de6e428cff15d033ae0c69eb789` (the full-gate-verified code candidate on `feat/executor-neutral-review-service`; HEAD of the integrated branch is the same code plus documentation / stray-artifact-removal commits)
+**output_commit:** `7f87240eea15f7f4ef4c4392b4ecde9e7f26ce9b` (HEAD of `feat/executor-neutral-review-service`; the full-gate-verified candidate)
 **contracts frozen:** `REVIEW_TARGET_V1` (t_ed1f4349) + `DAYDREAM_SERVICE_V1` (t_6f41b005)
 **this is NOT a Daydream verdict / GitHub Check / merge authorization.**
 
@@ -66,7 +66,7 @@ end-to-end acceptance coverage (below).
 
 ## End-to-end acceptance (hermetic; GitHub/publisher seam mocked)
 
-`tests/test_service_acceptance.py` (5 tests) drives the REAL controller +
+`tests/test_service_acceptance.py` (6 tests) drives the REAL controller +
 `ExecutionBridge` + canonical `ScriptedExecutor` + `PolicyEvaluator` + a
 recording publisher, and confirms:
 
@@ -75,7 +75,9 @@ recording publisher, and confirms:
 2. **retry B clean**: success is published exactly once, and only once the
    complete configured round set (both rounds) is bound to B's exact candidate
    (`test_only_complete_configured_round_set_for_b_publishes`);
-   an incomplete set is fail-closed with no publish (`test_incomplete_round_set_never_publishes`).
+   an incomplete set is fail-closed with no publish (`test_incomplete_round_set_never_publishes`);
+   a failed round still releases its job to terminal `RELEASED`
+   (`test_failed_round_job_reaches_released`).
 3. **merge-queue M1 -> M2**: rounds bound to the replaced M1 candidate can never
    authorize M2 (`test_m1_rounds_can_never_authorize_replaced_m2`);
    a stale live identity after force-push refuses success entirely
@@ -108,10 +110,10 @@ and the SQLite-restart case under the in-memory store impl — all by design.
 
 ## Artifact hashes (bounded pointers, sha256 prefixes)
 
-- `service/models.py` `4d9d6b7f71e17415` · `service/runner.py` `c9e464d0296e114e` ·
-  `service/executor_bridge.py` `0ded028062ec0986` · `executors/contract.py`
+- `service/models.py` `4d9d6b7f71e17415` · `service/runner.py` `8e377cae574b0dd5` ·
+  `service/executor_bridge.py` `863e72a274e4e476` · `executors/contract.py`
   `5493d72526539f63` (leaf-D, unchanged)
-- `tests/test_service_acceptance.py` `9a837ada8e2dce58`
+- `tests/test_service_acceptance.py` `b68990c867d8714d`
 
 ## Resolve notes for every port seam (recap for the qualifier)
 

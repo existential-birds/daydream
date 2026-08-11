@@ -42,7 +42,7 @@ from daydream.service.models import (
 )
 from daydream.service.policy import Decision, PolicyEvaluator
 from daydream.service.publisher import Publisher, PublishError, PublishRequest
-from daydream.service.states import ServiceState
+from daydream.service.states import is_terminal
 
 
 def round_outcome_from_verdict(verdict: str) -> TerminalOutcome:
@@ -126,11 +126,15 @@ class ReviewRunner:
         self._rounds[round(evaluated.spec.attempt_number)] = controller_record_to_round(
             evaluated, target=target, finding_count=finding_count
         )
-        if evaluated.state is ServiceState.FAILED:
-            # A failed round can never compose into a SUCCESS decision; close
-            # its lifecycle (FAILED -> RELEASED, releasing the execution) now
-            # instead of parking the job in a terminal state forever.
+        if is_terminal(evaluated.state):
+            # A non-clean round (failed, or a collected infra verdict that
+            # reached terminal INFRA_ERROR) can never compose into a SUCCESS
+            # decision; close its lifecycle (terminal -> RELEASED, releasing
+            # the execution) now instead of parking the job in a terminal
+            # state forever. Drop it from _round_jobs: it no longer awaits a
+            # terminal disposition from publish().
             await self.controller.release(job_spec.job_id)
+            del self._round_jobs[round(evaluated.spec.attempt_number)]
         return evaluated
 
     def rounds(self) -> list[RoundRecord]:
@@ -153,7 +157,11 @@ class ReviewRunner:
         every round job moves ``PUBLISHING -> PASSED`` and its execution is
         released. A refused publish (stale/replaced candidate) cancels the
         round jobs so none is left wedged in ``PUBLISHING``, then re-raises the
-        ``PublishError``.
+        ``PublishError``. A FAIL decision that no additional round can redeem
+        (a non-clean round is already recorded, or the configured set is
+        already complete) cancels the still-active round jobs so none is left
+        wedged in ``PUBLISHING`` either; a FAIL from an incomplete but still
+        clean set stays open so later rounds can compose into SUCCESS.
         """
         decision = self.evaluate(target)
         if decision.success and self.publisher is not None:
@@ -185,6 +193,19 @@ class ReviewRunner:
             # lifecycle: PUBLISHING -> PASSED, releasing each execution.
             for job_id in self._round_jobs.values():
                 await self.controller.publish(job_id)
+        elif not decision.success and (
+            any(r.outcome is not TerminalOutcome.CLEAN for r in self._rounds.values())
+            or len(self._rounds) >= self.policy.required_rounds
+        ):
+            # A FAIL decision that no additional round can redeem — a non-clean
+            # round is already recorded, or the configured set is already
+            # complete — must not leave clean round jobs wedged in active
+            # PUBLISHING: cancel them (each execution is released
+            # deterministically), the same closure the refused-publish path
+            # applies. A FAIL from an incomplete but still-clean set is left
+            # open so later rounds can still compose into SUCCESS.
+            for job_id in self._round_jobs.values():
+                await self.controller.cancel(job_id)
         return decision
 
     def __post_init__(self) -> None:

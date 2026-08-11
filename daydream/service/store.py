@@ -12,7 +12,13 @@ neutral models both sides share. It deliberately contains no implementation and
 no vendor/SDK/executor fields: the controller binds an opaque ``ExecutionRef``
 to an attempt and the store persists and returns it verbatim, never parsing the
 handle. Implementations live in ``store_memory.py`` (an in-memory conformance
-double for hermetic tests) and ``store_sqlite.py`` (the production store).
+double for hermetic tests) and ``store_sqlite.py`` (the production SQLite
+store). Note this :class:`ServiceStore` surface is leaf-C's transactional
+store — claims/leases/attempt history — which is a *different* ABI from the
+controller's ``ControllerStorage`` port (:mod:`daydream.service.ports`). The
+real controller is run over these stores only through the test-side adapter in
+``tests/harness/service_fakes.py``; no production module wires the two surfaces
+together yet.
 
 State-machine *legality* (which transitions are permitted) is the controller's
 concern. The store is a compare-and-set persistence layer: it guarantees that a

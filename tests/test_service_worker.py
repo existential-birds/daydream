@@ -34,6 +34,13 @@ from daydream.service.worker import (
 from daydream.supervision import RuleBasedToolSupervisor
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
+from tests.harness.service_fakes import (
+    BASE_SHA,
+    CANDIDATE_SHA,
+    CANDIDATE_TREE,
+    CONFIG_DIGEST,
+    DIFF_DIGEST,
+)
 
 SERVICE_FIXTURES = Path(__file__).parent / "fixtures" / "service"
 
@@ -82,7 +89,7 @@ def _job_for(
             full_diff_digest=full_diff_digest or _sha256(diff),
             invalidation_id="inv-1",
         ),
-        effective_config_digest="e" * 64,
+        effective_config_digest=CONFIG_DIGEST,
         reviewer_bundle_digest="f" * 64,
         required_lenses=required_lenses,
         round=1,
@@ -406,14 +413,14 @@ def _bare_job() -> ReviewJobV1:
         target=ReviewTargetV1(
             target_kind="pr_head",
             repo="acme/demo",
-            candidate_sha="a" * 40,
-            candidate_tree_digest="b" * 40,
-            base_sha="c" * 40,
+            candidate_sha=CANDIDATE_SHA,
+            candidate_tree_digest=CANDIDATE_TREE,
+            base_sha=BASE_SHA,
             pr_numbers=(7,),
-            full_diff_digest="d" * 64,
+            full_diff_digest=DIFF_DIGEST,
             invalidation_id="inv-1",
         ),
-        effective_config_digest="e" * 64,
+        effective_config_digest=CONFIG_DIGEST,
         reviewer_bundle_digest="f" * 64,
         required_lenses=("python",),
         round=1,

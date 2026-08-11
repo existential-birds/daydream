@@ -6,18 +6,25 @@ from typing import Literal
 import pytest
 
 from daydream.service.models import ReviewJobV1, ReviewTargetV1
+from tests.harness.service_fakes import (
+    BASE_SHA,
+    CANDIDATE_SHA,
+    CANDIDATE_TREE,
+    CONFIG_DIGEST,
+    DIFF_DIGEST,
+)
 
 
 def _target(
     *,
     target_kind: Literal["pr_head", "merge_group"] = "pr_head",
     repo: str = "acme/demo",
-    candidate_sha: str = "a" * 40,
-    candidate_tree_digest: str = "b" * 40,
-    base_sha: str = "c" * 40,
+    candidate_sha: str = CANDIDATE_SHA,
+    candidate_tree_digest: str = CANDIDATE_TREE,
+    base_sha: str = BASE_SHA,
     pr_numbers: tuple[int, ...] = (7,),
     merge_group_id: str | None = None,
-    full_diff_digest: str = "d" * 64,
+    full_diff_digest: str = DIFF_DIGEST,
     protected_config_ref: str | None = None,
     protected_config_digest: str | None = None,
     invalidation_id: str = "inv-1",
@@ -45,7 +52,7 @@ def _job(
     attempt: int = 1,
     deadline: str = "2030-01-01T00:00:00Z",
     created_at: str = "2030-01-01T00:00:00Z",
-    effective_config_digest: str = "e" * 64,
+    effective_config_digest: str = CONFIG_DIGEST,
     reviewer_bundle_digest: str = "f" * 64,
 ) -> ReviewJobV1:
     return ReviewJobV1(

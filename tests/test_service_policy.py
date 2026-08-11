@@ -16,96 +16,29 @@ from __future__ import annotations
 import pytest
 
 from daydream.service.models import (
-    LensInventory,
     PolicyDecision,
-    ReviewPolicy,
     ReviewTarget,
-    RoundRecord,
-    SourceOfTruth,
-    TargetKind,
     TerminalOutcome,
 )
 from daydream.service.policy import PolicyEvaluator
 from daydream.service.publisher import Publisher, PublishError, PublishReceipt, PublishRequest
+from tests.harness.service_fakes import (
+    BASE_SHA,
+    CANDIDATE_TREE,
+    CONFIG_DIGEST,
+    DIFF_DIGEST,
+)
+from tests.harness.service_fakes import (
+    make_policy as _policy,
+)
+from tests.harness.service_fakes import (
+    make_round as _round,
+)
+from tests.harness.service_fakes import (
+    make_target as _target,
+)
 
-CANDIDATE_SHA = "a" * 40
-CANDIDATE_TREE = "b" * 40
-BASE_SHA = "c" * 40
-DIFF_DIGEST = "d" * 64
-CONFIG_DIGEST = "e" * 64
 OVERRIDE_DIGEST = "f" * 64
-
-
-def _target(
-    *,
-    kind: TargetKind = TargetKind.PR_HEAD,
-    config_digest: str = CONFIG_DIGEST,
-    candidate_sha: str = CANDIDATE_SHA,
-) -> ReviewTarget:
-    return ReviewTarget(
-        repo="acme/widgets",
-        kind=kind,
-        candidate_sha=candidate_sha,
-        candidate_tree=CANDIDATE_TREE,
-        base_sha=BASE_SHA,
-        pr_number=77 if kind is TargetKind.PR_HEAD else None,
-        merge_group_id="mg-1" if kind is TargetKind.MERGE_GROUP else None,
-        diff_digest=DIFF_DIGEST,
-        config_source=SourceOfTruth(
-            ref="refs/heads/main",
-            sha=BASE_SHA,
-            digest=config_digest,
-        ),
-        invalidation_id="job-1",
-    )
-
-
-def _policy(
-    *,
-    rounds: int = 2,
-    complete_lens: tuple[str, ...] = ("python", "security"),
-    concurrent_rounds: bool = True,
-    publisher: str = "github-checks",
-    check_name: str = "daydream/review",
-    executor: str = "local-fake",
-) -> ReviewPolicy:
-    return ReviewPolicy(
-        backend="pi",
-        provider="nous",
-        model="deepseek/deepseek-v4-flash-0731",
-        required_rounds=rounds,
-        complete_lens=LensInventory(required=set(complete_lens)),
-        executor=executor,
-        concurrent_rounds=concurrent_rounds,
-        immutable_reviewer_bundle="sha256:" + "0" * 64,
-        deadline_s=1800.0,
-        hard_budget_s=3600.0,
-        publisher=publisher,
-        check_name=check_name,
-        source=SourceOfTruth(ref="refs/heads/main", sha=BASE_SHA, digest=CONFIG_DIGEST),
-    )
-
-
-def _round(
-    *,
-    attempt_id: str = "r1",
-    target: ReviewTarget | None = None,
-    outcome: TerminalOutcome = TerminalOutcome.CLEAN,
-    completed_lenses: tuple[str, ...] = ("python", "security"),
-    finding_count: int = 0,
-    partial_artifacts: bool = False,
-    execution_ref: str = "opaque:exec-1",
-) -> RoundRecord:
-    target = target or _target()
-    return RoundRecord(
-        attempt_id=attempt_id,
-        target=target,
-        outcome=outcome,
-        completed_lenses=set(completed_lenses),
-        finding_count=finding_count,
-        partial_artifacts=partial_artifacts,
-        execution_ref=execution_ref,
-    )
 
 
 def _evaluator() -> PolicyEvaluator:
@@ -190,7 +123,7 @@ def test_round_target_without_candidate_sha_mismatch_fails() -> None:
         repo=target.repo,
         kind=target.kind,
         candidate_sha=None,  # type: ignore[arg-type]  # deliberately smuggled below via dataclass
-        candidate_tree="b" * 40,
+        candidate_tree=CANDIDATE_TREE,
         base_sha=BASE_SHA,
         pr_number=77,
         merge_group_id=None,
@@ -294,21 +227,7 @@ def test_policy_config_digest_mismatch_target_is_invalid() -> None:
     """The evaluator refuses when the protected policy digest conflicts with the target."""
     # Policy bound to override digest, target bound to canonical digest.
     target = _target(config_digest=CONFIG_DIGEST)
-    tampered_policy = ReviewPolicy(
-        backend="pi",
-        provider="nous",
-        model="deepseek/deepseek-v4-flash-0731",
-        required_rounds=2,
-        complete_lens=LensInventory(required={"python", "security"}),
-        executor="local-fake",
-        concurrent_rounds=True,
-        immutable_reviewer_bundle="sha256:" + "0" * 64,
-        deadline_s=1800.0,
-        hard_budget_s=3600.0,
-        publisher="github-checks",
-        check_name="daydream/review",
-        source=SourceOfTruth(ref="refs/heads/main", sha=BASE_SHA, digest=OVERRIDE_DIGEST),
-    )
+    tampered_policy = _policy(config_digest=OVERRIDE_DIGEST)
     rounds = [_round(attempt_id="r1", target=target), _round(attempt_id="r2", target=target)]
     decision = _evaluator().evaluate(target, tampered_policy, rounds)
     assert decision.outcome is PolicyDecision.FAIL
@@ -331,6 +250,7 @@ def test_backend_and_executor_are_policy_only() -> None:
 
 def test_publisher_port_protocol_shape() -> None:
     """The publisher port exists and is bindable by a fake for hermetic tests."""
+
     class FakePublisher(Publisher):
         def publish(self, req: PublishRequest) -> PublishReceipt:
             return PublishReceipt(external_id=req.external_id, check_run_id=1)

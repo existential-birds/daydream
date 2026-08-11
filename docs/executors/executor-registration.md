@@ -19,6 +19,16 @@ agent driver; `provider` stays the Pi/model endpoint provider.
 ## The port you implement
 
 ```python
+from daydream.extensions import (
+    ArtifactEnvelope,
+    ExecutionRef,
+    ExecutionSnapshot,
+    ExecutorCapability,
+    ExecutorJob,
+    ReviewExecutor,
+)
+
+
 class ReviewExecutor:
     kind: str
     adapter_version: int
