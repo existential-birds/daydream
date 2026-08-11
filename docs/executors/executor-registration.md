@@ -53,7 +53,6 @@ Declare them as the adapter's `capabilities` frozenset. `require_capabilities`
 ## Registering
 
 ```python
-from daydream.executors import require_capabilities  # your adapter declares capabilities
 from daydream.extensions import ReviewExecutor
 
 def register(r):
@@ -70,7 +69,11 @@ validate` reports registered executor/publisher names.
 The common conformance suite lives in `tests/test_executor_contract.py` and is
 already parametrized over the two built-in hermetic adapters (`LocalExecutor`,
 `ScriptedExecutor`). To qualify a new adapter, add it as another
-parametrized case in that suite so it runs the *same* contract assertions:
+parametrized case in that suite so it runs the *same* contract assertions. The
+suite drives every job through its `_job()` helper — identity via
+`attempt`/`key`, plus a `**payload` dict (e.g. `lenses`, `outcome`). Your
+adapter must honour that payload: it is not free to ignore it, because the
+suite asserts on the jobs it drives through it.
 
 1. capability admission (declares all required capabilities; a partial adapter
    is rejected);
@@ -80,8 +83,8 @@ parametrized case in that suite so it runs the *same* contract assertions:
 5. restart reconciliation (a fresh instance over the same durable backing sees
    a prior ref);
 6. cleanup ordering / deterministic release;
-7. vendor-error mapping (a simulated SDK exception maps to neutral
-   `ExecutorInfrastructureError`, never leaks as a raw vendor type);
+7. vendor-error mapping (a simulated SDK exception must surface as the
+   neutral `INFRA_ERROR` status/outcome, never leak as a raw vendor type);
 8. vendor-neutrality (no non-neutral field may appear in a common model).
 
 You may run the suite yourself with:

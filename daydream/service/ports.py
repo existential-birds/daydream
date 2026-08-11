@@ -108,6 +108,22 @@ class ControllerStorage(Protocol):
         """Increment the retry counter on ``job_id`` (new attempt claims one retry)."""
         ...
 
+    async def reset_retry(
+        self,
+        job_id: str,
+        *,
+        expected_state: object,
+        record: ControllerRecord,
+    ) -> ControllerRecord:
+        """Replace the durable row with ``record`` (a fresh queued attempt) under a CAS guard.
+
+        Persists the full retry reset — cleared execution ref and worker
+        verdict, bumped attempt number and retry counter — so ``load`` agrees
+        with the record the controller returns instead of a row still carrying
+        the failed attempt.
+        """
+        ...
+
 
 class ReviewExecutor(Protocol):
     """Neutral compute/workspace adapter for a single review execution (DAYDREAM_SERVICE_V1).

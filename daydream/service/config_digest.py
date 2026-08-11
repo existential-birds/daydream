@@ -14,7 +14,7 @@ no I/O itself; callers supply the raw config dicts and the base-branch SHA.
 
 The digest is the binding that ties every round and the published Check to one
 immutable effective policy. Any change to the effective policy (round count,
-backend, provider, model, lens policy, executor, publisher, Check name, budgets)
+backend, provider, lens policy, executor, publisher, Check name)
 changes the digest, so a round or Check bound to an old digest can never be
 mistaken for the current policy.
 """
@@ -156,9 +156,24 @@ def resolve_policy_source(
 
     Raises:
         ProtectedPolicyError: If no protected source is available (no base config
-            and no explicit protected source).
+            and no explicit protected source), or an explicit protected source is
+            supplied incompletely (ref, sha, and config must come together).
     """
-    if protected_source_config is not None and protected_source_ref is not None:
+    if (
+        protected_source_config is not None
+        or protected_source_ref is not None
+        or protected_source_sha is not None
+    ):
+        if (
+            protected_source_config is None
+            or protected_source_ref is None
+            or protected_source_sha is None
+        ):
+            raise ProtectedPolicyError(
+                "incomplete explicit protected per-service source: ref, sha, and "
+                "config must be supplied together; refusing to fall back to a "
+                "weaker base/default-branch snapshot"
+            )
         if protected_source_config == {}:
             raise ProtectedPolicyError(
                 "explicit protected per-service source is empty; refusing to resolve "
@@ -169,7 +184,7 @@ def resolve_policy_source(
         if ambient_config:
             _merge_ambient_without_weakening(effective, ambient_config)
         return (
-            PolicySource(kind="protected", ref=protected_source_ref, sha=protected_source_sha or base_sha),
+            PolicySource(kind="protected", ref=protected_source_ref, sha=protected_source_sha),
             effective,
         )
 

@@ -10,12 +10,15 @@ Submodules (contracts, all neutral):
 - ``models`` — the frozen immutable data: exact ``ReviewTargetV1`` /
   ``ReviewJobV1`` (worker/job side), ``ReviewTarget`` / ``ReviewPolicy`` /
   ``RoundRecord`` / ``LensInventory`` / ``SourceOfTruth`` (policy side), and the
-  controller's ``JobSpec`` / ``ControllerRecord``. The canonical execution types
-  (opaque ``ExecutionRef``, ``ArtifactEnvelope``, ``ExecutionSnapshot``) live in
-  :mod:`daydream.executors.contract` and are re-exported here.
+  controller's ``JobSpec`` / ``ControllerRecord``. The service defines its own
+  distinct execution types (opaque ``ExecutionRef``, ``ArtifactEnvelope``,
+  ``ExecutionSnapshot``) in ``models``; the canonical executor contract types of
+  the same names live in :mod:`daydream.executors.contract` and are not
+  re-exported here.
 - ``states`` — the deterministic neutral state machine (queued -> starting ->
-  running -> collecting -> evaluated -> publishing -> passed|failed|infra_error|
-  cancelled -> released).
+  running -> collecting -> evaluated -> publishing -> passed -> released;
+  ``failed`` exits ``evaluated``, and ``infra_error`` / ``cancelled`` are legal
+  side exits from every active state).
 - ``ports`` — the ``ControllerStorage`` + ``ReviewExecutor`` Protocols the
   controller programs against (implementations live in consuming modules).
 - ``controller`` — the durable ``ServiceController`` driving jobs through the
@@ -31,6 +34,10 @@ Submodules (contracts, all neutral):
   protected-source rule + canonical effective-config digest.
 - ``publisher`` — the public publisher port (the trusted GitHub Checks writer is
   in :mod:`daydream.github_app`).
+- ``executor_bridge`` — the single seam normalizing a canonical
+  ``ReviewExecutor`` adapter onto the controller-facing surface.
+- ``runner`` — the composition entry point: ``ReviewRunner`` drives one job per
+  execution through controller, policy, and publisher.
 
 The meaning of ``Backend`` (the Daydream model-agent driver) is unchanged; the
 review-service executor seam is a separate concern. Importing this package never

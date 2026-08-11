@@ -101,13 +101,25 @@ class ServiceController:
             if record.superseded_by is not None:
                 await self._cancel(record)
                 raise Superseded(f"job {job_id} superseded by invalidation {record.superseded_by}")
-            if record.state in (ServiceState.RUNNING, ServiceState.COLLECTING, ServiceState.EVALUATED):
+            if record.state in (
+                ServiceState.STARTING,
+                ServiceState.RUNNING,
+                ServiceState.COLLECTING,
+                ServiceState.EVALUATED,
+            ):
                 # Already dispatched (duplicate delivery) — idempotent no-op.
+                # STARTING is included: a crash between the DISPATCH transition
+                # and STARTED must not start the execution a second time.
                 return record
 
             reason = self._admission.can_start(record.spec)
             if reason is not None:
                 return AdmissionBackoff(reason)
+            # Consume the admission slot atomically with the capacity check (no
+            # await between check and act), so concurrent dispatches cannot
+            # transiently exceed the cap and the failure path below releases
+            # exactly what this dispatch claimed.
+            self._admission.start(record.spec)
 
             # queued -> starting (claim the slot).
             record = await self._transition(record, ServiceEvent.DISPATCH)
@@ -123,9 +135,7 @@ class ServiceController:
                 record.job_id, expected_state=record.state, ref=ref
             )
             # starting -> running only after the ref is durably bound.
-            record = await self._transition(record, ServiceEvent.STARTED)
-            self._admission.start(record.spec)
-            return record
+            return await self._transition(record, ServiceEvent.STARTED)
 
     async def collect(self, job_id: str) -> ControllerRecord:
         """Gather and persist the passive artifact, then move to ``evaluated``.
@@ -174,7 +184,12 @@ class ServiceController:
                 raise ControllerError(f"job {job_id} cannot be evaluated before collection")
 
             if record.worker_verdict == VERDICT_INFRA_ERROR:
-                return record  # infra_error already terminal; explicit retry routing.
+                # Move the collected infra verdict to the terminal infra_error
+                # state: EVALUATED is active, not terminal, so a job left here
+                # can never be retried (retry_infra's CAS expects INFRA_ERROR),
+                # its execution is never released, and restart reconciliation
+                # wedges it in EVALUATED forever.
+                return await self._transition(record, ServiceEvent.INFRA)
 
             complete = record.spec.required_lenses <= record.completed_lenses
             if record.worker_verdict == VERDICT_CLEAN and not record.blocked and complete:
@@ -194,6 +209,21 @@ class ServiceController:
         async with self._lock(job_id):
             record = await self._require(job_id)
             return await self._cancel(record)
+
+    async def release(self, job_id: str) -> ControllerRecord:
+        """Move a settled job to the final ``released`` state and release its execution.
+
+        ``RELEASE`` is the final, idempotent transition from any terminal state
+        (``passed``/``failed``/``infra_error``/``cancelled``); the execution is
+        deterministically released afterward. Active jobs must reach a terminal
+        first (``publish`` for a clean round, ``cancel`` to interrupt), so a
+        stray release cannot wedge the machine open.
+        """
+        async with self._lock(job_id):
+            record = await self._require(job_id)
+            record = await self._transition(record, ServiceEvent.RELEASE)
+            await self._release_execution(record)
+            return record
 
     async def supersede(self, job_id: str, *, by_invalidation: int) -> ControllerRecord:
         """Cancel an in-flight job because a newer candidate head replaced it.
@@ -238,6 +268,9 @@ class ServiceController:
                 return ROUTE_TO_OPERATOR
             self._admission.record_infra_retry(record.spec)
             self._admission.release(record.spec)
+            # Deterministically release the failed execution before the durable
+            # row forgets it — the retried attempt must never reuse it.
+            await self._release_execution(record)
             # Reset the durable row to queued with a fresh attempt spec.
             fresh = ControllerRecord(
                 job_id=record.job_id,
@@ -260,11 +293,12 @@ class ServiceController:
                 trigger_ref=record.trigger_ref,
                 store_fields=dict(record.store_fields),
             )
-            # Persist the reset via the storage port so the row and state agree.
-            await self._storage.transition(
-                job_id, expected_state=ServiceState.INFRA_ERROR, new_state=ServiceState.QUEUED
+            # Persist the full reset (cleared execution ref/verdict, bumped
+            # attempt) via the storage port so load() agrees with the returned
+            # record instead of a QUEUED row still carrying the failed attempt.
+            return await self._storage.reset_retry(
+                record.job_id, expected_state=ServiceState.INFRA_ERROR, record=fresh
             )
-            return fresh
 
     # -- internals -----------------------------------------------------------
 
@@ -322,8 +356,13 @@ class ServiceController:
         if isinstance(envelope, ArtifactEnvelope):
             return envelope
         if isinstance(envelope, dict):
+            if "worker_verdict" not in envelope:
+                # Fail closed: a missing verdict must never default to clean.
+                raise ControllerError(
+                    "executor returned a dict envelope without a 'worker_verdict'"
+                )
             return ArtifactEnvelope(
-                worker_verdict=str(envelope.get("worker_verdict", VERDICT_CLEAN)),
+                worker_verdict=str(envelope["worker_verdict"]),
                 completed_lenses=frozenset(envelope.get("completed_lenses", [])),
                 artifact_hashes=tuple(envelope.get("artifact_hashes", [])),
                 blocked=bool(envelope.get("blocked", False)),

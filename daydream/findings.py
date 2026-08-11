@@ -62,10 +62,10 @@ FINDINGS_SCHEMA: dict[str, Any] = {
             ],
             "properties": {
                 "target_kind": {"enum": ["pr_head", "merge_group"]},
-                "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "candidate_tree_digest": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "base_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                "full_diff_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "candidate_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+                "candidate_tree_digest": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+                "base_sha": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+                "full_diff_digest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
             },
         },
         "findings": {
@@ -289,7 +289,7 @@ def load_findings_artifact(
             raise FindingsValidationError(
                 "artifact provenance is missing but the event-derived target requires it"
             )
-        for field_name in ("candidate_sha", "candidate_tree_digest", "base_sha", "full_diff_digest"):
+        for field_name in ("target_kind", "candidate_sha", "candidate_tree_digest", "base_sha", "full_diff_digest"):
             if provenance.get(field_name) != expected_provenance.get(field_name):
                 raise FindingsValidationError(
                     f"artifact provenance {field_name} {provenance.get(field_name)!r} does not match "

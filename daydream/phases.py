@@ -3708,7 +3708,7 @@ SERVICE_REVIEW_SCHEMA: dict[str, Any] = {
                     "id": {"type": "integer"},
                     "lens": {"type": "string"},
                     "file": {"type": "string"},
-                    "line": {"type": ["integer", "null"]},
+                    "line": {"type": "integer"},
                     "severity": {"enum": ["high", "medium", "low"]},
                     "confidence": {"enum": ["HIGH", "MEDIUM"]},
                     "title": {"type": "string"},
@@ -3784,7 +3784,7 @@ def build_service_review_prompt(job: "ReviewJobV1", lens_inventory: Sequence[str
         "- You are READ-ONLY. You must not write, edit, delete, stage, commit, push, or run any "
         "mutating command. Use only read tools and read-only git commands "
         "(`git diff`, `git log`, `git show`, `git grep`).\n"
-        "- Review the full candidate change set (`git diff <base>..HEAD`) and produce findings "
+        f"- Review the full candidate change set (`git diff {target.base_sha}..HEAD`) and produce findings "
         "per lens.\n\n"
         "Required lenses (every one MUST complete):\n"
         f"{required}\n\n"

@@ -41,7 +41,8 @@ from daydream.service.models import (
     TerminalOutcome,
 )
 from daydream.service.policy import Decision, PolicyEvaluator
-from daydream.service.publisher import Publisher, PublishRequest
+from daydream.service.publisher import Publisher, PublishError, PublishRequest
+from daydream.service.states import ServiceState
 
 
 def round_outcome_from_verdict(verdict: str) -> TerminalOutcome:
@@ -121,9 +122,15 @@ class ReviewRunner:
             return record
         await self.controller.collect(job_spec.job_id)
         evaluated = await self.controller.evaluate(job_spec.job_id)
+        self._round_jobs[round(evaluated.spec.attempt_number)] = job_spec.job_id
         self._rounds[round(evaluated.spec.attempt_number)] = controller_record_to_round(
             evaluated, target=target, finding_count=finding_count
         )
+        if evaluated.state is ServiceState.FAILED:
+            # A failed round can never compose into a SUCCESS decision; close
+            # its lifecycle (FAILED -> RELEASED, releasing the execution) now
+            # instead of parking the job in a terminal state forever.
+            await self.controller.release(job_spec.job_id)
         return evaluated
 
     def rounds(self) -> list[RoundRecord]:
@@ -134,13 +141,19 @@ class ReviewRunner:
         """Ask the policy evaluator for *target* given the collected rounds."""
         return self.evaluator.evaluate(target, self.policy, self.rounds())
 
-    def publish(self, target: ReviewTarget, *, external_id: str) -> Decision:
+    async def publish(self, target: ReviewTarget, *, external_id: str) -> Decision:
         """Evaluate and, on SUCCESS, durably publish the exact decision.
 
         Only a complete, clean, exact-candidate round set produces ``SUCCESS``,
         and only then is the trusted publisher called. A stale target (the
         publisher's live-identity revalidation fails) raises before any success
         is written; an incomplete set never reaches the publisher.
+
+        The job lifecycle is closed through the controller on the success path:
+        every round job moves ``PUBLISHING -> PASSED`` and its execution is
+        released. A refused publish (stale/replaced candidate) cancels the
+        round jobs so none is left wedged in ``PUBLISHING``, then re-raises the
+        ``PublishError``.
         """
         decision = self.evaluate(target)
         if decision.success and self.publisher is not None:
@@ -157,8 +170,23 @@ class ReviewRunner:
                 check_name=self.policy.check_name,
                 target=target,
             )
-            self.publisher.publish(req)
+            try:
+                self.publisher.publish(req)
+            except PublishError:
+                # Not-published: the publisher refused (stale/replaced
+                # candidate) before writing any success. Close the wedged
+                # PUBLISHING round jobs (cancel releases each execution
+                # deterministically), then propagate — a caller must treat any
+                # exception as not-published.
+                for job_id in self._round_jobs.values():
+                    await self.controller.cancel(job_id)
+                raise
+            # The decision is durably recorded; complete every round job's
+            # lifecycle: PUBLISHING -> PASSED, releasing each execution.
+            for job_id in self._round_jobs.values():
+                await self.controller.publish(job_id)
         return decision
 
     def __post_init__(self) -> None:
         self._rounds: dict[int, RoundRecord] = {}
+        self._round_jobs: dict[int, str] = {}

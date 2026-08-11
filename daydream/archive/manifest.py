@@ -294,26 +294,27 @@ def _config_provenance(config: "RunConfig") -> dict[str, str] | None:
     return {"digest": hashlib.sha256(payload.encode()).hexdigest()}
 
 
-def _resolved_provider(backend_name: str, model: str | None) -> str | None:
+def _resolved_provider(backend_name: str) -> str | None:
     """Resolve the provider exactly as the Pi backend would at execute time.
 
     ``claude``/``codex`` use their native endpoints and have no provider axis;
-    only ``pi`` resolves one: ``PI_PROVIDER`` wins, an explicitly resolved
-    model (a CLI/file-config override, so pi is told to pass ``--provider``)
-    falls back to Pi's default provider, and a Pi-settings-resolved model
-    (nothing daydream selects) leaves the provider unset — mirroring
-    ``PiBackend.execute``.
+    only ``pi`` resolves one: ``PI_PROVIDER`` wins, and when it is unset the
+    provider falls back to Pi's default. That holds both for an explicitly
+    resolved model (a CLI/file-config override, so pi is told to pass
+    ``--provider``) and for the default configuration where neither daydream
+    nor Pi's settings resolve a model — ``PiBackend.execute`` then runs
+    ``DEFAULT_PI_MODEL`` against the default provider. The manifest cannot
+    observe Pi's own settings resolution, so the provider is independent of
+    the daydream-resolved model.
     """
     if backend_name != "pi":
         return None
     provider = os.environ.get("PI_PROVIDER")
     if provider is not None:
         return provider
-    if model is not None:
-        from daydream.backends.pi import _PI_DEFAULT_PROVIDER
+    from daydream.backends.pi import _PI_DEFAULT_PROVIDER
 
-        return _PI_DEFAULT_PROVIDER
-    return None
+    return _PI_DEFAULT_PROVIDER
 
 
 def _build_provenance(config: "RunConfig") -> dict[str, Any]:
@@ -326,16 +327,23 @@ def _build_provenance(config: "RunConfig") -> dict[str, Any]:
     """
     from daydream.runner import _resolved_backend_name, _resolved_model
 
-    backend = _resolved_backend_name(config, "review")
+    try:
+        backend = _resolved_backend_name(config, "review")
+    except (AttributeError, TypeError):
+        backend = None
     try:
         model = _resolved_model(config, "review")
     except (AttributeError, TypeError):
         model = None
+    try:
+        config_provenance = _config_provenance(config)
+    except (AttributeError, TypeError):
+        config_provenance = None
     return {
         "backend": backend,
         "model": model,
-        "provider": _resolved_provider(backend, model),
-        "config": _config_provenance(config),
+        "provider": _resolved_provider(backend),
+        "config": config_provenance,
         "skill": getattr(config, "skill", None),
         "runtime": {
             "python": platform.python_version(),

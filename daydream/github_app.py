@@ -553,7 +553,20 @@ class GitHubChecksPublisher(Publisher):
         }
         check_run_id = self._check_run_id_for(req.external_id) if self._check_run_id_for else None
         try:
-            data = git_ops.gh_api(self._repo_dir, endpoint, method="POST", input_data=payload)
+            if check_run_id is not None:
+                # Idempotent update of the existing check run: PATCH it so a
+                # re-publish or a cancel of a stale check lands on the same
+                # artifact instead of creating a new check run.
+                update = dict(payload)
+                update.pop("head_sha", None)  # head_sha is immutable on PATCH
+                data = git_ops.gh_api(
+                    self._repo_dir,
+                    f"{endpoint}/{check_run_id}",
+                    method="PATCH",
+                    input_data=update,
+                )
+            else:
+                data = git_ops.gh_api(self._repo_dir, endpoint, method="POST", input_data=payload)
         except Exception as exc:  # noqa: BLE001 - surface any gh failure as PublishError
             raise PublishError(f"failed to publish GitHub check for {req.external_id}: {exc}") from exc
 

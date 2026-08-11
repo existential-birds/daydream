@@ -261,8 +261,27 @@ def test_provenance_round_trips_through_write_and_load(tmp_path, valid_artifact)
     assert loaded.provenance == _provenance()
 
 
-def test_load_rejects_provenance_mismatch(tmp_path, valid_artifact) -> None:
-    valid_artifact["provenance"] = {**_provenance(), "candidate_sha": "9" * 40}
+def test_load_with_provenance_block_when_none_expected_is_backward_compatible(
+    tmp_path, valid_artifact
+) -> None:
+    valid_artifact["provenance"] = _provenance()
+    path = tmp_path / "f.json"
+    write_findings_artifact(path, valid_artifact)
+    loaded = load_findings_artifact(
+        path,
+        expected_repo="o/r",
+        expected_pr_number=7,
+        expected_head_sha="h" * 40,
+        expected_provenance=None,
+    )
+    assert loaded.provenance == _provenance()
+
+
+@pytest.mark.parametrize("field_name", ["candidate_sha", "candidate_tree_digest", "base_sha", "full_diff_digest"])
+def test_load_rejects_provenance_mismatch(tmp_path, valid_artifact, field_name) -> None:
+    valid_artifact["provenance"] = {
+        **_provenance(), field_name: "9" * len(_provenance()[field_name])
+    }
     path = tmp_path / "f.json"
     write_findings_artifact(path, valid_artifact)
     with pytest.raises(FindingsValidationError, match="does not match"):

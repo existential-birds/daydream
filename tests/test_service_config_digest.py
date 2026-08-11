@@ -172,6 +172,7 @@ def test_ambient_cannot_weaken_explicit_protected_source() -> None:
         base_config=_policy_config(),
         base_sha=BASE_SHA,
         protected_source_ref="refs/heads/protected",
+        protected_source_sha="9" * 40,
         protected_source_config=_policy_config(required_rounds=3),
         ambient_config=ambient,
     )
@@ -184,7 +185,25 @@ def test_ambient_without_base_but_with_protected_source_uses_protected() -> None
         base_config=None,
         base_sha=BASE_SHA,
         protected_source_ref="refs/heads/ops",
+        protected_source_sha="8" * 40,
         protected_source_config=_policy_config(required_rounds=4),
     )
     assert source.kind == "protected"
     assert effective["review_policy"]["required_rounds"] == 4
+
+
+def test_incomplete_protected_source_raises() -> None:
+    """A partial pinned source must not silently fall back to the base snapshot."""
+    with pytest.raises(ProtectedPolicyError):
+        resolve_policy_source(
+            base_config=_policy_config(),
+            base_sha=BASE_SHA,
+            protected_source_config=_policy_config(required_rounds=3),  # no ref/sha
+        )
+    with pytest.raises(ProtectedPolicyError):
+        resolve_policy_source(
+            base_config=_policy_config(),
+            base_sha=BASE_SHA,
+            protected_source_ref="refs/heads/protected",
+            protected_source_config=_policy_config(required_rounds=3),
+        )  # no sha: must not fabricate base_sha

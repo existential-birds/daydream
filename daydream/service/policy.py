@@ -163,6 +163,6 @@ class PolicyEvaluator:
         round_identity = round_.target.identity
         target_identity = target.identity
         # Any unbound identity (e.g. missing candidate SHA) is untrustworthy.
-        if "" in round_identity[:1]:
+        if "" in round_identity:
             return False
         return round_identity == target_identity

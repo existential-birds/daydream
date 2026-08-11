@@ -221,9 +221,10 @@ class SqliteServiceStore(ServiceStore):
                 return status
             self._begin()
             try:
-                self._conn.execute(
+                cur = self._conn.execute(
                     "UPDATE jobs SET state = ?, current_attempt_id = ?, owner = ?,"
-                    " lease_expires_at = ?, version = version + 1, updated_at = ? WHERE job_id = ?",
+                    " lease_expires_at = ?, version = version + 1, updated_at = ?"
+                    " WHERE job_id = ? AND state = ? AND current_attempt_id IS ? AND owner IS ?",
                     (
                         new_state.value,
                         attempt_id,
@@ -231,8 +232,21 @@ class SqliteServiceStore(ServiceStore):
                         _iso(_after(now, ttl_seconds)),
                         _iso(now),
                         job_id,
+                        job.state.value,
+                        job.current_attempt_id,
+                        job.owner,
                     ),
                 )
+                if cur.rowcount == 0:
+                    # Lost the cross-process CAS: the row advanced between the
+                    # read above and this write. Re-derive from the fresh row so
+                    # the status is honest (idempotent replay, CONFLICT, LEASED).
+                    self._rollback()
+                    fresh = self.get_job(job_id)
+                    if fresh is None:
+                        self._job_not_found(job_id)
+                    assert fresh is not None
+                    return _derive_claim_status(fresh, attempt_id, expected, new_state, owner, now)
                 self._conn.execute(
                     "INSERT OR IGNORE INTO attempts (job_id, attempt_id, owner, state, execution_ref,"
                     " created_at) VALUES (?,?,?,?,?,?)",
@@ -273,10 +287,23 @@ class SqliteServiceStore(ServiceStore):
                 )
             self._begin()
             try:
-                self._conn.execute(
-                    "UPDATE jobs SET state = ?, version = version + 1, updated_at = ? WHERE job_id = ?",
-                    (to_state.value, _iso(now), job_id),
+                cur = self._conn.execute(
+                    "UPDATE jobs SET state = ?, version = version + 1, updated_at = ?"
+                    " WHERE job_id = ? AND state = ? AND current_attempt_id IS ? AND owner IS ?",
+                    (to_state.value, _iso(now), job_id, from_state.value, attempt_id, owner),
                 )
+                if cur.rowcount == 0:
+                    # Cross-process CAS loss: the row advanced between the read
+                    # above and this write; fail loud exactly like the pre-check.
+                    self._rollback()
+                    fresh = self.get_job(job_id)
+                    if fresh is None:
+                        self._job_not_found(job_id)
+                    assert fresh is not None
+                    raise StateConflictError(
+                        f"job {job_id} not in {from_state.value}/{attempt_id}/{owner} "
+                        f"(state={fresh.state.value}, attempt={fresh.current_attempt_id}, owner={fresh.owner})"
+                    )
                 self._conn.execute(
                     "UPDATE attempts SET state = ? WHERE job_id = ? AND attempt_id = ?",
                     (to_state.value, job_id, attempt_id),

@@ -39,7 +39,9 @@ from daydream.service.models import (
 from daydream.service.policy import PolicyDecision, PolicyEvaluator
 from daydream.service.publisher import Publisher, PublishError, PublishReceipt, PublishRequest
 from daydream.service.runner import ReviewRunner
+from daydream.service.states import ServiceState
 from tests.harness.service_fakes import InMemoryStorage
+from tests.harness.service_fakes import ScriptedExecutor as FakeScriptedExecutor
 
 CANDIDATE_SHA = "a" * 40
 CANDIDATE_TREE = "b" * 40
@@ -161,7 +163,7 @@ async def test_incomplete_round_set_never_publishes() -> None:
     runner, publisher, _ = _runner(rounds=2)
     await _run_clean_round(runner, attempt=1, target=_target())
 
-    decision = runner.publish(_target(), external_id="job-b")
+    decision = await runner.publish(_target(), external_id="job-b")
     assert decision.outcome is PolicyDecision.FAIL
     assert publisher.published == []  # never reached the publisher
 
@@ -169,25 +171,29 @@ async def test_incomplete_round_set_never_publishes() -> None:
 async def test_only_complete_configured_round_set_for_b_publishes() -> None:
     """Retry B clean: success is published exactly once, only once the complete
     configured round set (both rounds) is bound to B's exact candidate."""
-    runner, publisher, _ = _runner(rounds=2)
+    runner, publisher, storage = _runner(rounds=2)
     target_b = _target(sha=CANDIDATE_SHA)
 
     await _run_clean_round(runner, attempt=1, target=target_b)
-    partial = runner.publish(target_b, external_id="job-b")
+    partial = await runner.publish(target_b, external_id="job-b")
     assert partial.outcome is PolicyDecision.FAIL
     assert len(publisher.published) == 0
 
     await _run_clean_round(runner, attempt=2, target=target_b)
-    full = runner.publish(target_b, external_id="job-b")
+    full = await runner.publish(target_b, external_id="job-b")
     assert full.outcome is PolicyDecision.SUCCESS
     assert len(publisher.published) == 1
     assert publisher.published[0].target_sha == CANDIDATE_SHA
     assert publisher.published[0].conclusion == "success"
+    # The job lifecycle closes with the publish: both round jobs reach PASSED
+    # (and their executions are released) — never parked in PUBLISHING.
+    assert storage.load_job(_job(attempt=1).job_id).state is ServiceState.PASSED
+    assert storage.load_job(_job(attempt=2).job_id).state is ServiceState.PASSED
 
 
 async def test_b_round_with_missing_lens_cannot_authorize_b() -> None:
     """A B round that completes only one of its two lenses cannot authorize B."""
-    runner, publisher, _ = _runner(rounds=2)
+    runner, publisher, storage = _runner(rounds=2)
     target_b = _target(sha=CANDIDATE_SHA)
 
     await _run_clean_round(runner, attempt=1, target=target_b)
@@ -237,12 +243,48 @@ def test_m1_rounds_can_never_authorize_replaced_m2() -> None:
 async def test_stale_live_identity_never_publishes_success() -> None:
     """Force-push B after A's review: the publisher's live-identity revalidation
     refuses a success, so a replaced head can never be authorized by A's rounds."""
-    runner, publisher, _ = _runner(rounds=1)
+    runner, publisher, storage = _runner(rounds=1)
     target_a = _target(sha=CANDIDATE_SHA)
     await _run_clean_round(runner, attempt=1, target=target_a)
 
     # head moved: live identity is no longer the reviewed A candidate
     publisher.stale_sha = "9" * 40
     with pytest.raises(PublishError, match="no longer matches"):
-        runner.publish(target_a, external_id="job-a")
+        await runner.publish(target_a, external_id="job-a")
+    assert publisher.published == []
+    # A refused publish must not wedge the round job in PUBLISHING: the runner
+    # cancels it (releasing the execution) before propagating the error.
+    assert storage.load_job(_job(attempt=1).job_id).state is ServiceState.CANCELLED
+
+
+async def test_failed_round_job_reaches_released() -> None:
+    """A findings round fails closed and its job is released, not parked."""
+    publisher = RecordingPublisher()
+    storage = InMemoryStorage()
+    executor = FakeScriptedExecutor()
+    executor.envelopes.append(
+        {
+            "worker_verdict": "findings",
+            "completed_lenses": (),
+            "artifact_hashes": ("h1",),
+            "blocked": True,
+        }
+    )
+    controller = ServiceController(storage, executor)
+    runner = ReviewRunner(
+        controller=controller,
+        policy=_policy(rounds=1),
+        evaluator=PolicyEvaluator(),
+        publisher=publisher,
+    )
+    spec = _job()
+    record = await runner.run_one_round(job_spec=spec, target=_target())
+    assert record.state is ServiceState.FAILED  # the round itself failed closed
+    # The runner closes the lifecycle: FAILED -> RELEASED with a deterministic
+    # execution release — the job is never left parked in a terminal state.
+    assert storage.load_job(spec.job_id).state is ServiceState.RELEASED
+    assert len(executor.released) == 1 and executor.released[0][1] == "released"
+
+    decision = await runner.publish(_target(), external_id="job-a")
+    assert decision.outcome is PolicyDecision.FAIL
     assert publisher.published == []

@@ -19,6 +19,7 @@ controller-shaped ref and the bridge keeps the canonical handle to resolve it.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,10 +87,12 @@ class ExecutionBridge:
         *,
         resolve_attempt_id: Any = None,
         max_wait_polls: int = 64,
+        poll_interval_s: float = 5.0,
     ) -> None:
         self._executor = executor
         self._resolve_attempt_id = resolve_attempt_id
         self._max_wait_polls = max_wait_polls
+        self._poll_interval_s = poll_interval_s
         self._bindings: dict[str, _Binding] = {}
 
     @property
@@ -166,6 +169,7 @@ class ExecutionBridge:
             snapshot = await self._executor.inspect(canonical)
             if is_terminal(snapshot.status):
                 break
+            await asyncio.sleep(self._poll_interval_s)
         envelope = await self._executor.collect(canonical)
         return self._normalize_envelope(envelope)
 

@@ -102,8 +102,8 @@ by the **canonical effective-config digest** (`policy_digest`). It:
 - canonicalises it into an order-independent SHA-256 digest (list-of-strings
   values such as the lens inventory sort; nested dicts recurse).
 
-Any change to an authorizing field (round count, backend, provider, model, lens
-policy, executor, publisher, Check name, budgets) changes the digest. The
+Any change to an authorizing field (round count, backend, provider, lens
+policy, executor, publisher, Check name) changes the digest. The
 `PolicyEvaluator` refuses to evaluate unless a round's digest matches the
 target's protected config digest (`policy.source.digest == target.config_source.digest`),
 so a round or Check bound to an old digest can never be mistaken for current
@@ -427,8 +427,9 @@ Credentials live only where the trust boundary requires them:
   and GitHub-expiry-bounded. **Rotation** = replace the env vars and restart the
   service process (the JWT/token are never read as credentials onto argv; the
   token is injected into the child's environment at subprocess time via the
-  `gh` shim). Without configured App credentials, ambient `gh` identity is used
-  only for read-only posting paths.
+  `gh` shim). Without configured App credentials, ambient `gh` identity is
+  also used on posting (write) paths: `GitHubChecksPublisher` performs no
+  App-credential gate and POSTs check runs via the ambient identity.
 - **Executors / publishers** carry **no** shared secret in common models. Live
   hosted adapters are separately credentialed (e.g. `DAYDREAM_SPRITES_STAGING=1` +
   an explicit Sprite connection for Sprites) and must be rotated at their own
@@ -448,7 +449,7 @@ Current surface (honest about what exists today):
 - **Python `logging`.** Service modules (`daydream/service/worker.py`, store, ...)
   log warnings on every fail-closed event (`git_preflight_failed`,
   `mutation_detected`, `incomplete_lenses`, `state_capture_failed`, CAS conflicts,
-  retry routing). `DAYDREAM_GH_TIMEOUT_SECONDS` / `DAYDREAM_GH_RETRIES` govern the
+  retry routing). `DAYDREAM_GH_TIMEOUT_SECONDS` / `DAYDREAM_GH_TIMEOUT_RETRIES` govern the
   `gh` git-op subprocesses.
 - **CLI/runner rendering.** The service-mode hook (`runner.run_service`) renders
   the terminal outcome via the Rich console (`_print_service_outcome`) and returns
@@ -469,9 +470,9 @@ durable causal/debug markers the store leaf retains.
   ([`docs/executors/sprites.md`](executors/sprites.md)).
 - **`ControllerStorage` ↔ `ServiceStore` bridge** — today two ABIs wired through
   the controller's in-memory fake; a production adapter may bridge them directly.
-- **`ExecutionBridge.collect` polls to terminal** (bounded) — a reasonable adapter
-  default; operators may want to tune polling bounds for long-lived hosted
-  executors.
+- **`ExecutionBridge.collect` polling-bounds tuning** — the bounded
+  poll-to-terminal (`max_wait_polls`) is implemented; only operator-facing tuning
+  guidance for long-lived hosted executors is deferred.
 
 ---
 

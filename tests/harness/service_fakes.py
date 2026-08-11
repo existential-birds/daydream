@@ -131,6 +131,12 @@ class InMemoryStorage:
 
         return self._cas(job_id, ServiceState.INFRA_ERROR, _mutate)
 
+    async def reset_retry(
+        self, job_id: str, *, expected_state, record: ControllerRecord
+    ) -> ControllerRecord:
+        """Replace the durable row with the fresh retry record under a CAS guard."""
+        return self._cas(job_id, expected_state, lambda _r: record)
+
 
 def _with_state(r: ControllerRecord, new_state) -> ControllerRecord:
     return ControllerRecord(

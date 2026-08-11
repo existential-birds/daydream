@@ -230,6 +230,48 @@ def test_external_id_bound_to_immutable_job() -> None:
     assert seen["payload"]["external_id"] == "job-immutable-9"
 
 
+def test_existing_check_run_is_patched_not_recreated() -> None:
+    """A resolved check-run id is updated via PATCH, not duplicated via POST."""
+    seen = {}
+
+    def fake_gh_api(repo, endpoint, **kw):
+        if "pulls" in endpoint:
+            return {"head": {"sha": CANDIDATE_SHA}}
+        assert kw["method"] == "PATCH"
+        assert endpoint == "/repos/acme/widgets/check-runs/42"
+        seen["payload"] = kw["input_data"]
+        return {"id": 42}
+
+    publisher = _publisher(check_run_id_for=lambda external_id: 42)
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        receipt = publisher.publish(_req())
+
+    assert receipt.check_run_id == 42
+    # head_sha is immutable on PATCH; the update carries the new conclusion
+    assert "head_sha" not in seen["payload"]
+    assert seen["payload"]["conclusion"] == "success"
+    assert seen["payload"]["external_id"] == "job-1"
+
+
+def test_stale_candidate_not_patched_against_existing_check() -> None:
+    """A stale candidate refuses before any PATCH write, even with a resolved id."""
+    gh_calls = []
+
+    def fake_gh_api(repo, endpoint, **kw):
+        gh_calls.append(endpoint)
+        if "pulls" in endpoint:
+            return {"head": {"sha": "9" * 40}}  # live head moved
+        return {"id": 42}
+
+    publisher = _publisher(check_run_id_for=lambda external_id: 42)
+    with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
+        with pytest.raises(PublishError, match="stale"):
+            publisher.publish(_req())
+
+    # only the live-identity read happened; the existing check was not touched
+    assert gh_calls == ["/repos/acme/widgets/pulls/77"]
+
+
 def test_publisher_failure_never_becomes_success() -> None:
     """A gh write failure surfaces as PublishError; retrying does not invent success."""
     with patch("daydream.git_ops.gh_api", side_effect=git_ops.GitError("HTTP 422")):

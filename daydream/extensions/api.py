@@ -15,6 +15,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
+from daydream.executors.contract import (  # noqa: F401  (re-exported for adapters)
+    DAYDREAM_SERVICE_V1,
+    MIN_SUPPORTED_DAYDREAM_SERVICE_V1,
+)
+
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
     from daydream.trajectory import DaydreamPhase
@@ -28,10 +33,8 @@ MIN_SUPPORTED_EXTENSION_API_VERSION: int = 5
 # existing extension contract (additive — no EXTENSION_API_VERSION bump):
 # a fork registers executors/publishers through the same ``Registry`` it
 # already mutates. The versioned service contract itself (ports, capabilities,
-# common models) lives in ``daydream.executors.contract``; this constant is
+# common models) lives in ``daydream.executors.contract``; these constants are
 # re-exported so an adapter can assert the service contract it implements.
-DAYDREAM_SERVICE_V1: int = 1
-MIN_SUPPORTED_DAYDREAM_SERVICE_V1: int = 1
 
 
 class ExtensionError(Exception):

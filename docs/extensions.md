@@ -274,16 +274,18 @@ same `register(registry)` entrypoint it already uses.
 from daydream.extensions import LocalExecutor, ScriptedExecutor
 
 def register(r):
-    r.register_executor("local", LocalExecutor(root))
+    r.register_executor("local", LocalExecutor("."))
     r.register_executor("scripted", ScriptedExecutor())
     r.register_publisher("github-checks", MyTrustedPublisher())
 ```
 
 `register_executor(name, executor)` enforces **capability admission at
 registration**: the executor must be a conformant `ReviewExecutor` (implements
-`start` / `inspect` / `cancel` / `collect` / `release` and exposes `kind`,
-`adapter_version`, `capabilities`) and must declare every required capability
-(see `ExecutorCapability`). A weak executor, a duplicate name, or an out-of-range
+`start` / `inspect` / `cancel` / `collect` / `release` and exposes `kind` and
+`capabilities`) and must declare every required capability (see
+`ExecutorCapability`). `adapter_version` is not validated at registration; a
+duck-typed executor missing it passes registration and fails later with an
+`AttributeError` when the execution bridge reads it. A weak executor, a duplicate name, or an out-of-range
 service contract version raises `ExtensionError`. Registered executors resolve
 via `executor(name)`, `executor_if_registered(name)`, and `executor_names()`.
 

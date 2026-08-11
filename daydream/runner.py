@@ -30,7 +30,7 @@ registered flow definition.
 import os
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -1004,7 +1004,9 @@ async def _run_loop_deep(work: WorkContext, config: RunConfig) -> int:
     return await run_deep(config, work)
 
 
-async def run_service(config: RunConfig, job: "ReviewJobV1") -> int:
+async def run_service(
+    config: RunConfig, job: "ReviewJobV1", *, lens_inventory: Sequence[str] | None = None
+) -> int:
     """Service-mode dispatch hook: run a read-only service review for *job*.
 
     The entrypoint for ``DAYDREAM_SERVICE_V1`` executor ports' ``start``:
@@ -1017,6 +1019,15 @@ async def run_service(config: RunConfig, job: "ReviewJobV1") -> int:
     The job itself is constructed by the controller leaf from a forge event
     (``REVIEW_TARGET_V1``); this hook only consumes a validated
     :class:`~daydream.service.models.ReviewJobV1`.
+
+    Args:
+        config: The resolved run configuration.
+        job: The immutable job to run.
+        lens_inventory: Every lens the executing environment can dispatch
+            (the capability-constrained inventory). A required lens absent
+            here fails as ``lens_unavailable`` before the backend ever runs.
+            Defaults to ``job.required_lenses`` when the caller has no
+            constrained inventory to declare.
 
     Returns:
         ``0`` for ``clean``/``findings``, ``1`` for ``infra_error`` (or any
@@ -1068,7 +1079,10 @@ async def run_service(config: RunConfig, job: "ReviewJobV1") -> int:
 
     backend = _resolve_backend(config, "review", cwd=target_dir)
     artifact = await run_service_review(
-        target_dir, job, backend, lens_inventory=job.required_lenses
+        target_dir,
+        job,
+        backend,
+        lens_inventory=job.required_lenses if lens_inventory is None else lens_inventory,
     )
     _print_service_outcome(artifact)
     return terminal_exit_code(artifact)
