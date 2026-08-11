@@ -110,34 +110,57 @@ def _commands_table(commands: Sequence[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _manual_step_check(changed_paths: Sequence[str]) -> str:
+def _target_state_checks(changes: Sequence[dict[str, Any]]) -> str:
+    checks: list[str] = []
+    for change in changes:
+        path = str(change["path"])
+        symbol = str(change["symbol"])
+        target_state = str(change["target_state"])
+        if change["operation"] == "delete":
+            if symbol == path:
+                check = f"confirm `{path}` no longer exists"
+            else:
+                check = (
+                    f"inspect `{path}` and confirm `{symbol}` is absent; if "
+                    "the target state removes the whole file, confirm the path "
+                    "no longer exists"
+                )
+            checks.append(f"- **Deletion check**: {check}. Required target state: {target_state}")
+        else:
+            checks.append(f"- **Target-state check**: re-read `{path}` and confirm: {target_state}")
+    return "\n".join(checks)
+
+
+def _manual_step_check(changes: Sequence[dict[str, Any]]) -> str:
     """Host-owned fallback when the model attached no command to a step.
 
     Never leave the executor with nothing to do: both checks below are
     deterministic, need no repository knowledge, and have a stated expected
     result.
     """
+    changed_paths = [str(change["path"]) for change in changes]
     listed = _path_list(changed_paths)
     return (
         "No repository command was verified during planning for this step. "
-        "Verify it by hand instead, in this order:\n\n"
-        f"1. Re-read {listed} and confirm every **Target state** sentence "
-        "above is now literally true of the file contents. Expected: each one "
-        "describes what the file now says.\n"
-        "2. From the repository root run `git status --porcelain`. Expected: "
+        "Verify it by hand instead: confirm every **Target state** sentence "
+        "above is now literally true using the operation-aware checks below. "
+        "A deletion is verified by absence, not by trying to re-read a deleted "
+        "file.\n\n"
+        + _target_state_checks(changes)
+        + "\n\nFrom the repository root run `git status --porcelain`. Expected: "
         f"the only paths listed are {listed}.\n\n"
         "If either check fails, that is a failed verification — apply the "
-        "\"repeated-verification-failure\" STOP condition."
+        '"repeated-verification-failure" STOP condition.'
     )
 
 
 def _render_verification(
     command: dict[str, Any] | None,
     *,
-    changed_paths: Sequence[str],
+    changes: Sequence[dict[str, Any]],
 ) -> str:
     if command is None:
-        return _manual_step_check(changed_paths)
+        return _manual_step_check(changes)
     expected = command["expected_success"]
     exit_prefix = f"exit {expected['exit_code']} and "
     observable = expected["observable_result"]
@@ -148,7 +171,9 @@ def _render_verification(
     )
     note = command.get("note")
     return (
-        "Run this now, before starting the next step.\n\n"
+        "Confirm every target state before running the repository gate:\n\n"
+        + _target_state_checks(changes)
+        + "\n\nRun this now, before starting the next step.\n\n"
         f"**Purpose**: {command['purpose']}\n\n"
         f"**Run from**: {_run_from(command)}\n\n"
         f"**Command**: `{command['command']}`\n\n"
@@ -206,6 +231,13 @@ def _done_criterion_fallback(kind: str, in_scope_paths: Sequence[str]) -> str:
             "**Check**: from the repository root run "
             "`git status --porcelain`. **Expected**: every listed path is one "
             f"of {_path_list(in_scope_paths)}, and no other path appears."
+        )
+    if kind == "static-invariant":
+        return (
+            "**Check**: inspect the repository and confirm the exact invariant "
+            "stated above. If it names a deleted path, symbol, comment, or "
+            "block, verify that target is absent; a whole-file deletion is "
+            "successful when the path no longer exists."
         )
     return (
         "No repository command was verified during planning for this "
@@ -285,44 +317,71 @@ def render_plan(
             "**Verify**\n\n"
             + _render_verification(
                 step["verification"],
-                changed_paths=[change["path"] for change in step["changes"]],
+                changes=step["changes"],
             )
         )
     test_plan = plan["test_plan"]
-    exemplar_section = (
-        "Copy the shape of these existing tests; do not invent a new style.\n\n"
-        + "\n".join(
-            f"- `{item['path']}` — `{item['symbol']}`: "
-            f"{item['pattern_to_copy']}"
-            for item in test_plan["exemplars"]
-        )
-        if test_plan["exemplars"]
-        else (
-            "This repository has no existing test to copy. Write each named "
-            "case below from its own specification only, and do not go looking "
-            "for a house style that is not there."
-        )
-    )
-    case_lines = "\n\n".join(
-        (
-            f"- **{case['name']}** — `{case['test_file']}::"
-            f"{case['test_symbol']}` ({case['kind']})\n"
-            f"  - Setup: {case['setup']}\n"
-            f"  - Action: {case['action']}\n"
+    test_mode = str(test_plan["mode"])
+    test_plan_header = f"- **Mode**: `{test_mode}`\n- **Rationale**: {test_plan['rationale']}"
+    if test_mode == "new-or-updated-tests":
+        exemplar_section = (
+            "Copy the shape of these existing tests; do not invent a new style.\n\n"
             + "\n".join(
-                f"  - Assert: {assertion}" for assertion in case["assertions"]
+                f"- `{item['path']}` — `{item['symbol']}`: {item['pattern_to_copy']}" for item in test_plan["exemplars"]
             )
-            + "\n  - Verification:\n"
-            + _render_verification_list(
-                case["verification"],
-                indent="    ",
-                fallback=_test_case_fallback(
-                    case["test_file"], case["test_symbol"]
-                ),
+            if test_plan["exemplars"]
+            else (
+                "This repository has no existing test to copy. Write each named "
+                "case below from its own specification only, and do not go looking "
+                "for a house style that is not there."
             )
         )
-        for case in test_plan["cases"]
-    )
+        case_lines = "\n\n".join(
+            (
+                f"- **{case['name']}** — `{case['test_file']}::"
+                f"{case['test_symbol']}` ({case['kind']})\n"
+                f"  - Setup: {case['setup']}\n"
+                f"  - Action: {case['action']}\n"
+                + "\n".join(f"  - Assert: {assertion}" for assertion in case["assertions"])
+                + "\n  - Verification:\n"
+                + _render_verification_list(
+                    case["verification"],
+                    indent="    ",
+                    fallback=_test_case_fallback(case["test_file"], case["test_symbol"]),
+                )
+            )
+            for case in test_plan["cases"]
+        )
+        test_plan_detail = (
+            "These are the tests this plan requires. Where a step above already "
+            "creates one, this section is that test's specification — write it "
+            "once, not twice.\n\n"
+            "### Exemplars\n\n" + exemplar_section + "\n\n### Named cases\n\n" + case_lines
+        )
+    elif test_mode == "existing-coverage":
+        coverage_lines = "\n\n".join(
+            (
+                f"- `{coverage['path']}::{coverage['symbol']}`\n"
+                f"  - Already proves: {coverage['behavior']}\n"
+                "  - Verification:\n"
+                + _render_verification_list(
+                    coverage["verification"],
+                    indent="    ",
+                    fallback=_test_case_fallback(coverage["path"], coverage["symbol"]),
+                )
+            )
+            for coverage in test_plan["existing_coverage"]
+        )
+        test_plan_detail = (
+            "### Existing coverage\n\n"
+            "No test-code change is required. Run and preserve these exact "
+            "existing tests:\n\n" + coverage_lines
+        )
+    else:
+        test_plan_detail = (
+            "No test-code change is required. Verify the non-behavioral change "
+            "through the step gates and done criteria above and below."
+        )
     done_lines = "\n".join(
         f"- [ ] **{criterion['id']} ({criterion['kind']})**: "
         f"{criterion['description']}\n"
@@ -356,12 +415,10 @@ def render_plan(
         f"- **Effort**: {finding.get('effort', '—')}\n"
         f"- **Risk**: {finding.get('risk', '—')}\n"
         f"- **Category**: {finding.get('category', '—')}\n"
+        f"- **Covered finding fingerprints**: "
+        f"{_path_list(plan['covered_fingerprints'])}\n"
         f"- **Planned at**: commit `{planned_at[:7]}`, {planned_on.isoformat()}\n\n"
-        + (
-            f"Daydream run: `{run_session_id}`\n\n"
-            if run_session_id is not None
-            else ""
-        )
+        + (f"Daydream run: `{run_session_id}`\n\n" if run_session_id is not None else "")
         + "## Before you start\n\n"
         "Run these from the repository root, in this order, before Step 1. Each\n"
         "one has an exact expected result.\n\n"
@@ -412,29 +469,19 @@ def render_plan(
         "before reading the next.\n\n"
         + "\n\n".join(step_sections)
         + "\n\n## Test plan\n\n"
-        "These are the tests this plan requires. Where a step above already "
-        "creates one, this section is that test's specification — write it "
-        "once, not twice.\n\n"
-        "### Exemplars\n\n"
-        + exemplar_section
-        + "\n\n### Named cases\n\n"
-        + case_lines
+        + test_plan_header
+        + "\n\n"
+        + test_plan_detail
         + "\n\n## Done criteria\n\n"
-        "Every box must be checked before the plan is done.\n\n"
-        + done_lines
-        + "\n\n## STOP conditions\n\n"
+        "Every box must be checked before the plan is done.\n\n" + done_lines + "\n\n## STOP conditions\n\n"
         "If any of these happens, stop work immediately and report it. Do not "
-        "attempt a workaround and do not continue to the next step.\n\n"
-        + stop_lines
-        + "\n\n## Finishing\n\n"
-        "Only after every box under \"Done criteria\" is checked:\n\n"
+        "attempt a workaround and do not continue to the next step.\n\n" + stop_lines + "\n\n## Finishing\n\n"
+        'Only after every box under "Done criteria" is checked:\n\n'
         f"1. Stage exactly the in-scope paths — never `git add -A`, never "
         f"`git add .`: `git add {' '.join(in_scope_paths)}`\n"
         "2. Confirm nothing else is staged: `git status --porcelain` — "
         f"expected: every line is one of {_path_list(in_scope_paths)}.\n"
-        "3. Commit, following the **Commit boundaries** line under \"Git "
-        f"workflow\": `git commit -m \"{workflow['commit_message_example']}\"`\n"
+        '3. Commit, following the **Commit boundaries** line under "Git '
+        f'workflow": `git commit -m "{workflow["commit_message_example"]}"`\n'
         "4. Do not push and do not open a pull request.\n"
-        f"5. Set this plan's Status cell in `daydream_plans/README.md` from "
-        "`TODO` to `DONE`.\n"
     )

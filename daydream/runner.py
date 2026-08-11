@@ -572,20 +572,24 @@ def _get_head_sha(cwd: Path) -> str | None:
 
 
 def _run_posts_to_github(config: RunConfig) -> bool:
-    """Return whether the deep single flow (as selected by ``config``) can write to GitHub.
+    """Return whether the selected run can write to GitHub.
 
     This mirrors the mode dispatch's write-capable paths: feedback mode may
     reply to PR comments; an explicit ``--flow deep`` and the default
     non-shallow loop both execute deep's ``post-review`` step; and ``--comment``
-    posts inline comments. ``--review``, shallow mode, and generic custom flows
-    are report-only from the runner's perspective, so they retain the ambient
-    ``gh`` identity. A custom flow that gains a GitHub write must explicitly
-    add its dispatch contract here before it can use App credentials.
+    posts inline comments. Improve is write-capable only when its repository
+    config enables automatic issue publication. ``--review``, shallow mode,
+    and generic custom flows are report-only from the runner's perspective, so
+    they retain the ambient ``gh`` identity. A custom flow that gains a GitHub
+    write must explicitly add its dispatch contract here before it can use App
+    credentials.
     """
     if config.bot is not None:
         return True
 
     if config.flow_name is not None:
+        if config.flow_name == "improve":
+            return _file_config_or_empty(config).improve_github_publish_issues
         return config.flow_name == "deep"
 
     if config.output_mode == "comment":
@@ -932,11 +936,17 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         ctx = FlowContext(config=config, work=work, registry=get_registry())
         ctx.data["improve_dir"] = directory
         ctx.data["effort_tier"] = tier
+        ctx.data["improve_publish_issues"] = _file_config_or_empty(config).improve_github_publish_issues
+        ctx.data["github_repo"] = config.pr_repo
 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Effort: {config.improve_effort}")
         print_info(console, f"Focus: {config.improve_focus or 'all'}")
+        print_info(
+            console,
+            f"GitHub issue publishing: {'enabled' if ctx.data['improve_publish_issues'] else 'disabled'}",
+        )
         print_info(console, f"Model: {ctx.backend_for('recon').model}")
         print_info(
             console,

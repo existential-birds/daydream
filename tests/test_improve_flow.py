@@ -11,7 +11,7 @@ from daydream.config import AUDIT_CATEGORIES, EFFORT_TIERS, VET_BATCH_MAX_FINDIN
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.exploration_runner import _sample_paths, repo_scan
 from daydream.extensions.loader import build_registry
-from daydream.git_ops import head_sha
+from daydream.git_ops import GitError, head_sha
 from daydream.improve.orchestrator import (
     _apply_vet_verdicts,
     _stamp_finding,
@@ -19,11 +19,14 @@ from daydream.improve.orchestrator import (
 from daydream.improve.partition import Partition
 from daydream.improve.plans import PLAN_INDEX_FILENAME
 from daydream.improve.prompts import (
+    AUDIT_FINDINGS_SCHEMA,
     AUDIT_PLAYBOOK_SECTIONS,
     HARD_RULE_4,
     HARD_RULE_6,
     PLAN_AUTHOR_SCHEMA,
+    VET_SCHEMA,
     build_audit_prompt,
+    build_vet_prompt,
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
@@ -111,6 +114,66 @@ def test_audit_prompt_states_slicing_bounds_search_not_reading() -> None:
         tier=EFFORT_TIERS["standard"],
     )
     assert "bounds where you search, never what you may read" in prompt
+
+
+def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
+    tech_debt = build_audit_prompt(
+        category="tech-debt",
+        skill_invocation=None,
+        group=_GROUP,
+        scope_note="",
+        recon_summary="{}",
+        cwd=Path("/repo"),
+        tier=EFFORT_TIERS["standard"],
+    )
+    tests = build_audit_prompt(
+        category="tests",
+        skill_invocation=None,
+        group=_GROUP,
+        scope_note="",
+        recon_summary="{}",
+        cwd=Path("/repo"),
+        tier=EFFORT_TIERS["standard"],
+    )
+
+    assert "existing repository code" in tech_debt
+    assert "language standard library" in tech_debt
+    assert "already-declared dependency" in tech_debt
+    assert "mature new dependency" in tech_debt
+    assert "comments that merely narrate self-evident code" in tech_debt
+    assert "net reduction in production and test code" in tech_debt
+    assert "Parameterizable matrices" in tests
+    assert "Preserve separate tests" in tests
+
+
+def test_finding_and_vet_schemas_require_stable_maintenance_metadata() -> None:
+    for schema, collection in (
+        (AUDIT_FINDINGS_SCHEMA, "findings"),
+        (VET_SCHEMA, "verdicts"),
+    ):
+        item = schema["properties"][collection]["items"]
+        assert {
+            "maintenance_signals",
+            "change_shape",
+            "reuse_target",
+        } <= set(item["required"])
+        assert item["properties"]["change_shape"]["enum"] == [
+            "delete",
+            "reuse",
+            "consolidate",
+            "neutral",
+            "additive",
+            "unknown",
+        ]
+
+
+def test_vet_prompt_rejects_false_reuse_and_comment_cleanup() -> None:
+    prompt = build_vet_prompt(findings=[], cwd=Path("/repo"))
+
+    assert "re-open both implementations" in prompt
+    assert "layer boundaries" in prompt
+    assert "Similar-looking tests" in prompt
+    assert "preserve rationale, invariants, security" in prompt
 
 
 def _index_numbers_by_fingerprint(index_text: str) -> dict[str, int]:
@@ -460,15 +523,15 @@ async def test_partition_bound_splits_oversized_trees_via_config(
         improve_scaled_monorepo_target,
         "\n[tool.daydream.improve]\npartition-max-files = 5\nmax-partition-groups = 20\n",
     )
-    stub = install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
+    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_scaled_monorepo_target,
         flow_name="improve",
         file_config=file_config,
-    ))
+        )
+    )
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -499,15 +562,15 @@ async def test_group_ceiling_skips_smallest_groups_and_reports_them(
         improve_scaled_monorepo_target,
         "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
     )
-    stub = install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
+    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_scaled_monorepo_target,
         flow_name="improve",
         file_config=file_config,
-    ))
+        )
+    )
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -527,19 +590,19 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
     make_config: MakeConfig,
 ) -> None:
     _pin_stack_availability(monkeypatch, tmp_path)
-    stub = install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
+    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_scaled_monorepo_target,
         flow_name="improve",
         improve_effort="quick",
-    ))
+        )
+    )
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
-    assert len(audit_calls) == 3  # the quick tier's three categories
+    assert len(audit_calls) == 4  # quick also hunts tech-debt/code bloat
     for call in audit_calls:
         assert group_roots(call["prompt"]) == ["."]
     coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
@@ -605,16 +668,16 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
         improve_scaled_monorepo_target,
         "\n[tool.daydream.improve]\nmax-partition-groups = 1\n",
     )
-    stub = install_improve_stub(
-        monkeypatch, improve_scaled_monorepo_target, n_findings=0
-    )
+    stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
     stub.fail_categories = {"docs"}
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_scaled_monorepo_target,
         flow_name="improve",
         file_config=file_config,
-    ))
+        )
+    )
 
     assert code == 0
     report = improve_artifact(improve_scaled_monorepo_target, "report.md").read_text()
@@ -711,12 +774,14 @@ async def test_vet_batches_are_bounded_and_parallel(
     stub.findings_per_category = 45
     stub.vet_reject_titles = {"Security finding 45"}
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_focus="security",
         file_config=file_config,
-    ))
+        )
+    )
 
     assert code == 0
     vet_calls = [call for call in stub.calls if call["marker"] == "vet"]
@@ -725,18 +790,16 @@ async def test_vet_batches_are_bounded_and_parallel(
         payload = json.loads(call["prompt"].split("```json\n")[1].split("```")[0])
         assert len(payload) <= VET_BATCH_MAX_FINDINGS
     vetted = json.loads(improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text())
-    titles = {finding["title"] for finding in vetted["findings"]}
+    members = [member for package in vetted["findings"] for member in package.get("members", [package])]
+    titles = {finding["title"] for finding in members}
     # Verdicts from every batch apply: the last batch's rejection is honored
-    # and the other 44 keeps survive.
-    assert len(vetted["findings"]) == 44
+    # and the other 44 survive inside nine manageable work packages.
+    assert len(members) == 44
+    assert len(vetted["findings"]) == 9
     assert "Security finding 45" not in titles
     assert "Security finding 01" in titles and "Security finding 44" in titles
-    rejected = json.loads(
-        (improve_monorepo_target / "daydream_plans" / "rejected.json").read_text()
-    )
-    assert any(
-        entry["title"] == "Security finding 45" for entry in rejected["rejected"]
-    )
+    rejected = json.loads((improve_monorepo_target / "daydream_plans" / "rejected.json").read_text())
+    assert any(entry["title"] == "Security finding 45" for entry in rejected["rejected"])
 
 
 @pytest.mark.anyio
@@ -755,18 +818,22 @@ async def test_vet_batch_failure_fails_closed_per_batch(
     stub.findings_per_category = 45
     stub.fail_vet_titles = {"Security finding 41"}  # the third batch's agent raises
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_focus="security",
         file_config=file_config,
-    ))
+        )
+    )
 
     assert code == 0
     vetted = json.loads(improve_artifact(improve_monorepo_target, "vetted-findings.json").read_text())
-    titles = {finding["title"] for finding in vetted["findings"]}
+    members = [member for package in vetted["findings"] for member in package.get("members", [package])]
+    titles = {finding["title"] for finding in members}
     # Only the failed batch's five findings drop; the other two batches keep theirs.
-    assert len(vetted["findings"]) == 40
+    assert len(members) == 40
+    assert len(vetted["findings"]) == 8
     assert "Security finding 41" not in titles
     assert "Security finding 01" in titles and "Security finding 40" in titles
 
@@ -1057,22 +1124,19 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
     for private_value in (secret, model_prose, rejected_command):
         assert private_value not in console_output
 
+
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("effort", "focus", "expected_categories"),
     [
-        pytest.param(
-            "standard", None, sorted(AUDIT_CATEGORIES), id="standard-effort"
-        ),
+        pytest.param("standard", None, sorted(AUDIT_CATEGORIES), id="standard-effort"),
         pytest.param(
             "quick",
             None,
-            ["correctness", "security", "tests"],
+            ["correctness", "security", "tech-debt", "tests"],
             id="quick-effort",
         ),
-        pytest.param(
-            "standard", "security", ["security"], id="focus-security"
-        ),
+        pytest.param("standard", "security", ["security"], id="focus-security"),
     ],
 )
 async def test_effort_and_focus_select_the_audited_categories_read_only(
@@ -1084,15 +1148,15 @@ async def test_effort_and_focus_select_the_audited_categories_read_only(
     make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(make_config(
+    await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_effort=effort,
         improve_focus=focus,
-    ))
-    audited = json.loads(
-        improve_artifact(improve_monorepo_target, "audit-findings.json").read_text()
     )
+    )
+    audited = json.loads(improve_artifact(improve_monorepo_target, "audit-findings.json").read_text())
     assert sorted(audited["categories_run"]) == expected_categories
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert audit_calls and all(call["read_only"] for call in audit_calls)
@@ -1160,20 +1224,16 @@ async def test_pi_improve_retains_valid_commands_and_avoids_provider_overload(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         non_interactive=False,
-    ))
-
-    recon = json.loads(
-        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
-    )
-    plan_files = sorted(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    recon = json.loads(improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8"))
+    plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     console_output = capsys.readouterr().out
     observables = [
         console_output,
@@ -1214,27 +1274,21 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
         lambda *args, **kwargs: backend,
     )
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         non_interactive=False,
-    ))
-
-    plan_files = sorted(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     diagnostics_text = improve_artifact(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     ).read_text(encoding="utf-8")
     diagnostics = json.loads(diagnostics_text)
-    failed = [
-        attempt
-        for attempt in diagnostics["attempts"]
-        if attempt["disposition"] == "blocked"
-    ]
+    failed = [attempt for attempt in diagnostics["attempts"] if attempt["disposition"] == "blocked"]
     console_output = capsys.readouterr().out
     observables = [
         console_output,
@@ -1242,34 +1296,17 @@ async def test_pi_improve_partial_failure_is_successful_and_safe(
     ]
 
     assert code == 0
-    assert len(plan_files) == 4
+    assert len(plan_files) == 1
     assert len(failed) == 1
-    assert failed[0]["finding"]["title"] == "Production finding 03"
+    # The failed member is represented by its aggregate package title.
+    assert failed[0]["finding"]["title"] == "Production finding 01"
     assert failed[0]["errors"] == [{"code": "PROCESS_EXIT", "pointer": "/"}]
-    assert "Plan blocked for Production finding 03: PROCESS_EXIT at /." in console_output
+    assert "Plan blocked for Production finding 01: PROCESS_EXIT at /." in console_output
     report = improve_artifact(improve_monorepo_target, "report.md").read_text(encoding="utf-8")
-    assert "Plans written: 4" in report
+    assert "Plans written: 1" in report
     assert "Plans blocked by plan-writing failure: 1" in report
     assert all(backend.recon_secret not in text for text in observables)
     assert all(backend.planner_secret not in text for text in observables)
-
-
-@pytest.mark.anyio
-async def test_focus_next_is_direction_only_and_plans_are_spikes(
-    improve_monorepo_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target)
-    await run(make_config(improve_monorepo_target, flow_name="improve", improve_focus="next"))
-    audited = json.loads(
-        improve_artifact(improve_monorepo_target, "audit-findings.json").read_text()
-    )
-    assert audited["categories_run"] == ["direction"]
-    plan = next(
-        (improve_monorepo_target / "daydream_plans").glob("0*.md")
-    ).read_text()
-    assert "spike" in plan.lower()
 
 
 @pytest.mark.anyio
@@ -1307,12 +1344,14 @@ async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
     make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_branch_two_services_target)
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_branch_two_services_target,
         flow_name="improve",
         improve_focus="branch",
         improve_scope="apps/billing",
-    ))
+        )
+    )
     assert code == 0
     # Isolate the embedded ```diff fenced block so the assertion targets the
     # branch diff itself, not the whole-repo recon context that legitimately
@@ -1337,11 +1376,13 @@ async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
     make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_focus="branch",
-    ))
+        )
+    )
     assert code == 1
 
 
@@ -1756,21 +1797,21 @@ async def test_interactive_selection_honors_user_choice(
         improve_monorepo_target,
         n_findings=8,
     )
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         non_interactive=False,
-    ))
-    assert code == 0
-    selected = json.loads(
-        improve_artifact(improve_monorepo_target, "selected.json").read_text()
     )
+    )
+    assert code == 0
+    selected = json.loads(improve_artifact(improve_monorepo_target, "selected.json").read_text())
     assert len(selected["selected"]) == 1
     assert selected["mode"] == "interactive"
 
 
 @pytest.mark.anyio
-async def test_report_orders_by_leverage_and_separates_direction(
+async def test_report_orders_by_leverage_without_non_actionable_direction_section(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
@@ -1783,10 +1824,9 @@ async def test_report_orders_by_leverage_and_separates_direction(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    assert report.index("high-leverage-title") < report.index(
-        "low-leverage-title"
-    )
-    assert "## Direction" in report
+    assert report.index("high-leverage-title") < report.index("low-leverage-title")
+    assert "## Direction" not in report
+    assert "## Cleanup pressure" in report
     assert "not audited" in report.lower()
 
 
@@ -1797,25 +1837,21 @@ async def test_scope_slices_search_but_report_names_the_unaudited_rest(
     make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_scope="apps/billing",
-    ))
+        )
+    )
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert all("apps/billing" in call["prompt"] for call in audit_calls)
     # A slice bounds where the audit searches, never what it may read: a
     # cross-service finding must stay reachable (spec.md monorepo requirement).
-    assert all(
-        "bounds where you search, never what you may read" in call["prompt"]
-        for call in audit_calls
-    )
-    assert any(
-        "bounds where the audit searches" in call["prompt"].lower()
-        for call in audit_calls
-    )
+    assert all("bounds where you search, never what you may read" in call["prompt"] for call in audit_calls)
+    assert any("bounds where the audit searches" in call["prompt"].lower() for call in audit_calls)
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
     assert "catalog" in report and "not audited" in report.lower()
 
@@ -1827,14 +1863,14 @@ async def test_group_scope_expands_named_service_group_to_all_members(
     make_config: MakeConfig,
 ) -> None:
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_scope="core",
-        file_config=DaydreamFileConfig(
-            improve_service_groups={"core": ["apps/billing", "apps/catalog"]}
-        ),
-    ))
+            file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing", "apps/catalog"]}),
+        )
+    )
 
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -1853,19 +1889,17 @@ async def test_plan_subverb_skips_audit_and_writes_single_plan(
     make_config: MakeConfig,
 ) -> None:
     install_improve_stub(monkeypatch, improve_monorepo_target)
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
     assert code == 0
     assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert len(plans) == 1
     assert "rate limiting" in plans[0].read_text().lower()
 
@@ -1879,31 +1913,25 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.return_secret_invalid_enum_once = True
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
     assert len(plan_calls) == 2
     repair_prompt = plan_calls[1]["prompt"]
     assert "PRIVATE_SCHEMA_SECRET" not in repair_prompt
     assert "TOKEN=" not in repair_prompt
     assert all(
-        call["output_schema"] == PLAN_AUTHOR_SCHEMA
-        and call["read_only"] is True
-        and call["persist_session"] is False
+        call["output_schema"] == PLAN_AUTHOR_SCHEMA and call["read_only"] is True and call["persist_session"] is False
         for call in plan_calls
     )
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert len(plans) == 1
     persisted = "\n".join(
         path.read_text(encoding="utf-8")
@@ -1951,15 +1979,15 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, stub_attr, stub_value)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     plans_dir = improve_monorepo_target / "daydream_plans"
     diagnostics = _load_improve_json(
         improve_monorepo_target,
@@ -2000,22 +2028,18 @@ async def test_plan_subverb_clamps_over_length_prose_without_repair(
     assert len(over_length_role) == 306
     stub.plan_file_role_override = over_length_role
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
-
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
-    assert code == 0
-    assert len(plan_calls) == 1
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
+    assert code == 0
+    assert len(plan_calls) == 1
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert len(plans) == 1
     plan_text = plans[0].read_text(encoding="utf-8")
     assert over_length_role[:299] + "…" in plan_text
@@ -2041,22 +2065,18 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
         "production and X-Internal-Service-Secret: test-secret in tests."
     )
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
-
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
-    assert code == 0
-    assert len(plan_calls) == 1
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
+    assert code == 0
+    assert len(plan_calls) == 1
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert len(plans) == 1
     plan_text = plans[0].read_text(encoding="utf-8")
     assert "X-Internal-Service-Secret: <internalSecret>" in plan_text
@@ -2167,20 +2187,16 @@ async def test_sloppy_but_salvageable_output_is_normalized_and_written(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_sloppy = True
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
-
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
     assert len(plan_calls) == 1
     assert len(plans) == 1
@@ -2380,16 +2396,16 @@ async def test_injected_skill_availability_drives_routing_without_env(
     target: Path = request.getfixturevalue(target_fixture)
     install_improve_stub(monkeypatch, target, n_findings=0)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         target,
         flow_name="improve",
         skill_availability=injected,
-    ))
+        )
+    )
 
     assert code == 0
-    coverage = json.loads(
-        improve_artifact(target, "coverage.json").read_text(encoding="utf-8")
-    )
+    coverage = json.loads(improve_artifact(target, "coverage.json").read_text(encoding="utf-8"))
     # One group per expected stack: no collapse, and no stack split in two.
     assert len(coverage["groups"]) == len(expected_group_stacks)
     assert sorted(group["stack"] for group in coverage["groups"]) == expected_group_stacks
@@ -2405,15 +2421,15 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
     stub.plan_bad_recon_id_attempts = 1
     stub.plan_missing_path_attempts = 1
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
     assert len(plan_calls) == 2
     repair_prompt = plan_calls[1]["prompt"]
@@ -2459,46 +2475,37 @@ async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_unquoted_path_attempts = 1
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
     assert code == 0
     assert len(plan_calls) == 2
     repair_prompt = plan_calls[1]["prompt"]
     assert "EXISTING_PATH_NOT_QUOTED" in repair_prompt
     assert "/scope/existing_paths/0/path" in repair_prompt
     assert "context_excerpts" in repair_prompt
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert len(plans) == 1
     plan_text = plans[0].read_text(encoding="utf-8")
-    current_state = plan_text.split("## Current state\n\n", 1)[1].split(
-        "\n\n## Commands"
-    )[0]
+    current_state = plan_text.split("## Current state\n\n", 1)[1].split("\n\n## Commands")[0]
     assert "- `apps/billing/api.py:1-2`" in current_state
     assert "def service_name" in current_state
     diagnostics = _load_improve_json(
         improve_monorepo_target,
         "plan-write-diagnostics.json",
     )
-    assert [
-        attempt["disposition"] for attempt in diagnostics["attempts"]
-    ] == ["retried", "success"]
+    assert [attempt["disposition"] for attempt in diagnostics["attempts"]] == ["retried", "success"]
     first_attempt = diagnostics["attempts"][0]
     assert first_attempt["stage"] == "authoring"
-    assert {
-        (error["code"], error["pointer"])
-        for error in first_attempt["errors"]
-    } == {("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")}
+    assert {(error["code"], error["pointer"]) for error in first_attempt["errors"]} == {
+        ("EXISTING_PATH_NOT_QUOTED", "/scope/existing_paths/0/path")
+    }
 
 
 def _out_of_scope_section(plan_text: str) -> str:
@@ -2515,20 +2522,16 @@ async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
     deleted = "apps/billing/legacy_loader.py"
     stub.plan_stop_condition_path = deleted
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
-
-    plan_calls = [
-        call for call in stub.calls if call["marker"] == "plan-writer"
-    ]
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
     assert len(plan_calls) == 1
     assert len(plans) == 1
@@ -2571,17 +2574,15 @@ async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, failure_attr, 1)
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
-
-    plans = list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
         )
     )
+
+    plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
     assert stub.plan_writer_calls == 2
     assert len(plans) == 1
@@ -2611,11 +2612,13 @@ async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
     stub.plan_rate_limit_always = True
     stub.retry_attempts = 2
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -2634,11 +2637,13 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_crash_attempts = 2
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     assert code == 1
@@ -2691,7 +2696,6 @@ async def test_every_agent_call_in_every_mode_is_read_only(
 ) -> None:
     configs = (
         make_config(improve_monorepo_target, flow_name="improve"),
-        make_config(improve_monorepo_target, flow_name="improve", improve_focus="next"),
         make_config(improve_monorepo_target, flow_name="improve", improve_plan_description="x"),
     )
     for config in configs:
@@ -2779,6 +2783,23 @@ def test_apply_vet_verdicts_matches_by_vet_id(
     )
     assert {f["fingerprint"] for f in kept} == expected_kept
     assert {f["fingerprint"] for f in rejected} == expected_rejected
+
+
+def test_apply_vet_verdicts_normalizes_schema_severity_for_prioritization() -> None:
+    kept, _ = _apply_vet_verdicts(
+        [_VET_FINDINGS[0]],
+        [
+            {
+                "vet_id": 1,
+                "keep": True,
+                "reason": "confirmed",
+                "severity": "medium",
+            }
+        ],
+        rejected_at_sha="sha",
+    )
+
+    assert kept[0]["severity"] == "MED"
 
 
 def test_apply_vet_verdicts_restamps_a_corrected_location(tmp_path: Path) -> None:
@@ -3002,16 +3023,18 @@ async def test_long_step_instruction_reaches_the_plan_whole(
     assert 1500 < len(instruction) <= 4000
     stub.plan_instruction_override = instruction
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
     assert code == 0
-    plan_text = next(
-        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
-    ).read_text(encoding="utf-8")
+    plan_text = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")).read_text(
+        encoding="utf-8"
+    )
     assert instruction in plan_text
     assert "…" not in plan_text
 
@@ -3026,29 +3049,21 @@ async def test_over_length_instruction_is_repaired_not_silently_truncated(
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="add rate limiting",
-    ))
+        )
+    )
 
     assert code == 1
-    diagnostics = json.loads(
-        improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json").read_text()
-    )
-    errors = [
-        error
-        for attempt in diagnostics["attempts"]
-        for error in attempt["errors"]
-    ]
-    assert any(
-        error["pointer"] == "/steps/0/changes/0/instruction" for error in errors
-    ), errors
+    diagnostics = json.loads(improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json").read_text())
+    errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
+    assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
     # The plan writer was asked again rather than a mangled plan being written.
     assert stub.plan_writer_calls == 2
-    assert not list(
-        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
-    )
+    assert not list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
 
 
 @pytest.mark.anyio
@@ -3075,16 +3090,18 @@ async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
         "INTERNAL_SERVICE_SECRET="
     )
 
-    code = await run(make_config(
+    code = await run(
+        make_config(
         improve_monorepo_target,
         flow_name="improve",
         improve_plan_description="repoint dev env secrets",
-    ))
+        )
+    )
 
     assert code == 0
-    plan_text = next(
-        (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
-    ).read_text(encoding="utf-8")
+    plan_text = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")).read_text(
+        encoding="utf-8"
+    )
     for key in (
         "CLERK_SECRET_KEY=",
         "CLOUDFLARE_ACCOUNT_ID=",
@@ -3161,13 +3178,12 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     assert "never `git add -A`" in text
     assert "git add apps/billing/api.py apps/billing/test_api.py" in text
     assert "4. Do not push and do not open a pull request." in text
-    assert "from\n`TODO` to `DONE`" in text or "`TODO` to `DONE`" in text
+    # Issue publication copies the plan without committing the local index, so
+    # an executor must not be told to edit daydream_plans/README.md.
+    assert "`TODO` to `DONE`" not in text
 
     # The two previously unactionable STOP conditions now name the check.
-    assert (
-        "Before editing a file, read the exact line range quoted for it in "
-        "the Current state section" in text
-    )
+    assert "Before editing a file, read the exact line range quoted for it in the Current state section" in text
     assert "two failures total for the same verification" in text
 
 
@@ -3255,3 +3271,336 @@ async def test_plan_writer_is_told_to_leave_the_executor_no_decisions(
         "properties"
     ]["description"]["description"]
     assert "without judgement" in done
+
+
+@pytest.mark.anyio
+async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """Real runner path: configured CI mode writes no branches and files every plan."""
+    install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=len(AUDIT_CATEGORIES),
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: [],
+    )
+    created: list[dict[str, Any]] = []
+
+    def _create_issue(*args: Any, **kwargs: Any) -> str:
+        created.append(dict(kwargs))
+        return f"https://github.com/acme/widgets/issues/{len(created)}"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
+    branches_before = git(
+        improve_monorepo_target,
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads",
+    )
+
+    code = await run(
+        make_config(
+            improve_monorepo_target,
+            flow_name="improve",
+            pr_repo="acme/widgets",
+            file_config=DaydreamFileConfig(
+                improve_github_publish_issues=True,
+            ),
+        )
+    )
+
+    assert code == 0
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")
+    vetted = _load_improve_json(
+        improve_monorepo_target,
+        "vetted-findings.json",
+    )
+    assert len(selected["selected"]) == len(vetted["findings"])
+    assert len(selected["selected"]) > 5
+    plan_files = sorted((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
+    assert len(created) == len(plan_files) == len(selected["selected"])
+    assert {str(issue["body"]).partition("\n\n")[2] for issue in created} == {
+        path.read_text(encoding="utf-8") for path in plan_files
+    }
+    assert all(str(issue["body"]).startswith("<!-- daydream-improve: package=") for issue in created)
+    assert (
+        git(
+            improve_monorepo_target,
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+        )
+        == branches_before
+    )
+
+
+@pytest.mark.anyio
+async def test_disabled_publication_overwrites_stale_current_run_artifact(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """A disabled run cannot leave an earlier run looking current."""
+    artifact = improve_artifact(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "status": "complete",
+                "published": [{"issue_url": "https://example.test/stale"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=0)
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    publication = _load_improve_json(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    assert code == 0
+    assert publication["enabled"] is False
+    assert publication["status"] == "disabled"
+    assert publication["published"] == []
+    assert "example.test/stale" not in artifact.read_text(encoding="utf-8")
+
+
+@pytest.mark.anyio
+async def test_configured_publish_records_a_pathless_reconciled_plan(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+) -> None:
+    """An indexed package with no plan file is an explicit hard failure."""
+    install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=1,
+    )
+    first_code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+    plan_path = next((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
+    plan_path.unlink()
+    capsys.readouterr()
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: pytest.fail("a pathless package must fail before GitHub reconciliation"),
+    )
+
+    second_code = await run(
+        make_config(
+            improve_monorepo_target,
+            flow_name="improve",
+            pr_repo="acme/widgets",
+            file_config=DaydreamFileConfig(
+                improve_github_publish_issues=True,
+            ),
+        )
+    )
+
+    publication = _load_improve_json(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    assert first_code == 0
+    assert second_code == 1
+    assert publication["status"] == "failed"
+    assert publication["published"] == []
+    assert len(publication["failed"]) == 1
+    assert publication["failed"][0]["stage"] == "plan-reconciliation"
+    assert publication["failed"][0]["plan_path"] is None
+    output = capsys.readouterr().out
+    assert "Improve issue publishing failed" in output
+    assert "Improve planning failed" not in output
+
+
+@pytest.mark.anyio
+async def test_reused_plan_publishes_its_stored_package_and_member_identities(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """A skipped current finding publishes the complete stored plan identity."""
+    stub = install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=1,
+    )
+    first_code = await run(
+        make_config(improve_monorepo_target, flow_name="improve")
+    )
+    sidecar_path = (
+        improve_monorepo_target / "daydream_plans" / PLAN_INDEX_FILENAME
+    )
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    stored = sidecar["plans"][0]
+    stored["package_fingerprint"] = "stored-package"
+    # Preserve multiplicity: duplicate semantic aliases tell the publisher it
+    # must reconcile on raw member fingerprints instead.
+    stored["member_aliases"] = ["stored-alias", "stored-alias"]
+    stored_fingerprints = list(stored["member_fingerprints"])
+    sidecar_path.write_text(
+        json.dumps(sidecar, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: [],
+    )
+    created: list[dict[str, Any]] = []
+
+    def _create_issue(*args: Any, **kwargs: Any) -> str:
+        created.append(dict(kwargs))
+        return "https://github.com/acme/widgets/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
+
+    second_code = await run(
+        make_config(
+            improve_monorepo_target,
+            flow_name="improve",
+            pr_repo="acme/widgets",
+            file_config=DaydreamFileConfig(
+                improve_github_publish_issues=True,
+            ),
+        )
+    )
+
+    publication = _load_improve_json(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    assert first_code == second_code == 0
+    assert stub.plan_writer_calls == 1
+    assert len(created) == 1
+    body = str(created[0]["body"])
+    assert body.startswith(
+        "<!-- daydream-improve: package=stored-package -->\n"
+        "<!-- daydream-improve-member: alias=stored-alias -->\n"
+    )
+    assert all(
+        f"<!-- daydream-improve-member: fingerprint={fingerprint} -->"
+        in body
+        for fingerprint in stored_fingerprints
+    )
+    assert publication["published"][0]["package_id"] == "stored-package"
+    assert publication["published"][0]["member_aliases"] == [
+        "stored-alias",
+        "stored-alias",
+    ]
+    assert publication["published"][0]["member_fingerprints"] == (
+        stored_fingerprints
+    )
+
+
+@pytest.mark.anyio
+async def test_configured_publish_records_partial_plan_write_failure(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """Every selected package remains accounted for when one writer fails."""
+    backend = ProductionPathBackend(
+        improve_monorepo_target,
+        failed_title="Production finding 03",
+    )
+    monkeypatch.setattr(
+        "daydream.runner.create_backend",
+        lambda *args, **kwargs: backend,
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: [],
+    )
+    created: list[str] = []
+
+    def _create_issue(*args: Any, **kwargs: Any) -> str:
+        created.append(str(kwargs["title"]))
+        return "https://github.com/acme/widgets/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _create_issue)
+
+    code = await run(
+        make_config(
+            improve_monorepo_target,
+            flow_name="improve",
+            pr_repo="acme/widgets",
+            file_config=DaydreamFileConfig(
+                improve_github_publish_issues=True,
+            ),
+        )
+    )
+
+    publication = _load_improve_json(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    selected = _load_improve_json(improve_monorepo_target, "selected.json")
+    assert code == 2
+    assert publication["status"] == "partial"
+    assert len(publication["published"]) == len(created) == 1
+    assert len(publication["failed"]) == 1
+    assert publication["failed"][0]["stage"] == "plan-write"
+    assert publication["failed"][0]["plan_path"] is None
+    assert len(publication["published"]) + len(publication["failed"]) == len(selected["selected"])
+
+
+@pytest.mark.anyio
+async def test_publication_only_failure_is_not_reported_as_planning_failure(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    make_config: MakeConfig,
+) -> None:
+    install_improve_stub(
+        monkeypatch,
+        improve_monorepo_target,
+        n_findings=1,
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_list_strict",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "daydream.git_ops.gh_issue_create",
+        lambda *args, **kwargs: (_ for _ in ()).throw(GitError("offline")),
+    )
+
+    code = await run(
+        make_config(
+            improve_monorepo_target,
+            flow_name="improve",
+            pr_repo="acme/widgets",
+            file_config=DaydreamFileConfig(
+                improve_github_publish_issues=True,
+            ),
+        )
+    )
+
+    publication = _load_improve_json(
+        improve_monorepo_target,
+        "published-issues.json",
+    )
+    output = capsys.readouterr().out
+    report = improve_artifact(
+        improve_monorepo_target,
+        "report.md",
+    ).read_text(encoding="utf-8")
+    assert code == 1
+    assert publication["status"] == "failed"
+    assert publication["published"] == []
+    assert [entry["stage"] for entry in publication["failed"]] == ["issue-create"]
+    assert "Improve issue publishing failed" in output
+    assert "Improve planning failed" not in output
+    assert "GitHub publication failures: 1" in report

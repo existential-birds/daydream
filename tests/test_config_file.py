@@ -21,6 +21,43 @@ def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
     assert load_file_config(tmp_path).improve_service_roots == []
 
 
+def test_improve_github_issue_publishing_is_explicitly_configurable(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.improve.github]\npublish_issues = true\n"
+    )
+
+    config = load_file_config(tmp_path)
+
+    assert config.improve_github_publish_issues is True
+
+
+def test_improve_github_issue_publishing_accepts_kebab_case_fallback(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream.improve.github]\npublish-issues = true\n"
+    )
+
+    config = load_file_config(tmp_path)
+
+    assert config.improve_github_publish_issues is True
+
+
+@pytest.mark.parametrize("raw", ['"yes"', "1", "[]"])
+def test_improve_github_issue_publishing_rejects_non_boolean_values(
+    tmp_path: Path,
+    raw: str,
+) -> None:
+    (tmp_path / ".daydream.toml").write_text(
+        f"[improve.github]\npublish_issues = {raw}\n"
+    )
+
+    assert load_file_config(tmp_path).improve_github_publish_issues is False
+    assert DaydreamFileConfig().improve_github_publish_issues is False
+
+
 def test_improve_partition_bounds_parse_from_tool_daydream_improve(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "[tool.daydream.improve]\npartition-max-files = 7\nmax-partition-groups = 2\n"

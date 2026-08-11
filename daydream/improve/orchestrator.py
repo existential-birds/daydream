@@ -30,6 +30,7 @@ from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
     coverage_path,
     plan_write_diagnostics_path,
+    published_issues_path,
     recon_path,
     report_path,
     vetted_findings_path,
@@ -67,15 +68,17 @@ from daydream.improve.prioritize import (
     aggregate_cross_service,
     leverage_score,
     order_by_leverage,
-    partition_direction,
 )
 from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
+    CHANGE_SHAPES,
+    MAINTENANCE_SIGNALS,
     PLAN_AUTHOR_SCHEMA,
     RECON_COMMAND_CONTRACT_BULLET,
     VET_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.publish import ImprovePublishError, IssuePublisher
 from daydream.improve.render import markdown_cell
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
@@ -113,10 +116,11 @@ RECON_SCHEMA: dict[str, Any] = {
     },
 }
 
-_EVIDENCE_LOCATION = re.compile(
-    r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)"
-)
+_EVIDENCE_LOCATION = re.compile(r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)")
 _PROVENANCE_VALUES = {"introduced", "inherited"}
+_MAINTENANCE_SIGNALS = set(MAINTENANCE_SIGNALS)
+_CHANGE_SHAPES = set(CHANGE_SHAPES)
+_REUSE_TARGET = re.compile(r"^(?:repo:[^#\s]+#[^\s]+|stdlib:[^\s]+|dep:[^:\s]+:[^\s]+)$")
 
 
 def _redact_model_value(value: Any) -> Any:
@@ -756,6 +760,17 @@ def _stamp_finding(
     if evidence_paths is None:
         return None
     stamped = dict(finding)
+    raw_signals = stamped.get("maintenance_signals")
+    stamped["maintenance_signals"] = (
+        list(dict.fromkeys(signal for signal in raw_signals if signal in _MAINTENANCE_SIGNALS))
+        if isinstance(raw_signals, list)
+        else []
+    )
+    if stamped.get("change_shape") not in _CHANGE_SHAPES:
+        stamped["change_shape"] = "unknown"
+    reuse_target = stamped.get("reuse_target")
+    if not isinstance(reuse_target, str) or _REUSE_TARGET.fullmatch(reuse_target) is None:
+        stamped["reuse_target"] = None
     stamped["category"] = category
     stamped["partition"] = _owning_partition(partitions, evidence_paths)
     stamped["services"] = [
@@ -808,8 +823,6 @@ def resolve_categories(
     """Resolve the audit categories for an effort tier and optional focus."""
     if focus in {"security", "performance", "tests"}:
         return (focus,)
-    if focus == "next":
-        return ("direction",)
     if focus == "branch":
         return AUDIT_CATEGORIES
     return tier.categories or AUDIT_CATEGORIES
@@ -861,11 +874,6 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 if assignment.group.stack
                 else "Audit this group's surface."
             )
-            if ctx.config.improve_focus == "next":
-                scope_note += (
-                    "\nReturn 4–6 grounded suggestions with honest tradeoffs "
-                    "and design/spike-sized next steps."
-                )
             if ctx.config.improve_scope:
                 scope_note += (
                     f"\nService scope slice: `{ctx.config.improve_scope}`. "
@@ -1096,6 +1104,8 @@ def _apply_vet_verdicts(
         "effort",
         "risk",
         "confidence",
+        "maintenance_signals",
+        "change_shape",
         "path",
         "line",
         "provenance",
@@ -1120,19 +1130,29 @@ def _apply_vet_verdicts(
         for field in corrected_fields:
             if verdict.get(field) is not None:
                 corrected[field] = verdict[field]
-        location_corrected = (
-            verdict.get("path") is not None or verdict.get("line") is not None
-        )
+        # The vet contract uses human-readable severity names while the
+        # prioritizer's axes use the audit vocabulary. Normalize at the host
+        # boundary so aggregation cannot silently promote every vetted item to
+        # its conservative fallback.
+        severity = corrected.get("severity")
+        if isinstance(severity, str):
+            corrected["severity"] = {
+                "high": "HIGH",
+                "medium": "MED",
+                "low": "LOW",
+            }.get(severity.lower(), severity)
+        # Unlike the other corrected fields, ``None`` is a meaningful vet
+        # correction here: it explicitly retracts an audit-time reuse target.
+        if "reuse_target" in verdict:
+            corrected["reuse_target"] = verdict["reuse_target"]
+        location_corrected = verdict.get("path") is not None or verdict.get("line") is not None
         if location_corrected:
             _correct_primary_evidence_location(
                 corrected,
                 path=str(corrected.get("path", "")),
                 line=corrected.get("line"),
             )
-        if (
-            default_provenance is not None
-            and corrected.get("provenance") not in _PROVENANCE_VALUES
-        ):
+        if default_provenance is not None and corrected.get("provenance") not in _PROVENANCE_VALUES:
             corrected["provenance"] = default_provenance
         if location_corrected:
             restamped = _stamp_finding(
@@ -1261,36 +1281,22 @@ async def _step_vet(ctx: FlowContext) -> None:
 
     record_rejections(plans_dir, rejected)
     findings = aggregate_cross_service(order_by_leverage(kept))
-    defects, direction = partition_direction(findings)
-    ordered_defects = order_by_leverage(defects)
-    ordered_direction = order_by_leverage(direction)
+    ordered_defects = order_by_leverage(findings)
     vetted = _with_artifact_provenance(
         {
-            "findings": [*ordered_defects, *ordered_direction],
+            "findings": ordered_defects,
             "defects": ordered_defects,
-            "direction": ordered_direction,
         },
         phase=DaydreamPhase.VET,
     )
-    vetted_findings_path(directory).write_text(
-        json.dumps(vetted, indent=2) + "\n"
-    )
+    vetted_findings_path(directory).write_text(json.dumps(vetted, indent=2) + "\n")
     ctx.data["vetted"] = vetted
     ctx.data["previously_rejected"] = previously_rejected
     ctx.data["vet_rejected"] = len(rejected)
     ctx.data["defects"] = ordered_defects
-    ctx.data["direction"] = ordered_direction
     if branch_focus:
-        introduced = [
-            finding
-            for finding in ordered_defects
-            if finding.get("provenance") == "introduced"
-        ]
-        inherited = [
-            finding
-            for finding in ordered_defects
-            if finding.get("provenance") != "introduced"
-        ]
+        introduced = [finding for finding in ordered_defects if finding.get("provenance") == "introduced"]
+        inherited = [finding for finding in ordered_defects if finding.get("provenance") != "introduced"]
         ctx.data["findings_table"] = (
             "### Introduced by this branch\n\n"
             f"{_findings_table(introduced)}\n\n"
@@ -1299,10 +1305,6 @@ async def _step_vet(ctx: FlowContext) -> None:
         )
     else:
         ctx.data["findings_table"] = _findings_table(ordered_defects)
-    ctx.data["direction_section"] = _direction_section(
-        ordered_direction,
-        start=len(ordered_defects) + 1,
-    )
 
 
 def _evidence_cell(finding: dict[str, Any]) -> str:
@@ -1318,8 +1320,8 @@ def _findings_table(
     start: int = 1,
 ) -> str:
     lines = [
-        "| # | Finding | Category | Impact | Effort | Risk | Confidence | Evidence |",
-        "|---:|---|---|---|---|---|---|---|",
+        "| # | Finding | Category | Change | Impact | Effort | Risk | Confidence | Evidence |",
+        "|---:|---|---|---|---|---|---|---|---|",
     ]
     for number, finding in enumerate(findings, start=start):
         lines.append(
@@ -1329,6 +1331,7 @@ def _findings_table(
                     str(number),
                     markdown_cell(finding.get("title")),
                     markdown_cell(finding.get("category")),
+                    markdown_cell(finding.get("change_shape", "unknown")),
                     markdown_cell(finding.get("impact")),
                     markdown_cell(finding.get("effort")),
                     markdown_cell(finding.get("risk")),
@@ -1339,29 +1342,8 @@ def _findings_table(
             + " |"
         )
     if not findings:
-        lines.append("| — | No vetted defect findings. | — | — | — | — | — | — |")
+        lines.append("| — | No vetted findings. | — | — | — | — | — | — | — |")
     return "\n".join(lines)
-
-
-def _direction_section(
-    findings: list[dict[str, Any]],
-    *,
-    start: int,
-    limit: int = 4,
-) -> str:
-    if not findings:
-        return "## Direction\n\nNo grounded direction findings."
-    entries: list[str] = []
-    for number, finding in enumerate(findings[:limit], start=start):
-        entries.append(
-            f"### {number}. {markdown_cell(finding.get('title'))}\n\n"
-            f"{markdown_cell(finding.get('body'))} "
-            f"Impact: {markdown_cell(finding.get('impact'))}; "
-            f"effort: {markdown_cell(finding.get('effort'))}; "
-            f"fix risk: {markdown_cell(finding.get('risk'))}. "
-            f"Evidence: {_evidence_cell(finding)}."
-        )
-    return "## Direction\n\n" + "\n\n".join(entries)
 
 
 def _parse_selection(raw: str, *, total: int) -> list[int] | None:
@@ -1397,34 +1379,33 @@ def _default_selection(defects: list[dict[str, Any]]) -> list[int]:
     return list(range(1, min(5, len(defects)) + 1))
 
 
+def _automatic_issue_publishing(ctx: FlowContext) -> bool:
+    """Return whether this Improve run is configured to publish plans."""
+    file_config = ctx.config.file_config or DaydreamFileConfig()
+    return bool(getattr(file_config, "improve_github_publish_issues", False))
+
+
 def _selection_prompt(
-    defects: list[dict[str, Any]],
-    direction: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
 ) -> str:
-    sections = [
-        "Choose findings to turn into plans (comma-separated numbers or ranges).",
-        _findings_table(defects),
-    ]
-    if direction:
-        sections.append(
-            _direction_section(
-                direction,
-                start=len(defects) + 1,
-                limit=len(direction),
-            )
-        )
-    return "\n\n".join(sections)
+    return "\n\n".join(
+        [
+            "Choose findings to turn into plans (comma-separated numbers or ranges).",
+            _findings_table(findings),
+        ]
+    )
 
 
 async def _step_select(ctx: FlowContext) -> Stop | None:
     """Persist the user's plan selection or the silent unattended default."""
-    defects: list[dict[str, Any]] = ctx.data["defects"]
-    direction: list[dict[str, Any]] = ctx.data["direction"]
-    default_findings = (
-        direction if ctx.config.improve_focus == "next" else defects
+    default_findings: list[dict[str, Any]] = ctx.data["defects"]
+    publish_all = get_non_interactive() and _automatic_issue_publishing(ctx)
+    default_numbers = list(range(1, len(default_findings) + 1)) if publish_all else _default_selection(default_findings)
+    mode = (
+        "automatic-publishing"
+        if publish_all
+        else ("non-interactive-default" if get_non_interactive() else "interactive")
     )
-    default_numbers = _default_selection(default_findings)
-    mode = "non-interactive-default" if get_non_interactive() else "interactive"
     selected_numbers = default_numbers
 
     if not default_findings:
@@ -1444,14 +1425,12 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
         return None
 
     if not get_non_interactive():
-        default_text = (
-            f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
-        )
-        prompt = _selection_prompt(defects, direction)
+        default_text = f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
+        prompt = _selection_prompt(default_findings)
         raw = agent.prompt_user(console, prompt, default=default_text)
         parsed = _parse_selection(
             raw,
-            total=len(defects) + len(direction),
+            total=len(default_findings),
         )
         if parsed is None:
             raw = agent.prompt_user(
@@ -1461,17 +1440,13 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
             )
             parsed = _parse_selection(
                 raw,
-                total=len(defects) + len(direction),
+                total=len(default_findings),
             )
         selected_numbers = parsed if parsed is not None else default_numbers
 
-    selectable = [*defects, *direction]
-    selected = [
-        selectable[number - 1]["fingerprint"] for number in selected_numbers
-    ]
-    ctx.data["selected_findings"] = [
-        selectable[number - 1] for number in selected_numbers
-    ]
+    selectable = default_findings
+    selected = [selectable[number - 1]["fingerprint"] for number in selected_numbers]
+    ctx.data["selected_findings"] = [selectable[number - 1] for number in selected_numbers]
     ctx.data["selection_mode"] = mode
     (ctx.data["improve_dir"] / "selected.json").write_text(
         json.dumps(
@@ -1522,12 +1497,25 @@ def _description_finding(description: str) -> dict[str, Any]:
         "risk": "MED",
         "confidence": "HIGH",
         "evidence": [],
+        "maintenance_signals": [],
+        "change_shape": "unknown",
+        "reuse_target": None,
         "fingerprint": compute_fingerprint(
             "",
             description,
             "User-requested improve plan",
         ),
     }
+
+
+def _expected_plan_fingerprints(finding: dict[str, Any]) -> list[str]:
+    members = finding.get("member_fingerprints")
+    if isinstance(members, list):
+        valid = [item for item in members if isinstance(item, str) and item]
+        if valid:
+            return valid
+    fingerprint = finding.get("fingerprint")
+    return [fingerprint] if isinstance(fingerprint, str) and fingerprint else []
 
 
 async def _step_write_plans(ctx: FlowContext) -> None:
@@ -1555,18 +1543,14 @@ async def _step_write_plans(ctx: FlowContext) -> None:
     session = PlanWriteSession(
         plans_dir,
         planned_at=planned_at,
-        non_interactive_default=(
-            ctx.data["selection_mode"] == "non-interactive-default"
-        ),
+        non_interactive_default=(ctx.data["selection_mode"] in {"non-interactive-default", "automatic-publishing"}),
         run_session_id=_run_session_id(),
     )
     # Numbers are claimed here, in selection order, before any writer runs, so
     # a plan's number never depends on which writer finishes first.
     reservations = session.reserve(selected)
     pending = {reservation.index for reservation in reservations}
-    total = sum(
-        1 for reservation in reservations if reservation.number is not None
-    )
+    total = sum(1 for reservation in reservations if reservation.number is not None)
     landed = 0
     announced: set[int] = set()
 
@@ -1721,9 +1705,8 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                             assembled, issues = assemble_plan(
                                 output,
                                 repo=ctx.work.repo,
-                                recon_commands=_verification_commands(
-                                    ctx.data["recon"]
-                                ),
+                                recon_commands=_verification_commands(ctx.data["recon"]),
+                                expected_fingerprints=(_expected_plan_fingerprints(current)),
                             )
                         else:
                             assembled = None
@@ -1761,12 +1744,10 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                                     ),
                                 )
                             )
-                            current_prompt = (
-                                build_plan_writer_repair_prompt(
+                            current_prompt = build_plan_writer_repair_prompt(
                                     task_prompt,
                                     issues,
                                 )
-                            )
                             continue
                         if not isinstance(output, dict):
                             return {
@@ -1882,38 +1863,280 @@ async def _step_write_plans(ctx: FlowContext) -> None:
         )
 
 
-def _render_report(
-    services: list[Service],
-    all_services: list[Service],
-    stacks: list[StackAssignment],
-    audit: dict[str, Any],
-    findings: list[dict[str, Any]],
-    discarded_no_evidence: int,
-    dropped_low_confidence: int,
-    dropped_by_cap: int,
-    previously_rejected: int,
-    vet_rejected: int,
-    findings_table: str,
-    direction_section: str,
-    effort: str,
-    scope: str | None,
-    plan_write: dict[str, list[dict[str, Any]]],
-    partitions: list[Partition],
-    partitions_not_audited: list[Partition],
-    groups: list[PartitionGroup],
+def _local_plan_path(repo: Path, entry: dict[str, Any]) -> Path | None:
+    raw_path = entry.get("path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path)
+    return path if path.is_absolute() else repo / "daydream_plans" / path
+
+
+def _publication_package_id(
+    finding: dict[str, Any],
+    entry: dict[str, Any] | None = None,
 ) -> str:
-    service_lines = (
-        "\n".join(
-            f"- **{service.name}** — `{service.root.as_posix()}`"
-            for service in services
+    """Return the plan's stored package identity before the current finding's."""
+    return str(
+        (entry or {}).get("package_fingerprint")
+        or finding.get("package_fingerprint")
+        or finding.get("fingerprint")
+        or ""
+    )
+
+
+def _publication_members(
+    entry: dict[str, Any],
+    finding: dict[str, Any],
+    field: str,
+) -> tuple[str, ...]:
+    """Read stored plan membership first, with current-finding compatibility."""
+    raw = entry[field] if field in entry else finding.get(field)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(value for value in raw if isinstance(value, str) and value)
+
+
+def _publication_identity(
+    entry: dict[str, Any],
+    finding: dict[str, Any],
+    plan_path: Path | None,
+) -> dict[str, Any]:
+    """Extract the per-package identity shared by every publication record."""
+    return {
+        "package_id": _publication_package_id(finding, entry),
+        "title": str(entry.get("title") or finding.get("title") or "Improve repository"),
+        "plan_path": plan_path.name if plan_path is not None else None,
+        "member_fingerprints": list(_publication_members(entry, finding, "member_fingerprints")),
+        "member_aliases": list(_publication_members(entry, finding, "member_aliases")),
+    }
+
+
+def _publication_failure(
+    identity: dict[str, Any],
+    *,
+    stage: str,
+    error: str,
+) -> dict[str, Any]:
+    """Build a publication failure record from a shared package identity."""
+    return {**identity, "stage": stage, "error": error}
+
+
+def _write_publication_artifact(
+    ctx: FlowContext,
+    publication: dict[str, Any],
+) -> None:
+    published_issues_path(ctx.data["improve_dir"]).write_text(
+        json.dumps(
+            _with_artifact_provenance(
+                publication,
+                phase=DaydreamPhase.PLAN_WRITE,
+            ),
+            indent=2,
         )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+async def _step_publish_issues(ctx: FlowContext) -> None:
+    """Copy each validated local plan into one idempotent GitHub issue."""
+    enabled = _automatic_issue_publishing(ctx)
+    publication: dict[str, Any] = {
+        "enabled": enabled,
+        "status": "running" if enabled else "disabled",
+        "repository": ctx.config.pr_repo,
+        "published": [],
+        "failed": [],
+    }
+    ctx.data["issue_publication"] = publication
+    if not enabled:
+        _write_publication_artifact(ctx, publication)
+        return
+
+    candidates: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
+    represented: set[str] = set()
+    plan_write = ctx.data["plan_write"]
+    for disposition in ("written", "skipped", "failed"):
+        for entry in plan_write.get(disposition, []):
+            if not isinstance(entry, dict):
+                continue
+            nested_finding = entry.get("finding")
+            finding = nested_finding if isinstance(nested_finding, dict) else entry
+            package_id = _publication_package_id(finding, entry)
+            if package_id:
+                represented.add(package_id)
+            current_package_id = _publication_package_id(finding)
+            if current_package_id:
+                represented.add(current_package_id)
+            plan_path = _local_plan_path(ctx.work.repo, entry)
+            identity = _publication_identity(entry, finding, plan_path)
+            if disposition == "failed":
+                identity["plan_path"] = None
+                publication["failed"].append(
+                    _publication_failure(
+                        identity,
+                        stage="plan-write",
+                        error="Plan writing did not produce a validated local plan.",
+                    )
+                )
+            elif plan_path is None:
+                publication["failed"].append(
+                    _publication_failure(
+                        identity,
+                        stage="plan-reconciliation",
+                        error="The selected package was skipped without an unambiguous validated local plan.",
+                    )
+                )
+            elif not plan_path.is_file():
+                publication["failed"].append(
+                    _publication_failure(
+                        identity,
+                        stage="local-plan",
+                        error="The validated local plan file is unavailable.",
+                    )
+                )
+            else:
+                candidates.append((entry, finding, plan_path))
+
+    for finding in ctx.data.get("selected_findings", []):
+        if not isinstance(finding, dict):
+            continue
+        package_id = _publication_package_id(finding)
+        if package_id in represented:
+            continue
+        publication["failed"].append(
+            {
+                "package_id": package_id,
+                "title": str(finding.get("title") or "Improve repository"),
+                "plan_path": None,
+                "stage": "plan-accounting",
+                "error": ("Plan writing produced no outcome for the selected package."),
+            }
+        )
+
+    _write_publication_artifact(ctx, publication)
+    if not candidates:
+        _finish_publication(ctx, publication)
+        _write_publication_artifact(ctx, publication)
+        return
+
+    try:
+        publisher = IssuePublisher.connect(
+            ctx.work.repo,
+            repo_slug=ctx.config.pr_repo,
+        )
+    except ImprovePublishError as exc:
+        safe_error = redact_text(str(exc))
+        for entry, finding, plan_path in candidates:
+            publication["failed"].append(
+                _publication_failure(
+                    _publication_identity(entry, finding, plan_path),
+                    stage="preflight",
+                    error=safe_error,
+                )
+            )
+        _finish_publication(ctx, publication)
+        _write_publication_artifact(ctx, publication)
+        print_error(console, "Improve issue publishing failed", safe_error)
+        return
+
+    publication["repository"] = publisher.repo_slug
+    for entry, finding, plan_path in sorted(
+        candidates,
+        key=lambda item: int(item[0].get("number") or 0),
+    ):
+        identity = _publication_identity(entry, finding, plan_path)
+        try:
+            result = publisher.publish(
+                package_id=identity["package_id"],
+                title=identity["title"],
+                plan_path=plan_path,
+                member_fingerprints=identity["member_fingerprints"],
+                member_aliases=identity["member_aliases"],
+            )
+        except (ImprovePublishError, ValueError) as exc:
+            publication["failed"].append(
+                _publication_failure(
+                    identity,
+                    stage="issue-create",
+                    error=redact_text(str(exc)),
+                )
+            )
+            print_warning(
+                console,
+                f"Issue publishing failed for {identity['title']}: {redact_text(str(exc))}",
+            )
+        else:
+            publication["published"].append(
+                {
+                    **identity,
+                    "disposition": result.disposition,
+                    "issue_url": result.issue_url,
+                }
+            )
+            print_success(
+                console,
+                f"Issue {result.disposition} for {identity['title']}: {result.issue_url}",
+            )
+        _set_publication_status(publication)
+        _write_publication_artifact(ctx, publication)
+
+    _finish_publication(ctx, publication)
+    _write_publication_artifact(ctx, publication)
+
+
+def _set_publication_status(publication: dict[str, Any]) -> None:
+    """Reflect the current run's issue-publication outcome in its artifact."""
+    if not publication.get("enabled"):
+        publication["status"] = "disabled"
+    elif publication.get("failed") and publication.get("published"):
+        publication["status"] = "partial"
+    elif publication.get("failed"):
+        publication["status"] = "failed"
+    else:
+        publication["status"] = "complete"
+
+
+def _finish_publication(
+    ctx: FlowContext,
+    publication: dict[str, Any],
+) -> None:
+    """Finalize publication status and preserve complete-vs-partial exits."""
+    _set_publication_status(publication)
+    if publication.get("failed"):
+        publication_exit = 2 if publication.get("published") else 1
+        ctx.data["plan_exit_code"] = max(
+            ctx.data["plan_exit_code"],
+            publication_exit,
+        )
+
+
+def _render_report(ctx: FlowContext) -> str:
+    services = ctx.data["services"]
+    all_services = ctx.data["all_services"]
+    stacks = ctx.data["stacks"]
+    audit = ctx.data["audit"]
+    findings = ctx.data["vetted"]["findings"]
+    discarded_no_evidence = ctx.data["audit_discarded_no_evidence"]
+    dropped_low_confidence = ctx.data["audit_dropped_low_confidence"]
+    dropped_by_cap = ctx.data["audit_dropped_by_cap"]
+    previously_rejected = ctx.data["previously_rejected"]
+    vet_rejected = ctx.data["vet_rejected"]
+    findings_table = ctx.data["findings_table"]
+    effort = ctx.config.improve_effort
+    scope = ctx.config.improve_scope
+    plan_write = ctx.data["plan_write"]
+    issue_publication = ctx.data.get("issue_publication")
+    partitions = ctx.data["partitions"]
+    partitions_not_audited = ctx.data["partitions_not_audited"]
+    groups = ctx.data["partition_groups"]
+    service_lines = (
+        "\n".join(f"- **{service.name}** — `{service.root.as_posix()}`" for service in services)
         or "- No service roots detected."
     )
     top_offender_lines = _top_offender_lines(findings)
-    stack_lines = (
-        "\n".join(f"- **{stack.stack_name}**" for stack in stacks)
-        or "- No stacks detected."
-    )
+    cleanup_pressure_lines = _cleanup_pressure_lines(findings)
+    stack_lines = "\n".join(f"- **{stack.stack_name}**" for stack in stacks) or "- No stacks detected."
     roots_by_group = {group.name: _group_roots_cell(group) for group in groups}
     failures = audit.get("failed", {})
     failed_assignment_lines = (
@@ -1940,8 +2163,7 @@ def _render_report(
     )
     tier_bound = {
         "quick": (
-            "Recon hotspots only; categories outside correctness, security, "
-            "and tests were not audited."
+            "Recon hotspots only; categories outside correctness, security, tests, and tech debt were not audited."
         ),
         "standard": (
             "Coverage was hotspot-weighted across key packages; the partition "
@@ -1979,11 +2201,13 @@ def _render_report(
         f"- Plans blocked by plan-writing failure: {len(plan_write['failed'])}\n"
         f"{_blocked_plan_attempt_lines(plan_write)}"
     )
+    publication_lines = _publication_report_lines(issue_publication)
     return (
         "# Improve Report\n\n"
         "## Findings\n\n"
         f"{findings_table}\n\n"
-        f"{direction_section}\n\n"
+        "## Cleanup pressure\n\n"
+        f"{cleanup_pressure_lines}\n\n"
         "## Services\n\n"
         f"{service_lines}\n\n"
         "## Top offenders\n\n"
@@ -2006,7 +2230,9 @@ def _render_report(
         f"- Lowest-leverage findings dropped by tier cap: {dropped_by_cap}\n"
         f"- Previously rejected findings suppressed: {previously_rejected}\n"
         "\n## Plan writing\n\n"
-        f"{plan_lines}"
+        f"{plan_lines}\n\n"
+        "## GitHub issues\n\n"
+        f"{publication_lines}"
     )
 
 
@@ -2065,6 +2291,78 @@ def _top_offender_lines(findings: list[dict[str, Any]]) -> str:
     )
 
 
+def _cleanup_pressure_lines(findings: list[dict[str, Any]]) -> str:
+    """Summarize expected portfolio direction without inventing LOC counts."""
+    counts = Counter(str(finding.get("change_shape", "unknown")) for finding in findings)
+    subtractive = sum(counts[shape] for shape in ("delete", "reuse", "consolidate"))
+    return (
+        f"- Subtractive packages (delete/reuse/consolidate): {subtractive}\n"
+        f"- Neutral or unknown packages: "
+        f"{counts['neutral'] + counts['unknown']}\n"
+        f"- Additive packages: {counts['additive']}\n"
+        "- This is a prioritization preference, not a gate; exact LOC changes "
+        "are measured only after implementation."
+    )
+
+
+def _publication_report_lines(publication: dict[str, Any] | None) -> str:
+    if publication is None or not publication.get("enabled"):
+        return "- Automatic issue publishing was disabled."
+    published = publication.get("published", [])
+    failed = publication.get("failed", [])
+    dispositions = Counter(str(entry.get("disposition")) for entry in published if isinstance(entry, dict))
+    unavailable = sum(
+        1
+        for entry in failed
+        if isinstance(entry, dict)
+        and entry.get("stage")
+        in {
+            "plan-write",
+            "plan-reconciliation",
+            "local-plan",
+            "plan-accounting",
+        }
+    )
+    github_failures = len(failed) - unavailable if isinstance(failed, list) else 0
+    return (
+        f"- Issues created: {dispositions['created']}\n"
+        f"- Existing issues reused: {dispositions['existing']}\n"
+        f"- Ambiguous creates reconciled: {dispositions['reconciled']}\n"
+        f"- Packages without a validated local plan: {unavailable}\n"
+        f"- GitHub publication failures: {github_failures}"
+    )
+
+
+def _improve_failure_message(ctx: FlowContext) -> tuple[str, str]:
+    """Describe planning and publication failures without conflating them."""
+    plan_failures = len(ctx.data["plan_write"]["failed"])
+    publication = ctx.data.get("issue_publication")
+    failed = publication.get("failed", []) if isinstance(publication, dict) and publication.get("enabled") else []
+    local_plan_failures = sum(
+        1
+        for entry in failed
+        if isinstance(entry, dict) and entry.get("stage") in {"plan-reconciliation", "local-plan", "plan-accounting"}
+    )
+    github_failures = sum(
+        1 for entry in failed if isinstance(entry, dict) and entry.get("stage") in {"preflight", "issue-create"}
+    )
+    issue_failures = local_plan_failures + github_failures
+    if plan_failures and issue_failures:
+        heading = "Improve planning and issue publishing failed"
+    elif issue_failures:
+        heading = "Improve issue publishing failed"
+    else:
+        heading = "Improve planning failed"
+    details = []
+    if plan_failures:
+        details.append(f"{plan_failures} selected plan(s) failed")
+    if local_plan_failures:
+        details.append(f"{local_plan_failures} selected package(s) lacked a local plan")
+    if github_failures:
+        details.append(f"{github_failures} GitHub operation(s) failed")
+    return heading, "; ".join(details) + "."
+
+
 async def _step_report(ctx: FlowContext) -> Stop | None:
     """Render the improve report for reconnaissance and audit coverage."""
     if ctx.config.improve_plan_description is not None:
@@ -2079,45 +2377,25 @@ async def _step_report(ctx: FlowContext) -> Stop | None:
                 f"- Plans written: {len(plan_write['written'])}\n"
                 f"- Requests skipped as already planned: {len(plan_write['skipped'])}\n"
                 f"- Plan-writing failures: {len(plan_write['failed'])}\n"
-                f"{_blocked_plan_attempt_lines(plan_write)}"
+                f"{_blocked_plan_attempt_lines(plan_write)}\n\n"
+                "## GitHub issues\n\n"
+                f"{_publication_report_lines(ctx.data.get('issue_publication'))}"
             ),
             encoding="utf-8",
         )
         if ctx.data["plan_exit_code"]:
+            heading, detail = _improve_failure_message(ctx)
+            print_error(console, heading, detail)
             return Stop(ctx.data["plan_exit_code"])
         print_success(console, "Description plan complete.")
         return None
 
     report_path(ctx.data["improve_dir"]).write_text(
-        _report_with_provenance(
-            _render_report(
-                ctx.data["services"],
-                ctx.data["all_services"],
-                ctx.data["stacks"],
-                ctx.data["audit"],
-                ctx.data["vetted"]["findings"],
-                ctx.data["audit_discarded_no_evidence"],
-                ctx.data["audit_dropped_low_confidence"],
-                ctx.data["audit_dropped_by_cap"],
-                ctx.data["previously_rejected"],
-                ctx.data["vet_rejected"],
-                ctx.data["findings_table"],
-                ctx.data["direction_section"],
-                ctx.config.improve_effort,
-                ctx.config.improve_scope,
-                ctx.data["plan_write"],
-                ctx.data["partitions"],
-                ctx.data["partitions_not_audited"],
-                ctx.data["partition_groups"],
-            )
-        )
+        _report_with_provenance(_render_report(ctx))
     )
     if ctx.data["plan_exit_code"]:
-        print_error(
-            console,
-            "Improve planning failed",
-            f"{len(ctx.data['plan_write']['failed'])} selected plan(s) failed.",
-        )
+        heading, detail = _improve_failure_message(ctx)
+        print_error(console, heading, detail)
         return Stop(ctx.data["plan_exit_code"])
     print_success(
         console,
@@ -2142,6 +2420,11 @@ STEPS: tuple[FlowStep, ...] = (
         name="write-plans",
         run=_step_write_plans,
         config_phase="plan_write",
+    ),
+    FlowStep(
+        name="publish-improve-issues",
+        run=_step_publish_issues,
+        config_phase="recon",
     ),
     FlowStep(
         name="improve-report",

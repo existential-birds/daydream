@@ -35,3 +35,8 @@ def report_path(improve_dir_path: Path) -> Path:
 def plan_write_diagnostics_path(improve_dir_path: Path) -> Path:
     """Return the sanitized plan-writer attempt diagnostics path."""
     return improve_dir_path / "plan-write-diagnostics.json"
+
+
+def published_issues_path(improve_dir_path: Path) -> Path:
+    """Return the GitHub issue-publication disposition artifact path."""
+    return improve_dir_path / "published-issues.json"

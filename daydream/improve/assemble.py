@@ -10,6 +10,8 @@ model output: filesystem reads only, no randomness, no wall-clock reads.
 
 from __future__ import annotations
 
+import ast
+import re
 from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -47,6 +49,30 @@ GIT_BRANCH_BASIS = (
 )
 
 _PLACEHOLDER_ARG_TOKENS = {"...", "todo", "tbd", "${todo}"}
+
+_DOCUMENTATION_SUFFIXES = {".adoc", ".md", ".mdx", ".rst", ".txt"}
+_DOCUMENTATION_NAMES = {
+    "authors",
+    "changelog",
+    "code_of_conduct",
+    "contributing",
+    "license",
+    "maintainers",
+    "readme",
+    "security",
+}
+_TEST_DIRECTORY_NAMES = {"__tests__", "spec", "specs", "test", "tests"}
+_COMMENT_KIND = re.compile(r"\b(?:comment|docstring)\b", re.IGNORECASE)
+_ABSENCE_WORD = re.compile(r"\b(?:absent|delete[ds]?|no longer|remove[ds]?)\b", re.IGNORECASE)
+_COMMENT_REWRITE = re.compile(r"\b(?:condense|rewrite|shorten|simplif(?:y|ies)|trim)\b", re.IGNORECASE)
+_UNCHANGED_EXECUTION = re.compile(
+    r"(?:\b(?:code|executable behavior|function body|runtime behavior)\b.{0,100}"
+    r"\b(?:identical|unchanged|unmodified)\b|"
+    r"\b(?:identical|unchanged|unmodified)\b.{0,100}"
+    r"\b(?:code|executable behavior|function body|runtime behavior)\b)",
+    re.IGNORECASE,
+)
+_IDENTIFIER = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
 
 
 @dataclass(frozen=True)
@@ -90,6 +116,9 @@ _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     # unfinished order. An over-length one is now an authoring issue the model
     # repairs by splitting the change, never a silent truncation.
     ("steps", "*", "verification", "note"),
+    ("test_plan", "rationale"),
+    ("test_plan", "existing_coverage", "*", "behavior"),
+    ("test_plan", "existing_coverage", "*", "verification", "note"),
     ("test_plan", "exemplars", "*", "pattern_to_copy"),
     ("test_plan", "cases", "*", "name"),
     ("test_plan", "cases", "*", "setup"),
@@ -183,6 +212,128 @@ def _read_repo_file(repo: Path, path: str) -> str | None:
         return candidate.read_text(encoding="utf-8")
     except (OSError, UnicodeError, ValueError):
         return None
+
+
+def _is_documentation_path(path: str) -> bool:
+    candidate = Path(path)
+    if any(part.casefold() in {"doc", "docs", "documentation"} for part in candidate.parts):
+        return True
+    stem = candidate.stem.casefold()
+    return candidate.suffix.casefold() in _DOCUMENTATION_SUFFIXES or stem in _DOCUMENTATION_NAMES
+
+
+def _is_test_path(path: str) -> bool:
+    candidate = Path(path)
+    parts = {part.casefold() for part in candidate.parts[:-1]}
+    name = candidate.name.casefold()
+    stem = candidate.stem.casefold()
+    return bool(parts & _TEST_DIRECTORY_NAMES) or (
+        stem in {"test", "tests"}
+        or stem.startswith("test_")
+        or stem.endswith("_test")
+        or candidate.stem.endswith(("Test", "Tests"))
+        or ".test." in name
+        or ".spec." in name
+    )
+
+
+def _is_comment_only_change(change: dict[str, Any]) -> bool:
+    if change.get("operation") not in {"modify", "delete"}:
+        return False
+    symbol = str(change.get("symbol") or "")
+    instruction = str(change.get("instruction") or "")
+    target_state = str(change.get("target_state") or "")
+    authored_change = f"{symbol} {instruction}"
+    if not (_COMMENT_KIND.search(authored_change) and _COMMENT_KIND.search(target_state)):
+        return False
+    return bool(
+        _ABSENCE_WORD.search(target_state)
+        or (_COMMENT_REWRITE.search(instruction) and _UNCHANGED_EXECUTION.search(target_state))
+    )
+
+
+def _not_applicable_change_allowed(change: dict[str, Any]) -> bool:
+    """Return whether a change is structurally eligible to omit test coverage.
+
+    The host cannot prove from model prose that production code is dead, so a
+    delete operation is not itself an exemption. Documentation and exact
+    comment/docstring cleanup are non-behavioural by construction; deleting a
+    redundant test is also eligible when the plan supplies a separate static
+    or step gate. Production-source deletion must use existing coverage or a
+    named new/updated test instead.
+    """
+
+    path = change.get("path")
+    if not isinstance(path, str):
+        return False
+    if _is_documentation_path(path) or _is_comment_only_change(change):
+        return True
+    return change.get("operation") == "delete" and _is_test_path(path)
+
+
+def _has_test_declaration(path: str, source: str, symbol: str) -> bool:
+    """Match an exact test declaration, never a substring or prose mention."""
+
+    if not symbol or "\n" in symbol or "\r" in symbol:
+        return False
+    test_path = _is_test_path(path)
+    if Path(path).suffix.casefold() == ".py" and _IDENTIFIER.fullmatch(symbol):
+        if not test_path or not symbol.casefold().startswith("test"):
+            return False
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return False
+        return any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol for node in ast.walk(tree)
+        )
+
+    escaped = re.escape(symbol)
+    if _IDENTIFIER.fullmatch(symbol):
+        path_based_declaration_patterns = (
+            # Python/Ruby, Rust, Go/Swift, and JavaScript named functions.
+            rf"^[ \t]*(?:(?:export|internal|private|protected|public|"
+            rf"pub(?:\([^)]*\))?|async|static)\s+)*(?:def|fn|function)\s+"
+            rf"{escaped}(?![A-Za-z0-9_$])\s*(?:\(|:)",
+            rf"^[ \t]*(?:(?:internal|private|protected|public|static)\s+)*"
+            rf"func(?:\s+\([^)]*\))?\s+{escaped}(?![A-Za-z0-9_$])\s*\(",
+            # JavaScript/TypeScript arrow-function tests.
+            rf"^[ \t]*(?:(?:export|async)\s+)*(?:const|let|var)\s+"
+            rf"{escaped}(?![A-Za-z0-9_$])\s*=",
+            # C#, JVM, and similar method declarations. Requiring at least one
+            # modifier prevents an ordinary call expression from qualifying.
+            rf"^[ \t]*(?:(?:async|final|internal|override|private|protected|"
+            rf"public|static|virtual)\s+)+(?:fun|void|[A-Za-z_$]"
+            rf"[A-Za-z0-9_$<>?,.\[\]]*)\s+{escaped}"
+            rf"(?![A-Za-z0-9_$])\s*\(",
+        )
+        if test_path and any(re.search(pattern, source, re.MULTILINE) for pattern in path_based_declaration_patterns):
+            return True
+        annotated_declaration_patterns = (
+            # C/C++ test macros are test declarations wherever they live.
+            rf"^[ \t]*TEST(?:_[FP])?\s*\([^,\n]+,\s*"
+            rf"{escaped}(?![A-Za-z0-9_$])\s*\)",
+            # Attribute/annotation-driven Rust, JVM, and .NET test methods.
+            rf"(?ms)^[ \t]*(?:#\[[^\]]*test[^\]]*\]|@Test|"
+            rf"\[(?:Fact|Test|TestMethod|Theory)\])\s*\n"
+            rf"[ \t]*(?:(?:public|private|protected|static|final|async|pub)\s+)*"
+            rf"(?:fun|fn|void|[A-Za-z_$][A-Za-z0-9_$<>?,.\[\]]*)\s+"
+            rf"{escaped}(?![A-Za-z0-9_$])\s*\(",
+        )
+        if any(re.search(pattern, source, re.MULTILINE) for pattern in annotated_declaration_patterns):
+            return True
+
+    # Frameworks such as Jest, RSpec, and ExUnit use an exact quoted title as
+    # the test's durable identity rather than a language-level function name.
+    for quote in ('"', "'"):
+        quoted = re.escape(f"{quote}{symbol}{quote}")
+        if re.search(
+            rf"^[ \t]*(?:it|scenario|specify|test)\s*(?:\(\s*)?{quoted}",
+            source,
+            re.MULTILINE,
+        ):
+            return True
+    return False
 
 
 def _entry_paths(entries: Any) -> list[str]:
@@ -419,42 +570,8 @@ def _relocate_existing_new_paths(
     for step in steps if isinstance(steps, list) else []:
         changes = step.get("changes") if isinstance(step, dict) else None
         for change in changes if isinstance(changes, list) else []:
-            if (
-                isinstance(change, dict)
-                and change.get("path") in relocated
-                and change.get("operation") == "create"
-            ):
+            if isinstance(change, dict) and change.get("path") in relocated and change.get("operation") == "create":
                 change["operation"] = "modify"
-
-
-_TEST_SYMBOL_MAX_LENGTH = _author_schema_max_length(
-    ("test_plan", "cases", "*", "test_symbol")
-)
-
-
-def _disambiguate_test_symbols(normalized: dict[str, Any]) -> None:
-    """Number a repeated test symbol instead of blocking on the collision.
-
-    Two cases naming the same test is a naming slip, not a defect in the work
-    the plan describes. The first occurrence keeps the authored name and each
-    repeat gets the lowest unused ``_<n>`` suffix, so every case still names one
-    distinct test the executor can write and run.
-    """
-    test_plan = normalized.get("test_plan")
-    cases = test_plan.get("cases") if isinstance(test_plan, dict) else None
-    seen: set[str] = set()
-    for case in cases if isinstance(cases, list) else []:
-        symbol = case.get("test_symbol") if isinstance(case, dict) else None
-        if not isinstance(symbol, str):
-            continue
-        candidate = symbol
-        suffix = 2
-        while candidate in seen:
-            tail = f"_{suffix}"
-            candidate = symbol[: _TEST_SYMBOL_MAX_LENGTH - len(tail)] + tail
-            suffix += 1
-        seen.add(candidate)
-        case["test_symbol"] = candidate
 
 
 def _clamp_excerpt_end_lines(normalized: dict[str, Any], *, repo: Path) -> None:
@@ -549,7 +666,6 @@ def _normalize_authored(
     _declare_referenced_paths(normalized, repo=repo)
     _dedup_scope(normalized, repo=repo)
     _relocate_existing_new_paths(normalized, repo=repo)
-    _disambiguate_test_symbols(normalized)
     _clamp_excerpt_end_lines(normalized, repo=repo)
     return normalized
 
@@ -666,6 +782,13 @@ def _iter_command_refs(
         if isinstance(step, dict) and isinstance(step.get("verification"), dict):
             yield f"/steps/{index}/verification", step["verification"]
     test_plan = normalized.get("test_plan")
+    existing_coverage = test_plan.get("existing_coverage") if isinstance(test_plan, dict) else None
+    for index, coverage in enumerate(existing_coverage if isinstance(existing_coverage, list) else []):
+        if isinstance(coverage, dict) and isinstance(coverage.get("verification"), dict):
+            yield (
+                f"/test_plan/existing_coverage/{index}/verification",
+                coverage["verification"],
+            )
     cases = test_plan.get("cases") if isinstance(test_plan, dict) else None
     for index, case in enumerate(cases if isinstance(cases, list) else []):
         if isinstance(case, dict) and isinstance(case.get("verification"), dict):
@@ -684,19 +807,16 @@ def _iter_command_refs(
             yield f"/additional_command_refs/{index}", ref
 
 
-_COMMAND_NOTE_MAX_LENGTH = _author_schema_max_length(
-    ("additional_command_refs", "*", "note")
-)
+_COMMAND_NOTE_MAX_LENGTH = _author_schema_max_length(("additional_command_refs", "*", "note"))
 _RETARGETED_COMMAND_NOTE = (
-    "Retargeted by the host: the command this plan named is verified only for "
-    "paths this plan does not change, so this repository-wide command runs "
-    "instead."
+    "Retargeted by the host: the command this plan named does not cover this "
+    "verification's targets, so this repository-wide command runs instead."
 )
 _COMMAND_SCOPE_CAVEAT = (
     "Scope caveat from the host: this command's verified applicability does "
-    "not cover every path this plan changes, and no verified command that "
-    "covers them is available here. Run it as written and report what it "
-    "reports; do not substitute a command of your own."
+    "not cover every target of this verification, and no verified command "
+    "that covers them is available here. Run it as written and report what "
+    "it reports; do not substitute a command of your own."
 )
 
 
@@ -719,12 +839,14 @@ def _repair_command_scope(
 ) -> None:
     """Retarget or annotate a verified command whose scope misses the plan.
 
-    A command whose applicability does not line up with the plan's changed
-    paths runs a slightly too narrow or too broad check; it does not make the
-    plan wrong, so it is repaired rather than thrown away. The host prefers a
-    verified repository-wide command, which by definition covers every path,
-    and otherwise keeps the model's choice and states the caveat in the note
-    the plan renders — the executor is told the truth either way.
+    A command whose applicability does not line up with its verification
+    targets runs a slightly too narrow or too broad check; it does not make the
+    plan wrong, so it is repaired rather than thrown away. Step and authored
+    test gates target writable paths, while an existing-coverage gate targets
+    its cited read-only test path. The host prefers a verified repository-wide
+    command, which by definition covers every path, and otherwise keeps the
+    model's choice and states the caveat in the note the plan renders — the
+    executor is told the truth either way.
 
     Two things are deliberately left alone. A ``recon_command_id`` naming no
     verified command at all is a hallucination, not a scope imperfection, and
@@ -750,22 +872,33 @@ def _repair_command_scope(
         None,
     )
     steps = normalized.get("steps")
-    step_targets: dict[str, list[str]] = {}
+    ref_targets: dict[str, list[str]] = {}
     for index, step in enumerate(steps if isinstance(steps, list) else []):
         changes = step.get("changes") if isinstance(step, dict) else None
-        step_targets[f"/steps/{index}/verification"] = [
+        ref_targets[f"/steps/{index}/verification"] = [
             change["path"]
             for change in (changes if isinstance(changes, list) else [])
             if isinstance(change, dict) and isinstance(change.get("path"), str)
         ]
+    test_plan = normalized.get("test_plan")
+    test_plan = test_plan if isinstance(test_plan, dict) else {}
+    existing_coverage = test_plan.get("existing_coverage")
+    for index, coverage in enumerate(existing_coverage if isinstance(existing_coverage, list) else []):
+        path = coverage.get("path") if isinstance(coverage, dict) else None
+        if isinstance(path, str):
+            ref_targets[f"/test_plan/existing_coverage/{index}/verification"] = [path]
+    cases = test_plan.get("cases")
+    for index, case in enumerate(cases if isinstance(cases, list) else []):
+        path = case.get("test_file") if isinstance(case, dict) else None
+        if isinstance(path, str):
+            ref_targets[f"/test_plan/cases/{index}/verification"] = [path]
     for pointer, ref in _iter_command_refs(normalized):
         recon_id = ref.get("recon_command_id")
         base = recon_by_id.get(recon_id) if isinstance(recon_id, str) else None
         if base is None:
             continue
-        if _command_scope_fits_plan(base, in_scope) and _command_covers_all(
-            base, step_targets.get(pointer, ())
-        ):
+        targets = ref_targets.get(pointer, in_scope)
+        if _command_scope_fits_plan(base, targets) and _command_covers_all(base, targets):
             continue
         if repository_wide is not None and ref.get("appended_args") is None:
             ref["recon_command_id"] = repository_wide
@@ -779,6 +912,7 @@ def _collect_issues(
     *,
     repo: Path,
     recon_by_id: dict[str, dict[str, Any]],
+    expected_fingerprints: Sequence[str] | None = None,
 ) -> list[AssemblyIssue]:
     issues: list[AssemblyIssue] = []
     seen: set[tuple[str, str, str | None]] = set()
@@ -810,6 +944,27 @@ def _collect_issues(
         return True
 
     _schema_issues(normalized, add)
+
+    covered = normalized.get("covered_fingerprints")
+    if isinstance(covered, list) and all(isinstance(item, str) for item in covered):
+        if len(covered) != len(set(covered)):
+            add(
+                "COVERED_FINGERPRINT_DUPLICATE",
+                "/covered_fingerprints",
+                hint="List each finding fingerprint exactly once.",
+            )
+        if expected_fingerprints is not None:
+            expected = set(expected_fingerprints)
+            actual = set(covered)
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            if missing or extra:
+                add(
+                    "COVERED_FINGERPRINTS_MISMATCH",
+                    "/covered_fingerprints",
+                    f"missing={len(missing)};extra={len(extra)}",
+                    hint=("replace with exactly: " + ", ".join(str(item) for item in expected_fingerprints)),
+                )
 
     scope = normalized.get("scope")
     scope = scope if isinstance(scope, dict) else {}
@@ -962,10 +1117,112 @@ def _collect_issues(
 
     test_plan = normalized.get("test_plan")
     test_plan = test_plan if isinstance(test_plan, dict) else {}
+    mode = test_plan.get("mode")
+    existing_coverage = test_plan.get("existing_coverage")
+    existing_coverage = existing_coverage if isinstance(existing_coverage, list) else []
     exemplars = test_plan.get("exemplars")
-    for index, exemplar in enumerate(
-        exemplars if isinstance(exemplars, list) else []
-    ):
+    exemplars = exemplars if isinstance(exemplars, list) else []
+    cases = test_plan.get("cases")
+    cases = cases if isinstance(cases, list) else []
+
+    if mode == "new-or-updated-tests":
+        if not cases:
+            # Preserve the long-standing diagnostic while moving this rule out
+            # of JSON Schema and into the mode-aware host boundary.
+            add(
+                "AUTHOR_SCHEMA_INVALID",
+                "/test_plan/cases",
+                "minItems=1;actual=0",
+                "new-or-updated-tests mode requires at least one named case",
+            )
+        if existing_coverage:
+            add(
+                "TEST_PLAN_MODE_CONFLICT",
+                "/test_plan/existing_coverage",
+                hint=("new-or-updated-tests mode uses named cases; leave existing_coverage empty"),
+            )
+    elif mode == "existing-coverage":
+        if not existing_coverage:
+            add(
+                "EXISTING_COVERAGE_REQUIRED",
+                "/test_plan/existing_coverage",
+                hint=("cite at least one existing test path and symbol, or choose another test-plan mode"),
+            )
+        if cases:
+            add(
+                "TEST_PLAN_MODE_CONFLICT",
+                "/test_plan/cases",
+                hint="existing-coverage mode must not author new test cases",
+            )
+        if exemplars:
+            add(
+                "TEST_PLAN_MODE_CONFLICT",
+                "/test_plan/exemplars",
+                hint="existing-coverage mode does not need test-writing exemplars",
+            )
+    elif mode == "not-applicable":
+        for field, entries in (
+            ("existing_coverage", existing_coverage),
+            ("exemplars", exemplars),
+            ("cases", cases),
+        ):
+            if entries:
+                add(
+                    "TEST_PLAN_MODE_CONFLICT",
+                    f"/test_plan/{field}",
+                    hint=f"not-applicable mode requires an empty {field} array",
+                )
+        criteria = normalized.get("done_criteria")
+        criteria = criteria if isinstance(criteria, list) else []
+        if any(isinstance(criterion, dict) and criterion.get("kind") == "test-gate" for criterion in criteria):
+            add(
+                "TEST_PLAN_MODE_CONFLICT",
+                "/done_criteria",
+                hint=("not-applicable mode must not claim a test gate; use a step gate or static invariant"),
+            )
+        if not any(
+            isinstance(criterion, dict) and criterion.get("kind") in {"static-invariant", "step-gate"}
+            for criterion in criteria
+        ):
+            add(
+                "NON_TEST_VERIFICATION_REQUIRED",
+                "/done_criteria",
+                hint=(
+                    "not-applicable mode requires a static-invariant or "
+                    "step-gate criterion stating the exact non-test check"
+                ),
+            )
+        for step_index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            changes = step.get("changes")
+            for change_index, change in enumerate(changes if isinstance(changes, list) else []):
+                if not isinstance(change, dict) or _not_applicable_change_allowed(change):
+                    continue
+                add(
+                    "TEST_PLAN_NOT_APPLICABLE_UNSAFE",
+                    f"/steps/{step_index}/changes/{change_index}/operation",
+                    hint=(
+                        "use existing-coverage or new-or-updated-tests for "
+                        "production behavior; not-applicable is limited to "
+                        "documentation, exact comment/docstring cleanup, or "
+                        "deleting a redundant test"
+                    ),
+                )
+
+    for index, coverage in enumerate(existing_coverage):
+        if not isinstance(coverage, dict):
+            continue
+        pointer = f"/test_plan/existing_coverage/{index}"
+        path = coverage.get("path")
+        symbol = coverage.get("symbol")
+        if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
+            continue
+        source = _read_repo_file(repo, path)
+        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
+            add("EXISTING_COVERAGE_INVALID", pointer)
+
+    for index, exemplar in enumerate(exemplars):
         if not isinstance(exemplar, dict):
             continue
         pointer = f"/test_plan/exemplars/{index}"
@@ -974,20 +1231,28 @@ def _collect_issues(
         if not isinstance(path, str) or not check_path(f"{pointer}/path", path):
             continue
         source = _read_repo_file(repo, path)
-        if (
-            source is None
-            or not isinstance(symbol, str)
-            or symbol not in source
-        ):
+        if source is None or not isinstance(symbol, str) or not _has_test_declaration(path, source, symbol):
             add("TEST_EXEMPLAR_INVALID", pointer)
-    cases = test_plan.get("cases")
-    for index, case in enumerate(cases if isinstance(cases, list) else []):
+    seen_test_symbols: set[tuple[str, str]] = set()
+    for index, case in enumerate(cases):
         if not isinstance(case, dict):
             continue
-        # Normalization already declared a well-formed test_file in scope and
-        # disambiguated any repeated test_symbol; the check that stays is the
-        # path grammar and confinement one.
-        check_path(f"/test_plan/cases/{index}/test_file", case.get("test_file"))
+        test_file = case.get("test_file")
+        test_symbol = case.get("test_symbol")
+        check_path(f"/test_plan/cases/{index}/test_file", test_file)
+        if isinstance(test_file, str) and isinstance(test_symbol, str):
+            identity = (test_file, test_symbol)
+            if identity in seen_test_symbols:
+                add(
+                    "DUPLICATE_TEST_SYMBOL",
+                    f"/test_plan/cases/{index}/test_symbol",
+                    hint=(
+                        "combine cases with the same behavior into one "
+                        "parameterized test, or use meaningful distinct symbols "
+                        "for genuinely different behaviors"
+                    ),
+                )
+            seen_test_symbols.add(identity)
 
     for pointer, ref in _iter_command_refs(normalized):
         if pointer.startswith("/steps/"):
@@ -1179,11 +1444,15 @@ def _injected_done_criteria(
                 "verification": None,
             },
         )
-    if "test-gate" not in kinds:
-        symbols = ", ".join(
-            case["test_symbol"] for case in normalized["test_plan"]["cases"]
-        )
-        description = f"Every named test-plan case passes: {symbols}."
+    test_plan = normalized["test_plan"]
+    test_mode = test_plan["mode"]
+    if "test-gate" not in kinds and test_mode != "not-applicable":
+        if test_mode == "existing-coverage":
+            symbols = ", ".join(coverage["symbol"] for coverage in test_plan["existing_coverage"])
+            description = f"The cited existing coverage passes: {symbols}."
+        else:
+            symbols = ", ".join(case["test_symbol"] for case in test_plan["cases"])
+            description = f"Every named test-plan case passes: {symbols}."
         criteria.append(
             {
                 "kind": "test-gate",
@@ -1191,6 +1460,30 @@ def _injected_done_criteria(
                 "verification": None,
             }
         )
+    for step in normalized["steps"]:
+        for change in step["changes"]:
+            if change["operation"] != "delete":
+                continue
+            path = change["path"]
+            symbol = change["symbol"]
+            if any(
+                criterion["kind"] == "static-invariant" and change["target_state"] in criterion["description"]
+                for criterion in criteria
+            ):
+                continue
+            if symbol == path:
+                description = f"The deleted path `{path}` is absent. Target state: {change['target_state']}"
+            else:
+                description = (
+                    f"The deleted target `{symbol}` is absent from `{path}`. Target state: {change['target_state']}"
+                )
+            criteria.append(
+                {
+                    "kind": "static-invariant",
+                    "description": description[:description_limit],
+                    "verification": None,
+                }
+            )
     if "scope-integrity" not in kinds:
         scope = normalized["scope"]
         paths = ", ".join(
@@ -1218,6 +1511,7 @@ def assemble_plan(
     *,
     repo: Path,
     recon_commands: Sequence[dict[str, Any]],
+    expected_fingerprints: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any] | None, tuple[AssemblyIssue, ...]]:
     """Normalize, collect ALL authoring issues, then expand.
 
@@ -1236,7 +1530,12 @@ def assemble_plan(
         if isinstance(command, dict) and isinstance(command.get("id"), str)
     }
     _repair_command_scope(normalized, recon_by_id=recon_by_id)
-    issues = _collect_issues(normalized, repo=repo, recon_by_id=recon_by_id)
+    issues = _collect_issues(
+        normalized,
+        repo=repo,
+        recon_by_id=recon_by_id,
+        expected_fingerprints=expected_fingerprints,
+    )
     if issues:
         return None, tuple(issues)
 
@@ -1257,16 +1556,12 @@ def assemble_plan(
     ]
     assembled = {
         "title": normalized["title"],
+        "covered_fingerprints": list(normalized["covered_fingerprints"]),
         "why_this_matters": dict(normalized["why_this_matters"]),
         "current_state_excerpts": current_state_excerpts,
-        "commands_you_will_need": _derived_commands_table(
-            normalized, recon_by_id=recon_by_id
-        ),
+        "commands_you_will_need": _derived_commands_table(normalized, recon_by_id=recon_by_id),
         "scope": {
-            "existing_paths": [
-                {"path": entry["path"], "role": entry["role"]}
-                for entry in scope["existing_paths"]
-            ],
+            "existing_paths": [{"path": entry["path"], "role": entry["role"]} for entry in scope["existing_paths"]],
             "new_paths": deepcopy(scope["new_paths"]),
             "out_of_scope_paths": deepcopy(scope["out_of_scope_paths"]),
             "out_of_scope_behaviors": deepcopy(scope["out_of_scope_behaviors"]),
@@ -1294,6 +1589,15 @@ def assemble_plan(
             for index, step in enumerate(normalized["steps"], start=1)
         ],
         "test_plan": {
+            "mode": normalized["test_plan"]["mode"],
+            "rationale": normalized["test_plan"]["rationale"],
+            "existing_coverage": [
+                {
+                    **{key: coverage[key] for key in coverage if key != "verification"},
+                    "verification": _expand_optional_ref(coverage["verification"], recon_by_id=recon_by_id),
+                }
+                for coverage in normalized["test_plan"]["existing_coverage"]
+            ],
             "exemplars": deepcopy(normalized["test_plan"]["exemplars"]),
             "cases": [
                 {

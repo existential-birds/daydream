@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import git_ops
-from daydream.improve.prioritize import plan_priority
+from daydream.improve.prioritize import member_alias, plan_priority
 from daydream.improve.render import (
     _redact_model_value,
     markdown_cell,
@@ -323,6 +324,9 @@ class PlanIndexEntry:
     slug: str
     title: str
     fingerprint: str
+    package_fingerprint: str
+    member_fingerprints: tuple[str, ...]
+    member_aliases: tuple[str, ...]
     priority: str
     effort: str
     risk: str
@@ -330,6 +334,9 @@ class PlanIndexEntry:
     planned_at: str
     status: str
     host_blocked: bool
+    change_shape: str
+    maintenance_signals: tuple[str, ...]
+    reuse_target: str
 
     @property
     def path(self) -> str | None:
@@ -342,12 +349,125 @@ def _index_field(value: Any) -> str:
     return redact_text(str(value or "").strip())
 
 
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip()))
+
+
+def _string_sequence(value: Any) -> tuple[str, ...]:
+    """Normalize a string sequence while preserving meaningful multiplicity."""
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _finding_package_fingerprint(finding: dict[str, Any]) -> str:
+    package = finding.get("package_fingerprint")
+    if isinstance(package, str) and package:
+        return package
+    fingerprint = finding.get("fingerprint")
+    return fingerprint if isinstance(fingerprint, str) else ""
+
+
+def _entry_fingerprints(entry: PlanIndexEntry) -> frozenset[str]:
+    return frozenset(
+        value
+        for value in (
+            entry.package_fingerprint,
+            entry.fingerprint,
+            *entry.member_fingerprints,
+            *entry.member_aliases,
+        )
+        if value
+    )
+
+
+def _finding_member_fingerprints(finding: dict[str, Any], *, fallback: str) -> tuple[str, ...]:
+    members = _string_tuple(finding.get("member_fingerprints"))
+    return members or ((fallback,) if fallback else ())
+
+
+def _finding_member_aliases(finding: dict[str, Any]) -> tuple[str, ...]:
+    return _string_sequence(finding.get("member_aliases"))
+
+
+def _finding_member_identities(
+    finding: dict[str, Any],
+) -> tuple[frozenset[str], ...]:
+    """Return the alternative durable IDs for each current package member."""
+    nested = finding.get("members")
+    if isinstance(nested, list):
+        valid_members = [item for item in nested if isinstance(item, dict)]
+        semantic_aliases = [member_alias(item) for item in valid_members]
+        alias_counts = Counter(semantic_aliases)
+        groups: list[frozenset[str]] = []
+        for item, semantic_alias in zip(valid_members, semantic_aliases, strict=True):
+            identities = {
+                value
+                for value in (
+                    item.get("fingerprint"),
+                    (semantic_alias if alias_counts[semantic_alias] == 1 else None),
+                )
+                if isinstance(value, str) and value
+            }
+            if identities:
+                groups.append(frozenset(identities))
+        if groups:
+            return tuple(groups)
+
+    fingerprints = _finding_member_fingerprints(
+        finding,
+        fallback=_finding_package_fingerprint(finding),
+    )
+    aliases = _finding_member_aliases(finding)
+    if aliases and len(aliases) == len(fingerprints):
+        alias_counts = Counter(aliases)
+        groups = [
+            frozenset(
+                value
+                for value in (
+                    fingerprint,
+                    alias if alias_counts[alias] == 1 else None,
+                )
+                if value
+            )
+            for fingerprint, alias in zip(fingerprints, aliases, strict=True)
+        ]
+    else:
+        groups = [frozenset((fingerprint,)) for fingerprint in fingerprints]
+    # A singleton's semantic package ID is itself a valid cross-run alias.
+    # For multi-member packages it must not stand in for every member: doing so
+    # would silently suppress newly added work after a membership change.
+    if len(groups) == 1:
+        package = _finding_package_fingerprint(finding)
+        if package:
+            groups[0] = groups[0] | {package}
+        if aliases and len(aliases) != len(fingerprints):
+            groups[0] = groups[0] | set(aliases)
+    return tuple(groups)
+
+
+def _entry_member_coverage(entry: PlanIndexEntry) -> frozenset[str]:
+    values = {*entry.member_fingerprints, *entry.member_aliases}
+    if len(entry.member_fingerprints) <= 1:
+        values.update((entry.package_fingerprint, entry.fingerprint))
+    return frozenset(value for value in values if value)
+
+
+def _fully_covered(identities: tuple[frozenset[str], ...], coverage: set[str] | frozenset[str]) -> bool:
+    return bool(identities) and all(group & coverage for group in identities)
+
+
 def _entry_payload(entry: PlanIndexEntry) -> dict[str, Any]:
     return {
         "number": entry.number,
         "slug": entry.slug,
         "title": entry.title,
         "fingerprint": entry.fingerprint,
+        "package_fingerprint": entry.package_fingerprint,
+        "member_fingerprints": list(entry.member_fingerprints),
+        "member_aliases": list(entry.member_aliases),
         "priority": entry.priority,
         "effort": entry.effort,
         "risk": entry.risk,
@@ -355,6 +475,9 @@ def _entry_payload(entry: PlanIndexEntry) -> dict[str, Any]:
         "planned_at": entry.planned_at,
         "status": entry.status,
         "host_blocked": entry.host_blocked,
+        "change_shape": entry.change_shape,
+        "maintenance_signals": list(entry.maintenance_signals),
+        "reuse_target": entry.reuse_target,
     }
 
 
@@ -363,6 +486,7 @@ def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
         return None
     number = payload.get("number")
     fingerprint = payload.get("fingerprint")
+    package_fingerprint = payload.get("package_fingerprint")
     slug = _index_field(payload.get("slug"))
     status = _index_field(payload.get("status"))
     if (
@@ -375,11 +499,20 @@ def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
         or (slug and _NUMBERED_PLAN.fullmatch(f"{number:03d}-{slug}.md") is None)
     ):
         return None
+    if not isinstance(package_fingerprint, str) or not package_fingerprint:
+        package_fingerprint = fingerprint
+    member_fingerprints = _string_tuple(payload.get("member_fingerprints"))
+    if not member_fingerprints:
+        member_fingerprints = (fingerprint,)
+    member_aliases = _string_sequence(payload.get("member_aliases"))
     return PlanIndexEntry(
         number=number,
         slug=slug,
         title=_index_field(payload.get("title")),
         fingerprint=fingerprint,
+        package_fingerprint=package_fingerprint,
+        member_fingerprints=member_fingerprints,
+        member_aliases=member_aliases,
         priority=_index_field(payload.get("priority")),
         effort=_index_field(payload.get("effort")),
         risk=_index_field(payload.get("risk")),
@@ -387,6 +520,9 @@ def _entry_from_payload(payload: Any) -> PlanIndexEntry | None:
         planned_at=_index_field(payload.get("planned_at")),
         status=status,
         host_blocked=bool(payload.get("host_blocked")),
+        change_shape=_index_field(payload.get("change_shape") or "unknown"),
+        maintenance_signals=_string_tuple(payload.get("maintenance_signals")),
+        reuse_target=_index_field(payload.get("reuse_target")),
     )
 
 
@@ -453,6 +589,9 @@ def _rendered_index_entries(plans_dir: Path) -> dict[str, PlanIndexEntry]:
             slug=link.group(1) if link is not None else "",
             title=_index_field(cells[1]),
             fingerprint=marker.group(1),
+            package_fingerprint=marker.group(1),
+            member_fingerprints=(marker.group(1),),
+            member_aliases=(),
             priority=_index_field(cells[2]),
             effort=_index_field(cells[3]),
             risk="",
@@ -460,6 +599,9 @@ def _rendered_index_entries(plans_dir: Path) -> dict[str, PlanIndexEntry]:
             planned_at="",
             status=status,
             host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
+            change_shape="unknown",
+            maintenance_signals=(),
+            reuse_target="",
         )
     return entries
 
@@ -495,11 +637,12 @@ def _is_retryable(plans_dir: Path, entry: PlanIndexEntry) -> bool:
 
 
 def planned_fingerprints(plans_dir: Path) -> set[str]:
-    """Return fingerprints with durable executable/non-transient status."""
+    """Return package identities and aliases with durable plan status."""
     return {
-        entry.fingerprint
+        fingerprint
         for entry in _merged_index(plans_dir).values()
         if not _is_retryable(plans_dir, entry)
+        for fingerprint in _entry_fingerprints(entry)
     }
 
 
@@ -631,6 +774,9 @@ def _blocked_entry(
         slug="",
         title=_index_field(finding.get("title") or "Selected finding"),
         fingerprint=fingerprint,
+        package_fingerprint=_finding_package_fingerprint(finding) or fingerprint,
+        member_fingerprints=_finding_member_fingerprints(finding, fallback=fingerprint),
+        member_aliases=_finding_member_aliases(finding),
         priority=plan_priority(finding),
         effort=_index_field(finding.get("effort")),
         risk=_index_field(finding.get("risk")),
@@ -638,6 +784,9 @@ def _blocked_entry(
         planned_at=planned_at,
         status=status,
         host_blocked=_HOST_BLOCKED_STATUS.fullmatch(status) is not None,
+        change_shape=_index_field(finding.get("change_shape") or "unknown"),
+        maintenance_signals=_string_tuple(finding.get("maintenance_signals")),
+        reuse_target=_index_field(finding.get("reuse_target")),
     )
 
 
@@ -658,6 +807,9 @@ def _index_entry(
         slug=slug,
         title=_index_field(title),
         fingerprint=fingerprint,
+        package_fingerprint=_finding_package_fingerprint(finding) or fingerprint,
+        member_fingerprints=_finding_member_fingerprints(finding, fallback=fingerprint),
+        member_aliases=_finding_member_aliases(finding),
         priority=plan_priority(finding),
         effort=_index_field(finding.get("effort")),
         risk=_index_field(finding.get("risk")),
@@ -665,6 +817,9 @@ def _index_entry(
         planned_at=planned_at,
         status=status,
         host_blocked=host_blocked,
+        change_shape=_index_field(finding.get("change_shape") or "unknown"),
+        maintenance_signals=_string_tuple(finding.get("maintenance_signals")),
+        reuse_target=_index_field(finding.get("reuse_target")),
     )
 
 
@@ -681,6 +836,11 @@ class PlanReservation:
     index: int
     fingerprint: str
     number: int | None
+    existing_number: int | None = None
+    existing_path: str | None = None
+    existing_package_fingerprint: str | None = None
+    existing_member_fingerprints: tuple[str, ...] = ()
+    existing_member_aliases: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -729,19 +889,11 @@ class PlanWriteSession:
         self._index_path = plans_dir / "README.md"
         self._sidecar_path = plans_dir / PLAN_INDEX_FILENAME
         self._non_interactive_default = (
-            non_interactive_default
-            or "non-interactive default" in _index_text(plans_dir).lower()
+            non_interactive_default or "non-interactive default" in _index_text(plans_dir).lower()
         )
         self._entries = _merged_index(plans_dir)
-        self._fingerprints = {
-            entry.fingerprint
-            for entry in self._entries.values()
-            if not _is_retryable(plans_dir, entry)
-        }
         self._rejected = load_rejections(plans_dir)
-        self._next_number = (
-            _highest_plan_number(plans_dir, self._entries.values()) + 1
-        )
+        self._next_number = _highest_plan_number(plans_dir, self._entries.values()) + 1
         self._reserved_count = 0
         self._written: list[tuple[int, dict[str, Any]]] = []
         self._skipped: list[tuple[int, dict[str, Any]]] = []
@@ -769,19 +921,40 @@ class PlanWriteSession:
             index = self._reserved_count
             self._reserved_count += 1
             if not isinstance(finding, dict):
-                reservations.append(PlanReservation(index, "", None))
+                reservations.append(PlanReservation(index=index, fingerprint="", number=None))
                 continue
-            fingerprint = str(finding.get("fingerprint") or "")
-            if fingerprint in self._fingerprints or fingerprint in self._rejected:
+            fingerprint = _finding_package_fingerprint(finding)
+            identities = _finding_member_identities(finding)
+            existing = self._existing_plan(identities)
+            if existing is not None:
                 reservations.append(
-                    PlanReservation(index, fingerprint, None)
+                    PlanReservation(
+                        index=index,
+                        fingerprint=fingerprint,
+                        number=None,
+                        existing_number=existing.number,
+                        existing_path=(
+                            existing.path
+                            if existing.path is not None and _has_plan_file(self._plans_dir, existing)
+                            else None
+                        ),
+                        existing_package_fingerprint=existing.package_fingerprint,
+                        existing_member_fingerprints=existing.member_fingerprints,
+                        existing_member_aliases=existing.member_aliases,
+                    )
                 )
+                continue
+            durable_coverage = set(self._rejected)
+            for entry in self._entries.values():
+                if not _is_retryable(self._plans_dir, entry):
+                    durable_coverage.update(_entry_member_coverage(entry))
+            if _fully_covered(identities, durable_coverage):
+                reservations.append(PlanReservation(index=index, fingerprint=fingerprint, number=None))
                 continue
             reserved_numbers = [
                 entry.number
                 for entry in self._entries.values()
-                if entry.fingerprint == fingerprint
-                and _is_retryable(self._plans_dir, entry)
+                if _is_retryable(self._plans_dir, entry) and _fully_covered(identities, _entry_member_coverage(entry))
             ]
             for reserved in reserved_numbers:
                 del self._entries[reserved]
@@ -790,8 +963,17 @@ class PlanWriteSession:
             else:
                 number = self._next_number
                 self._next_number += 1
-            reservations.append(PlanReservation(index, fingerprint, number))
+            reservations.append(PlanReservation(index=index, fingerprint=fingerprint, number=number))
         return reservations
+
+    def _existing_plan(self, identities: tuple[frozenset[str], ...]) -> PlanIndexEntry | None:
+        """Resolve one durable plan only when it covers every current member."""
+        candidates = [
+            entry
+            for entry in self._entries.values()
+            if not _is_retryable(self._plans_dir, entry) and _fully_covered(identities, _entry_member_coverage(entry))
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
     def commit(
         self,
@@ -807,7 +989,16 @@ class PlanWriteSession:
             return PlanOutcome("ignored", None, None, "")
         title = str(finding.get("title") or "Selected finding")
         if reservation.number is None:
-            self._skipped.append((reservation.index, finding))
+            skipped: dict[str, Any] = {"finding": finding}
+            if reservation.existing_number is not None:
+                skipped["number"] = reservation.existing_number
+                if reservation.existing_path is not None:
+                    skipped["path"] = reservation.existing_path
+                if reservation.existing_package_fingerprint is not None:
+                    skipped["package_fingerprint"] = reservation.existing_package_fingerprint
+                    skipped["member_fingerprints"] = list(reservation.existing_member_fingerprints)
+                    skipped["member_aliases"] = list(reservation.existing_member_aliases)
+            self._skipped.append((reservation.index, skipped))
             attempt = self._attempt_of(safe)
             if attempt is not None:
                 self._diagnostics.append(
@@ -823,7 +1014,12 @@ class PlanWriteSession:
                         ),
                     )
                 )
-            return PlanOutcome("skipped", None, None, title)
+            return PlanOutcome(
+                "skipped",
+                reservation.existing_number,
+                reservation.existing_path,
+                title,
+            )
         return self._land(reservation, safe)
 
     def finish(self) -> dict[str, list[dict[str, Any]]]:
@@ -915,7 +1111,6 @@ class PlanWriteSession:
                 ),
             )
         )
-        self._fingerprints.add(reservation.fingerprint)
         return PlanOutcome("written", number, path, title)
 
     def _land(

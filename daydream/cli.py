@@ -574,9 +574,9 @@ def _build_improve_parser(
         default="standard",
         dest="improve_effort",
         help=(
-            "Audit breadth: quick = correctness/security/tests only, serial, "
+            "Audit breadth: quick = correctness/security/tests/tech-debt, serial, "
             "HIGH-confidence findings capped near six; standard (default) = all "
-            "nine categories in parallel; deep = all nine searched very "
+            "eight categories in parallel; deep = all eight searched very "
             "thoroughly, including labeled LOW-confidence investigate items. "
             "Does not change the model or reasoning effort — those are per-phase "
             "(see [tool.daydream.phases.<phase>])"
@@ -584,13 +584,12 @@ def _build_improve_parser(
     )
     parser.add_argument(
         "--focus",
-        choices=["security", "performance", "tests", "branch", "next"],
+        choices=["security", "performance", "tests", "branch"],
         default=None,
         dest="improve_focus",
         help=(
             "Narrow the audit: a single category, 'branch' to audit only the "
-            "diff against the base branch, or 'next' for product direction "
-            "instead of defects"
+            "diff against the base branch"
         ),
     )
     parser.add_argument(

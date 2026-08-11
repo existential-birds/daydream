@@ -2008,3 +2008,81 @@ def gh_issue_list(
     except json.JSONDecodeError:
         return []
     return rows if isinstance(rows, list) else []
+
+
+def gh_issue_list_strict(
+    repo: Path,
+    *,
+    state: str = "all",
+    repo_slug: str,
+) -> list[dict[str, Any]]:
+    """List every issue through the paginated REST API, failing closed.
+
+    Unlike :func:`gh_issue_list`, this helper is for workflows where an empty
+    result after a failed lookup could cause a duplicate write. It therefore
+    raises on transport, API, and response-shape failures. GitHub's REST issue
+    endpoint also returns pull requests; those rows are deliberately excluded.
+
+    Args:
+        repo: Worktree the call is rooted in (cwd for ``gh``).
+        state: One of ``"open"``, ``"closed"``, or ``"all"``.
+        repo_slug: Explicit GitHub ``owner/repo`` target.
+
+    Returns:
+        Normalized issue dictionaries containing ``number``, ``title``,
+        ``body``, ``url``, and ``state``. Pagination is unbounded rather than
+        stopping at GitHub's 100-item page size.
+
+    Raises:
+        GitError: If the arguments are invalid, lookup fails, or GitHub returns
+            an unexpected response shape.
+    """
+    if state not in {"open", "closed", "all"}:
+        raise GitError(f"invalid issue state {state!r}")
+    parsed = split_owner_repo(repo_slug)
+    if parsed is None or "/" in parsed[1]:
+        raise GitError(f"invalid GitHub repository slug {repo_slug!r}")
+    owner, name = parsed
+    endpoint = f"repos/{owner}/{name}/issues?state={state}&per_page=100"
+    rows = gh_api(
+        repo,
+        endpoint,
+        paginate=True,
+        jq=".[]",
+        idempotent=True,
+    )
+    if not isinstance(rows, list):
+        raise GitError("GitHub issue lookup returned a non-list response")
+
+    issues: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise GitError("GitHub issue lookup returned a non-object row")
+        if row.get("pull_request") is not None:
+            continue
+        number = row.get("number")
+        title = row.get("title")
+        body = row.get("body")
+        url = row.get("html_url", row.get("url"))
+        row_state = row.get("state")
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or not isinstance(title, str)
+            or body is not None
+            and not isinstance(body, str)
+            or not isinstance(url, str)
+            or not url
+            or not isinstance(row_state, str)
+        ):
+            raise GitError("GitHub issue lookup returned a malformed issue row")
+        issues.append(
+            {
+                "number": number,
+                "title": title,
+                "body": body or "",
+                "url": url,
+                "state": row_state,
+            }
+        )
+    return issues

@@ -42,6 +42,17 @@ def test_callback_listener_captures_code_then_exchanges(monkeypatch):
     assert slug == "acme-bot"
 
 
+def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
+    manifest = bot_setup._manifest_payload(
+        redirect_url="http://localhost:8080/callback",
+        org=None,
+    )
+
+    permissions = manifest["default_permissions"]
+    assert isinstance(permissions, dict)
+    assert permissions["issues"] == "write"
+
+
 def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch):
     """The seam threads the listener's repo_dir and the callback code unchanged."""
     captured: dict[str, object] = {}

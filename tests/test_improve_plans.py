@@ -29,6 +29,7 @@ from daydream.improve.plans import (
     planned_fingerprints,
     record_rejections,
 )
+from daydream.improve.prioritize import aggregate_cross_service
 from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_plan_writer_repair_prompt,
@@ -105,6 +106,9 @@ def _finding(*, fingerprint: str = "fp-fix-n-plus-one") -> dict[str, object]:
         "risk": "MED",
         "confidence": "HIGH",
         "evidence": ["apps/catalog/api.py:1"],
+        "maintenance_signals": [],
+        "change_shape": "unknown",
+        "reuse_target": None,
     }
 
 
@@ -580,6 +584,7 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
     focused = "tests/test_catalog.py -q"
     return {
         "title": title,
+        "covered_fingerprints": ["fp-fix-n-plus-one"],
         "why_this_matters": {
             "problem": "list_catalog currently loads each catalog item separately.",
             "concrete_cost": "Large catalogs create avoidable query latency per request.",
@@ -654,6 +659,9 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
             },
         ],
         "test_plan": {
+            "mode": "new-or-updated-tests",
+            "rationale": ("Catalog batching changes runtime behavior and needs a focused regression."),
+            "existing_coverage": [],
             "exemplars": [
                 {
                     "path": "tests/test_catalog.py",
@@ -821,6 +829,9 @@ def test_assembled_plan_renders_complete_deterministic_handoff(repo: Path, head_
     assert "apps/catalog/api.py:1-2" in text
     assert "return [load_item(item_id) for item_id in item_ids]" in text
     assert "**Branch**: improve/batch-catalog-queries" in text
+    assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`" in text
+    assert "Set this plan's Status cell" not in text
+    assert "daydream_plans/README.md" not in text
     assert "TODO" in (repo / "daydream_plans/README.md").read_text()
 
 
@@ -1711,12 +1722,7 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
     head_sha: str,
     status: str,
 ) -> None:
-    """A hand-edited Status cell outranks the sidecar and is adopted by it.
-
-    ``render_plan``'s Finishing section tells the executor to set this cell, so
-    the README owns Status; the sidecar owns everything else and converges on
-    the operator's edit rather than overwriting it.
-    """
+    """A hand-edited Status cell outranks the sidecar and is adopted by it."""
     plans_dir = repo / "daydream_plans"
     selection = _selection(repo)
     _write_plans(plans_dir, [selection], planned_at=head_sha)
@@ -2692,11 +2698,12 @@ def test_step_gate_scope_mismatch_falls_back_to_the_repository_wide_command(
     assert "uv run pytest apps/catalog" not in step_section
     assert (
         "**Why this gate**: Retargeted by the host: the command this plan "
-        "named is verified only for paths this plan does not change, so this "
+        "named does not cover this verification's targets, so this "
         "repository-wide command runs instead." in step_section
     )
-    # The test case's own gate fits the plan's scope, so it is left alone.
-    assert "`uv run pytest apps/catalog`" in rendered
+    # The named test case targets tests/test_catalog.py, so its mismatched gate
+    # is retargeted independently too.
+    assert "`uv run pytest apps/catalog`" not in rendered
 
 
 def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(
@@ -2727,10 +2734,10 @@ def test_command_scope_mismatch_without_a_repo_wide_command_renders_a_caveat(
     assert "**Command**: `uv run pytest apps/billing`" in rendered
     assert (
         "**Why this gate**: Scope caveat from the host: this command's "
-        "verified applicability does not cover every path this plan changes, "
-        "and no verified command that covers them is available here. Run it as "
-        "written and report what it reports; do not substitute a command of "
-        "your own." in rendered
+        "verified applicability does not cover every target of this "
+        "verification, and no verified command that covers them is available "
+        "here. Run it as written and report what it reports; do not substitute "
+        "a command of your own." in rendered
     )
 
 
@@ -2768,9 +2775,9 @@ def test_scope_mismatched_ref_with_appended_args_keeps_its_command(
     assert (
         "**Why this gate**: Runs the focused catalog regression. Scope caveat "
         "from the host: this command's verified applicability does not cover "
-        "every path this plan changes, and no verified command that covers them "
-        "is available here. Run it as written and report what it reports; do "
-        "not substitute a command of your own." in rendered
+        "every target of this verification, and no verified command that "
+        "covers them is available here. Run it as written and report what it "
+        "reports; do not substitute a command of your own." in rendered
     )
 
 
@@ -2780,14 +2787,11 @@ def test_hallucinated_recon_command_still_blocks_the_plan(repo: Path) -> None:
 
     issues = _issues(repo, plan)
 
-    assert [render_issue(issue) for issue in issues] == [
-        "RECON_COMMAND_UNKNOWN@/steps/0/verification/recon_command_id"
-    ]
+    assert [render_issue(issue) for issue in issues] == ["RECON_COMMAND_UNKNOWN@/steps/0/verification/recon_command_id"]
 
 
-def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
+def test_duplicate_test_symbols_require_parametrization_or_meaningful_names(
     repo: Path,
-    head_sha: str,
 ) -> None:
     plan = _authored_plan()
     duplicate = deepcopy(plan["test_plan"]["cases"][0])
@@ -2796,14 +2800,47 @@ def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
     third["name"] = "Catalog loading tolerates an empty catalog"
     plan["test_plan"]["cases"].extend([duplicate, third])
 
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == [
+        "DUPLICATE_TEST_SYMBOL@/test_plan/cases/1/test_symbol",
+        "DUPLICATE_TEST_SYMBOL@/test_plan/cases/2/test_symbol",
+    ]
+    assert all(issue.hint is not None and "parameterized test" in issue.hint for issue in issues)
+
+
+def _use_existing_catalog_coverage(plan: dict[str, Any]) -> None:
+    plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
+    plan["context_excerpts"] = [plan["context_excerpts"][0]]
+    plan["steps"][0]["changes"] = [plan["steps"][0]["changes"][0]]
+    plan["test_plan"] = {
+        "mode": "existing-coverage",
+        "rationale": ("The existing catalog regression already observes the preserved result."),
+        "existing_coverage": [
+            {
+                "path": "tests/test_catalog.py",
+                "symbol": "test_list_catalog_returns_items",
+                "behavior": ("The public catalog query still returns the expected item list."),
+                "verification": _ref(appended_args="tests/test_catalog.py -q"),
+            }
+        ],
+        "exemplars": [],
+        "cases": [],
+    }
+
+
+def test_existing_coverage_mode_keeps_test_evidence_read_only(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plan = _authored_plan()
+    _use_existing_catalog_coverage(plan)
     assembled = _assembled(repo, plan)
 
-    symbol = "test_list_catalog_batches_item_loading"
-    assert [case["test_symbol"] for case in assembled["test_plan"]["cases"]] == [
-        symbol,
-        f"{symbol}_2",
-        f"{symbol}_3",
-    ]
+    assert [entry["path"] for entry in assembled["scope"]["existing_paths"]] == ["apps/catalog/api.py"]
+    assert assembled["done_criteria"][-2]["description"] == (
+        "The cited existing coverage passes: test_list_catalog_returns_items."
+    )
     rendered = render_plan(
         _finding(),
         plan=assembled,
@@ -2811,15 +2848,352 @@ def test_duplicate_test_symbols_are_numbered_and_both_cases_survive(
         planned_on=date(2024, 1, 1),
         number=1,
     )
-    assert f"`tests/test_catalog.py::{symbol}` (unit)" in rendered
-    assert f"`tests/test_catalog.py::{symbol}_2` (unit)" in rendered
-    assert f"`tests/test_catalog.py::{symbol}_3` (unit)" in rendered
-    assert "**Catalog loading preserves item order**" in rendered
-    assert "**Catalog loading tolerates an empty catalog**" in rendered
-    assert (
-        f"Every named test-plan case passes: {symbol}, {symbol}_2, "
-        f"{symbol}_3."
-    ) in rendered
+    assert "**Mode**: `existing-coverage`" in rendered
+    assert "### Existing coverage" in rendered
+    assert "`tests/test_catalog.py::test_list_catalog_returns_items`" in rendered
+    assert "### Named cases" not in rendered
+
+
+def test_existing_coverage_command_is_scoped_to_read_only_test_evidence(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plan = _authored_plan()
+    _use_existing_catalog_coverage(plan)
+    plan["test_plan"]["existing_coverage"][0]["verification"] = _ref("catalog-test-only")
+    commands = [
+        *_recon_commands(),
+        _scoped_recon_command(
+            "catalog-test-only",
+            command="uv run pytest tests/test_catalog.py",
+            paths=["tests/test_catalog.py"],
+        ),
+    ]
+
+    assembled = _assembled(repo, plan, commands=commands)
+
+    assert [entry["path"] for entry in assembled["scope"]["existing_paths"]] == ["apps/catalog/api.py"]
+    coverage = assembled["test_plan"]["existing_coverage"][0]
+    assert coverage["verification"]["command"] == ("uv run pytest tests/test_catalog.py")
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=head_sha,
+        planned_on=date(2024, 1, 1),
+        number=1,
+    )
+    assert "`uv run pytest tests/test_catalog.py`" in rendered
+    assert "Retargeted by the host" not in rendered.partition("### Existing coverage")[2]
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "def test_list_catalog_returns_items_extra():\n    assert list_catalog()\n",
+        "# def test_list_catalog_returns_items():\nVALUE = 1\n",
+        'DESCRIPTION = "def test_list_catalog_returns_items():"\n',
+    ],
+    ids=("longer-symbol", "comment", "string"),
+)
+def test_existing_coverage_requires_an_exact_test_declaration(
+    repo: Path,
+    replacement: str,
+) -> None:
+    (repo / "tests/test_catalog.py").write_text(replacement, encoding="utf-8")
+    plan = _authored_plan()
+    _use_existing_catalog_coverage(plan)
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
+
+
+@pytest.mark.parametrize(
+    ("path", "symbol", "source"),
+    [
+        (
+            "apps/catalog/api.py",
+            "list_catalog",
+            "def list_catalog():\n    return []\n",
+        ),
+        (
+            "tests/test_catalog.py",
+            "catalog_helper",
+            "def catalog_helper():\n    return []\n",
+        ),
+    ],
+    ids=("source-function", "test-helper"),
+)
+def test_existing_coverage_rejects_non_test_python_functions(
+    repo: Path,
+    path: str,
+    symbol: str,
+    source: str,
+) -> None:
+    (repo / path).write_text(source, encoding="utf-8")
+    plan = _authored_plan()
+    _use_existing_catalog_coverage(plan)
+    plan["test_plan"]["existing_coverage"][0].update(path=path, symbol=symbol)
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == ["EXISTING_COVERAGE_INVALID@/test_plan/existing_coverage/0"]
+
+
+def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plan = _authored_plan(title="Delete obsolete catalog documentation")
+    plan["scope"]["existing_paths"] = [
+        {
+            "path": "README.md",
+            "role": "Delete obsolete catalog documentation.",
+        }
+    ]
+    plan["scope"]["new_paths"] = []
+    plan["scope"]["out_of_scope_paths"] = [
+        {
+            "path": "apps/catalog",
+            "reason": "Deleting obsolete documentation does not change runtime code.",
+        }
+    ]
+    plan["context_excerpts"] = [
+        {
+            "path": "README.md",
+            "start_line": 1,
+            "end_line": 1,
+            "file_role": "Delete obsolete catalog documentation.",
+        }
+    ]
+    plan["steps"] = [
+        {
+            "title": "Delete the obsolete catalog documentation",
+            "changes": [
+                {
+                    "path": "README.md",
+                    "symbol": "README.md",
+                    "operation": "delete",
+                    "instruction": (
+                        "Delete README.md because its obsolete catalog notes are "
+                        "superseded by the maintained documentation site."
+                    ),
+                    "target_state": ("The repository no longer contains the README.md path."),
+                }
+            ],
+            "verification": None,
+        }
+    ]
+    plan["test_plan"] = {
+        "mode": "not-applicable",
+        "rationale": ("This removes documentation and does not alter supported behavior."),
+        "existing_coverage": [],
+        "exemplars": [],
+        "cases": [],
+    }
+    plan["done_criteria"] = [
+        {
+            "kind": "static-invariant",
+            "description": "The repository no longer contains the README.md path.",
+            "verification": None,
+        }
+    ]
+    plan["false_assumption"]["related_paths"] = ["README.md"]
+
+    assembled = _assembled(repo, plan)
+
+    assert all(criterion["kind"] != "test-gate" for criterion in assembled["done_criteria"])
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=head_sha,
+        planned_on=date(2024, 1, 1),
+        number=1,
+    )
+    assert "**Mode**: `not-applicable`" in rendered
+    assert "No test-code change is required" in rendered
+    assert "(delete):" in rendered
+    assert "**Deletion check**: confirm `README.md` no longer exists" in rendered
+    assert "(static-invariant)**: The repository no longer contains the README.md path." in rendered
+    assert "### Named cases" not in rendered
+
+
+def test_not_applicable_rejects_behavior_bearing_production_deletion(
+    repo: Path,
+) -> None:
+    plan = _authored_plan(title="Delete obsolete catalog implementation")
+    plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
+    plan["context_excerpts"] = [plan["context_excerpts"][0]]
+    plan["steps"][0]["changes"] = [
+        {
+            "path": "apps/catalog/api.py",
+            "symbol": "apps/catalog/api.py",
+            "operation": "delete",
+            "instruction": (
+                "Delete apps/catalog/api.py because the implementation is believed to be unused by supported callers."
+            ),
+            "target_state": ("The repository no longer contains apps/catalog/api.py."),
+        }
+    ]
+    plan["test_plan"] = {
+        "mode": "not-applicable",
+        "rationale": "The implementation is believed to be dead production code.",
+        "existing_coverage": [],
+        "exemplars": [],
+        "cases": [],
+    }
+    plan["done_criteria"] = [
+        {
+            "kind": "static-invariant",
+            "description": "apps/catalog/api.py is absent from the repository.",
+            "verification": None,
+        }
+    ]
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == ["TEST_PLAN_NOT_APPLICABLE_UNSAFE@/steps/0/changes/0/operation"]
+
+
+def _comment_cleanup_plan(
+    *,
+    instruction: str,
+    target_state: str,
+) -> dict[str, Any]:
+    plan = _authored_plan(title="Remove a self evident catalog comment")
+    plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
+    plan["context_excerpts"] = [plan["context_excerpts"][0]]
+    plan["steps"][0]["changes"] = [
+        {
+            "path": "apps/catalog/api.py",
+            "symbol": "comment above list_catalog",
+            "operation": "modify",
+            "instruction": instruction,
+            "target_state": target_state,
+        }
+    ]
+    plan["test_plan"] = {
+        "mode": "not-applicable",
+        "rationale": "Removing this comment cannot change executable behavior.",
+        "existing_coverage": [],
+        "exemplars": [],
+        "cases": [],
+    }
+    plan["done_criteria"] = [
+        {
+            "kind": "static-invariant",
+            "description": target_state,
+            "verification": None,
+        }
+    ]
+    return plan
+
+
+def test_not_applicable_requires_an_explicit_non_test_done_gate(repo: Path) -> None:
+    plan = _comment_cleanup_plan(
+        instruction=("Remove the self-evident comment above list_catalog without changing the function body."),
+        target_state=("The self-evident comment is absent and list_catalog is unchanged."),
+    )
+    plan["done_criteria"] = [
+        {
+            "kind": "behavior",
+            "description": "The list_catalog function body remains byte-for-byte unchanged.",
+            "verification": None,
+        }
+    ]
+
+    issues = _issues(repo, plan)
+
+    assert [render_issue(issue) for issue in issues] == ["NON_TEST_VERIFICATION_REQUIRED@/done_criteria"]
+
+
+def test_not_applicable_allows_shortening_a_comment_without_code_changes(
+    repo: Path,
+) -> None:
+    target_state = "The catalog comment is shorter while the function body remains unchanged."
+    plan = _comment_cleanup_plan(
+        instruction=(
+            "Shorten the catalog comment to retain only its non-obvious rationale without editing executable code."
+        ),
+        target_state=target_state,
+    )
+
+    assembled = _assembled(repo, plan)
+
+    assert assembled["test_plan"]["mode"] == "not-applicable"
+    assert any(
+        criterion["kind"] == "static-invariant" and criterion["description"] == target_state
+        for criterion in assembled["done_criteria"]
+    )
+
+
+def test_deletion_only_production_plan_can_use_existing_coverage(
+    repo: Path,
+) -> None:
+    plan = _authored_plan(title="Delete obsolete catalog implementation")
+    _use_existing_catalog_coverage(plan)
+    plan["steps"][0]["changes"] = [
+        {
+            "path": "apps/catalog/api.py",
+            "symbol": "legacy_catalog_loader",
+            "operation": "delete",
+            "instruction": (
+                "Delete legacy_catalog_loader while preserving list_catalog and its existing public return behavior."
+            ),
+            "target_state": ("legacy_catalog_loader is absent and list_catalog remains present."),
+        }
+    ]
+
+    assembled = _assembled(repo, plan)
+
+    assert assembled["test_plan"]["mode"] == "existing-coverage"
+    assert all(change["operation"] == "delete" for change in assembled["steps"][0]["changes"])
+    assert any(
+        criterion["kind"] == "static-invariant" and "legacy_catalog_loader" in criterion["description"]
+        for criterion in assembled["done_criteria"]
+    )
+
+
+def test_plan_must_cover_every_expected_aggregate_fingerprint(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plan = _authored_plan()
+
+    assembled, issues = assemble_plan(
+        plan,
+        repo=repo,
+        recon_commands=_recon_commands(),
+        expected_fingerprints=["fp-fix-n-plus-one", "fp-repeated-tests"],
+    )
+
+    assert assembled is None
+    assert [render_issue(issue) for issue in issues] == [
+        "COVERED_FINGERPRINTS_MISMATCH@/covered_fingerprints#missing=1;extra=0"
+    ]
+
+    plan["covered_fingerprints"].append("fp-repeated-tests")
+    assembled, issues = assemble_plan(
+        plan,
+        repo=repo,
+        recon_commands=_recon_commands(),
+        expected_fingerprints=["fp-repeated-tests", "fp-fix-n-plus-one"],
+    )
+    assert issues == ()
+    assert assembled is not None
+    assert set(assembled["covered_fingerprints"]) == {
+        "fp-fix-n-plus-one",
+        "fp-repeated-tests",
+    }
+    assert "Order is not significant" in PLAN_AUTHOR_SCHEMA["properties"]["covered_fingerprints"]["description"]
+    rendered = render_plan(
+        _finding(),
+        plan=assembled,
+        planned_at=head_sha,
+        planned_on=date(2024, 1, 1),
+        number=1,
+    )
+    assert "**Covered finding fingerprints**: `fp-fix-n-plus-one`, `fp-repeated-tests`" in rendered
 
 
 @pytest.mark.parametrize(
@@ -3176,3 +3550,335 @@ def test_repair_prompt_drops_malformed_detail_segment() -> None:
     assert "/x" in prompt
     assert "bad,stuff!" not in prompt
     assert '"detail"' not in prompt
+
+
+def test_plan_index_persists_package_aliases_and_maintenance_metadata(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    finding = _finding(fingerprint="pkg-parser-cleanup")
+    finding.update(
+        {
+            "package_fingerprint": "pkg-parser-cleanup",
+            "member_fingerprints": ["fp-local-parser", "fp-parser-tests"],
+            "member_aliases": ["member-v1:local", "member-v1:tests"],
+            "maintenance_signals": ["dead_code", "reuse_existing"],
+            "change_shape": "reuse",
+            "reuse_target": "repo:src/http.py#parse_headers",
+        }
+    )
+
+    _write_plans(
+        plans_dir,
+        [{"finding": finding, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    sidecar = json.loads((plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8"))
+    entry = sidecar["plans"][0]
+    assert entry["package_fingerprint"] == "pkg-parser-cleanup"
+    assert entry["member_fingerprints"] == [
+        "fp-local-parser",
+        "fp-parser-tests",
+    ]
+    assert entry["member_aliases"] == ["member-v1:local", "member-v1:tests"]
+    assert entry["maintenance_signals"] == ["dead_code", "reuse_existing"]
+    assert entry["change_shape"] == "reuse"
+    assert entry["reuse_target"] == "repo:src/http.py#parse_headers"
+    assert planned_fingerprints(plans_dir) == {
+        "pkg-parser-cleanup",
+        "fp-local-parser",
+        "fp-parser-tests",
+        "member-v1:local",
+        "member-v1:tests",
+    }
+
+
+def test_partial_member_overlap_does_not_suppress_uncovered_work(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    original = _finding(fingerprint="pkg-original")
+    original.update(
+        {
+            "package_fingerprint": "pkg-original",
+            "member_fingerprints": ["fp-shared", "fp-original-only"],
+        }
+    )
+    _write_plans(
+        plans_dir,
+        [{"finding": original, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+    repackaged = _finding(fingerprint="pkg-expanded")
+    repackaged.update(
+        {
+            "package_fingerprint": "pkg-expanded",
+            "member_fingerprints": ["fp-shared", "fp-new-member"],
+        }
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": repackaged, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["skipped"] == []
+    assert result["written"][0]["number"] == 2
+    assert result["written"][0]["path"] == "002-batch-catalog-queries.md"
+    assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 2
+
+
+def test_stable_member_alias_reuses_complete_plan_with_stored_package_id(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    original = _finding(fingerprint="pkg-original")
+    original.update(
+        {
+            "package_fingerprint": "pkg-original",
+            "member_fingerprints": ["fp-old-wording"],
+            "member_aliases": ["member-v1:stable-concern"],
+        }
+    )
+    _write_plans(
+        plans_dir,
+        [{"finding": original, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+    reworded = _finding(fingerprint="pkg-current")
+    reworded.update(
+        {
+            "package_fingerprint": "pkg-current",
+            "member_fingerprints": ["fp-new-wording"],
+            "member_aliases": ["member-v1:stable-concern"],
+        }
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": reworded, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["written"] == []
+    assert result["skipped"][0]["number"] == 1
+    assert result["skipped"][0]["path"] == "001-batch-catalog-queries.md"
+    assert result["skipped"][0]["package_fingerprint"] == "pkg-original"
+    assert result["skipped"][0]["member_fingerprints"] == ["fp-old-wording"]
+    assert result["skipped"][0]["member_aliases"] == ["member-v1:stable-concern"]
+    assert result["skipped"][0]["finding"]["package_fingerprint"] == "pkg-current"
+
+
+def test_colliding_semantic_alias_cannot_cover_two_distinct_current_members(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    first = _finding(fingerprint="fp-first")
+    first.update(
+        {
+            "title": "Repeated catalog fixture setup obscures behavior",
+            "category": "tests",
+            "line": 1,
+            "maintenance_signals": ["duplicated_test_structure"],
+            "reuse_target": "repo:catalog_fixture",
+        }
+    )
+    second = _finding(fingerprint="fp-second")
+    second.update(
+        {
+            "title": "Catalog fixture setup repeats in every test",
+            "category": "tests",
+            "line": 1,
+            "maintenance_signals": ["duplicated_test_structure"],
+            "reuse_target": "repo:catalog_fixture",
+        }
+    )
+    original = aggregate_cross_service([first])[0]
+    _write_plans(
+        plans_dir,
+        [{"finding": original, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+    expanded = aggregate_cross_service([first, second])[0]
+
+    assert expanded["member_aliases"] == [
+        original["member_aliases"][0],
+        original["member_aliases"][0],
+    ]
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": expanded, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["skipped"] == []
+    assert result["written"][0]["number"] == 2
+
+
+def test_legacy_singleton_index_entry_recovers_as_its_own_package(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha)
+    sidecar_path = plans_dir / PLAN_INDEX_FILENAME
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    for key in (
+        "package_fingerprint",
+        "member_fingerprints",
+        "member_aliases",
+        "maintenance_signals",
+        "change_shape",
+        "reuse_target",
+    ):
+        sidecar["plans"][0].pop(key)
+    sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
+
+    assert planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    result = _write_plans(
+        plans_dir,
+        [_selection(repo)],
+        planned_at=head_sha,
+    )
+    assert result["written"] == []
+    assert result["skipped"][0]["path"] == "001-batch-catalog-queries.md"
+
+
+def test_ambiguous_partial_member_overlap_is_planned_instead_of_suppressed(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+
+    def _package(package: str, unique_member: str) -> dict[str, Any]:
+        finding = _finding(fingerprint=package)
+        finding.update(
+            {
+                "package_fingerprint": package,
+                "member_fingerprints": ["fp-shared", unique_member],
+            }
+        )
+        return {"finding": finding, **_assembled(repo)}
+
+    _write_plans(
+        plans_dir,
+        [_package("pkg-first", "fp-first"), _package("pkg-second", "fp-second")],
+        planned_at=head_sha,
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [_package("pkg-third", "fp-third")],
+        planned_at=head_sha,
+    )
+
+    assert result["skipped"] == []
+    assert result["written"][0]["number"] == 3
+
+
+def test_split_durable_coverage_suppresses_without_stale_plan_path(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+
+    def _package(package: str, member: str) -> dict[str, Any]:
+        finding = _finding(fingerprint=package)
+        finding.update(
+            {
+                "package_fingerprint": package,
+                "member_fingerprints": [member],
+            }
+        )
+        return {"finding": finding, **_assembled(repo)}
+
+    _write_plans(
+        plans_dir,
+        [_package("pkg-first", "fp-first"), _package("pkg-second", "fp-second")],
+        planned_at=head_sha,
+    )
+    combined = _finding(fingerprint="pkg-combined")
+    combined.update(
+        {
+            "package_fingerprint": "pkg-combined",
+            "member_fingerprints": ["fp-first", "fp-second"],
+        }
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": combined, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["written"] == []
+    assert len(result["skipped"]) == 1
+    assert "number" not in result["skipped"][0]
+    assert "path" not in result["skipped"][0]
+    assert "package_fingerprint" not in result["skipped"][0]
+
+
+def test_partial_rejection_does_not_suppress_uncovered_package_member(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    record_rejections(
+        plans_dir,
+        [{"fingerprint": "fp-rejected", "title": "Rejected member"}],
+    )
+    finding = _finding(fingerprint="pkg-current")
+    finding.update(
+        {
+            "package_fingerprint": "pkg-current",
+            "member_fingerprints": ["fp-rejected", "fp-new"],
+        }
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": finding, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["skipped"] == []
+    assert len(result["written"]) == 1
+
+
+def test_all_rejected_members_suppress_package_without_plan_identity(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    plans_dir = repo / "daydream_plans"
+    record_rejections(
+        plans_dir,
+        [
+            {"fingerprint": "fp-first", "title": "First rejected member"},
+            {"fingerprint": "fp-second", "title": "Second rejected member"},
+        ],
+    )
+    finding = _finding(fingerprint="pkg-current")
+    finding.update(
+        {
+            "package_fingerprint": "pkg-current",
+            "member_fingerprints": ["fp-first", "fp-second"],
+        }
+    )
+
+    result = _write_plans(
+        plans_dir,
+        [{"finding": finding, **_assembled(repo)}],
+        planned_at=head_sha,
+    )
+
+    assert result["written"] == []
+    assert len(result["skipped"]) == 1
+    assert "number" not in result["skipped"][0]
+    assert "path" not in result["skipped"][0]
