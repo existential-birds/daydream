@@ -7,9 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-12
+
+### Added
+
+- **improve:** Aggregate cleanup plans and publish issues ([#362](https://github.com/existential-birds/daydream/pull/362))
+
+  The `improve` flow now groups cleanup work into packages and can publish
+  prioritized plans as GitHub issues, so approved remediation is filed back
+  into the repository instead of sitting in local plan artifacts. Plans that
+  get re-anchored to a different file group are landed durably in the plan
+  index ([#354](https://github.com/existential-birds/daydream/pull/354)).
+
+- **deep:** Route out-of-scope findings to GitHub issues instead of auto-fixing them ([#337](https://github.com/existential-birds/daydream/pull/337))
+
+  The fix phase is now hard-bound to the reviewed-diff file set: valid changes
+  that fall outside that scope are no longer auto-fixed in place — they are
+  reverted and filed as GitHub issues, so the reviewer never silently edits
+  files outside the diff under review.
+
+- **bot:** Config-gated APPROVE review for clean deep reviews ([#347](https://github.com/existential-birds/daydream/pull/347))
+
+  When enabled, a deep review that comes back clean can submit a GitHub
+  `APPROVE` review, giving the bot a first-class approval path for PRs with no
+  findings.
+
+- **corpus:** Upload run trajectories to a private HuggingFace dataset repo (opt-in) ([#346](https://github.com/existential-birds/daydream/pull/346))
+
+  Trajectories from runs can now be uploaded to a private HuggingFace dataset,
+  feeding the SFT/RL corpus pipeline from real production runs.
+
+- **pi-backend:** Default to the Nous provider + deepseek-v4-flash-0731 ([#340](https://github.com/existential-birds/daydream/pull/340))
+
+- **fix:** Anti-degradation quality gate for the fix phase ([#329](https://github.com/existential-birds/daydream/pull/329))
+
+  A new gate blocks fixes that degrade quality metrics below their baselines,
+  with separate absolute thresholds for runs where a baseline is undefined
+  ([#331](https://github.com/existential-birds/daydream/pull/331)).
+
+- **deep:** Uncovered-diff-file sweep second-pass reviewer ([#325](https://github.com/existential-birds/daydream/pull/325))
+
+  After the per-stack reviews, a second-pass reviewer sweeps diff files no
+  stack covered, so nothing in the diff escapes review.
+
+- **prompts:** Anti-slop review rubric ([#322](https://github.com/existential-birds/daydream/pull/322)) and per-stack test-quality rubric ([#319](https://github.com/existential-birds/daydream/pull/319))
+
+  New reviewer guidance flags structural erosion and verbosity, and checks
+  tests for vacuous or internal-field assertions and nondeterminism.
+  Cross-file verification (symbol existence, config-flow traces, trust-model
+  checks) is now instructed directly ([#328](https://github.com/existential-birds/daydream/pull/328)), and a
+  wire-contract checklist was added to the Rust and generic-fallback prompts
+  ([#333](https://github.com/existential-birds/daydream/pull/333)).
+
+- **eval:** Erosion + verbosity quality metrics ([#323](https://github.com/existential-birds/daydream/pull/323))
+
+- **bench:** In-process OpenAI-compatible judge route ([#326](https://github.com/existential-birds/daydream/pull/326)) and CodeRabbit-parity regression corpus ([#320](https://github.com/existential-birds/daydream/pull/320))
+
+- **fix:** Forbid editing generated files ([#313](https://github.com/existential-birds/daydream/pull/313))
+
+  A guard snapshots generated files before fixing, prevents edits to them in
+  all fix prompts, and reverts any forbidden generated-file edit at runtime.
+
+- **rl:** Verifiers v1 environment for the deep loop ([#295](https://github.com/existential-birds/daydream/pull/295))
+
+- **backends:** Reap subprocess groups and release pipes to stop improve-flow fd exhaustion ([#306](https://github.com/existential-birds/daydream/pull/306))
+
 ### Changed
 
-- **extensions:** Bump the extension contract to v5 (hard-breaking, #330)
+- **extensions:** Bump the extension contract to v5 (hard-breaking, [#330](https://github.com/existential-birds/daydream/pull/330))
 
   The `review` / `shallow` / `pr-feedback` flows collapsed into modes of the
   single `deep` flow, so their flow names, the `review` prompt slot, and the
@@ -17,27 +82,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MIN_SUPPORTED_EXTENSION_API_VERSION` both rise to `5` (supported range
   `5..5`); extensions must declare `DAYDREAM_EXT_API = 5`.
 
+- **perf:** Deep-review speed and token efficiency (measured, quality-preserving) ([#299](https://github.com/existential-birds/daydream/pull/299))
+
 ### Fixed
 
-- **deep:** Restore the `--cleanup` / `--no-cleanup` behavior dropped by the
-  single-flow collapse (#330)
+- **deep:** Restore the `--cleanup` / `--no-cleanup` behavior dropped by the single-flow collapse ([#330](https://github.com/existential-birds/daydream/pull/330), [#348](https://github.com/existential-birds/daydream/pull/348))
 
   A terminal `cleanup` step at the end of the unified `deep` flow again owns
   the review-output cleanup: `--cleanup` removes `.review-output.md` after a
   successful run, `--no-cleanup` keeps it, and an unspecified flag falls back
   to the old shallow gate (interactive prompt, unattended default keeps). It
-  runs in every mode that writes the report (default loop, shallow, review,
-  comment) and only on successful completion; `feedback` mode writes no report
-  and is gated off.
+  runs in every mode that writes the report and only on successful completion;
+  `feedback` mode writes no report and is gated off.
 
-- **backends:** Classify pi `502` responses as retryable (#356)
+- **backends:** Classify pi `502` responses as retryable ([#358](https://github.com/existential-birds/daydream/pull/358))
 
   The pi backend's transient-error guard covered `429`/`503` but treated a
-  `502` (e.g. `502 status code (no body)` from an upstream gateway) as fatal on
-  first occurrence, killing the whole deep cycle mid-run. `502` and
-  `bad gateway` are now matched alongside the existing server-error literals,
-  so a bounded backoff window replaces the fatal path and a sustained `502`
-  window still terminates cleanly with previously written verdicts preserved.
+  `502` as fatal on first occurrence. `502` and `bad gateway` are now matched
+  alongside the existing server-error literals, so a bounded backoff window
+  replaces the fatal path.
+
+- **eval:** Never crash on unbalanced-quote shell commands; log swallowed eval failures ([#344](https://github.com/existential-birds/daydream/pull/344))
+
+- **eval:** Extract read paths from `shell`/`read`/`bash` tool calls in coverage and grounding analysis ([#318](https://github.com/existential-birds/daydream/pull/318))
+
+- **reconcile:** Suppress forged daydream-finding markers from non-bot commenters ([#298](https://github.com/existential-birds/daydream/pull/298))
+
+- **improve:** Make command-contract schema patterns lookaround-free ([#305](https://github.com/existential-birds/daydream/pull/305))
+
+- **deep:** Fail-close on revert failure and recompute scope on resume; short-circuit the fix gate when all findings are out of scope
 
 ## [0.25.0] - 2026-07-26
 
@@ -946,7 +1019,8 @@ Initial release of Daydream - an automated code review and fix loop using the Cl
 - `rich` - Terminal UI components
 - `pyfiglet` - ASCII art header generation
 
-[unreleased]: https://github.com/existential-birds/daydream/compare/v0.25.0...HEAD
+[unreleased]: https://github.com/existential-birds/daydream/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/existential-birds/daydream/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/existential-birds/daydream/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/existential-birds/daydream/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/existential-birds/daydream/compare/v0.23.0...v0.23.1
