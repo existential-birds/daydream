@@ -93,6 +93,8 @@ Fill in:
   - **Pull requests: Read and write** — posting and minimizing review comments,
     and the command workflow's 👀 acknowledgement reaction (signed by the App
     token so it shows as `<name>[bot]`, not `github-actions[bot]`).
+  - **Issues: Read and write** — publishing configured `daydream improve`
+    plans directly into issue descriptions and reconciling prior runs.
   - **Contents: Read-only** — required by the posting token's least-privilege trio.
   - **Metadata: Read-only** — implicit baseline.
   - **Actions: Read and write** — the command workflow mints a dispatch token

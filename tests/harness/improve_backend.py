@@ -53,6 +53,15 @@ def _plan_ref(
     }
 
 
+def _neutral_maintenance_fields() -> dict[str, Any]:
+    """Required finding metadata for fixtures unrelated to cleanup pressure."""
+    return {
+        "maintenance_signals": [],
+        "change_shape": "unknown",
+        "reuse_target": None,
+    }
+
+
 def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
     scope_kind = "unsupported" if all_invalid else "whole-repository"
     return [
@@ -111,19 +120,9 @@ def _stub_recon_commands(*, all_invalid: bool = False) -> list[dict[str, Any]]:
 
 def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     requested_context = (
-        f" for the requested change: {finding['title']}"
-        if finding.get("category") == "requested"
-        else ""
+        f" for the requested change: {finding['title']}" if finding.get("category") == "requested" else ""
     )
-    title = (
-        f"Spike {finding['title']}"
-        if finding.get("category") == "direction"
-        else (
-            finding["title"]
-            if len(finding["title"]) >= 12
-            else f"Implement requested change {finding['title']}"
-        )
-    )
+    title = finding["title"] if len(finding["title"]) >= 12 else f"Implement requested change {finding['title']}"
     step_gate = _plan_ref(
         "test-suite",
         appended_args="apps/billing/test_api.py -q",
@@ -140,36 +139,25 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "title": title,
+        "covered_fingerprints": list(finding.get("member_fingerprints") or [finding["fingerprint"]]),
         "why_this_matters": {
-            "problem": (
-                f"{finding['title']} affects the billing service contract today."
-            ),
+            "problem": (f"{finding['title']} affects the billing service contract today."),
             "concrete_cost": (
-                "Leaving the billing behavior unchanged creates avoidable "
-                "maintenance and verification cost."
+                "Leaving the billing behavior unchanged creates avoidable maintenance and verification cost."
             ),
-            "intended_outcome": (
-                "The billing service has an explicit implementation and named "
-                "regression coverage."
-            ),
+            "intended_outcome": ("The billing service has an explicit implementation and named regression coverage."),
         },
         "scope": {
             "existing_paths": [
                 {
                     "path": "apps/billing/api.py",
-                    "role": (
-                        "Implement the selected billing behavior"
-                        f"{requested_context}."
-                    ),
+                    "role": (f"Implement the selected billing behavior{requested_context}."),
                 }
             ],
             "new_paths": [
                 {
                     "path": "apps/billing/test_api.py",
-                    "role": (
-                        "Add named regression coverage for billing"
-                        f"{requested_context}."
-                    ),
+                    "role": (f"Add named regression coverage for billing{requested_context}."),
                 }
             ],
             "out_of_scope_paths": [
@@ -240,36 +228,21 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
             },
         ],
         "test_plan": {
-            "exemplars": [
-                {
-                    "path": "apps/catalog/api.py",
-                    "symbol": "service_name",
-                    "pattern_to_copy": (
-                        "Use the neighboring service's direct service_name function style."
-                    ),
-                }
-            ],
+            "mode": "new-or-updated-tests",
+            "rationale": ("The selected behavior changes and needs one focused regression test."),
+            "existing_coverage": [],
+            # The fixture repository intentionally has no tests yet. A source
+            # helper is not a test exemplar, so the honest contract is empty.
+            "exemplars": [],
             "cases": [
                 {
-                    "name": (
-                        "Billing service preserves the requested contract"
-                        f"{requested_context}"
-                    ),
+                    "name": (f"Billing service preserves the requested contract{requested_context}"),
                     "test_file": "apps/billing/test_api.py",
                     "test_symbol": "test_service_name_preserves_contract",
                     "kind": "unit",
-                    "setup": (
-                        "Import service_name from the billing API module"
-                        f"{requested_context}."
-                    ),
-                    "action": (
-                        "Call service_name once without additional arguments"
-                        f"{requested_context}."
-                    ),
-                    "assertions": [
-                        "The returned value is the expected billing service "
-                        f"string{requested_context}."
-                    ],
+                    "setup": (f"Import service_name from the billing API module{requested_context}."),
+                    "action": (f"Call service_name once without additional arguments{requested_context}."),
+                    "assertions": [f"The returned value is the expected billing service string{requested_context}."],
                     "verification": test_gate,
                 }
             ],
@@ -473,16 +446,12 @@ class ImproveStubBackend:
                 "dependencies": "## Dependencies & Migrations",
                 "dx": "## DX & Tooling",
                 "docs": "## Docs",
-                "direction": "## Direction",
             }
-            category = next(
-                name for name, heading in headings.items() if heading in prompt
-            )
+            category = next(name for name, heading in headings.items() if heading in prompt)
         elif "You are the improve vet." in prompt:
             marker = "vet"
         elif "You are writing a self-contained implementation plan" in prompt or (
-            isinstance(output_schema, dict)
-            and "false_assumption" in output_schema.get("properties", {})
+            isinstance(output_schema, dict) and "false_assumption" in output_schema.get("properties", {})
         ):
             marker = "plan-writer"
         self.calls.append(
@@ -600,6 +569,7 @@ class ImproveStubBackend:
                                 "risk": "LOW",
                                 "confidence": "HIGH",
                                 "evidence": [f"{cited}:1"],
+                                **_neutral_maintenance_fields(),
                             }
                             for number in range(1, self.findings_per_category + 1)
                         ]
@@ -637,6 +607,7 @@ class ImproveStubBackend:
                     "risk": "LOW",
                     "confidence": "HIGH",
                     "evidence": [f"{cited}:1"],
+                    **_neutral_maintenance_fields(),
                 }
             ]
             if category == "performance":
@@ -652,6 +623,7 @@ class ImproveStubBackend:
                         "risk": "LOW",
                         "confidence": "HIGH",
                         "evidence": ["apps/catalog/api.py:1"],
+                        **_neutral_maintenance_fields(),
                     }
                 )
             yield ResultEvent(
@@ -691,6 +663,9 @@ class ImproveStubBackend:
                             "confidence": candidate["confidence"],
                             "path": candidate["path"],
                             "line": candidate["line"],
+                            "maintenance_signals": candidate["maintenance_signals"],
+                            "change_shape": candidate["change_shape"],
+                            "reuse_target": candidate["reuse_target"],
                         }
                         for candidate in candidates
                     ]
@@ -953,7 +928,6 @@ class ProductionPathBackend(ImproveStubBackend):
                 "dependencies": "## Dependencies & Migrations",
                 "dx": "## DX & Tooling",
                 "docs": "## Docs",
-                "direction": "## Direction",
             }
             category = next(
                 name for name, heading in headings.items() if heading in prompt
@@ -994,6 +968,7 @@ class ProductionPathBackend(ImproveStubBackend):
                         "risk": "LOW",
                         "confidence": "HIGH",
                         "evidence": ["apps/billing/api.py:1"],
+                        **_neutral_maintenance_fields(),
                     }
                 ]
             yield ResultEvent(
@@ -1015,7 +990,10 @@ class ProductionPathBackend(ImproveStubBackend):
             self.peak_active = max(self.peak_active, self.plan_active)
             try:
                 await anyio.sleep(0.05)
-                if finding["title"] == self.failed_title:
+                member_titles = {
+                    str(member.get("title")) for member in finding.get("members", []) if isinstance(member, dict)
+                }
+                if finding["title"] == self.failed_title or self.failed_title in member_titles:
                     raise _ProductionPathPlannerError(f"planner process metadata {self.planner_secret}")
             finally:
                 self.plan_active -= 1

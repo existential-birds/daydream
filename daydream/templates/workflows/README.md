@@ -59,7 +59,10 @@ No single job ever holds both PR code and the App private key:
   identity, not `github-actions[bot]`). Both writes flow through the App token,
   so the job's default GITHUB_TOKEN is unprivileged (`permissions: {}`). This is
   why the App requests `Actions: read & write` and `Pull requests: read & write`
-  — see the setup guide's App-permissions step.
+  — see the setup guide's App-permissions step. The App also requests
+  `Issues: read & write` for repositories that enable unattended Improve plan
+  publication; none of these review-only workflow jobs request that scope in
+  their narrowed runtime token.
 - **Phase B (Daydream Post)** holds the App key but only ever checks out the
   base repo's default branch (trusted code). It mints a token with exactly
   `pull-requests: write, contents: read, metadata: read`, downloads the

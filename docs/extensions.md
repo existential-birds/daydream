@@ -326,10 +326,13 @@ key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 | 3 | `vet` | `vet` |
 | 4 | `select-plans` | `select-plans` |
 | 5 | `write-plans` | `plan_write` |
-| 6 | `improve-report` | `recon` |
+| 6 | `publish-improve-issues` | `recon` |
+| 7 | `improve-report` | `recon` |
 
 The improve run configuration also carries `improve_effort`, `improve_focus`,
-`improve_scope`, and `improve_plan_description`.
+`improve_scope`, and `improve_plan_description`. Issue publication is gated by
+`[tool.daydream.improve.github] publish_issues = true`; when disabled, the
+publication step is a no-op.
 
 Steps carry `enabled` predicates internally (tier gates, mode gates,
 resume points); a step listed here may be skipped for a given run, but the

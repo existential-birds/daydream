@@ -114,6 +114,10 @@ class DaydreamFileConfig:
         improve_service_roots: Repository-relative glob patterns identifying
             service roots for the improve flow.
         improve_service_groups: Named groups of repository-relative service roots.
+        improve_github_publish_issues: Whether Improve should publish each validated
+            local plan as a GitHub issue. This is an explicit repository-level
+            opt-in under ``[tool.daydream.improve.github]``; absent or malformed
+            values leave publishing disabled.
         trajectory_hub_repo: Opt-in HuggingFace dataset repo id that each run's
             archive bundle is uploaded to. ``None`` (the default when the key is
             absent or junk) leaves the feature off; only a string value is
@@ -146,6 +150,7 @@ class DaydreamFileConfig:
     improve_service_groups: dict[str, list[str]] = field(default_factory=dict)
     improve_partition_max_files: int | None = None
     improve_max_partition_groups: int | None = None
+    improve_github_publish_issues: bool = False
     trajectory_hub_repo: str | None = None
 
     def phase_model(self, phase: str) -> str | None:
@@ -388,6 +393,14 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     improve = improve if isinstance(improve, dict) else {}
     service_groups = improve.get("service_groups")
     service_groups = service_groups if isinstance(service_groups, dict) else {}
+    improve_github = improve.get("github")
+    improve_github = improve_github if isinstance(improve_github, dict) else {}
+    raw_improve_publish = improve_github.get(
+        "publish_issues", improve_github.get("publish-issues")
+    )
+    improve_github_publish_issues = (
+        raw_improve_publish if isinstance(raw_improve_publish, bool) else False
+    )
     # Per-file-group fix budgets (#201): tolerate junk by degrading to None (the
     # config.py default then applies). bool is excluded even though it subclasses
     # int/float — ``group_max_serial_items = true`` is never a meaningful count.
@@ -421,5 +434,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         },
         improve_partition_max_files=_coerce_positive_int(improve, "partition_max_files"),
         improve_max_partition_groups=_coerce_positive_int(improve, "max_partition_groups"),
+        improve_github_publish_issues=improve_github_publish_issues,
         trajectory_hub_repo=trajectory_hub_repo,
     )

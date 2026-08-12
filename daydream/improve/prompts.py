@@ -45,6 +45,57 @@ RECON_COMMAND_CONTRACT_BULLET = """exact build, test, and lint commands supporte
   enumerates those itself. Never combine a label, arrow, annotation,
   or explanatory prose with the command;"""
 
+MAINTENANCE_SIGNALS: tuple[str, ...] = (
+    "overengineered_structure",
+    "reuse_existing",
+    "hand_rolled_substitute",
+    "duplicated_test_structure",
+    "parameterizable_test_matrix",
+    "excessive_comment",
+    "self_evident_comment",
+    "dead_code",
+)
+
+CHANGE_SHAPES: tuple[str, ...] = (
+    "delete",
+    "reuse",
+    "consolidate",
+    "neutral",
+    "additive",
+    "unknown",
+)
+
+_MAINTENANCE_FINDING_PROPERTIES: dict[str, Any] = {
+    "maintenance_signals": {
+        "type": "array",
+        "description": (
+            "Stable classifications for codebase-growth pressure. Return an "
+            "empty array when none apply; do not invent a signal merely to "
+            "prefer a smaller patch."
+        ),
+        "items": {"type": "string", "enum": list(MAINTENANCE_SIGNALS)},
+    },
+    "change_shape": {
+        "type": "string",
+        "enum": list(CHANGE_SHAPES),
+        "description": (
+            "The expected overall shape of the fix. This is a prioritization "
+            "hint, not a promise about exact line counts."
+        ),
+    },
+    "reuse_target": {
+        "type": ["string", "null"],
+        "maxLength": 500,
+        "description": (
+            "For reuse_existing, identify the verified target as "
+            "repo:<path>#<symbol>. For a standard-library or dependency "
+            "substitute use stdlib:<qualified-name> or dep:<package>:<api>. "
+            "The target must be cited in evidence. "
+            "Return null when no concrete reuse target is proposed."
+        ),
+    },
+}
+
 AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -66,6 +117,9 @@ AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
                     "risk",
                     "confidence",
                     "evidence",
+                    "maintenance_signals",
+                    "change_shape",
+                    "reuse_target",
                 ],
                 "properties": {
                     "title": {"type": "string"},
@@ -81,6 +135,7 @@ AUDIT_FINDINGS_SCHEMA: dict[str, Any] = {
                         "type": "array",
                         "items": {"type": "string"},
                     },
+                    **_MAINTENANCE_FINDING_PROPERTIES,
                 },
             },
         },
@@ -108,6 +163,9 @@ VET_SCHEMA: dict[str, Any] = {
                     "confidence",
                     "path",
                     "line",
+                    "maintenance_signals",
+                    "change_shape",
+                    "reuse_target",
                 ],
                 "properties": {
                     "vet_id": {"type": "integer"},
@@ -135,6 +193,7 @@ VET_SCHEMA: dict[str, Any] = {
                     },
                     "path": {"type": ["string", "null"]},
                     "line": {"type": ["integer", "null"]},
+                    **_MAINTENANCE_FINDING_PROPERTIES,
                 },
             },
         },
@@ -162,6 +221,7 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "title",
+        "covered_fingerprints",
         "why_this_matters",
         "scope",
         "context_excerpts",
@@ -174,6 +234,17 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "title": {"type": "string", "minLength": 12, "maxLength": 160},
+        "covered_fingerprints": {
+            "type": "array",
+            "minItems": 1,
+            "description": (
+                "Copy the selected finding's complete set of unique "
+                "member_fingerprints exactly. Order is not significant. When "
+                "it has no member_fingerprints, use a one-item array "
+                "containing its fingerprint."
+            ),
+            "items": {"type": "string", "minLength": 1, "maxLength": 128},
+        },
         "why_this_matters": {
             "type": "object",
             "additionalProperties": False,
@@ -383,7 +454,10 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                         "characters to specify, split it into "
                                         "several entries in this array or "
                                         "into another step; it is never "
-                                        "truncated for you."
+                                        "truncated for you. For a delete "
+                                        "operation, name exactly what is "
+                                        "removed and do not invent a "
+                                        "replacement."
                                     ),
                                 },
                                 "target_state": {
@@ -396,7 +470,11 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                                         "so the executor can re-read the file "
                                         "and check it sentence by sentence. "
                                         "Describe observable content, not "
-                                        "intent or quality."
+                                        "intent or quality. For a delete "
+                                        "operation, state that the exact "
+                                        "symbol or block is absent; when the "
+                                        "whole file is deleted, state that the "
+                                        "path no longer exists."
                                     ),
                                 },
                             },
@@ -409,8 +487,72 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
         "test_plan": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["exemplars", "cases"],
+            "required": [
+                "mode",
+                "rationale",
+                "existing_coverage",
+                "exemplars",
+                "cases",
+            ],
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [
+                        "new-or-updated-tests",
+                        "existing-coverage",
+                        "not-applicable",
+                    ],
+                    "description": (
+                        "Use new-or-updated-tests when test code must change, "
+                        "existing-coverage when named tests already prove the "
+                        "change, and not-applicable only for documentation, "
+                        "exact comment/docstring cleanup, or deletion of a "
+                        "non-runtime artifact or redundant test that cannot "
+                        "usefully be exercised by a test."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "minLength": 20,
+                    "maxLength": 700,
+                    "description": (
+                        "Explain why this mode is sufficient for this exact "
+                        "change. Deletion alone is not a reason to omit tests "
+                        "when observable behavior changes."
+                    ),
+                },
+                "existing_coverage": {
+                    "type": "array",
+                    "description": (
+                        "Exact existing tests that already prove the planned "
+                        "behavior. Populate only in existing-coverage mode. "
+                        "These paths are evidence, not writable plan scope."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "path",
+                            "symbol",
+                            "behavior",
+                            "verification",
+                        ],
+                        "properties": {
+                            "path": _REPOSITORY_FILE_PATH_SCHEMA,
+                            "symbol": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 300,
+                            },
+                            "behavior": {
+                                "type": "string",
+                                "minLength": 20,
+                                "maxLength": 700,
+                            },
+                            "verification": _OPTIONAL_COMMAND_REF_SCHEMA,
+                        },
+                    },
+                },
                 "exemplars": {
                     "type": "array",
                     "description": (
@@ -439,7 +581,6 @@ PLAN_AUTHOR_SCHEMA: dict[str, Any] = {
                 },
                 "cases": {
                     "type": "array",
-                    "minItems": 1,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -608,23 +749,31 @@ Look for the algorithmic and architectural wins, not micro-optimizations.
 - Frontend: heavyweight dependencies, missing code-splitting on rare routes, unoptimized assets, client fetching for render-time data, and render waterfalls.
 - Backend: synchronous work that belongs in a queue, missing indexes implied by query patterns (flag for verification), and connection-per-request patterns where pooling exists.
 - Build/CI: slow CI from missing caching, redundant pipeline steps, test suites that could parallelize.""",
-    "tests": """## Test Coverage
+    "tests": """## Test Coverage & Test Maintainability
 
 The goal is not a percentage — it is which untested code is dangerous.
 
 - Map critical paths (money, auth, data mutation, the feature the repo exists for) and check which have zero or trivial coverage.
 - Modules with high churn plus no tests are top refactor risks; flag them as characterization-tests-first candidates.
 - Existing test quality: tests that assert nothing meaningful, heavy mocking, unread snapshots, and flaky real-timer/network/order patterns.
+- Test DRY: find repeated setup, fixtures, requests, and assertion blocks that obscure the behavior under test. Prefer an existing helper or fixture over introducing another one.
+- Parameterizable matrices: combine cases that exercise the same behavior through different inputs and expected outputs. Preserve separate tests when setup, behavior, failure diagnosis, or lifecycle is materially different; fewer test functions is not itself a goal.
+- Reuse before invention: cite the existing fixture, factory, harness, or assertion helper that duplicate test code should use. Do not propose a new shared helper when an appropriate repository helper already exists.
 - Missing test layers: unit-only suites with no integration coverage on API boundaries, or slow E2E where unit tests would suffice.
 - Verification infrastructure: if there is no one-command way to know the codebase works, that is a prerequisite finding.""",
     "tech-debt": """## Tech Debt & Architecture
 
-- Duplication: the same logic re-implemented in three or more places, especially divergent copies.
+- Existing-code reuse is the first search, not an afterthought. Look for implementations, adapters, validators, serializers, parsers, fixtures, factories, and utilities that duplicate a repository implementation. A reuse finding cites both the redundant code and the exact canonical target, and explains why their contracts and layer boundaries are compatible.
+- Apply this reuse ladder in order: existing repository code; the language standard library; an already-declared dependency; then a mature new dependency only when the earlier choices do not fit. A new dependency requires a concrete API match and a comparison of maintenance, security, license, transitive-dependency, and migration costs. Do not flag custom code merely because a package exists.
+- Hand-rolled substitutes: flag custom implementations of solved, subtle behavior only when a verified standard-library or dependency API covers the required contract more safely or simply.
+- Duplication: flag repeated logic even across only two sites when one can directly reuse the other and deletion is substantial. Otherwise require a clear maintenance cost, not superficial textual similarity.
 - Layering violations: UI importing data-layer internals, circular dependencies, and high-fan-in junk-drawer utility modules.
 - Dead code: unused modules, fully rolled-out flags still branching, unexplained commented blocks, and unused manifest dependencies.
 - God objects/modules: files far larger than the repo median, high-fan-in modules, double-digit parameters, or deep branching.
 - Inconsistent patterns: multiple ways of fetching data, handling errors, or styling in one repo; identify the recent winner.
-- Abstraction mismatches: single-implementation premature abstractions or missing abstractions where changes require lockstep edits.""",
+- Over-engineering: unnecessary wrappers, layers, registries, factories, interfaces, indirection, and single-implementation abstractions. Prefer deleting the layer and calling the stable implementation directly when that preserves a sound boundary.
+- Comments: flag excessive prose and comments that merely narrate self-evident code. Preserve comments that explain why, invariants, security constraints, compatibility requirements, non-obvious tradeoffs, public API contracts, or temporary workarounds with removal conditions.
+- Abstraction mismatches: single-implementation premature abstractions or missing abstractions where changes require lockstep edits. A proposed new abstraction must delete more duplication than it adds and have a stable, evidence-backed boundary.""",
     "dependencies": """## Dependencies & Migrations
 
 - Major-version lag on core frameworks/runtimes where EOL, security cutoffs, or ecosystem incompatibility create a real cost.
@@ -647,17 +796,6 @@ Lowest default priority — only flag where absence has a concrete cost:
 - Public API surface without reference docs.
 - Architectural decisions nobody can reconstruct in actively contested areas.
 - Stale docs that are actively wrong, such as setup instructions or API examples that no longer work.""",
-    "direction": """## Direction — features & where to take this next
-
-Forward-looking: not what is broken, but what this codebase wants to become. Every suggestion must cite repository evidence.
-
-- Unfinished intent: thematic TODO/FIXME clusters, flags never rolled out, stubs, half-built modules, or abandoned feature work in history.
-- Stated-but-undelivered: README/roadmap promises without code, no-op flags/config, or product docs the implementation has not caught up to.
-- Surface asymmetries: export without import, create without bulk-create, one-way webhooks, incomplete CRUD, or internal workarounds for a missing public API.
-- The adjacent possible: capabilities made disproportionately cheap by existing architecture.
-- Friction worth productizing: work users evidently perform by hand around the project.
-
-For direction findings, Impact is product/user value and Confidence is how well the option is grounded, not certainty that it is the right strategy. State honest tradeoffs and prefer a design/spike plan over build-everything scope.""",
 }
 
 FINDING_FORMAT = """## Finding format
@@ -666,6 +804,10 @@ Every finding must carry:
 - a body containing concrete impact and a 1–3 sentence fix sketch;
 - Effort measured as S (hours), M (about a day), or L (multi-day), including tests;
 - Risk measured on the fix, not on the defect.
+- `maintenance_signals`, using only the stable schema values (or an empty array);
+- `change_shape`, describing whether the whole fix deletes, reuses, consolidates, is neutral, adds, or is still unknown;
+- `reuse_target`, set to a normalized concrete target when reuse is proposed and null otherwise. Repository reuse targets and dependency fit must have their own evidence citation.
+Prefer a deletion, direct reuse, or consolidation when it solves the full problem with equal safety. Seek a net reduction in production and test code across the recommendation, but never trade away correctness, useful coverage, clear diagnostics, rationale comments, or maintainable boundaries merely to reduce line count. Do not claim an exact line reduction before implementation.
 Do not invent a finding without direct evidence."""
 
 HARD_RULE_4 = """Never reproduce secret values. If the audit finds credentials, tokens, or `.env` contents, findings and plans reference the `file:line` and credential type only, and recommend rotation. The value itself must never appear in anything you write."""
@@ -678,6 +820,12 @@ boilerplate STOP conditions (drift, repeated verification failure,
 out-of-scope change), command records, excerpt text, plan numbering,
 planned-at stamps, and Markdown rendering — do not restate any of it.
 
+Copy coverage identity without interpretation: set `covered_fingerprints` to
+the selected finding's complete set of unique `member_fingerprints` when
+present, or to an array containing its single `fingerprint` otherwise. Order is
+not significant. Do not omit, rewrite, or add identifiers. Every member of an
+aggregated finding must be covered by the one plan.
+
 Reference verification commands instead of writing them: each verification
 slot selects one verified recon command by id. Null `appended_args` runs the
 recon command verbatim; otherwise `appended_args` is a focused argument suffix
@@ -686,6 +834,30 @@ substitutions, or placeholders. The `note` states why that gate proves the
 piece it is attached to. If recon lists no verified commands, use null
 verification everywhere and an empty `additional_command_refs` array; never
 invent a command.
+
+Choose the test-plan mode from evidence, not habit:
+- `new-or-updated-tests` requires one or more named cases. Reuse existing
+  fixtures and helpers, and parameterize cases that share setup, action, and
+  assertion shape. Do not emit duplicate test symbols or mechanically numbered
+  variants; use one parameterized symbol or meaningful names for genuinely
+  different behavior.
+- `existing-coverage` requires one or more exact existing test path/symbol
+  references and no authored cases or exemplars. Explain the behavior each
+  existing test already proves. Those tests are read-only evidence unless a
+  step separately declares them writable.
+- `not-applicable` requires empty existing coverage, exemplars, and cases. Use
+  it only when every change is demonstrably non-behavioral documentation or
+  comment cleanup, or deletes a non-runtime artifact or redundant test. Include
+  a `static-invariant` or `step-gate` done criterion that states the exact
+  non-test check and expected result. Deleting production source is not enough
+  to qualify: even code believed to be dead needs a named new/updated test or
+  verified existing coverage when its absence could affect runtime behavior.
+Deletion-only plans are valid: every step operation may be `delete`,
+`scope.new_paths` may be empty, and the plan must not invent a replacement,
+shim, abstraction, or synthetic test. State every deletion target as an absence
+that can be checked in the step's **Verify** block and the plan's done criteria.
+Use step verification, static checks, build/type/lint gates, or existing
+coverage to prove the deletion is safe.
 
 Cite current code with line anchors only, in `context_excerpts` — it is the one
 place excerpts live. Every `scope.existing_paths` path needs at least one
@@ -831,6 +1003,24 @@ Expect and explicitly check the three common failure classes:
 2. real issues with mis-attributed evidence or the wrong file/line; and
 3. duplicate findings from different audit passes.
 
+For maintenance findings, be especially skeptical:
+- A reuse finding is keepable only when you re-open both implementations, verify
+  compatible behavior and layer boundaries, and confirm the normalized
+  `reuse_target` has its own evidence citation.
+- A hand-rolled-substitute finding needs an exact standard-library or dependency
+  API match. For a new dependency, confirm the stated maintenance, security,
+  license, transitive-cost, and migration tradeoff; package popularity alone is
+  not evidence.
+- A DRY or parametrization finding must preserve distinct behavior, lifecycle,
+  and useful failure diagnostics. Similar-looking tests with different reasons
+  to fail stay separate.
+- A comment-removal finding must preserve rationale, invariants, security and
+  compatibility constraints, public contracts, and workaround context.
+- Reject cleanup that adds a helper, abstraction, or dependency without an
+  evidence-backed net simplification. Correct `maintenance_signals`,
+  `change_shape`, and `reuse_target` when the finding is real but classified
+  incorrectly.
+
 Correct supported metadata or citations when needed. If a claim cannot be
 confirmed from the repository, reject it with a concise reason by default.
 
@@ -967,6 +1157,8 @@ def build_plan_writer_repair_prompt(
 __all__ = [
     "AUDIT_FINDINGS_SCHEMA",
     "AUDIT_PLAYBOOK_SECTIONS",
+    "CHANGE_SHAPES",
+    "MAINTENANCE_SIGNALS",
     "PLAN_AUTHOR_SCHEMA",
     "PLAN_WRITER_CONTRACT_INSTRUCTIONS",
     "RECON_COMMAND_CONTRACT_BULLET",

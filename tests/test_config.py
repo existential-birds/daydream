@@ -48,12 +48,16 @@ def test_audit_categories_match_playbook() -> None:
         "dependencies",
         "dx",
         "docs",
-        "direction",
     }
 
 
 def test_quick_effort_tier_uses_high_confidence_core_categories() -> None:
-    assert EFFORT_TIERS["quick"].categories == ("correctness", "security", "tests")
+    assert EFFORT_TIERS["quick"].categories == (
+        "correctness",
+        "security",
+        "tests",
+        "tech-debt",
+    )
 
 
 def test_effort_tiers_carry_partition_group_ceilings() -> None:

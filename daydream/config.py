@@ -297,7 +297,6 @@ AUDIT_CATEGORIES: tuple[str, ...] = (
     "dependencies",
     "dx",
     "docs",
-    "direction",
 )
 
 
@@ -315,7 +314,7 @@ class EffortTier:
 
 EFFORT_TIERS: dict[str, EffortTier] = {
     "quick": EffortTier(
-        categories=("correctness", "security", "tests"),
+        categories=("correctness", "security", "tests", "tech-debt"),
         max_concurrency=1,
         high_confidence_only=True,
         max_findings=6,
@@ -367,7 +366,6 @@ AUDIT_SKILL_MAP: dict[str, dict[str, str]] = {
     "dependencies": {},
     "dx": {},
     "docs": {},
-    "direction": {},
 }
 
 # CLI skill name to full skill path mapping (derived from REVIEW_SKILLS to avoid duplication)
@@ -415,6 +413,7 @@ SETUP_SECRET_NAMES: tuple[str, ...] = (
 BOT_HANDLE_VAR: str = "DAYDREAM_BOT_HANDLE"
 APP_PERMISSIONS: dict[str, str] = {
     "pull_requests": "write",
+    "issues": "write",
     "contents": "read",
     "metadata": "read",
     "actions": "write",

@@ -56,7 +56,8 @@ To update: `git pull && uv sync`
 prioritizes them by leverage, and writes self-contained implementation plans.
 Every agent call uses a read-only backend profile. Daydream's host code writes
 only run artifacts under `.daydream/` and durable advisory artifacts under
-`daydream_plans/`; it does not modify tracked source files.
+`daydream_plans/`; it does not modify tracked source files. GitHub issue
+publishing is disabled unless the repository explicitly enables it.
 
 ```bash
 daydream improve /path/to/project
@@ -68,9 +69,9 @@ daydream improve --focus security /path/to/project
 
 | Tier | Audit coverage |
 |------|----------------|
-| `quick` | Correctness, security, and tests; serial, HIGH-confidence findings only, capped near six |
-| `standard` | All nine categories with a concurrency ceiling of ten; the default |
-| `deep` | All nine categories with a concurrency ceiling of ten; includes LOW-confidence investigation items |
+| `quick` | Correctness, security, tests, and tech debt; serial, HIGH-confidence findings only, capped near six |
+| `standard` | All eight categories with a concurrency ceiling of ten; the default |
+| `deep` | All eight categories with a concurrency ceiling of ten; includes LOW-confidence investigation items |
 
 `--effort` selects audit *breadth* only. It does not change the model or the
 reasoning effort — those are per-phase (see [Reasoning Effort](#reasoning-effort)).
@@ -100,7 +101,6 @@ truncated.
 | `performance` | Audit only performance |
 | `tests` | Audit only test coverage |
 | `branch` | Audit the merge-base diff and label findings as introduced or inherited |
-| `next` | Produce grounded direction proposals as spike plans |
 
 Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected
 services. The report names detected services that the scope did not cover.
@@ -119,9 +119,48 @@ Each audit writes its report and structured intermediate data under
 numbered plan files, a `.index.json` durable plan record, a `README.md` plan
 index rendered from it, and `rejected.json` for findings that later runs should
 suppress. Editing a plan's **Status** cell in `README.md` is honored: that cell
-outranks `.index.json`. In non-interactive mode, Daydream selects the
-top five or fewer vetted defect findings by leverage; direction findings are
-never selected automatically.
+outranks `.index.json`. In non-interactive mode, Daydream selects every vetted
+work package only when automatic GitHub issue publishing is enabled; compatible
+overlapping findings have already been aggregated into those issue-sized
+packages. Without automatic publishing, the unattended default remains the top
+five packages.
+
+### Publish Improve plans as GitHub issues
+
+Repositories can opt into fully unattended issue publication:
+
+```toml
+[tool.daydream.improve.github]
+publish_issues = true
+```
+
+When enabled, Improve first writes and validates each plan locally, then copies
+the complete plan Markdown into the corresponding GitHub issue description.
+It creates no plan branch, commit, or push. A stable marker in each issue makes
+reruns idempotent even from a fresh GitHub Actions checkout; both open and
+closed issues are reconciled before any new issue is created. If reconciliation
+fails, publication stops rather than risking a duplicate issue.
+
+Only one Improve publisher may run against a repository at a time. Marker
+reconciliation makes sequential reruns idempotent, but two concurrent runs can
+both observe that an issue is absent before either creates it. Use a
+repository-scoped GitHub Actions concurrency group (and an equivalent lock for
+cron jobs running elsewhere):
+
+```yaml
+concurrency:
+  group: daydream-improve-${{ github.repository }}
+  cancel-in-progress: false
+```
+
+The workflow token needs issue write access, but Daydream does not need content
+write access. A minimal GitHub Actions permission block is:
+
+```yaml
+permissions:
+  contents: read # required by actions/checkout, not by issue publication
+  issues: write
+```
 
 ## Architecture
 
@@ -446,8 +485,9 @@ Posts are attributed to `<app-slug>[bot]`, and the active identity (bot or
 human) is displayed before any GitHub action.
 
 One-time setup: create a GitHub App (minimum permissions: Pull Requests
-read/write, Contents read, Metadata read, Actions read/write), generate a private key from the
-App settings page, and install the App on the target repository's org or user.
+read/write, Issues read/write, Contents read, Metadata read, Actions
+read/write), generate a private key from the App settings page, and install the
+App on the target repository's org or user.
 
 In GitHub Actions:
 
