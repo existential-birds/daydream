@@ -692,13 +692,24 @@ class NamedPruneOutcome:
 def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
     """Remove the single ``-reanchor`` worktree named *name*, returning a verdict.
 
-    The worktree lives at ``.daydream/worktrees/<name>``. A ``daydream_plans``
-    directory's ``*.md`` count is captured (*before* removal) purely as
-    blast-radius metadata for the removal notice; it never affects removal.
-    Removal failures are reported as :data:`PRUNE_GIT_FAILURE`, never coerced
-    to success.
+    The worktree lives at ``.daydream/worktrees/<name>``. The name is
+    validated against the shared filesystem-safe dirname rules before any
+    filesystem or git access. A ``daydream_plans`` directory's ``*.md`` count
+    is captured (*before* removal) purely as blast-radius metadata for the
+    removal notice; it never affects removal. Removal failures are reported as
+    :data:`PRUNE_GIT_FAILURE`, never coerced to success.
+
+    Returns :data:`PRUNE_NOT_REANCHOR` for an invalid name, :data:`PRUNE_NOT_FOUND`
+    when the named directory is absent, :data:`PRUNE_REMOVED` on a successful
+    removal, and :data:`PRUNE_GIT_FAILURE` when removal itself fails.
     """
+    if _SAFE_DIRNAME.fullmatch(name) is None or not name.endswith(
+        _REANCHOR_DIR_SUFFIX
+    ):
+        return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
     path = repo / ".daydream" / "worktrees" / name
+    if not path.is_dir():
+        return NamedPruneOutcome(PRUNE_NOT_FOUND)
     plans = path / "daydream_plans"
     if plans.is_dir():
         plan_count = sum(1 for _ in plans.glob("*.md"))
