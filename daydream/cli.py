@@ -49,8 +49,11 @@ from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
     ShutdownPanel,
+    create_console,
     get_shutdown_panel,
     print_error,
+    print_info,
+    print_success,
     set_shutdown_panel,
 )
 
@@ -567,6 +570,12 @@ def _build_improve_parser(
             metavar="DESCRIPTION",
             help="Change to investigate and turn into one implementation plan",
         )
+    if subverb == "prune-reanchor":
+        parser.add_argument(
+            "improve_prune_name",
+            metavar="NAME",
+            help="name of the -reanchor worktree to remove",
+        )
     parser.add_argument("target", metavar="TARGET", help="Repository to audit")
     parser.add_argument(
         "--effort",
@@ -611,7 +620,8 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
     improve_argv = argv[1:] if argv and argv[0] == "improve" else argv
     subverb = (
         improve_argv[0]
-        if improve_argv and improve_argv[0] == "plan"
+        if improve_argv
+        and improve_argv[0] in {"plan", "prune-reanchor", "list-reanchor"}
         else None
     )
     if subverb is not None:
@@ -639,6 +649,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
         improve_plan_description=getattr(
             args, "improve_plan_description", None
         ),
+        improve_prune_name=getattr(args, "improve_prune_name", None),
     )
 
 
@@ -1646,6 +1657,57 @@ def _handle_setup_command(argv: list[str]) -> int:
         return 1
 
 
+def _handle_prune_reanchor(config: RunConfig) -> int:
+    """Remove one named ``-reanchor`` worktree; sync cleanup, no improve flow.
+
+    Returns ``0`` on removal and ``1`` for every other verdict, so the exit
+    code reads as a reliable removal contract for scripts/operators.
+    """
+    from daydream.improve.plans import (
+        PRUNE_NOT_FOUND,
+        PRUNE_NOT_REANCHOR,
+        PRUNE_REMOVED,
+        prune_named_reanchor_worktree,
+    )
+
+    console = create_console()
+    name = config.improve_prune_name
+    assert name is not None  # the prune-reanchor sub-verb guard guarantees this
+    repo = Path(config.target) if config.target else Path.cwd()
+    outcome = prune_named_reanchor_worktree(repo, name)
+    if outcome.verdict == PRUNE_REMOVED:
+        suffix = (
+            f" (held {outcome.plan_count} re-anchored plans)"
+            if outcome.plan_count > 1
+            else ""
+        )
+        print_success(console, f"Removed worktree {name}{suffix}")
+        return 0
+    if outcome.verdict == PRUNE_NOT_FOUND:
+        print_error(console, "Prune re-anchor", f"No such worktree: {name}")
+    elif outcome.verdict == PRUNE_NOT_REANCHOR:
+        print_error(
+            console, "Prune re-anchor", f"{name!r} is not a -reanchor worktree"
+        )
+    else:  # PRUNE_GIT_FAILURE
+        print_error(console, "Prune re-anchor", f"Could not remove {name}")
+    return 1
+
+
+def _handle_list_reanchor(config: RunConfig) -> int:
+    """List existing ``-reanchor`` worktrees; sync, no improve flow.
+
+    An empty list still exits ``0`` — listing nothing is not an error.
+    """
+    from daydream.improve.plans import list_reanchor_worktrees
+
+    console = create_console()
+    repo = Path(config.target) if config.target else Path.cwd()
+    for path in list_reanchor_worktrees(repo):
+        print_info(console, path.name)
+    return 0
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1667,6 +1729,9 @@ def main() -> None:
           and land the workflows via a PR (``--verify`` for the doctor)
         - ``ext`` — extension namespace (``validate`` loads the
           ``daydream_ext`` extension and resolve-checks the registry)
+        - ``improve`` — repository audit + advisory plans; sub-verbs
+          ``prune-reanchor`` / ``list-reanchor`` short-circuit to sync
+          filesystem cleanup, everything else runs the async audit flow
 
     Raises:
         SystemExit: Always raised with exit code 0 on success, 130 on keyboard
@@ -1704,6 +1769,19 @@ def main() -> None:
         # short-circuit before anyio.run.
         if verb == "ext":
             sys.exit(_handle_ext_command(argv[1:]))
+
+        # ``improve prune-reanchor`` / ``list-reanchor`` are pure filesystem
+        # cleanup (no agent work), so short-circuit to a sync handler instead of
+        # routing every improve invocation through anyio.run(run, ...). Peek
+        # ``argv[1]`` exactly as ``_parse_improve_args`` does.
+        if verb == "improve" and (argv[1] if len(argv) > 1 else None) in {
+            "prune-reanchor",
+            "list-reanchor",
+        }:
+            config = _parse_improve_args(argv)
+            if argv[1] == "prune-reanchor":
+                sys.exit(_handle_prune_reanchor(config))
+            sys.exit(_handle_list_reanchor(config))
 
         config = (
             _parse_improve_args(argv)

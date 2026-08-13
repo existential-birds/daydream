@@ -180,3 +180,53 @@ def test_non_tty_auto_enables_non_interactive(
         cli.main()
 
     assert captured["v"] is True  # auto-enabled with no flag
+
+
+def test_cli_main_prune_reanchor_removes_and_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.harness.git_helpers import git
+    from tests.test_improve_plans import _repo
+
+    repo, _ = _repo(tmp_path)
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "prune-reanchor", "run-abcd-reanchor", str(repo)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert not target.exists()
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_cli_main_prune_reanchor_rejects_name_exits_1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.test_improve_plans import _repo
+
+    repo, _ = _repo(tmp_path)
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
+    monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "prune-reanchor", "run-abc", str(repo)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert "run-abc" not in (repo / ".daydream" / "worktrees").glob("*")
+    assert not (repo / ".daydream" / "worktrees" / "run-abc").exists()
