@@ -1779,6 +1779,23 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 
+def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import list_reanchor_worktrees
+
+    a = repo / ".daydream" / "worktrees" / "run-aaaa-reanchor"
+    b = repo / ".daydream" / "worktrees" / "run-bbbb-reanchor"
+    other = repo / ".daydream" / "worktrees" / "feature"
+    for w in (a, b, other):
+        git(repo, "worktree", "add", "--detach", str(w), "HEAD")
+
+    names = [p.name for p in list_reanchor_worktrees(repo)]
+
+    assert sorted(names) == ["run-aaaa-reanchor", "run-bbbb-reanchor"]
+    assert "feature" not in names
+
+
 def test_planned_at_still_matching_head_writes_in_place(
     repo: Path,
     head_sha: str,

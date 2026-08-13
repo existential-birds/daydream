@@ -722,6 +722,22 @@ def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
     return NamedPruneOutcome(PRUNE_REMOVED, plan_count)
 
 
+def list_reanchor_worktrees(repo: Path) -> list[Path]:
+    """List the ``*.{_REANCHOR_DIR_SUFFIX}`` directories under ``.daydream/worktrees``.
+
+    Returns the exact names the automatic prune would remove, so an operator
+    can discover them before pruning. Existing directories only; non-directory
+    entries are skipped, matching ``prune_stale_reanchor_worktrees``.
+    """
+    return [
+        path
+        for path in (repo / ".daydream" / "worktrees").glob(
+            f"*{_REANCHOR_DIR_SUFFIX}"
+        )
+        if path.is_dir()
+    ]
+
+
 def _highest_plan_number(
     plans_dir: Path, entries: Iterable[PlanIndexEntry]
 ) -> int:
