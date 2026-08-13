@@ -24,6 +24,7 @@ from daydream.improve.command_contract import (
 )
 from daydream.improve.plans import (
     PLAN_INDEX_FILENAME,
+    PRUNE_REMOVED,
     PlanWriteSession,
     load_rejections,
     planned_fingerprints,
@@ -1686,6 +1687,39 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     assert removed == 1
     assert not stale_dir.exists()
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_removes_valid_worktree(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
+
+    assert outcome.verdict == PRUNE_REMOVED
+    assert not target.exists()
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_reports_plan_count(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+    plans = target / "daydream_plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    for n in ("001-x.md", "002-y.md"):
+        (plans / n).write_text("# plan\n", encoding="utf-8")
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
+
+    assert outcome.verdict == PRUNE_REMOVED
+    assert outcome.plan_count == 2
 
 
 def test_planned_at_still_matching_head_writes_in_place(

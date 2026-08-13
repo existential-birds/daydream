@@ -668,6 +668,49 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     return removed
 
 
+# Verdicts for a named prune of a single re-anchor worktree. Distinct outcomes
+# let the caller report precisely what happened instead of a bare success/fail.
+PRUNE_REMOVED = "removed"
+PRUNE_NOT_FOUND = "not-found"
+PRUNE_NOT_REANCHOR = "not-reanchor"
+PRUNE_GIT_FAILURE = "git-failure"
+
+
+@dataclass(frozen=True)
+class NamedPruneOutcome:
+    """Outcome of a prune of one named re-anchor worktree.
+
+    ``verdict`` is one of :data:`PRUNE_REMOVED`, :data:`PRUNE_NOT_FOUND`,
+    :data:`PRUNE_NOT_REANCHOR`, or :data:`PRUNE_GIT_FAILURE`. ``plan_count``
+    is best-effort metadata for the removal notice only, never a gate.
+    """
+
+    verdict: str
+    plan_count: int = 0
+
+
+def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
+    """Remove the single ``-reanchor`` worktree named *name*, returning a verdict.
+
+    The worktree lives at ``.daydream/worktrees/<name>``. A ``daydream_plans``
+    directory's ``*.md`` count is captured (*before* removal) purely as
+    blast-radius metadata for the removal notice; it never affects removal.
+    Removal failures are reported as :data:`PRUNE_GIT_FAILURE`, never coerced
+    to success.
+    """
+    path = repo / ".daydream" / "worktrees" / name
+    plans = path / "daydream_plans"
+    if plans.is_dir():
+        plan_count = sum(1 for _ in plans.glob("*.md"))
+    else:
+        plan_count = 0
+    try:
+        git_ops.worktree_remove(repo, path, force=True)
+    except git_ops.GitError:
+        return NamedPruneOutcome(PRUNE_GIT_FAILURE, plan_count)
+    return NamedPruneOutcome(PRUNE_REMOVED, plan_count)
+
+
 def _highest_plan_number(
     plans_dir: Path, entries: Iterable[PlanIndexEntry]
 ) -> int:
