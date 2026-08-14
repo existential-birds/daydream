@@ -1,4 +1,5 @@
-"""Price resolution and evidence-derived improvement recommendations in the offline benchmark report generator (bench/benchmark-report/build.py)."""
+"""Price resolution and evidence-derived improvement recommendations in
+the offline benchmark report generator (bench/benchmark-report/build.py)."""
 
 from __future__ import annotations
 
@@ -366,7 +367,8 @@ def _recommendation_case(tmp_path: Path, case: str) -> tuple[dict | None, dict |
             "priority": 3,
             "heading": "Re-judge daydream under custom-reviewer",
             "body": "daydream has no leaf under: custom-reviewer.",
-            "measurement": "Next-run target: fill the cross-judge panels and confirm the precision story is judge-robust.",
+            "measurement": "Next-run target: fill the cross-judge panels and confirm the "
+                           "precision story is judge-robust.",
             "citation": "source: discovered judges custom-reviewer",
         }]
     raise AssertionError(f"unknown case {case!r}")
@@ -381,3 +383,25 @@ def test_improvements_derive_from_corpus_evidence(
     judges, labels, expected = _recommendation_case(tmp_path, case)
     report: dict[str, Any] = build_mod.build(_corpus(tmp_path, judges=judges, labels=labels))
     assert report["improvements"] == expected
+
+
+def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path)
+    out_dir = tmp_path / "report"
+    r = subprocess.run(  # noqa: S603 - args are paths/tool names from the fixture, not user-controlled
+        [sys.executable, str(BUILD_PY), args.results_root,
+         "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
+         "--trajectories", args.trajectories, "--out", str(out_dir)],
+        capture_output=True, text=True, cwd=BUILD_PY.parents[2],
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    data = json.loads((out_dir / "data.json").read_text())
+    assert data["improvements"] == []
+    html = (out_dir / "index.html").read_text()
+    assert "No evidence-backed recommendations were generated for this corpus." in html
+    template_text = TEMPLATE_HTML.read_text()
+    for literal in _REMOVED_LITERALS:
+        assert literal not in html
+        assert literal not in template_text

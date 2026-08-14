@@ -310,7 +310,8 @@ def _build_improvements(
             "heading": f"Tighten the noisiest label slice: {worst['dim']} = {worst['label']}",
             "body": f"The {worst['label']} {worst['dim'].lower()} cohort carries {worst['fp']} FP "
                     f"for {worst['tp']} TP across {worst['n_prs']} PRs.",
-            "measurement": f"Next-run target: FP below {worst['fp']} on {worst['label']} {worst['dim'].lower()} slices.",
+            "measurement": f"Next-run target: FP below {worst['fp']} on {worst['label']} "
+                           f"{worst['dim'].lower()} slices.",
             "citation": f"source: {labels_source} (Slices panel)",
         })
 
@@ -323,7 +324,8 @@ def _build_improvements(
             "priority": 3,
             "heading": f"Re-judge daydream under {displays}",
             "body": f"daydream has no leaf under: {ids}.",
-            "measurement": "Next-run target: fill the cross-judge panels and confirm the precision story is judge-robust.",
+            "measurement": "Next-run target: fill the cross-judge panels and confirm the "
+                           "precision story is judge-robust.",
             "citation": f"source: discovered judges {ids}",
         })
 

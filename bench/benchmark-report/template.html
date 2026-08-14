@@ -245,7 +245,7 @@ svg{display:block;width:100%;height:auto;overflow:visible;}
 
   <section class="section" id="sec-improve" data-nav="Next run">
     <div class="h2"><span class="glyph">◇</span>IMPROVEMENTS BEFORE THE NEXT RUN<span class="n">prioritized · falsifiable</span></div>
-    <p class="subhead">Grounded in the numbers above. Each item names a predicted, measurable effect so the next run can confirm or refute it.</p>
+    <p class="subhead">Derived from this corpus's measured evidence — aggregate judge metrics, label slices, and exact source paths. Each item names a measurable next-run target so the next run can confirm or refute it.</p>
     <div id="improvements"></div>
   </section>
 
@@ -588,37 +588,14 @@ function renderTable(){
 }
 
 function renderImprovements(){
-  const anchor=DATA.judges.find(j=>j.has_daydream);
   const host=$("#improvements");host.innerHTML="";
-  if(!anchor){host.innerHTML='<div class="placeholder">no scored judge</div>';return;}
-  const d=anchor.daydream;
-  let worst=null;
-  DATA.slices.forEach(sl=>sl.rows.forEach(r=>{const ratio=r.tp?r.fp/r.tp:(r.fp?99:0);
-    if(r.fp>=3&&(!worst||ratio>worst.ratio))worst={dim:sl.title,label:r.label,ratio,fp:r.fp,tp:r.tp};}));
-  const fieldF1=DATA.judges.filter(j=>j.field.length).map(j=>j.field[0].f1);
-  const f1Spread=fieldF1.length?((Math.max(...fieldF1)-Math.min(...fieldF1))*100).toFixed(1):"~2";
-  const newP=d.tp*0.9/(d.tp*0.9+d.fp*0.55);
-  const worstLift=worst?((d.tp/(d.tp+d.fp-Math.round(worst.fp/2))-d.precision)*100).toFixed(1):"0";
-  const items=[
-    {p:1,cls:"",h:"Confidence-gate / severity-threshold the candidate set",
-     body:`daydream flags <b>${d.tp+d.fp}</b> findings to capture <b>${d.tp}</b> true positives — precision ${pct(d.precision)}% (#${anchor.ranks.precision[0]} of ${anchor.ranks.precision[1]}). Drop low-confidence / low-severity candidates before they reach the judge.`,
-     pred:`Predict: dropping the bottom ~40% of candidates by confidence cuts FP ${d.fp}→~${Math.round(d.fp*0.55)} while keeping ≥${Math.round(d.tp*0.9)} TP → precision ≈ ${pct(newP)}% (from ${pct(d.precision)}%), F1 ≈ ${pct(2*newP*(d.recall*0.9)/(newP+d.recall*0.9))}%.`,
-     cite:`source: results/${esc(DATA.meta.anchor_judge)}/evaluations.json (${esc(DDTOOL)} false_positives lists)`},
-    {p:1,cls:"",h:"De-duplicate near-identical candidates per PR before submission",
-     body:`Many FPs are restatements of one concern (e.g. the grafana singleflight finding recurs as three distinct candidates). The harness already runs step2.5 dedup corpus-side; mirror it pre-submission so siblings collapse to one.`,
-     pred:`Predict: per-PR candidate dedup removes 15–25% of FP at zero TP loss → precision +3–5 pts independent of item 1.`,
-     cite:`source: step2_5_dedup_candidates module · leaf total_candidates vs fp`},
-    {p:2,cls:"p2",h:worst?`Tighten the worst-precision slice: ${esc(worst.dim)} = ${esc(worst.label)}`:"Tighten the noisiest label slice",
-     body:worst?`The <b>${esc(worst.label)}</b> ${esc(worst.dim.toLowerCase())} cohort carries ${worst.fp} FP for ${worst.tp} TP (${worst.ratio.toFixed(1)}× FP:TP) — daydream's noisiest slice. Add slice-specific guardrails or suppress speculative findings there.`:"Add guardrails on the noisiest label cohort.",
-     pred:worst?`Predict: halving FP on this slice lifts overall precision ~${worstLift} pts.`:"Predict: measurable precision lift on the targeted slice.",
-     cite:`source: results/pr_labels.json joined to daydream leaves (Slices panel)`},
-    {p:3,cls:"p3",h:"Re-judge daydream under Sonnet 4.5 and GPT-5.2",
-     body:`daydream has a leaf only under <b>${esc(anchor.display)}</b>. The other ${DATA.judges.length-1} discovered judges show the field but a placeholder for daydream. Running the judge step under each fills the cross-judge panels and tests whether the precision story is judge-robust.`,
-     pred:`Predict: F1 moves within ±3 pts across judges (the field's best-F1 tool shifts only ${f1Spread} pts across the three), so daydream's bottom-precision standing is judge-robust.`,
-     cite:`source: discovered judges ${esc(DATA.judges.map(j=>j.id).join(", "))}`},
-  ];
-  items.forEach(it=>{const div=document.createElement("div");div.className="imp "+it.cls;
-    div.innerHTML=`<div class="pri">${it.p}</div><div class="body"><h4>${it.h}</h4><p>${it.body}</p><div class="pred">▸ ${it.pred}</div><div class="cite">${it.cite}</div></div>`;host.appendChild(div);});
+  const items=DATA.improvements;
+  if(!items.length){
+    host.innerHTML='<div class="placeholder">No evidence-backed recommendations were generated for this corpus.</div>';
+    return;
+  }
+  items.forEach(it=>{const div=document.createElement("div");div.className="imp "+(it.priority===2?"p2":it.priority===3?"p3":"");
+    div.innerHTML=`<div class="pri">${esc(it.priority)}</div><div class="body"><h4>${esc(it.heading)}</h4><p>${esc(it.body)}</p><div class="pred">\u25b8 ${esc(it.measurement)}</div><div class="cite">${esc(it.citation)}</div></div>`;host.appendChild(div);});
 }
 
 function renderFoot(){
