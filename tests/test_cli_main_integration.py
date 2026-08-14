@@ -228,5 +228,7 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 1
-    assert "run-abc" not in (repo / ".daydream" / "worktrees").glob("*")
+    assert not any(
+        p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*")
+    )
     assert not (repo / ".daydream" / "worktrees" / "run-abc").exists()

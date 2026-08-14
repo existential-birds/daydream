@@ -1673,14 +1673,11 @@ def _handle_prune_reanchor(config: RunConfig) -> int:
     console = create_console()
     name = config.improve_prune_name
     assert name is not None  # the prune-reanchor sub-verb guard guarantees this
-    repo = Path(config.target) if config.target else Path.cwd()
+    repo = Path(config.target)
     outcome = prune_named_reanchor_worktree(repo, name)
     if outcome.verdict == PRUNE_REMOVED:
-        suffix = (
-            f" (held {outcome.plan_count} re-anchored plans)"
-            if outcome.plan_count > 1
-            else ""
-        )
+        plans = "plans" if outcome.plan_count != 1 else "plan"
+        suffix = f" (held {outcome.plan_count} re-anchored {plans})"
         print_success(console, f"Removed worktree {name}{suffix}")
         return 0
     if outcome.verdict == PRUNE_NOT_FOUND:
@@ -1702,7 +1699,7 @@ def _handle_list_reanchor(config: RunConfig) -> int:
     from daydream.improve.plans import list_reanchor_worktrees
 
     console = create_console()
-    repo = Path(config.target) if config.target else Path.cwd()
+    repo = Path(config.target)
     for path in list_reanchor_worktrees(repo):
         print_info(console, path.name)
     return 0

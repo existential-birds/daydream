@@ -646,6 +646,29 @@ def planned_fingerprints(plans_dir: Path) -> set[str]:
     }
 
 
+def _worktrees_dir(repo: Path) -> Path:
+    """Return the ``.daydream/worktrees`` base directory for a repo.
+
+    Shared by every re-anchor worktree consumer so the base path cannot be
+    broadened in one place while others drift.
+    """
+    return repo / ".daydream" / "worktrees"
+
+
+def _iter_reanchor_worktrees(repo: Path) -> Iterable[Path]:
+    """Yield existing ``*-reanchor`` worktree directories under ``.daydream/worktrees``.
+
+    Single source of truth for which worktrees the automatic prune removes and
+    the manual list reports, so the discovery contract cannot drift. Existing
+    directories only; non-directory entries are skipped.
+    """
+    return (
+        path
+        for path in _worktrees_dir(repo).glob(f"*{_REANCHOR_DIR_SUFFIX}")
+        if path.is_dir()
+    )
+
+
 def prune_stale_reanchor_worktrees(repo: Path) -> int:
     """Remove leftover ``*-reanchor`` worktrees from prior plan runs.
 
@@ -655,11 +678,7 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     so one stale worktree never blocks a plan run.
     """
     removed = 0
-    for path in (
-        repo / ".daydream" / "worktrees"
-    ).glob(f"*{_REANCHOR_DIR_SUFFIX}"):
-        if not path.is_dir():
-            continue
+    for path in _iter_reanchor_worktrees(repo):
         try:
             git_ops.worktree_remove(repo, path, force=True)
         except git_ops.GitError:
@@ -707,7 +726,7 @@ def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
         _REANCHOR_DIR_SUFFIX
     ):
         return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
-    path = repo / ".daydream" / "worktrees" / name
+    path = _worktrees_dir(repo) / name
     if not path.is_dir():
         return NamedPruneOutcome(PRUNE_NOT_FOUND)
     plans = path / "daydream_plans"
@@ -729,13 +748,7 @@ def list_reanchor_worktrees(repo: Path) -> list[Path]:
     can discover them before pruning. Existing directories only; non-directory
     entries are skipped, matching ``prune_stale_reanchor_worktrees``.
     """
-    return [
-        path
-        for path in (repo / ".daydream" / "worktrees").glob(
-            f"*{_REANCHOR_DIR_SUFFIX}"
-        )
-        if path.is_dir()
-    ]
+    return list(_iter_reanchor_worktrees(repo))
 
 
 def _highest_plan_number(
@@ -1360,12 +1373,7 @@ class PlanWriteSession:
                 run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
-                worktree = (
-                    self._repo
-                    / ".daydream"
-                    / "worktrees"
-                    / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
-                )
+                worktree = _worktrees_dir(self._repo) / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
                 git_ops.worktree_add(
                     self._repo, worktree, new_head, detach=True
                 )
