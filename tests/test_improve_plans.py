@@ -28,6 +28,7 @@ from daydream.improve.plans import (
     PRUNE_NOT_FOUND,
     PRUNE_NOT_REANCHOR,
     PRUNE_REMOVED,
+    PRUNE_UNSAFE_NAME,
     PlanWriteSession,
     load_rejections,
     planned_fingerprints,
@@ -1728,14 +1729,13 @@ def test_prune_named_reanchor_worktree_reports_plan_count(
 @pytest.mark.parametrize(
     "bad_name",
     [
-        "run-abc",          # no -reanchor suffix
         "../etc-reanchor",  # traversal: slash + leading dot
         ".hidden-reanchor",  # first char not [A-Za-z0-9]
         "a" * 81,           # over _SAFE_DIRNAME's 0-79 tail bound
         "run abc-reanchor",  # space outside the safe class
     ],
 )
-def test_prune_named_reanchor_worktree_rejects_invalid_names(
+def test_prune_named_reanchor_worktree_rejects_unsafe_names(
     repo: Path, bad_name: str
 ) -> None:
     from daydream.improve.plans import prune_named_reanchor_worktree
@@ -1745,6 +1745,25 @@ def test_prune_named_reanchor_worktree_rejects_invalid_names(
     ).exists() else set()
 
     outcome = prune_named_reanchor_worktree(repo, bad_name)
+
+    assert outcome.verdict == PRUNE_UNSAFE_NAME
+    after = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+    assert before == after  # nothing reached the filesystem or git
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
+    repo: Path,
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    before = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abc")
 
     assert outcome.verdict == PRUNE_NOT_REANCHOR
     after = set((repo / ".daydream" / "worktrees").glob("*")) if (

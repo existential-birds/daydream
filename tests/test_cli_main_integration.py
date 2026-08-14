@@ -232,3 +232,60 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(
         p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*")
     )
     assert not (repo / ".daydream" / "worktrees" / "run-abc").exists()
+
+
+def test_cli_main_list_reanchor_lists_and_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``improve list-reanchor`` through cli.main exits 0 and names the
+    re-anchor worktrees the automatic prune would remove.
+
+    The sync sub-verb short-circuits in ``main()`` (no anyio/agent work), so no
+    stub backend is needed; the observable outcome is the exit code and the
+    printed worktree names.
+    """
+    from tests.harness.git_helpers import git
+    from tests.test_improve_plans import _repo
+
+    repo, _ = _repo(tmp_path)
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    listed: list[str] = []
+    monkeypatch.setattr(
+        "daydream.cli.print_info",
+        lambda _console, name: listed.append(str(name)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "list-reanchor", str(repo)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0
+    assert listed == ["run-abcd-reanchor"]
+
+
+def test_cli_main_list_reanchor_empty_exits_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty re-anchor set still exits 0 — listing nothing is not an error."""
+    from tests.test_improve_plans import _repo
+
+    repo, _ = _repo(tmp_path)
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    monkeypatch.setattr("daydream.cli.print_info", lambda *a, **k: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "list-reanchor", str(repo)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 0

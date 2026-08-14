@@ -692,6 +692,7 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
 PRUNE_REMOVED = "removed"
 PRUNE_NOT_FOUND = "not-found"
 PRUNE_NOT_REANCHOR = "not-reanchor"
+PRUNE_UNSAFE_NAME = "unsafe-name"
 PRUNE_GIT_FAILURE = "git-failure"
 
 
@@ -700,7 +701,8 @@ class NamedPruneOutcome:
     """Outcome of a prune of one named re-anchor worktree.
 
     ``verdict`` is one of :data:`PRUNE_REMOVED`, :data:`PRUNE_NOT_FOUND`,
-    :data:`PRUNE_NOT_REANCHOR`, or :data:`PRUNE_GIT_FAILURE`. ``plan_count``
+    :data:`PRUNE_NOT_REANCHOR`, :data:`PRUNE_UNSAFE_NAME`, or
+    :data:`PRUNE_GIT_FAILURE`. ``plan_count``
     is best-effort metadata for the removal notice only, never a gate.
     """
 
@@ -718,13 +720,15 @@ def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
     removal notice; it never affects removal. Removal failures are reported as
     :data:`PRUNE_GIT_FAILURE`, never coerced to success.
 
-    Returns :data:`PRUNE_NOT_REANCHOR` for an invalid name, :data:`PRUNE_NOT_FOUND`
-    when the named directory is absent, :data:`PRUNE_REMOVED` on a successful
-    removal, and :data:`PRUNE_GIT_FAILURE` when removal itself fails.
+    Returns :data:`PRUNE_UNSAFE_NAME` for a name that fails the
+    filesystem-safe dirname rules, :data:`PRUNE_NOT_REANCHOR` for a safe name
+    lacking the ``-reanchor`` suffix, :data:`PRUNE_NOT_FOUND` when the named
+    directory is absent, :data:`PRUNE_REMOVED` on a successful removal, and
+    :data:`PRUNE_GIT_FAILURE` when removal itself fails.
     """
-    if _SAFE_DIRNAME.fullmatch(name) is None or not name.endswith(
-        _REANCHOR_DIR_SUFFIX
-    ):
+    if _SAFE_DIRNAME.fullmatch(name) is None:
+        return NamedPruneOutcome(PRUNE_UNSAFE_NAME)
+    if not name.endswith(_REANCHOR_DIR_SUFFIX):
         return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
     path = _worktrees_dir(repo) / name
     if not path.is_dir():

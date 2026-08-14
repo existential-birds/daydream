@@ -75,6 +75,16 @@ KNOWN_VERBS = {
     "ext",
 }
 
+# Sub-verbs recognized under the ``improve`` verb. Single source of truth for
+# improve sub-verb dispatch: ``_parse_improve_args`` strips any of these from
+# argv, and ``main()`` derives its sync short-circuit set from this constant so
+# the two can never drift apart.
+IMPROVE_SUB_VERBS = frozenset({"plan", "prune-reanchor", "list-reanchor"})
+# Sub-verbs that do no agent work and short-circuit to sync handlers in
+# ``main()`` — everything except the ``plan`` flow, which routes through
+# ``anyio.run(run, ...)``.
+IMPROVE_SYNC_SUB_VERBS = IMPROVE_SUB_VERBS - {"plan"}
+
 
 def _first_verb(argv: list[str]) -> str:
     """Classify the leading argv token into a verb.
@@ -620,8 +630,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
     improve_argv = argv[1:] if argv and argv[0] == "improve" else argv
     subverb = (
         improve_argv[0]
-        if improve_argv
-        and improve_argv[0] in {"plan", "prune-reanchor", "list-reanchor"}
+        if improve_argv and improve_argv[0] in IMPROVE_SUB_VERBS
         else None
     )
     if subverb is not None:
@@ -1667,6 +1676,7 @@ def _handle_prune_reanchor(config: RunConfig) -> int:
         PRUNE_NOT_FOUND,
         PRUNE_NOT_REANCHOR,
         PRUNE_REMOVED,
+        PRUNE_UNSAFE_NAME,
         prune_named_reanchor_worktree,
     )
 
@@ -1685,6 +1695,10 @@ def _handle_prune_reanchor(config: RunConfig) -> int:
     elif outcome.verdict == PRUNE_NOT_REANCHOR:
         print_error(
             console, "Prune re-anchor", f"{name!r} is not a -reanchor worktree"
+        )
+    elif outcome.verdict == PRUNE_UNSAFE_NAME:
+        print_error(
+            console, "Prune re-anchor", f"{name!r} is not a safe worktree name"
         )
     else:  # PRUNE_GIT_FAILURE
         print_error(console, "Prune re-anchor", f"Could not remove {name}")
@@ -1770,11 +1784,12 @@ def main() -> None:
         # ``improve prune-reanchor`` / ``list-reanchor`` are pure filesystem
         # cleanup (no agent work), so short-circuit to a sync handler instead of
         # routing every improve invocation through anyio.run(run, ...). Peek
-        # ``argv[1]`` exactly as ``_parse_improve_args`` does.
-        if verb == "improve" and (argv[1] if len(argv) > 1 else None) in {
-            "prune-reanchor",
-            "list-reanchor",
-        }:
+        # ``argv[1]`` exactly as ``_parse_improve_args`` does; the set comes from
+        # :data:`IMPROVE_SYNC_SUB_VERBS`, derived from the shared
+        # :data:`IMPROVE_SUB_VERBS` so dispatch can't drift.
+        if verb == "improve" and (
+            argv[1] if len(argv) > 1 else None
+        ) in IMPROVE_SYNC_SUB_VERBS:
             config = _parse_improve_args(argv)
             if argv[1] == "prune-reanchor":
                 sys.exit(_handle_prune_reanchor(config))
