@@ -14,7 +14,9 @@ cannot verify and that a careless edit could silently break:
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
-  review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth).
+  review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth), and
+  the repository workflow README names ``OPENAI_API_KEY`` as the credential the
+  live Codex workflow consumes.
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """
@@ -111,9 +113,7 @@ def _action_references(wf: dict[str, Any]) -> list[str]:
 # never ${{ }} interpolation, which would splice attacker-controlled text into the
 # shell.
 
-_EVENT_INTERP = re.compile(
-    r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}"
-)
+_EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
 
 
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
@@ -123,8 +123,7 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
         for step in job["steps"]:
             if "run" in step:
                 assert not _EVENT_INTERP.search(step["run"]), (
-                    f"{wf_path.name}:{job_name}: event data must reach run: via env:, "
-                    f"never ${{{{ }}}} interpolation"
+                    f"{wf_path.name}:{job_name}: event data must reach run: via env:, never ${{{{ }}}} interpolation"
                 )
 
 
@@ -169,9 +168,7 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
 # the moving `main` tip, across every live and shipped workflow. Fails on
 # release until the pin is bumped in lockstep with the package version.
 
-_INSTALL_RE = re.compile(
-    r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
-)
+_INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?")
 
 
 def _package_version() -> str:
@@ -234,23 +231,29 @@ _APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d13972
 # job, a refloated pin, or a newly added unpinned token action fails loudly rather
 # than being silently absorbed by a wildcard.
 _APP_TOKEN_PIN_CASES = [
-    (TEMPLATES_DIR / "daydream-post.yml", "template-post",
-     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
-    (REPO_WORKFLOWS_DIR / "daydream-post.yml", "live-post",
-     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
-    (TEMPLATES_DIR / "daydream-command.yml", "template-command",
-     [("dispatch", _APP_TOKEN_ACTION)]),
-    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command",
-     [("dispatch", _APP_TOKEN_ACTION)]),
-    (TEMPLATES_DIR / "single" / "daydream.yml", "single",
-     [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION),
-      ("surface-failure", _APP_TOKEN_ACTION)]),
+    (
+        TEMPLATES_DIR / "daydream-post.yml",
+        "template-post",
+        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
+    ),
+    (
+        REPO_WORKFLOWS_DIR / "daydream-post.yml",
+        "live-post",
+        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
+    ),
+    (TEMPLATES_DIR / "daydream-command.yml", "template-command", [("dispatch", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command", [("dispatch", _APP_TOKEN_ACTION)]),
+    (
+        TEMPLATES_DIR / "single" / "daydream.yml",
+        "single",
+        [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION), ("surface-failure", _APP_TOKEN_ACTION)],
+    ),
 ]
 
 
-@pytest.mark.parametrize("wf_path,expected",
-                         [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES],
-                         ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES])
+@pytest.mark.parametrize(
+    "wf_path,expected", [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES], ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES]
+)
 def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list) -> None:
     wf = load_workflow(wf_path)
     token_action_uses = [
@@ -280,12 +283,9 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     """
     text = wf_path.read_text(encoding="utf-8")
     assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text, (
-        f"{wf_path.name}: Post findings step must export BOT_LOGIN from "
-        f"vars.DAYDREAM_BOT_HANDLE (issue #254)"
+        f"{wf_path.name}: Post findings step must export BOT_LOGIN from vars.DAYDREAM_BOT_HANDLE (issue #254)"
     )
-    assert '--bot-login "$BOT_LOGIN"' in text, (
-        f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
-    )
+    assert '--bot-login "$BOT_LOGIN"' in text, f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
 
 
 def test_single_setup_preserves_privilege_split() -> None:
@@ -319,15 +319,22 @@ def test_single_setup_preserves_privilege_split() -> None:
     }
 
 
-# Repo dogfood workflow (Codex): the one non-obvious behavioral constraint worth
-# guarding — `codex exec` does not read OPENAI_API_KEY for model-API auth, so
-# `codex login --with-api-key` must persist auth.json BEFORE the review runs.
+# Repo dogfood workflow (Codex). The full rationale — the `codex exec` auth
+# gap, the `codex login --with-api-key` persistence, and the README's naming of
+# the live credential — lives in the module docstring and is exercised by
+# test_repo_workflow_readme_documents_codex_credential; this test asserts the
+# login-persistence ordering that rationale requires.
+
+
+def _assert_repo_workflow_uses_openai_credential() -> None:
+    """Assert the repo's live review workflow uses OPENAI_API_KEY as its only secret."""
+    text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
+    assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
 
 
 def test_repo_review_authenticates_codex_before_running() -> None:
     wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
-    text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
-    assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
+    _assert_repo_workflow_uses_openai_credential()
 
     steps = job_steps(wf, "analyze")
     login = next(s for s in steps if "codex login --with-api-key" in s.get("run", ""))
@@ -336,3 +343,31 @@ def test_repo_review_authenticates_codex_before_running() -> None:
     assert steps.index(login) < review_idx, "Codex auth must be persisted before the review runs"
     # The review step authenticates via auth.json, not a redundant env secret.
     assert "OPENAI_API_KEY" not in steps[review_idx].get("env", {})
+
+
+@pytest.mark.parametrize(
+    "section_start,section_end",
+    [
+        ("## Install", "## Trigger matrix"),
+        ("## Security model — the privilege split", "## Dedup limitations (v1)"),
+    ],
+    ids=["install", "security-model"],
+)
+def test_repo_workflow_readme_documents_codex_credential(section_start: str, section_end: str) -> None:
+    _assert_repo_workflow_uses_openai_credential()
+    readme_text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
+
+    start = readme_text.find(section_start)
+    assert start != -1, (
+        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing section header {section_start!r} "
+        f"— renamed or re-worded? Keep it in sync with this test."
+    )
+    end = readme_text.find(section_end, start)
+    assert end != -1, (
+        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing header {section_end!r} after "
+        f"{section_start!r} — renamed/re-worded, or did the two headers swap order?"
+    )
+    section = readme_text[start:end]
+
+    assert "`OPENAI_API_KEY`" in section
+    assert "ANTHROPIC_API_KEY" not in section
