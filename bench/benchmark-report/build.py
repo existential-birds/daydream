@@ -31,12 +31,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeGuard
 
+from daydream.benchmark.score import JUDGE_ERROR_RATIO_THRESHOLD
 from daydream.pricing import ModelPrice, compute_cost, load_user_prices, resolve_prices
 from daydream.timeutil import parse_iso_timestamp
-
-# Judge-error guard from daydream/benchmark/score.py: above this ratio of failed
-# comparisons the tp/fp/fn collapse to noise, not a real zero.
-JUDGE_ERROR_RATIO_THRESHOLD = 0.5
 
 # Vendor prefixes the published SaaS field carries; the harness writes daydream
 # with no prefix. Stripping these collapses the two dirs onto one judge id.
