@@ -93,6 +93,12 @@ class StubBackend:
         self.fail_all_test_runs: bool = False
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
+        # When set, the cross-stack merge branch emits unparseable prose text
+        # (no structured output) -- drives the "got str" salvage path (#361).
+        self.merge_emit_str: str | None = None
+        # When set, the cross-stack merge branch emits a BARE item list (not
+        # wrapped in {"items": [...]}) -- the R1 parseable-list shape (#361).
+        self.merge_emit_bare_list: list[dict[str, Any]] | None = None
         # Optional LLM supervisor verdicts keyed by canonical item id.
         self.supervise_verdicts: dict[int, dict[str, Any]] | None = None
         # Optional deferred Write tool pairs for the built-in tool-supervisor tests.
@@ -569,6 +575,13 @@ class StubBackend:
         # structural findings, normalizes ids, and renders review-output.md.
         if "cross-stack merge agent" in pl:
             yield TextEvent(text="")
+            if self.merge_emit_str is not None:
+                yield TextEvent(text=self.merge_emit_str)
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            if self.merge_emit_bare_list is not None:
+                yield ResultEvent(structured_output=self.merge_emit_bare_list, continuation=None)
+                return
             if self.merge_echo_records:
                 # Echo the on-disk per-stack records as merged items so the
                 # rendered artifact reflects any arbiter revisions (#168).

@@ -35,6 +35,8 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.phases import phase_cross_stack_merge
+from tests.harness.stub_backend import install_stub_backend, silence
+from tests.test_deep_orchestrator import _merge_item, _run_deep
 
 
 def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
@@ -166,3 +168,24 @@ async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work) -
         )
     assert excinfo.value.response_shape == "str"
     assert excinfo.value.stack_context == ["python"]
+
+
+async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatch) -> None:
+    """R7(i): a bare-list merge result is merged and the run succeeds."""
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_bare_list = [
+        _merge_item(1, "store/cache.py", "high", desc="unbounded cache write"),
+        _merge_item(2, "cli/main.py", "medium", desc="unused arg"),
+    ]
+    assert await _run_deep(multi_stack_target) == 0
+    items = json.loads(merged_items_path(deep_dir(multi_stack_target)).read_text())
+    # Structural findings are appended after the merge independent of this branch,
+    # so scope the assertion to the per-stack merge items (R7(i)): the bare-list
+    # result is normalized + merged rather than rejected or silently lost.
+    per_stack = [i["file"] for i in items["items"] if i.get("lens") == "per-stack"]
+    assert per_stack == ["store/cache.py", "cli/main.py"]
+    assert items.get("partial") is not True
