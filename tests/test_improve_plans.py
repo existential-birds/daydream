@@ -14,6 +14,7 @@ from daydream.improve.assemble import (
     assemble_plan,
     render_issue,
 )
+from daydream.improve.orchestrator import _reanchored_report_section
 from daydream.improve.command_contract import (
     canonicalize_directory_scope,
     literal_command_error,
@@ -4021,3 +4022,24 @@ def test_improve_list_reanchored_json_mode(
     assert rows[0]["title"] == "Fix N+1 catalog queries"
     assert rows[0]["status"].startswith("REANCHORED")
     assert rows[0]["landing_path"] == expected_rel
+
+
+def test_reanchored_report_section_lists_rows(repo: Path, head_sha: str) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    section = _reanchored_report_section(repo / "daydream_plans")
+
+    assert "## Re-anchored plans" in section
+    assert "001" in section
+    assert "Fix N+1 catalog queries" in section
+    assert expected_rel in section
+
+
+def test_reanchored_report_section_empty(tmp_path: Path) -> None:
+    plans_dir = tmp_path / "daydream_plans"
+    plans_dir.mkdir(parents=True)  # no .index.json
+
+    section = _reanchored_report_section(plans_dir)
+
+    assert "## Re-anchored plans" in section
+    assert "No re-anchored plans" in section
