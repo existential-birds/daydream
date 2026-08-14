@@ -310,12 +310,13 @@ async def test_direct_scoring_filters_extraction_and_dedup_to_selected_urls(tmp_
     }))
 
     # Stale selected leaves + preserved unselected leaves (sentinel-bearing).
-    preserved_candidates = [{"text": UNSELECTED_SENTINEL, "path": None, "line": None}]
+    preserved_candidates = [{"text": UNSELECTED_SENTINEL, "path": None, "line": None},
+                               {"text": UNSELECTED_SENTINEL, "path": None, "line": None}]
     (model_dir / "candidates.json").write_text(json.dumps({
         URL: {"daydream": [{"text": "stale selected candidate", "path": None, "line": None}]},
         UNSELECTED_URL: {"daydream": preserved_candidates},
     }))
-    preserved_groups = [[0, 1]]
+    preserved_groups = [[0], [1]]
     (model_dir / "dedup_groups.json").write_text(json.dumps({
         URL: {"daydream": [[0]]},
         UNSELECTED_URL: {"daydream": preserved_groups},
