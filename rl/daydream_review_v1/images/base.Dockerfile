@@ -121,8 +121,9 @@ RUN if [ "${INSTALL_CLAUDE}" = "1" ]; then \
 # does not drag a node runtime in ahead of the pi layer that actually needs one.
 # Release tags are `rust-vX.Y.Z`; each asset unpacks to a single file named after
 # its target triple, which is why it is renamed rather than extracted in place.
-# The archive is downloaded to a temp file, verified against the published GitHub
-# release asset digest, then extracted — never piped straight into tar.
+# The archive is downloaded to a temp file and verified against a locally pinned
+# SHA256 constant (captured from the published GitHub release asset at pin time),
+# then extracted — never piped straight into tar.
 ARG INSTALL_CODEX=1
 ARG CODEX_VERSION=0.145.0
 RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
@@ -147,8 +148,9 @@ RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
 # a full node distribution. Node goes to /usr/local so `npm install -g` puts the
 # `pi` binary in /usr/local/bin with no prefix juggling. The .tar.gz build is
 # used, not .tar.xz, so the base needs no xz-utils. The Node archive is
-# downloaded to a temp file and verified against the checksums in v22.17.1's
-# published signed SHASUMS256.txt before it is extracted.
+# downloaded to a temp file and verified against a locally pinned SHA256 constant
+# (captured from v22.17.1's published signed SHASUMS256.txt at pin time) before it
+# is extracted.
 ARG INSTALL_PI=1
 ARG NODE_VERSION=22.17.1
 ARG PI_VERSION=0.82.1

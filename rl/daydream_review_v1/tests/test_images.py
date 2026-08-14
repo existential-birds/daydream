@@ -158,7 +158,7 @@ def test_base_dockerfile_pins_immutable_versions_and_checksums(required_literal:
         pytest.param(
             (
                 "claude-code.asc",        # release-key download
-                "release_fingerprint",    # fingerprint comparison
+                '!= "${release_fingerprint}"',  # fingerprint-mismatch guard (real `!=` on the pin)
                 "--import",               # gpg signing-key import
                 "manifest.json",          # manifest download
                 "manifest.json.sig",      # detached-signature download
