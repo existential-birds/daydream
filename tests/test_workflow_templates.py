@@ -8,6 +8,7 @@ cannot verify and that a careless edit could silently break:
 - No untrusted event data is interpolated into a ``run:`` body (injection).
 - The daydream install stays pinned to the current release tag (cross-file
   drift against ``pyproject.toml``).
+- Every App-token action in the live and packaged posting workflows stays pinned to the approved v2.2.2 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
@@ -126,6 +127,41 @@ def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
     for job in post["jobs"].values():
         assert not has_checkout(job)
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
+
+
+_APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+
+# Every token-minting workflow, shipped or live, pins every App-token action to
+# the approved v2.2.2 commit. Lists the concrete (job, action) pairs so a renamed
+# job, a refloated pin, or a newly added unpinned token action fails loudly rather
+# than being silently absorbed by a wildcard.
+_APP_TOKEN_PIN_CASES = [
+    (TEMPLATES_DIR / "daydream-post.yml", "template-post",
+     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-post.yml", "live-post",
+     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
+    (TEMPLATES_DIR / "daydream-command.yml", "template-command",
+     [("dispatch", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command",
+     [("dispatch", _APP_TOKEN_ACTION)]),
+    (TEMPLATES_DIR / "single" / "daydream.yml", "single",
+     [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION),
+      ("surface-failure", _APP_TOKEN_ACTION)]),
+]
+
+
+@pytest.mark.parametrize("wf_path,expected",
+                         [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES],
+                         ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES])
+def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list) -> None:
+    wf = load_workflow(wf_path)
+    token_action_uses = [
+        (job_name, str(step.get("uses", "")))
+        for job_name, job in wf["jobs"].items()
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
+    ]
+    assert sorted(token_action_uses) == sorted(expected)
 
 
 @pytest.mark.parametrize(
