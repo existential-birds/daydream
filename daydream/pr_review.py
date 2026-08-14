@@ -1,10 +1,14 @@
-"""Post daydream review findings as inline comments on the current branch's PR.
+"""Post daydream review findings as inline comments on a target PR.
 
-Shared by deep-review mode (reads canonical `merged-items.json`) and
-comment mode (`--comment`) (consumes alt-review issues directly).
+Shared by deep-review mode (reads canonical `merged-items.json`), comment
+mode (`--comment`) (consumes alt-review issues directly), and
+`scripts/redrive_post.py` (a thin CLI over the same canonical
+`merged-items.json` that a redrive must post).
 
 Flow:
-    1. Locate the open PR for the current branch via `gh pr list`.
+    1. Locate the target PR: by explicit number via `gh pr view` when
+       `pr_number` is supplied (consumer: `scripts/redrive_post.py`), else
+       the current branch's open PR via `gh pr list`.
     2. Parse issues (from canonical merged items or alt-issue dicts).
     3. Resolve each issue to a real head-SHA line via anchor grep.
     4. Classify into inline (line within a diff hunk), file-level (file in
@@ -158,6 +162,7 @@ async def post_review_to_pr_from_report(
     console: Console,
     post: bool = False,
     approve_on_clean: bool = False,
+    pr_number: int | None = None,
 ) -> PostStatus:
     """Read canonical `merged-items.json` and offer to post to the PR.
 
@@ -171,6 +176,11 @@ async def post_review_to_pr_from_report(
     ``approve_on_clean=True`` (issue #343) opts into posting
     ``event: "APPROVE"`` when the review has zero high/medium findings.
 
+    ``pr_number``: when set, resolves the target PR by explicit number via
+    ``gh pr view`` (redrive) instead of the current branch's open PR;
+    a failing explicit lookup returns :attr:`PostStatus.NO_PR` with no
+    fallback to current-branch discovery.
+
     Returns:
         A :class:`PostStatus` describing the outcome so the caller can decide
         whether a non-posting run is a failure (comment mode) or a
@@ -178,13 +188,28 @@ async def post_review_to_pr_from_report(
     """
     if not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
-    items = json.loads(merged_items_path.read_text()).get("items", [])
+    try:
+        items = json.loads(merged_items_path.read_text()).get("items", [])
+    except (OSError, json.JSONDecodeError):
+        # A corrupt/partially-written merged-items.json must not crash the run
+        # with an unhandled JSONDecodeError; treat it like a missing file and
+        # skip the post cleanly (#400).
+        print_warning(
+            console,
+            f"Could not read {merged_items_path.name}; skipping PR post.",
+        )
+        return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
     if not issues and not approve_on_clean:
         print_info(console, "No parseable issues in review output; skipping PR post.")
         return PostStatus.NOTHING_TO_POST
     return await _post(
-        target_dir, issues, console=console, post=post, approve_on_clean=approve_on_clean
+        target_dir,
+        issues,
+        console=console,
+        post=post,
+        approve_on_clean=approve_on_clean,
+        pr_number=pr_number,
     )
 
 
@@ -1041,6 +1066,51 @@ def build_payload(
 # --- Core orchestration ---------------------------------------------------
 
 
+def _resolve_pr(
+    target_dir: Path,
+    console: Console,
+    pr_number: int | None,
+) -> PRInfo | None:
+    """Resolve the target PR for posting.
+
+    Handles both the current-branch discovery path (:func:`find_open_pr`) and
+    the explicitly-pinned path (:func:`find_pr_by_number`). On failure it
+    prints a warning describing the cause — distinguishing a missing PR from a
+    failed owner/repo slug resolution — and returns ``None``.
+
+    Returns:
+        The resolved :class:`PRInfo`, or ``None`` (after warning) when the PR
+        cannot be resolved.
+    """
+    if pr_number is not None:
+        pr = find_pr_by_number(target_dir, pr_number)
+        if pr is None:
+            # Distinguish "PR not found" from "owner/repo slug unresolvable"
+            # so the operator gets a precise diagnostic rather than a generic
+            # "could not resolve" message.
+            if git_ops.gh_pr_view(target_dir, pr_number) is None:
+                print_warning(
+                    console,
+                    f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
+                )
+            else:
+                print_warning(
+                    console,
+                    f"PR #{pr_number} resolved via `gh pr view` but the owner/repo "
+                    "slug could not be resolved via `gh repo view`; skipping PR post.",
+                )
+            return None
+        return pr
+    pr = find_open_pr(target_dir)
+    if pr is None:
+        print_warning(
+            console,
+            "No open PR found for the current branch; skipping PR post.",
+        )
+        return None
+    return pr
+
+
 async def _post(
     target_dir: Path,
     issues: list[ParsedIssue],
@@ -1048,13 +1118,10 @@ async def _post(
     console: Console,
     post: bool = False,
     approve_on_clean: bool = False,
+    pr_number: int | None = None,
 ) -> PostStatus:
-    pr = find_open_pr(target_dir)
+    pr = _resolve_pr(target_dir, console, pr_number)
     if pr is None:
-        print_warning(
-            console,
-            "No open PR found for the current branch; skipping PR post.",
-        )
         return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
