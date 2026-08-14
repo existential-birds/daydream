@@ -64,6 +64,14 @@ _BOT_WORKFLOW_PATHS = sorted(
 
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 
+_DAYDREAM_INSTALL_WORKFLOW_PATHS = [
+    REPO_WORKFLOWS_DIR / "daydream-review.yml",
+    REPO_WORKFLOWS_DIR / "daydream-post.yml",
+    TEMPLATES_DIR / "daydream-review.yml",
+    TEMPLATES_DIR / "daydream-post.yml",
+    TEMPLATES_DIR / "single" / "daydream.yml",
+]
+
 
 def _action_references(wf: dict[str, Any]) -> list[str]:
     """Return job-level and step-level ``uses:`` executable references, in document order."""
@@ -134,15 +142,20 @@ def _package_version() -> str:
     return data["project"]["version"]
 
 
-@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml", "single/daydream.yml"])
-def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
-    text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    "wf_path",
+    _DAYDREAM_INSTALL_WORKFLOW_PATHS,
+    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+def test_daydream_install_is_pinned_to_current_release_tag(wf_path: Path) -> None:
+    text = wf_path.read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
-    assert refs, f"{name} must install daydream via `uv tool install git+…`"
+    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
+    assert refs, f"{rel} must install daydream via `uv tool install git+…`"
     expected = f"@v{_package_version()}"
     for ref in refs:
         assert ref == expected, (
-            f"{name} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
+            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
             f"{expected}. Bump the template pin in lockstep with the package version on release."
         )
 
