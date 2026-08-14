@@ -269,7 +269,25 @@ _GH_DEFAULT_RETRIES = 2
 def _gh_timeout() -> int:
     """Default ``gh`` subprocess timeout in seconds (env-overridable)."""
     raw = os.environ.get("DAYDREAM_GH_TIMEOUT_SECONDS")
-    return int(raw) if raw else _GH_DEFAULT_TIMEOUT
+    if raw is None:
+        return _GH_DEFAULT_TIMEOUT
+    try:
+        value = int(raw)
+    except ValueError:
+        _logger.warning(
+            "DAYDREAM_GH_TIMEOUT_SECONDS=%r is not a valid integer; using default %d",
+            raw,
+            _GH_DEFAULT_TIMEOUT,
+        )
+        return _GH_DEFAULT_TIMEOUT
+    if value <= 0:
+        _logger.warning(
+            "DAYDREAM_GH_TIMEOUT_SECONDS=%r must be positive; using default %d",
+            raw,
+            _GH_DEFAULT_TIMEOUT,
+        )
+        return _GH_DEFAULT_TIMEOUT
+    return value
 
 
 def _gh_retries() -> int:

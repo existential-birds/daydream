@@ -739,6 +739,40 @@ def test_mutating_wrapper_does_not_retry_on_timeout(
 # --- _run_gh timeout retry (fake-gh flake under load) -----------------------
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected_timeout", "expected_warning"),
+    [
+        ("6O", 60, "DAYDREAM_GH_TIMEOUT_SECONDS='6O' is not a valid integer; using default 60"),
+        ("-5", 60, "DAYDREAM_GH_TIMEOUT_SECONDS='-5' must be positive; using default 60"),
+        ("0", 60, "DAYDREAM_GH_TIMEOUT_SECONDS='0' must be positive; using default 60"),
+        ("7", 7, None),
+    ],
+    ids=["malformed", "negative", "zero", "valid"],
+)
+def test_run_gh_timeout_environment_validation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path,
+    env_value: str, expected_timeout: int, expected_warning: str | None,
+) -> None:
+    """`_run_gh` resolves the env timeout at call time, warning+falling back on bad values."""
+    repo = _make_repo_with_main(tmp_path)
+    monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_SECONDS", env_value)
+
+    def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        raise subprocess.TimeoutExpired(cmd=["gh"], timeout=expected_timeout)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", always_timeout)
+    with pytest.raises(git_ops.GitTimeoutError) as exc:
+        git_ops._run_gh(repo, ["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
+    assert str(exc.value) == (
+        "gh repo view --json nameWithOwner -q .nameWithOwner "
+        f"timed out after {expected_timeout}s"
+    )
+    if expected_warning is None:
+        assert "DAYDREAM_GH_TIMEOUT_SECONDS" not in caplog.text
+    else:
+        assert expected_warning in caplog.text
+
+
 def test_run_gh_read_wrapper_retries_then_succeeds_and_exhausts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
