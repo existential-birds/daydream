@@ -2197,7 +2197,7 @@ async def _emit_failure_handoff(
                 question="Copy handoff to clipboard?",
                 default="y",
             ):
-                if copy_to_clipboard(body):
+                if await anyio.to_thread.run_sync(copy_to_clipboard, body):
                     print_success(console, "Handoff copied to clipboard")
                 else:
                     recovery = (
