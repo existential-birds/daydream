@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -56,18 +57,15 @@ async def render_agent(
     """Drive ``run_agent`` over *events* and return the raw terminal output.
 
     The tool-panel / quiet-mode tests all repeated the same harness: a scripted
-    event-yielding backend, the panel animation's ``time.sleep`` stubbed out, a
-    ``StringIO``-backed ``Console`` bound over ``daydream.agent.console``, and
-    ``set_quiet_mode``. The console is pinned (``force_terminal=True``,
-    ``width=120``, ``NEON_THEME``) so wrapping and styling are identical
-    regardless of the host terminal.
+    event-yielding backend, a ``StringIO``-backed ``Console`` bound over
+    ``daydream.agent.console``, and ``set_quiet_mode``. The console is pinned
+    (``force_terminal=True``, ``width=120``, ``NEON_THEME``) so wrapping and
+    styling are identical regardless of the host terminal.
 
     Returns the output with ANSI codes INTACT -- the border/styling assertions
     read them. Callers comparing plain text pass the result to ``strip_ansi``.
     """
     from daydream.agent import run_agent, set_quiet_mode
-
-    monkeypatch.setattr("daydream.ui.panels.time.sleep", lambda _: None)
 
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
@@ -84,6 +82,38 @@ async def render_agent(
         phase=DaydreamPhase.REVIEW,
     )
     return output.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Five consecutive thinking panels render immediately, in order.
+
+    Regression for issue #377: the old LiveThinkingPanel.show slept 0.5s per
+    thought inside the event loop, so five thoughts blocked the loop for
+    >= 2.5s of wall time. render_agent no longer stubs out time.sleep, so this
+    exercises the real production path. The < 2.0s bound is discriminating:
+    the old code needs >= 2.5s; the fixed code renders all five immediately.
+    """
+    thoughts = [f"thought {i} of the stream" for i in range(5)]
+    events: list[Any] = [
+        *[ThinkingEvent(text=t) for t in thoughts],
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+
+    start = time.perf_counter()
+    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 2.0, f"5 thoughts took {elapsed:.2f}s (old code >= 2.5s)"
+
+    assert plain_text.count("Thinking") == 5, "each thought must render its Thinking title once"
+
+    cursor = -1
+    for t in thoughts:
+        idx = plain_text.find(t)
+        assert idx != -1, f"thought {t!r} did not render"
+        assert idx > cursor, f"thought {t!r} rendered out of order"
+        cursor = idx
 
 
 # Fixtures
