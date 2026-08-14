@@ -213,9 +213,13 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
 def _resolve_python_import(import_str: str, repo_root: Path, importer: Path) -> list[Path]:
     candidates: list[Path] = []
     if import_str.startswith("."):
-        # Relative import; resolve against importer's package directory.
+        # Relative import; ascend N-1 package levels for N leading dots,
+        # then resolve the remaining path against that ancestor.
+        relative_level = len(import_str) - len(import_str.lstrip("."))
         base = importer.parent
-        cleaned = import_str.lstrip(".")
+        for _ in range(relative_level - 1):
+            base = base.parent
+        cleaned = import_str[relative_level:]
         parts = cleaned.split(".") if cleaned else []
         target = base
         for part in parts:

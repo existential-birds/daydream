@@ -3,6 +3,7 @@
 import inspect
 from pathlib import Path
 
+import pytest
 from conftest import _commit, _git, _make_repo_with_main
 
 from daydream.tree_sitter_index import _MAX_IMPORTERS, detect_affected_files
@@ -51,11 +52,80 @@ def test_python_impact_surface(tmp_path: Path):
     paths_by_role = {(r.path, r.role) for r in results}
     assert ("daydream_demo/api.py", "modified") in paths_by_role
     assert ("daydream_demo/models.py", "modified") in paths_by_role
-    # The api.py -> models.py edge must be visible somewhere.
-    assert any(r.role == "imports" and r.path.endswith("models.py") for r in results) or any(
-        r.role == "imported_by" for r in results
-    )
+    # The api.py -> models.py forward edge must be exact.
+    assert ("daydream_demo/models.py", "imports") in paths_by_role
     assert len(results) >= 2
+
+
+_SHARED_FIXTURES: dict[str, str] = {
+    "package/__init__.py": "",
+    "package/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
+    "package/feature/__init__.py": "",
+}
+
+
+@pytest.mark.parametrize(
+    "api_rel, files, expected_import_path",
+    [
+        # `from ..models` in package/feature/api.py resolves to the parent package.
+        (
+            "package/feature/api.py",
+            _SHARED_FIXTURES
+            | {
+                "package/feature/api.py": (
+                    '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
+                ),
+            },
+            "package/models.py",
+        ),
+        # `from ...models` in package/feature/nested/api.py resolves to the grandparent package.
+        (
+            "package/feature/nested/api.py",
+            _SHARED_FIXTURES
+            | {
+                "package/feature/nested/__init__.py": "",
+                "package/feature/nested/api.py": (
+                    '"""API module."""\nfrom ...models import User\n\ndef get_user():\n    return User()\n'
+                ),
+            },
+            "package/models.py",
+        ),
+        # `from . import something` resolves to the current package's __init__.py
+        # because tree-sitter captures only the relative import node (the dot),
+        # not the imported name after the dot.
+        (
+            "package/feature/api.py",
+            _SHARED_FIXTURES
+            | {
+                "package/feature/api.py": (
+                    '"""API module."""\nfrom . import something\n\nthing = something.thing\n'
+                ),
+            },
+            "package/feature/__init__.py",
+        ),
+        # `from ....something import name` with 4+ dots ascends to the great-grandparent package.
+        (
+            "package/feature/nested/deep/api.py",
+            _SHARED_FIXTURES
+            | {
+                "package/feature/nested/__init__.py": "",
+                "package/feature/nested/deep/__init__.py": "",
+                "package/something.py": '"""Ancestor sibling module."""\n\nthing = 1\n',
+                "package/feature/nested/deep/api.py": (
+                    '"""API module."""\nfrom ....something import thing\n\nthing\n'
+                ),
+            },
+            "package/something.py",
+        ),
+    ],
+)
+def test_python_multilevel_relative_imports(
+    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str
+):
+    repo = _materialize(tmp_path, files)
+    results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
+    imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
+    assert imports_pairs == {(expected_import_path, "imports")}
 
 
 def test_typescript_impact_surface(tmp_path: Path):
