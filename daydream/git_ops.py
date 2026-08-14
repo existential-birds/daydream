@@ -1410,12 +1410,24 @@ def clean_untracked(repo: Path) -> None:
         raise GitError(f"git clean -fd failed in {repo}: {proc.stderr.strip()}")
 
 
-def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> None:
+def worktree_add(
+    repo: Path,
+    path: Path,
+    ref: str,
+    *,
+    detach: bool = True,
+    lock_reason: str | None = None,
+) -> None:
     """Create a new worktree at *path* pointing at *ref*.
 
     Args:
         path: Filesystem path for the new worktree (must not already exist).
         detach: When True, pass ``--detach`` so the new worktree is detached.
+        lock_reason: When set, pass ``--lock --reason <lock_reason>`` so the
+            worktree is created already-locked in the same ``git worktree add``
+            invocation. Arming the lock atomically with creation closes the
+            window in which a concurrent prune could force-remove the fresh
+            worktree between an add and a separate lock call.
 
     Raises:
         GitError: If ``git worktree add`` fails.
@@ -1423,6 +1435,9 @@ def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> No
     args = ["worktree", "add"]
     if detach:
         args.append("--detach")
+    if lock_reason is not None:
+        args.append("--lock")
+        args.extend(["--reason", lock_reason])
     args.extend([str(path), ref])
     proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
@@ -1446,6 +1461,84 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
     proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
+
+
+def worktree_remove_unlocked(repo: Path, path: Path, *, force: bool = True) -> None:
+    """Unlock *path* (if locked), then remove the worktree.
+
+    git refuses to remove a locked worktree even with ``--force``, so any
+    removal of a possibly-locked worktree must release the lock first. This is
+    the single place encoding that unlock-before-remove ordering; callers that
+    remove a worktree which may still hold a lock use this instead of inlining
+    ``worktree_unlock`` + ``worktree_remove``.
+
+    The unlock is best-effort: ``git worktree unlock`` fails on an
+    already-unlocked worktree, which is expected here and ignored. The removal
+    itself is authoritative and raises :class:`GitError` on failure.
+
+    Raises:
+        GitError: If ``git worktree remove`` fails.
+    """
+    try:
+        worktree_unlock(repo, path)
+    except GitError:
+        pass
+    worktree_remove(repo, path, force=force)
+
+
+def worktree_lock(repo: Path, path: Path, *, reason: str | None = None) -> None:
+    """Lock the worktree at *path* so git refuses to remove it.
+
+    Args:
+        reason: Human-readable lock reason (e.g. the run_id), shown by
+            ``git worktree list --porcelain`` and stored in the ``locked`` file.
+
+    Raises:
+        GitError: If ``git worktree lock`` fails.
+    """
+    args = ["worktree", "lock"]
+    if reason is not None:
+        args.extend(["--reason", reason])
+    args.append(str(path))
+    proc = _run_git(repo, args, timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree lock {path} failed: {proc.stderr.strip()}")
+
+
+def worktree_unlock(repo: Path, path: Path) -> None:
+    """Unlock the worktree at *path*, releasing git's removal guard.
+
+    Raises:
+        GitError: If ``git worktree unlock`` fails.
+    """
+    proc = _run_git(repo, ["worktree", "unlock", str(path)], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree unlock {path} failed: {proc.stderr.strip()}")
+
+
+def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
+    """Return the lock-armed time of the worktree at *path*, or None if unlocked.
+
+    The lock file lives at ``<git_dir>/worktrees/<path.name>/locked``; its mtime
+    is when the lock was armed, and its absence means the worktree is unlocked.
+    Returns ``None`` only for a genuinely absent lock file, never on a git
+    failure (which propagates as :class:`GitError`).
+
+    Raises:
+        GitError: If ``git rev-parse --git-common-dir`` fails.
+    """
+    proc = _run_git(repo, ["rev-parse", "--git-common-dir"], timeout=5)
+    if proc.returncode != 0:
+        raise GitError(
+            f"git rev-parse --git-common-dir failed in {repo}: {proc.stderr.strip()}"
+        )
+    git_dir = Path(proc.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / path.name / "locked"
+    if not locked.is_file():
+        return None
+    return locked.stat().st_mtime
 
 
 def create_branch(repo: Path, name: str) -> None:

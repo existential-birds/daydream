@@ -1744,6 +1744,50 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 
+def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
+    repo: Path, head_sha: str
+) -> None:
+    """Acceptance #1/#4/#5: run B's start-of-run prune must not destroy run A's
+    live re-anchor worktree; A's finished plan still lands on finish()."""
+    from daydream import git_ops
+    from daydream.improve.plans import prune_stale_reanchor_worktrees
+
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
+    )
+    git(repo, "add", "README.md")
+    new_head = commit(repo, "advance head after plan fan-out")
+
+    # Run A: mid-write — worktree created + locked, session NOT finished yet
+    session_a = PlanWriteSession(
+        repo / "daydream_plans",
+        planned_at=head_sha,
+        run_session_id="run-A",
+    )
+    reservations_a = session_a.reserve([_finding()])
+    assert session_a.commit(reservations_a[0], _selection(repo)).status == "written"
+    worktree_a = repo / ".daydream" / "worktrees" / "run-A-reanchor"
+    assert worktree_a.is_dir()
+    assert git_ops.worktree_lock_mtime(repo, worktree_a) is not None  # live lock
+
+    # Run B starts: its start-of-run prune runs while A is mid-write
+    removed = prune_stale_reanchor_worktrees(repo)
+    assert removed == 0                        # A's live worktree is skipped
+    assert worktree_a.is_dir()                 # never force-removed
+    assert (worktree_a / "daydream_plans/001-batch-catalog-queries.md").is_file()
+
+    # A finishes: durable main copy + REANCHORED entry land; lock released
+    result_a = session_a.finish()
+    assert len(result_a["written"]) == 1
+    main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
+    assert main_plan.is_file()
+    assert f"`{new_head}`" in main_plan.read_text(encoding="utf-8")
+    assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert git_ops.worktree_lock_mtime(repo, worktree_a) is None  # released
+
+
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
     repo: Path, head_sha: str
 ) -> None:
@@ -4221,3 +4265,104 @@ def test_reanchored_report_section_empty(tmp_path: Path) -> None:
 
     assert "## Re-anchored plans" in section
     assert "No re-anchored plans" in section
+
+def test_reanchored_failure_releases_worktree_lock(
+    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Should-have #1: a graceful re-anchor write failure releases the lock."""
+    from daydream import git_ops
+
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("render failure")
+
+    # Only intentional failure-injection mock in the plan: deterministically
+    # fail INSIDE the post-lock write window (permission sabotage breaks under
+    # root CI; the real-path rule protects the network/API backend, not this).
+    monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
+
+    session = PlanWriteSession(
+        repo / "daydream_plans", planned_at=head_sha, run_session_id="run-A"
+    )
+    reservations = session.reserve([_finding()])
+    out = session.commit(reservations[0], _selection(repo))
+    assert out.status == "blocked"
+
+    worktree = repo / ".daydream" / "worktrees" / "run-A-reanchor"
+    assert not worktree.exists()                               # removed (fix #2)
+    assert git_ops.worktree_lock_mtime(repo, worktree) is None  # released
+
+def test_failed_reanchor_frees_worktree_for_later_finding(
+    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix #2: a re-anchor failure must remove the worktree so a later
+    re-anchorable finding in the same run can re-add the path instead of
+    failing with PLAN_REANCHOR_FAILED."""
+    from daydream.improve.plans import PlanWriteSession
+
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+
+    calls = {"n": 0}
+
+    from daydream.improve import plans as plans_mod
+
+    real_render = plans_mod.render_plan
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first re-anchor render fails")
+        # second render (re-anchor of the next finding) succeeds
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
+
+    session = PlanWriteSession(
+        repo / "daydream_plans", planned_at=head_sha, run_session_id="run-A"
+    )
+    reservations = session.reserve([_finding(), _finding()])
+    first = session.commit(reservations[0], _selection(repo))
+    assert first.status == "blocked"
+
+    second = session.commit(reservations[1], _selection(repo))
+    assert second.status == "written", "later re-anchorable finding must still land"
+
+    result = session.finish()
+    assert len(result["written"]) == 1
+
+
+
+
+def test_stale_locked_reanchor_worktree_is_reclaimed(
+    repo: Path, head_sha: str
+) -> None:
+    """Acceptance #3: a crashed session's still-locked worktree is eventually
+    reclaimed (lock backdated past the staleness window), not wedged forever."""
+    import os
+
+    from daydream import git_ops
+    from daydream.improve.plans import prune_stale_reanchor_worktrees
+
+    stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
+    git(repo, "worktree", "add", "--detach", str(stale), "HEAD")
+    git_ops.worktree_lock(repo, stale, reason="run-dead")
+    git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / "run-dead-reanchor" / "locked"
+    os.utime(locked, (0, 0))  # backdate to 1970: older than any staleness window
+
+    removed = prune_stale_reanchor_worktrees(repo)
+
+    assert removed == 1
+    assert not stale.exists()
+    assert "run-dead-reanchor" not in git(repo, "worktree", "list")

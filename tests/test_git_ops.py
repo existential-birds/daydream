@@ -1560,3 +1560,67 @@ def test_log_shas_since_warns_on_git_error(tmp_path: Path, caplog: pytest.LogCap
         result = git_ops.log_shas_since(repo, "main", "nonexistent-ref")
     assert result == []
     assert any("log_shas_since" in record.message for record in caplog.records)
+
+
+def test_worktree_lock_and_lock_mtime_roundtrip(tmp_path: Path) -> None:
+    """The lock primitives arm a real git worktree lock, expose its mtime,
+    make a single-force remove refuse it, and release it on unlock."""
+    repo = _make_repo_with_main(tmp_path)
+    wt = repo / "wt1"
+    git_ops.worktree_add(repo, wt, "main", detach=True)
+
+    assert git_ops.worktree_lock_mtime(repo, wt) is None  # unlocked
+
+    git_ops.worktree_lock(repo, wt, reason="run-A")
+    locked_at = git_ops.worktree_lock_mtime(repo, wt)
+    assert locked_at is not None
+
+    # the liveness guard: a single --force remove is refused while locked
+    with pytest.raises(GitError):
+        git_ops.worktree_remove(repo, wt, force=True)
+
+    git_ops.worktree_unlock(repo, wt)
+    assert git_ops.worktree_lock_mtime(repo, wt) is None  # released
+
+
+def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path) -> None:
+    """worktree_remove_unlocked centralizes the unlock-before-remove ordering:
+    it removes a locked worktree (unlocking it first) and an already-unlocked
+    one (the unlock attempt is a no-op), so callers never inline the rule."""
+    repo = _make_repo_with_main(tmp_path)
+
+    # Locked worktree: removal must unlock first, then remove.
+    locked_wt = repo / "wt-locked"
+    git_ops.worktree_add(repo, locked_wt, "main", detach=True)
+    git_ops.worktree_lock(repo, locked_wt, reason="run-A")
+    assert git_ops.worktree_lock_mtime(repo, locked_wt) is not None
+    git_ops.worktree_remove_unlocked(repo, locked_wt)
+    assert not locked_wt.exists()
+
+    # Unlocked worktree: the unlock attempt fails harmlessly, removal proceeds.
+    unlocked_wt = repo / "wt-unlocked"
+    git_ops.worktree_add(repo, unlocked_wt, "main", detach=True)
+    assert git_ops.worktree_lock_mtime(repo, unlocked_wt) is None
+    git_ops.worktree_remove_unlocked(repo, unlocked_wt)
+    assert not unlocked_wt.exists()
+
+
+def test_worktree_add_with_lock_reason_arms_lock_atomically(
+    tmp_path: Path,
+) -> None:
+    """Fix #3: worktree_add(lock_reason=...) must create the worktree already
+    locked in a single git invocation, so there is no unlocked window in which
+    a concurrent prune could force-remove the fresh worktree."""
+    repo = _make_repo_with_main(tmp_path)
+    wt = repo / "wt-locked"
+
+    git_ops.worktree_add(repo, wt, "main", detach=True, lock_reason="run-A")
+
+    # locked marker present with the reason; no separate worktree_lock call needed
+    assert git_ops.worktree_lock_mtime(repo, wt) is not None
+    git_dir = Path(_git(repo, "rev-parse", "--git-common-dir").strip())
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / wt.name / "locked"
+    assert locked.is_file()
+    assert "run-A" in locked.read_text(encoding="utf-8")

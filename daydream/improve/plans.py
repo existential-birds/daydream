@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -48,6 +49,11 @@ _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # Re-anchor worktree dirnames end in this suffix; the prune pass and the
 # re-anchor write share it so a rename can never silently stop pruning.
 _REANCHOR_DIR_SUFFIX = "-reanchor"
+# A still-locked re-anchor worktree whose lock is older than this is treated as
+# a crashed session's leftover and reclaimed (unlocked then removed). A live
+# concurrent lock is under this age in any realistic session, so "stale" here
+# is generous and only a crashed lock (unboundedly old) is ever reclaimed.
+_REANCHOR_LOCK_STALE_AFTER_S = 24 * 3600
 REANCHORED_STATUS_PREFIX = "REANCHORED"
 _REANCHORED_LANDED = re.compile(rf"^{re.escape(REANCHORED_STATUS_PREFIX)} \(landed at (.+)\)$")
 
@@ -701,11 +707,27 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     ``.daydream/worktrees/<run_id>-reanchor``; each new plan run prunes them so
     the directory does not grow unboundedly. Individual failures are tolerated
     so one stale worktree never blocks a plan run.
+
+    The prune is lock-aware: a live re-anchor worktree (locked at creation, age
+    near zero) is skipped without any removal attempt, so a concurrent run
+    mid-write is never destroyed. A worktree whose lock is older than
+    ``_REANCHOR_LOCK_STALE_AFTER_S`` is a crashed session's leftover: it is
+    reclaimed via ``git_ops.worktree_remove_unlocked`` (unlock, then
+    force-remove) rather than wedged forever. Unlocked worktrees are removed
+    the same way, the unlock being a no-op for them.
     """
     removed = 0
     for path in _iter_reanchor_worktrees(repo):
         try:
-            git_ops.worktree_remove(repo, path, force=True)
+            locked_at = git_ops.worktree_lock_mtime(repo, path)
+            if (
+                locked_at is not None
+                and time.time() - locked_at <= _REANCHOR_LOCK_STALE_AFTER_S
+            ):
+                # Live re-anchor worktree (lock age near zero): never unlock or
+                # remove it, so a concurrent run mid-write is not destroyed.
+                continue
+            git_ops.worktree_remove_unlocked(repo, path)
         except git_ops.GitError:
             continue
         removed += 1
@@ -1137,12 +1159,31 @@ class PlanWriteSession:
     def finish(self) -> dict[str, list[dict[str, Any]]]:
         """Reconcile the index and return what this session landed."""
         self._write_index()
+        self._release_reanchor_worktree()
         return {
             "written": _by_reservation(self._written),
             "skipped": _by_reservation(self._skipped),
             "failed": _by_reservation(self._failed),
             "diagnostics": _by_reservation(self._diagnostics),
         }
+
+    def _release_reanchor_worktree(self) -> None:
+        """Best-effort release of the re-anchor worktree's git lock.
+
+        A failed unlock must never surface or fail the plan run, so the unlock
+        is swallowed via :class:`~root.git_ops.GitError`. Clear the reference
+        regardless so a later release is a no-op. The worktree itself is kept on
+        a successful finish() (the durable plan lives in the main index and the
+        worktree is pruned at the next run); only a re-anchor failure removes it
+        (see ``_reanchor_failed``) so the path can be re-used.
+        """
+        if self._reanchor_worktree is None:
+            return
+        try:
+            git_ops.worktree_unlock(self._repo, self._reanchor_worktree)
+        except git_ops.GitError:
+            pass
+        self._reanchor_worktree = None
 
     @staticmethod
     def _attempt_of(selection: dict[str, Any]) -> dict[str, Any] | None:
@@ -1381,6 +1422,20 @@ class PlanWriteSession:
         filename = f"{number:03d}-{slug}.md"
 
         def _reanchor_failed() -> PlanOutcome:
+            # Best-effort release: a graceful re-anchor failure must not leave
+            # the worktree locked forever (it would wedge a later prune).
+            failed_wt = self._reanchor_worktree
+            self._release_reanchor_worktree()
+            # Remove the worktree so a later re-anchorable finding can re-add
+            # the path instead of failing with PLAN_REANCHOR_FAILED (fix #2).
+            # Removal goes through worktree_remove_unlocked — the single place
+            # encoding unlock-before-remove; the release above already unlocked,
+            # so the helper's unlock is a no-op.
+            if failed_wt is not None:
+                try:
+                    git_ops.worktree_remove_unlocked(self._repo, failed_wt)
+                except git_ops.GitError:
+                    pass
             return self._block(
                 reservation,
                 selection,
@@ -1403,8 +1458,18 @@ class PlanWriteSession:
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
                 worktree = _worktrees_dir(self._repo) / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
+                # Create the worktree already-locked in one git invocation so a
+                # concurrent run's start-of-run prune cannot destroy the live
+                # worktree between an add and a separate lock (fix #3). Released
+                # best-effort on finish()/failure; git refuses to remove a
+                # locked worktree, so removal goes through
+                # git_ops.worktree_remove_unlocked (unlock, then remove).
                 git_ops.worktree_add(
-                    self._repo, worktree, new_head, detach=True
+                    self._repo,
+                    worktree,
+                    new_head,
+                    detach=True,
+                    lock_reason=run_id,
                 )
                 self._reanchor_worktree = worktree
             text = render_plan(
