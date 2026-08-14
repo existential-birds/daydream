@@ -793,6 +793,8 @@ def test_read_only_gh_retry_environment_validation(
     repo = _make_repo_with_main(tmp_path)
     if env_value is not None:
         monkeypatch.setenv("DAYDREAM_GH_TIMEOUT_RETRIES", env_value)
+    else:
+        monkeypatch.delenv("DAYDREAM_GH_TIMEOUT_RETRIES", raising=False)
     calls = {"n": 0}
 
     def always_timeout(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
