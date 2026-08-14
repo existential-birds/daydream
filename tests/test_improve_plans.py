@@ -4304,6 +4304,7 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
     """Acceptance #3: a crashed session's still-locked worktree is eventually
     reclaimed (lock backdated past the staleness window), not wedged forever."""
     import os
+
     from daydream import git_ops
     from daydream.improve.plans import prune_stale_reanchor_worktrees
 
