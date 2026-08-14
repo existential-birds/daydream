@@ -73,15 +73,19 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
 
 
 def test_rundir_golden_contains_no_model_directed_trajectory_transcripts(rundir_golden: Path) -> None:
-    """Static fixture guard: the committed golden fixture must not carry
-    model-directed trajectory transcripts.
+    """Static fixture guard: no per-fork trajectory transcript may ship under
+    ``trajectories/``, and every retained trajectory's user-authored step
+    messages must be inert.
 
     The per-fork transcripts under ``trajectories/`` (deep-generic,
     deep-structure, explore-dependency-tracer, fix-tests-test-calc-py) carried
     real prompt/directive content and absolute machine paths, and nothing reads
     them — they must not be reintroduced. The retained root ``trajectory.json``
     (consumed by ``test_rundir_golden_user_messages_are_inert``) must likewise
-    keep every user-authored step message empty.
+    keep every user-authored step message empty. This guard enforces only
+    transcript-file absence and user-message inertness; it does not sanitize
+    every internal field of the retained root fixture (e.g. historical machine
+    paths or embedded prompt copies that no test reads).
     """
     trajectories = rundir_golden / "trajectories"
     assert not trajectories.is_dir() or not next(trajectories.iterdir(), None)
