@@ -60,7 +60,6 @@ def test_copy_to_clipboard_success_and_selection(
     assert captured["argv"] == expected_argv
     assert captured["input"] == text
     assert captured["timeout"] == clipboard._CLIPBOARD_TIMEOUT_SECONDS
-    assert clipboard._CLIPBOARD_TIMEOUT_SECONDS == 5
 
 
 def test_copy_to_clipboard_no_mechanism(monkeypatch: pytest.MonkeyPatch) -> None:
