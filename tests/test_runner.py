@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import subprocess
+import threading
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream import git_ops, runner
@@ -879,6 +884,7 @@ async def _drive_fix_cycle_failing(
     script: list[Turn],
     stdin_guard_message: str | None = None,
     stdin_answers: list[str] | None = None,
+    clipboard_is_available: bool = False,
 ) -> tuple[int, ScriptedBackend, list[bool]]:
     """Drive the deep fix-cycle (``shallow=True, start_at="fix"``) with the REAL
     ``phase_test_and_heal`` over a scripted failing test run.
@@ -932,7 +938,7 @@ async def _drive_fix_cycle_failing(
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_fix_parallel", _noop_fix)
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
-    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: False)
+    monkeypatch.setattr("daydream.phases.clipboard_available", lambda: clipboard_is_available)
 
     if stdin_answers is not None:
         answers = iter(stdin_answers)
@@ -959,6 +965,12 @@ async def _drive_fix_cycle_failing(
     return exit_code, test_backend, commit_calls
 
 
+def _assert_single_handoff(repo: Path, body: str) -> None:
+    handoffs = list(repo.glob(".daydream/runs/*/handoff.md"))
+    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
+    assert handoffs[0].read_text(encoding="utf-8") == body
+
+
 @pytest.mark.asyncio
 async def test_fix_cycle_failing_tests_abort_writes_handoff(
     monkeypatch, feature_branch_repo, make_config
@@ -982,9 +994,7 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
 
     assert exit_code == 1
 
-    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
-    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\ninteractive abort"
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\ninteractive abort")
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
@@ -995,6 +1005,84 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
     assert all(
         "Analyze the failures and fix them" not in p for p in test_backend.prompts
     ), test_backend.prompts
+
+
+@pytest.mark.asyncio
+async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows_manual_copy_guidance(
+    monkeypatch, feature_branch_repo, make_config
+):
+    """Real-path: a hung clipboard utility during the confirmed failure handoff is bounded to
+    5s, runs off the event loop, degrades to the manual-copy warning, and the run still exits 1.
+
+    Drives the deep fix cycle with the REAL phase_test_and_heal over a scripted failing test
+    run. The operator confirms the fix gate, aborts the heal menu, and confirms the clipboard
+    copy. The clipboard subprocess fake blocks 0.3s (a compressed stand-in for the 5s bound),
+    raises TimeoutExpired, and the real copy_to_clipboard returns False -> the manual-copy
+    warning fires. An event-loop ticker must keep ticking during the worker-thread block —
+    proving the copy is offloaded, not run on the loop.
+    """
+    from daydream import clipboard
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.phases.print_warning",
+        lambda console_arg, message: warnings.append(message),
+    )
+    successes: list[str] = []
+    monkeypatch.setattr(
+        "daydream.phases.print_success",
+        lambda console_arg, message: successes.append(message),
+    )
+
+    observed_timeouts: list[Any] = []
+    state = {"ticks": 0, "at_entry": -1, "at_release": -1}
+    stop_tick = threading.Event()
+
+    def _blocking_run(argv: list[str], **kwargs: Any) -> None:
+        observed_timeouts.append(kwargs.get("timeout"))
+        state["at_entry"] = state["ticks"]
+        time.sleep(0.3)  # simulated hung clipboard utility, bounded (stands in for 5s)
+        state["at_release"] = state["ticks"]
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 5.0))
+
+    monkeypatch.setattr(
+        clipboard,
+        "subprocess",
+        SimpleNamespace(run=_blocking_run, SubprocessError=subprocess.SubprocessError),
+    )
+    monkeypatch.setattr("daydream.clipboard._detect_clipboard_command", lambda: ["pbcopy"])
+
+    async def _ticker() -> None:
+        while not stop_tick.is_set():
+            state["ticks"] += 1
+            await anyio.sleep(0.001)
+
+    ticker_task = asyncio.create_task(_ticker())
+
+    exit_code, _backend, commit_calls = await _drive_fix_cycle_failing(
+        monkeypatch,
+        feature_branch_repo,
+        make_config(feature_branch_repo, start_at="fix", shallow=True, non_interactive=False),
+        script=[_FAIL_TURN, _handoff_turn("# Handoff\n\nclipboard timeout")],
+        stdin_answers=["y", "4", "y"],
+        clipboard_is_available=True,
+    )
+    stop_tick.set()
+    await ticker_task
+
+    assert exit_code == 1
+    assert observed_timeouts == [5], f"expected timeout exactly 5, got {observed_timeouts}"
+    assert state["at_release"] >= state["at_entry"], (
+        "event loop did not tick during the blocked clipboard copy — the copy is running "
+        "synchronously on the loop, not offloaded"
+    )
+    assert any(
+        "Clipboard copy failed; copy manually from path above" in m for m in warnings
+    ), f"manual-copy warning missing; got {warnings!r}"
+    assert successes == [], f"expected no success message, got {successes!r}"
+    assert commit_calls == [], "a commit ran despite tests failing"
+
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\nclipboard timeout")
 
 
 @pytest.mark.asyncio
@@ -1029,9 +1117,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
 
     assert exit_code == 1
 
-    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
-    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\n--yes bounded fix failure"
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\n--yes bounded fix failure")
 
     assert commit_calls == [], "a commit ran despite tests failing"
 

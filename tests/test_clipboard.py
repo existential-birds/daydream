@@ -51,6 +51,7 @@ def test_copy_to_clipboard_success_and_selection(
     def fake_run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         captured["argv"] = argv
         captured["input"] = kwargs.get("input")
+        captured["timeout"] = kwargs.get("timeout")
         return subprocess.CompletedProcess(argv, returncode=0)
 
     monkeypatch.setattr(clipboard.subprocess, "run", fake_run)
@@ -58,6 +59,7 @@ def test_copy_to_clipboard_success_and_selection(
     assert copy_to_clipboard(text) is True
     assert captured["argv"] == expected_argv
     assert captured["input"] == text
+    assert captured["timeout"] == clipboard._CLIPBOARD_TIMEOUT_SECONDS
 
 
 def test_copy_to_clipboard_no_mechanism(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,6 +87,11 @@ def test_copy_to_clipboard_no_mechanism(monkeypatch: pytest.MonkeyPatch) -> None
             id="called-process-error",
         ),
         pytest.param("xclip", OSError("exec failed"), id="os-error"),
+        pytest.param(
+            "pbcopy",
+            subprocess.TimeoutExpired(cmd=["pbcopy"], timeout=clipboard._CLIPBOARD_TIMEOUT_SECONDS),
+            id="timeout-expired",
+        ),
     ],
 )
 def test_copy_to_clipboard_subprocess_failure(
