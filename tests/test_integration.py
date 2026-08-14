@@ -103,11 +103,37 @@ async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pyt
     # Warm up run_agent/ScriptedBackend setup and Console construction so that
     # setup cost is not counted against the wall-clock bound: under loaded
     # parallel CI (pytest -n auto) that setup can push elapsed past 2.0s and
-    # flake the regression (issue #336).
-    await render_agent(monkeypatch, events, quiet=False)
+    # flake the regression (issue #336). The Console is bound ONCE here,
+    # outside the timed window, and reused for both the warm-up and the timed
+    # run -- render_agent reconstructs a fresh Console on every call, so its
+    # warm-up would only cover one-time lazy imports, not the setup it re-does
+    # inside the timed window. Building it here excludes that setup entirely.
+    from daydream.agent import run_agent, set_quiet_mode
+
+    output = StringIO()
+    monkeypatch.setattr(
+        "daydream.agent.console",
+        Console(file=output, force_terminal=True, width=120, theme=NEON_THEME),
+    )
+    set_quiet_mode(False)
+
+    async def run_() -> None:
+        await run_agent(
+            ScriptedBackend(events=events, model="mock-model"),
+            Path("/tmp"),
+            "Test prompt",
+            phase=DaydreamPhase.REVIEW,
+        )
+
+    # Warm up lazy imports / first-call setup on the already-built Console, then
+    # discard that output so the timed window below measures only rendering.
+    await run_()
+    output.seek(0)
+    output.truncate(0)
 
     start = time.perf_counter()
-    plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
+    await run_()
+    plain_text = strip_ansi(output.getvalue())
     elapsed = time.perf_counter() - start
 
     assert elapsed < 2.0, f"5 thoughts took {elapsed:.2f}s (old code >= 2.5s)"
