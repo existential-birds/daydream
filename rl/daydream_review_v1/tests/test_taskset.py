@@ -61,9 +61,13 @@ def _write_manifest(path: Path, slugs: list[str]) -> Path:
     return path
 
 
-def test_fixture_repo_is_deterministic(tmp_path: Path) -> None:
+@pytest.mark.parametrize("precreate_dest", [False, True], ids=["missing-destination", "empty-destination"])
+def test_fixture_repo_is_deterministic(tmp_path: Path, precreate_dest: bool) -> None:
     """The SHAs pinned in fixture.py, corpus-mini and the manifest are the real ones."""
-    repo = build_fixture_repo(tmp_path / "fx")
+    dest = tmp_path / "fx"
+    if precreate_dest:
+        dest.mkdir()
+    repo = build_fixture_repo(dest)
     assert (repo.base_sha, repo.pr1_head_sha, repo.pr2_head_sha) == (
         FIXTURE_BASE_SHA,
         FIXTURE_PR1_HEAD_SHA,
