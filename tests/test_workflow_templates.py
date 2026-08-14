@@ -238,3 +238,29 @@ def test_repo_review_authenticates_codex_before_running() -> None:
     assert steps.index(login) < review_idx, "Codex auth must be persisted before the review runs"
     # The review step authenticates via auth.json, not a redundant env secret.
     assert "OPENAI_API_KEY" not in steps[review_idx].get("env", {})
+
+
+@pytest.mark.parametrize(
+    "section_start,section_end",
+    [
+        ("## Install", "## Trigger matrix"),
+        ("## Security model — the privilege split", "## Dedup limitations (v1)"),
+    ],
+    ids=["install", "security-model"],
+)
+def test_repo_workflow_readme_documents_codex_credential(
+    section_start: str, section_end: str
+) -> None:
+    wf_text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
+    readme_text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
+
+    credentials = set(_SECRET_REF_RE.findall(wf_text))
+    assert credentials == {"OPENAI_API_KEY"}
+
+    start = readme_text.index(section_start)
+    end = readme_text.index(section_end, start)
+    section = readme_text[start:end]
+
+    for cred in credentials:
+        assert f"`{cred}`" in section
+    assert "ANTHROPIC_API_KEY" not in section
