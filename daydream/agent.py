@@ -411,8 +411,10 @@ async def run_agent(
         max_turns: Optional cap on the number of model turns.
         read_only: When True, the backend enforces a non-mutating tool profile
             at the tool layer (Claude PreToolUse guard hook; Codex
-            ``--sandbox read-only``). Wired True only for the read-only
-            failure-summarizer call; all other call sites keep the default.
+            ``--sandbox read-only``). Callers select this explicitly per call
+            site; the diagnostic subagents (setup-investigator,
+            recommendation-verifier) and the failure summarizer pass True,
+            while mutating phases keep the False default.
         persist_session: When False, request an ephemeral backend invocation.
             The default preserves existing continuation behavior.
         wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded

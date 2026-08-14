@@ -311,7 +311,10 @@ class Backend(Protocol):
                 profile at the tool layer (Claude via a PreToolUse guard hook;
                 Codex via ``--sandbox read-only``) so the agent can inspect
                 history but cannot write/edit/delete or mutate the working
-                tree. Wired True only for the failure-summarizer call.
+                tree. Callers select this flag explicitly per call site: the
+                diagnostic subagents (setup-investigator,
+                recommendation-verifier) and the failure summarizer pass True,
+                while mutating phases keep the False default.
 
                 **Per-backend semantics diverge**: the Claude backend blocks
                 git commits (the PreToolUse hook denies the Bash tool when the

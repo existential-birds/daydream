@@ -173,6 +173,16 @@ def _build_fix_prompt(
 
 
 
+def _render_bash_allowlist() -> str:
+    """Render the read-only Bash allowlist as a comma-separated back-ticked list.
+
+    Single source for the ``READ_ONLY_BASH_ALLOWLIST`` render so the setup-
+    investigator and failure-summarizer prompts stay word-for-word in sync with
+    the commands the backend guard hook actually enforces.
+    """
+    return ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+
+
 def _build_setup_investigator_prompt(test_output: str) -> str:
     """Build a read-only diagnostic prompt for the setup-investigator subagent.
 
@@ -195,8 +205,8 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
         "the code under test is broken.\n\n"
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect files.\n"
-        "- You MAY use Bash for NON-MUTATING discovery only: `make help`, `npm run` "
-        "(no script name — just list scripts), `ls`, `cat`, `pwd`, `git status`.\n"
+        "- You MAY use Bash for NON-MUTATING discovery only. Permitted commands: "
+        + _render_bash_allowlist() + ".\n"
         "- You MUST NOT run tests, build steps, or installers.\n"
         "- You MUST NOT modify, create, or delete any files.\n"
         "- You MUST NOT invoke Write, Edit, or any file-mutating tool.\n\n"
@@ -274,6 +284,7 @@ async def _run_setup_investigator(
                 prompt,
                 output_schema=SETUP_INVESTIGATOR_SCHEMA,
                 phase=DaydreamPhase.TEST,
+                read_only=True,
             )
         except Exception:  # noqa: BLE001 - investigator failure is non-fatal
             _logger.debug("setup-investigator agent failed", exc_info=True)
@@ -381,7 +392,7 @@ def _build_failure_summarizer_prompt(
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect the artifacts listed below.\n"
         "- You MAY use Bash for NON-MUTATING inspection ONLY. Permitted commands: "
-        + ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+        + _render_bash_allowlist()
         + ". "
         "These are read-only — they inspect history and never change the repo. Use "
         "them to VERIFY any claim about cause or history before you write it as fact. "
@@ -1588,6 +1599,7 @@ async def phase_verify_recommendations(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
+        read_only=True,
     )
 
     candidate: Any = result
