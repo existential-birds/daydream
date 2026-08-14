@@ -311,6 +311,26 @@ def test_report_allows_mixed_canonical_and_unique_legacy_trajectories(
     )
 
 
+def test_duplicate_trajectory_identity_is_rejected(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two files resolving to the same canonical key raise ValueError, never silently overwrite."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(
+        tmp_path,
+        pr_trajectories={
+            "https://github.com/calcom/cal.com/pull/10600": (
+                "cal.com-10600.json", "calcom/cal.com", 1_000_000, 1_000_000, 1_000_000, 3, None
+            ),
+            "https://github.com/calcom/cal.com/pull/10601": (
+                "cal.com-dup-10600.json", "calcom/cal.com", 2_000_000, 2_000_000, 2_000_000, 4, None
+            ),
+        },
+    )
+    with pytest.raises(SystemExit, match=r"duplicate trajectory key 'calcom/cal\.com/10600'"):
+        build_mod.build(args)
+
+
 TEMPLATE_HTML = BUILD_PY.with_name("template.html")
 # All six literals live only inside the old renderImprovements() body; the
 # generated index.html must contain none of them. "15–25%" uses an EN-DASH.
