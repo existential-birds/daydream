@@ -406,3 +406,33 @@ def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, mon
     for literal in _REMOVED_LITERALS:
         assert literal not in html
         assert literal not in template_text
+
+
+def test_main_rejects_report_with_no_eligible_judge_panel(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every judge ineligible -> main() exits nonzero, no report dir written, and the
+    message lists each skipped judge's id and specific reason (in sorted order)."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path, judges={
+        # 4 SaaS tools < 5 -> ineligible
+        "anthropic_claude-opus-4-5-20251101": _tools(4, _leaf(tp=1, fp=0)),
+        # 3 SaaS tools < 5 -> ineligible
+        "openai_gpt-5.2": _tools(3, _leaf(tp=1, fp=0)),
+    })
+    out_dir = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", [
+        "build.py", str(args.results_root),
+        "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
+        "--trajectories", args.trajectories, "--out", str(out_dir),
+    ])
+    with pytest.raises(SystemExit) as exc:
+        build_mod.main()
+    # no-write invariant: report dir must never have been created
+    assert out_dir.exists() is False
+    msg = str(exc.value)
+    assert "claude-opus-4-5-20251101" in msg
+    assert "gpt-5.2" in msg
+    assert "no SaaS field (superseded or partial run)" in msg
+    # both skipped judges listed, in sorted (skipped_judges) order
+    assert msg.index("claude-opus-4-5-20251101") < msg.index("gpt-5.2")
