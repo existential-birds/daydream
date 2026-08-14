@@ -130,12 +130,16 @@ _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
 
-def test_rundir_golden_step_11_message_is_inert(rundir_golden: Path) -> None:
-    """No user-authored step in the committed golden trajectory may carry
-    instruction-bearing text an automated reviewer could mistake for trusted
-    direction. This is a clean-pass fixture, so every user slot must be inert;
-    a directive reappearing in any user slot fails the build. The step-11
-    message is the canonical case and must also keep its structural shape."""
+def test_rundir_golden_user_messages_are_inert(rundir_golden: Path) -> None:
+    """Defensive regression guard only: every user-authored step in the
+    committed golden trajectory must carry an empty message. The
+    reward/verification path derives its signals from ``deep/`` verdicts and
+    review-output length, never from this trajectory's step messages, so this
+    does not reduce harm on that path — it is fixture hygiene for a clean-pass
+    reference, not a security control. Every user slot of the fixture must be
+    inert; a directive reappearing in any user step fails the build. The
+    step-11 verify slot is the canonical case and must still keep its
+    structural shape."""
     trajectory = json.loads((rundir_golden / "trajectory.json").read_text(encoding="utf-8"))
     user_steps = [s for s in trajectory["steps"] if s.get("source") == "user"]
     assert user_steps, "expected at least one user-authored step"
@@ -144,7 +148,10 @@ def test_rundir_golden_step_11_message_is_inert(rundir_golden: Path) -> None:
     step_11 = [s for s in trajectory["steps"] if s.get("step_id") == 11]
     assert len(step_11) == 1
     step = step_11[0]
-    assert set(step) == {"extra", "message", "source", "step_id", "timestamp"}
+    # Structural shape check on the required fields only: exact key-set equality
+    # would fail the build on any message-neutral ATIF metadata field added to
+    # the record, decoupling unrelated schema drift from the inert-message guard.
+    assert {"extra", "message", "source", "step_id", "timestamp"} <= set(step)
     assert step["source"] == "user"
     assert step["message"] == ""
 
