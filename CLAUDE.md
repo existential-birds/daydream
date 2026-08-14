@@ -207,6 +207,8 @@ Full contract: `docs/extensions.md`.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).
 - **Conventional Commits** (`feat(backends): ...`). Stage explicitly (`git add <path>`), never `git add -A`.
 - Fix bugs at the root. Never bypass the hook, skip tests, or `git push --no-verify`.
+- Own your own bugs in plain language. Never describe your defect as the tool being buggy.
+- Never claim success that isn't verified-working.
 
 ## Environment variables
 
