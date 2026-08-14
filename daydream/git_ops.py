@@ -1487,12 +1487,12 @@ def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
     failure (which propagates as :class:`GitError`).
 
     Raises:
-        GitError: If ``git rev-parse --git-dir`` fails.
+        GitError: If ``git rev-parse --git-common-dir`` fails.
     """
-    proc = _run_git(repo, ["rev-parse", "--git-dir"], timeout=5)
+    proc = _run_git(repo, ["rev-parse", "--git-common-dir"], timeout=5)
     if proc.returncode != 0:
         raise GitError(
-            f"git rev-parse --git-dir failed in {repo}: {proc.stderr.strip()}"
+            f"git rev-parse --git-common-dir failed in {repo}: {proc.stderr.strip()}"
         )
     git_dir = Path(proc.stdout.strip())
     if not git_dir.is_absolute():

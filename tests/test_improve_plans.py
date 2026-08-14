@@ -4311,7 +4311,10 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
     stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
     git(repo, "worktree", "add", "--detach", str(stale), "HEAD")
     git_ops.worktree_lock(repo, stale, reason="run-dead")
-    locked = repo / ".git" / "worktrees" / "run-dead-reanchor" / "locked"
+    git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / "run-dead-reanchor" / "locked"
     os.utime(locked, (0, 0))  # backdate to 1970: older than any staleness window
 
     removed = prune_stale_reanchor_worktrees(repo)
