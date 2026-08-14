@@ -209,6 +209,8 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
             wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
         pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
         key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"
+        if key in out:
+            raise ValueError(f"duplicate trajectory key '{key}'")
         out[key] = {
             "repo_short": repo_short, "pr_number": num,
             "pr_repo": pr_repo,
