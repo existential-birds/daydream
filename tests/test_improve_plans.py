@@ -14,7 +14,6 @@ from daydream.improve.assemble import (
     assemble_plan,
     render_issue,
 )
-from daydream.improve.orchestrator import _reanchored_report_section
 from daydream.improve.command_contract import (
     canonicalize_directory_scope,
     literal_command_error,
@@ -25,6 +24,7 @@ from daydream.improve.command_contract import (
     validate_host_commands,
     validate_recon_commands,
 )
+from daydream.improve.orchestrator import _reanchored_report_section
 from daydream.improve.plans import (
     PLAN_INDEX_FILENAME,
     PlanIndexEntry,
