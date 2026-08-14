@@ -293,7 +293,25 @@ def _gh_timeout() -> int:
 def _gh_retries() -> int:
     """Read-only ``gh`` timeout-retry budget (env-overridable)."""
     raw = os.environ.get("DAYDREAM_GH_TIMEOUT_RETRIES")
-    return int(raw) if raw else _GH_DEFAULT_RETRIES
+    if raw is None:
+        return _GH_DEFAULT_RETRIES
+    try:
+        value = int(raw)
+    except ValueError:
+        _logger.warning(
+            "DAYDREAM_GH_TIMEOUT_RETRIES=%r is not a valid integer; using default %d",
+            raw,
+            _GH_DEFAULT_RETRIES,
+        )
+        return _GH_DEFAULT_RETRIES
+    if value < 0:
+        _logger.warning(
+            "DAYDREAM_GH_TIMEOUT_RETRIES=%r is negative; using default %d",
+            raw,
+            _GH_DEFAULT_RETRIES,
+        )
+        return _GH_DEFAULT_RETRIES
+    return value
 
 
 def _run_git(
