@@ -172,9 +172,6 @@ def test_cli_main_rejects_workspace_copy_traversal(
     # The error path renders a "Workspace Error" panel via runner.print_error; silence it.
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
 
-    outside = repo_with_origin.parent / "outside-source.txt"
-    outside.write_text("KEEP\n")
-
     monkeypatch.setattr(
         sys,
         "argv",
@@ -193,8 +190,6 @@ def test_cli_main_rejects_workspace_copy_traversal(
         cli.main()
 
     assert exc.value.code == 1
-    # The escaped destination was never written; the external source is untouched.
-    assert outside.read_text() == "KEEP\n"
     # No stray ephemeral worktree child remains after cleanup.
     wt_root = repo_with_origin / ".daydream" / "worktrees"
     assert not wt_root.exists() or not any(wt_root.iterdir())

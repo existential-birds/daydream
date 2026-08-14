@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterable
 
 from daydream import git_ops
 from daydream.config_file import load_toml_or_empty
@@ -261,8 +261,8 @@ def copy_files_into_ephemeral(
     # before any copy runs. An entry that escapes either root aborts the
     # whole copy, leaving nothing partially copied.
     for rel in unique:
-        _resolve_workspace_copy_path(rel, source, "source")
-        _resolve_workspace_copy_path(rel, dest, "destination")
+        for root, root_label in ((source, "source"), (dest, "destination")):
+            _resolve_workspace_copy_path(rel, root, root_label)
 
     copied: list[Path] = []
     for rel_path in unique:
@@ -281,7 +281,7 @@ def copy_files_into_ephemeral(
 # --- Internal helpers --------------------------------------------------------
 
 
-def _dedupe_ordered(entries) -> list[Path]:
+def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:
     """De-duplicate path-like *entries*, preserving first-occurrence order."""
     unique: list[Path] = []
     seen: set[Path] = set()
