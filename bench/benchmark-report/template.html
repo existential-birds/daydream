@@ -272,6 +272,7 @@ function fmtSec(x){return x==null?"—":Math.round(x)+"s";}
 let STATE={judge:DATA.judges[0]?DATA.judges[0].id:null};
 function curJudge(){return DATA.judges.find(j=>j.id===STATE.judge)||DATA.judges[0];}
 const DDTOOL=DATA.meta.daydream_tool;
+function anchorJudge(){return DATA.judges.find(j=>j.id===DATA.meta.anchor_judge);}
 
 function renderJudgeBtns(){
   const host=$("#judgebtns");host.innerHTML="";
@@ -294,7 +295,7 @@ function renderNav(){
 }
 
 function renderLead(){
-  const anchor=DATA.judges.find(j=>j.has_daydream);
+  const anchor=anchorJudge();
   const d=anchor?anchor.daydream:null;const rk=anchor?anchor.ranks:null;
   $("#leadcopy").innerHTML=d?
     `On <b>${DATA.meta.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${esc(anchor.display)}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact subset; cost is synthesized from daydream's measured tokens.`
@@ -469,7 +470,7 @@ function renderJudgeSens(){
 }
 
 function renderSlices(){
-  const anchor=DATA.judges.find(j=>j.has_daydream);
+  const anchor=anchorJudge();
   $("#slice-judgetag").textContent=anchor?"· "+anchor.display:"";
   const host=$("#slices");host.innerHTML="";
   const grid=document.createElement("div");grid.className="grid2";
@@ -494,7 +495,7 @@ function renderCost(){
   const e=DATA.economy;
   $("#cost-sub").innerHTML=`Computed from measured tokens @ <b>${esc(e.price_model)}</b> price card (in $${e.price_card.input} / cached $${e.price_card.cached} / out $${e.price_card.output} per 1M; counters disjoint). Backend records $0 (GLM via z.ai) — this is synthesized, not read. ${e.n_with_trajectory} of ${e.n_prs} PRs have a trajectory.`;
   const host=$("#cost-kpis");host.innerHTML="";
-  const ddtp=(DATA.judges.find(j=>j.has_daydream)||{daydream:{tp:1}}).daydream.tp||1;
+  const ddtp=(anchorJudge()||{daydream:{tp:1}}).daydream.tp||1;
   const cards=[
     {label:"Total cost",val:fmtUSD(e.total_cost_usd),sub:`${e.n_with_trajectory} PRs`},
     {label:"Cost / PR",val:fmtUSD(e.cost_per_pr),sub:"mean over scored PRs"},
