@@ -31,6 +31,7 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
+from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     _PI_DEFAULT_RETRY_BASE_DELAY,
@@ -41,6 +42,7 @@ from daydream.backends.pi import (
     PiError,
     _is_retryable_error_message,
     _is_retryable_exit_code,
+    _is_stream_truncation_message,
     _pi_error_category,
     _pi_retry_attempts,
     _pi_retry_base_delay,
@@ -1274,6 +1276,82 @@ def test_pi_error_categories_are_stable_host_codes(
     expected: str,
 ) -> None:
     assert _pi_error_category(message) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "503 status code (no body)",
+        "Stream ended without finish_reason",
+        "request timeout while waiting for response",
+    ],
+)
+def test_pi_transient_failures_are_retryable(message: str) -> None:
+    assert _is_retryable_error_message(message) is True
+
+
+def test_is_stream_truncation_message() -> None:
+    assert _is_stream_truncation_message("stream ended without finish_reason") is True
+
+
+@pytest.mark.asyncio
+async def test_stream_eof_without_finish_reason_is_retryable_pi_error() -> None:
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process(
+        [
+            '{"type":"session","sessionId":"pi_ses_truncated"}',
+            '{"type":"agent_start"}',
+            '{"type":"turn_start"}',
+        ]
+    )
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError, match="finish_reason") as raised:
+            async for _ in backend.execute(Path("/tmp"), "Truncated"):
+                pass
+    assert raised.value.retryable is True
+    assert raised.value.category == "STREAM_TRUNCATION"
+
+
+@pytest.mark.asyncio
+async def test_stream_eof_after_completed_earlier_turn_is_retryable_pi_error() -> None:
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = make_mock_process(
+        [
+            '{"type":"session","sessionId":"pi_ses_truncated"}',
+            '{"type":"agent_start"}',
+            '{"type":"turn_start"}',
+            '{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}',
+            '{"type":"turn_start"}',
+        ]
+    )
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(PiError, match="finish_reason") as raised:
+            async for _ in backend.execute(Path("/tmp"), "Truncated"):
+                pass
+    assert raised.value.retryable is True
+    assert raised.value.category == "STREAM_TRUNCATION"
+
+
+@pytest.mark.asyncio
+async def test_pi_stream_timeout_is_retryable() -> None:
+    backend = PiBackend(model="glm-5.2")
+    mock_proc = MagicMock()
+    mock_proc.stdout = MagicMock()
+    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.returncode = 0
+    mock_proc.terminate = MagicMock()
+    mock_proc.kill = MagicMock()
+    with (
+        patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch(
+            "daydream.backends.pi.readline_with_idle_timeout",
+            side_effect=StreamStalledError("pi", 1.0),
+        ),
+    ):
+        with pytest.raises(StreamStalledError) as raised:
+            async for _ in backend.execute(Path("/tmp"), "Timeout"):
+                pass
+    assert raised.value.retryable is True
 
 
 # ---------------------------------------------------------------------------
