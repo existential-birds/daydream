@@ -33,6 +33,8 @@ daydream /path/to/project                          # review -> fix -> test (deep
 daydream --comment /path/to/project                # review -> post inline PR comments, then exit
 daydream improve /path/to/project                  # read-only repo audit -> prioritized plans
 daydream improve plan "add rate limiting" /path/to/project  # investigate one request -> plan
+daydream improve prune-reanchor <NAME> /path/to/project   # remove one executed re-anchor worktree (exit 0 on removal, non-zero when the name is rejected/absent/git-failed)
+daydream improve list-reanchor /path/to/project   # list existing -reanchor worktrees
 
 # Other verbs / flags (`--help-all` for the full advanced surface)
 daydream --shallow -s python /path/to/project      # shallow Python single-pass review-fix-test

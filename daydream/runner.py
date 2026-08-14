@@ -193,6 +193,8 @@ class RunConfig:
         improve_scope: Optional service name/root/glob to audit.
         improve_plan_description: One-line request for ``daydream improve plan``;
             switches the flow to single-request investigation mode.
+        improve_prune_name: Name of the ``-reanchor`` worktree to remove for the
+            ``daydream improve prune-reanchor`` sub-verb (only set there).
         skill_availability: Stack keys with an installed Beagle review skill,
             resolved once by :func:`run` from ``get_installed_skills()``. ``None``
             means unresolved or registry-unreadable (→ optimistic routing in
@@ -278,6 +280,7 @@ class RunConfig:
     improve_focus: str | None = None
     improve_scope: str | None = None
     improve_plan_description: str | None = None
+    improve_prune_name: str | None = None
     skill_availability: frozenset[str] | None = None
     # Issue #309: uncovered-diff-file sweep (second-pass reviewer). CLI-tier
     # overrides; ``None`` falls through to the file-config scalar then the

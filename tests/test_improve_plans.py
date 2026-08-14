@@ -24,6 +24,11 @@ from daydream.improve.command_contract import (
 )
 from daydream.improve.plans import (
     PLAN_INDEX_FILENAME,
+    PRUNE_GIT_FAILURE,
+    PRUNE_NOT_FOUND,
+    PRUNE_NOT_REANCHOR,
+    PRUNE_REMOVED,
+    PRUNE_UNSAFE_NAME,
     PlanWriteSession,
     load_rejections,
     planned_fingerprints,
@@ -1686,6 +1691,128 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     assert removed == 1
     assert not stale_dir.exists()
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_removes_valid_worktree(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
+
+    assert outcome.verdict == PRUNE_REMOVED
+    assert not target.exists()
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_reports_plan_count(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    git(repo, "worktree", "add", "--detach", str(target), "HEAD")
+    plans = target / "daydream_plans"
+    plans.mkdir(parents=True, exist_ok=True)
+    for n in ("001-x.md", "002-y.md"):
+        (plans / n).write_text("# plan\n", encoding="utf-8")
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
+
+    assert outcome.verdict == PRUNE_REMOVED
+    assert outcome.plan_count == 2
+
+
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "../etc-reanchor",  # traversal: slash + leading dot
+        ".hidden-reanchor",  # first char not [A-Za-z0-9]
+        "a" * 81,           # over _SAFE_DIRNAME's 0-79 tail bound
+        "run abc-reanchor",  # space outside the safe class
+    ],
+)
+def test_prune_named_reanchor_worktree_rejects_unsafe_names(
+    repo: Path, bad_name: str
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    before = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+
+    outcome = prune_named_reanchor_worktree(repo, bad_name)
+
+    assert outcome.verdict == PRUNE_UNSAFE_NAME
+    after = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+    assert before == after  # nothing reached the filesystem or git
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(
+    repo: Path,
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    before = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abc")
+
+    assert outcome.verdict == PRUNE_NOT_REANCHOR
+    after = set((repo / ".daydream" / "worktrees").glob("*")) if (
+        repo / ".daydream" / "worktrees"
+    ).exists() else set()
+    assert before == after  # nothing reached the filesystem or git
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    outcome = prune_named_reanchor_worktree(repo, "run-zzzz-reanchor")
+
+    assert outcome.verdict == PRUNE_NOT_FOUND
+
+
+def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(
+    repo: Path,
+) -> None:
+    from daydream.improve.plans import prune_named_reanchor_worktree
+
+    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    target.mkdir(parents=True, exist_ok=True)  # plain dir, NOT a git worktree
+
+    outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
+
+    assert outcome.verdict == PRUNE_GIT_FAILURE
+    assert target.exists()  # left in place; git refused to remove a non-worktree
+    # a plain dir is never a registered worktree, so this holds regardless of
+    # how many real re-anchor worktrees the suite created
+    assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
+
+
+def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(
+    repo: Path, head_sha: str
+) -> None:
+    from daydream.improve.plans import list_reanchor_worktrees
+
+    a = repo / ".daydream" / "worktrees" / "run-aaaa-reanchor"
+    b = repo / ".daydream" / "worktrees" / "run-bbbb-reanchor"
+    other = repo / ".daydream" / "worktrees" / "feature"
+    for w in (a, b, other):
+        git(repo, "worktree", "add", "--detach", str(w), "HEAD")
+
+    names = [p.name for p in list_reanchor_worktrees(repo)]
+
+    assert sorted(names) == ["run-aaaa-reanchor", "run-bbbb-reanchor"]
+    assert "feature" not in names
 
 
 def test_planned_at_still_matching_head_writes_in_place(

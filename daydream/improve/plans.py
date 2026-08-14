@@ -646,6 +646,29 @@ def planned_fingerprints(plans_dir: Path) -> set[str]:
     }
 
 
+def _worktrees_dir(repo: Path) -> Path:
+    """Return the ``.daydream/worktrees`` base directory for a repo.
+
+    Shared by every re-anchor worktree consumer so the base path cannot be
+    broadened in one place while others drift.
+    """
+    return repo / ".daydream" / "worktrees"
+
+
+def _iter_reanchor_worktrees(repo: Path) -> Iterable[Path]:
+    """Yield existing ``*-reanchor`` worktree directories under ``.daydream/worktrees``.
+
+    Single source of truth for which worktrees the automatic prune removes and
+    the manual list reports, so the discovery contract cannot drift. Existing
+    directories only; non-directory entries are skipped.
+    """
+    return (
+        path
+        for path in _worktrees_dir(repo).glob(f"*{_REANCHOR_DIR_SUFFIX}")
+        if path.is_dir()
+    )
+
+
 def prune_stale_reanchor_worktrees(repo: Path) -> int:
     """Remove leftover ``*-reanchor`` worktrees from prior plan runs.
 
@@ -655,17 +678,81 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     so one stale worktree never blocks a plan run.
     """
     removed = 0
-    for path in (
-        repo / ".daydream" / "worktrees"
-    ).glob(f"*{_REANCHOR_DIR_SUFFIX}"):
-        if not path.is_dir():
-            continue
+    for path in _iter_reanchor_worktrees(repo):
         try:
             git_ops.worktree_remove(repo, path, force=True)
         except git_ops.GitError:
             continue
         removed += 1
     return removed
+
+
+# Verdicts for a named prune of a single re-anchor worktree. Distinct outcomes
+# let the caller report precisely what happened instead of a bare success/fail.
+PRUNE_REMOVED = "removed"
+PRUNE_NOT_FOUND = "not-found"
+PRUNE_NOT_REANCHOR = "not-reanchor"
+PRUNE_UNSAFE_NAME = "unsafe-name"
+PRUNE_GIT_FAILURE = "git-failure"
+
+
+@dataclass(frozen=True)
+class NamedPruneOutcome:
+    """Outcome of a prune of one named re-anchor worktree.
+
+    ``verdict`` is one of :data:`PRUNE_REMOVED`, :data:`PRUNE_NOT_FOUND`,
+    :data:`PRUNE_NOT_REANCHOR`, :data:`PRUNE_UNSAFE_NAME`, or
+    :data:`PRUNE_GIT_FAILURE`. ``plan_count``
+    is best-effort metadata for the removal notice only, never a gate.
+    """
+
+    verdict: str
+    plan_count: int = 0
+
+
+def prune_named_reanchor_worktree(repo: Path, name: str) -> NamedPruneOutcome:
+    """Remove the single ``-reanchor`` worktree named *name*, returning a verdict.
+
+    The worktree lives at ``.daydream/worktrees/<name>``. The name is
+    validated against the shared filesystem-safe dirname rules before any
+    filesystem or git access. A ``daydream_plans`` directory's ``*.md`` count
+    is captured (*before* removal) purely as blast-radius metadata for the
+    removal notice; it never affects removal. Removal failures are reported as
+    :data:`PRUNE_GIT_FAILURE`, never coerced to success.
+
+    Returns :data:`PRUNE_UNSAFE_NAME` for a name that fails the
+    filesystem-safe dirname rules, :data:`PRUNE_NOT_REANCHOR` for a safe name
+    lacking the ``-reanchor`` suffix, :data:`PRUNE_NOT_FOUND` when the named
+    directory is absent, :data:`PRUNE_REMOVED` on a successful removal, and
+    :data:`PRUNE_GIT_FAILURE` when removal itself fails.
+    """
+    if _SAFE_DIRNAME.fullmatch(name) is None:
+        return NamedPruneOutcome(PRUNE_UNSAFE_NAME)
+    if not name.endswith(_REANCHOR_DIR_SUFFIX):
+        return NamedPruneOutcome(PRUNE_NOT_REANCHOR)
+    path = _worktrees_dir(repo) / name
+    if not path.is_dir():
+        return NamedPruneOutcome(PRUNE_NOT_FOUND)
+    plans = path / "daydream_plans"
+    if plans.is_dir():
+        plan_count = sum(1 for _ in plans.glob("*.md"))
+    else:
+        plan_count = 0
+    try:
+        git_ops.worktree_remove(repo, path, force=True)
+    except git_ops.GitError:
+        return NamedPruneOutcome(PRUNE_GIT_FAILURE, plan_count)
+    return NamedPruneOutcome(PRUNE_REMOVED, plan_count)
+
+
+def list_reanchor_worktrees(repo: Path) -> list[Path]:
+    """List the ``*.{_REANCHOR_DIR_SUFFIX}`` directories under ``.daydream/worktrees``.
+
+    Returns the exact names the automatic prune would remove, so an operator
+    can discover them before pruning. Existing directories only; non-directory
+    entries are skipped, matching ``prune_stale_reanchor_worktrees``.
+    """
+    return list(_iter_reanchor_worktrees(repo))
 
 
 def _highest_plan_number(
@@ -1290,12 +1377,7 @@ class PlanWriteSession:
                 run_id = self._run_session_id or f"run-{self._planned_at[:12]}"
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
-                worktree = (
-                    self._repo
-                    / ".daydream"
-                    / "worktrees"
-                    / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
-                )
+                worktree = _worktrees_dir(self._repo) / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
                 git_ops.worktree_add(
                     self._repo, worktree, new_head, detach=True
                 )
