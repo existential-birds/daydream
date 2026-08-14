@@ -11,8 +11,9 @@ These three workflows are this repository's own **repository-only Codex dogfood 
 
 ## Install
 
-To install the dogfood workflows in a repository of your own, follow the
-canonical installation guide:
+To install these repository workflows in a repository of your own, create the
+`OPENAI_API_KEY` repository secret the review job consumes (it authenticates the
+Codex CLI before review), then follow the canonical installation guide:
 [`daydream/templates/workflows/README.md#install`](../../daydream/templates/workflows/README.md#install).
 
 ## Trigger matrix
