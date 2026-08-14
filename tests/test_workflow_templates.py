@@ -6,8 +6,10 @@ permission dicts). They guard only the handful of properties a single file-read
 cannot verify and that a careless edit could silently break:
 
 - No untrusted event data is interpolated into a ``run:`` body (injection).
+- Every non-local action ``uses:`` in the live and shipped bot workflows
+  resolves to a full commit SHA (never a mutable tag/branch/expression).
 - The daydream install stays pinned to the current release tag (cross-file
-  drift against ``pyproject.toml``).
+  drift against ``pyproject.toml``), in every live and shipped workflow.
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v2.2.2 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
@@ -27,8 +29,9 @@ from typing import Any
 import pytest
 import yaml
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "daydream" / "templates" / "workflows"
-REPO_WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
+REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
@@ -49,6 +52,59 @@ def job_steps(wf: dict[str, Any], job: str) -> list[dict[str, Any]]:
 
 def has_checkout(job: dict[str, Any]) -> bool:
     return any("actions/checkout" in s.get("uses", "") for s in job["steps"])
+
+
+# Action-ref policy (all bot workflows, live + shipped): every non-local
+# `uses:` must resolve to a full commit SHA, never a mutable tag, branch,
+# expression, Docker reference, short hash, or non-hex revision, and must carry
+# the human-readable `# vX.Y.Z` inline comment naming the release that SHA pins.
+# Repo-local `./…` actions are exempt. Rides the root pytest suite in ci.yml.
+
+_BOT_WORKFLOW_PATHS = sorted(
+    [*REPO_WORKFLOWS_DIR.glob("daydream-*.yml"), *TEMPLATES_DIR.rglob("*.yml")],
+    key=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+
+_PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+
+# Approved SHA → release mapping every pinned action ref must match, so the
+# `# vX.Y.Z` inline comment is verifiable rather than decorative (yaml.safe_load
+# strips it, so the comment can only be checked against the raw text). Concrete
+# pairs, in the style of _APP_TOKEN_ACTION below: a refloated pin or a mistyped
+# comment fails loudly instead of being silently absorbed by a wildcard.
+_PINNED_ACTION_VERSIONS = {
+    "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5": "v4.3.1",
+    "astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a": "v4.2.0",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": "v4.3.0",
+    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349": "v2.2.2",
+}
+
+_USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))?$")
+
+_DAYDREAM_INSTALL_WORKFLOW_PATHS = [
+    REPO_WORKFLOWS_DIR / "daydream-review.yml",
+    REPO_WORKFLOWS_DIR / "daydream-post.yml",
+    TEMPLATES_DIR / "daydream-review.yml",
+    TEMPLATES_DIR / "daydream-post.yml",
+    TEMPLATES_DIR / "single" / "daydream.yml",
+]
+
+
+def _action_references(wf: dict[str, Any]) -> list[str]:
+    """Return job-level and step-level ``uses:`` executable references, in document order."""
+    refs: list[str] = []
+    for job in wf["jobs"].values():
+        job_uses = job.get("uses")
+        if isinstance(job_uses, str):
+            refs.append(job_uses)
+        steps = job.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                step_uses = step.get("uses")
+                if isinstance(step_uses, str):
+                    refs.append(step_uses)
+    return refs
 
 
 # Injection guard (all templates): untrusted event data must reach run: via env:,
@@ -72,9 +128,46 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
                 )
 
 
+@pytest.mark.parametrize(
+    "wf_path",
+    _BOT_WORKFLOW_PATHS,
+    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path) -> None:
+    wf = load_workflow(wf_path)
+    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
+    for ref in _action_references(wf):
+        if ref.startswith("./"):
+            continue
+        assert _PINNED_ACTION_RE.fullmatch(ref), (
+            f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
+            f"(expected owner/repo@<40 hex chars>)"
+        )
+    # yaml.safe_load strips inline comments, so the declared `# vX.Y.Z` version
+    # comment is only visible in the raw text. Every non-local uses: line must
+    # carry the approved release comment for its pinned SHA.
+    for line in wf_path.read_text(encoding="utf-8").splitlines():
+        m = _USES_LINE_RE.match(line)
+        if m is None:
+            continue
+        ref, comment = m.group("ref"), m.group("comment")
+        if ref.startswith("./"):
+            continue
+        expected = _PINNED_ACTION_VERSIONS.get(ref)
+        assert expected is not None, (
+            f"{rel}: non-local action reference {ref!r} is not in the approved "
+            f"pinned-action map; add it (with its release version) or its version "
+            f"comment cannot be verified"
+        )
+        assert comment == expected, (
+            f"{rel}: action reference {ref!r} carries version comment {comment!r}, "
+            f"but must carry the approved {expected!r} inline comment"
+        )
+
+
 # Install-pin drift guard: the bot must install a pinned daydream release, never
-# the moving `main` tip. Fails on release until the template pin is bumped in
-# lockstep with the package version.
+# the moving `main` tip, across every live and shipped workflow. Fails on
+# release until the pin is bumped in lockstep with the package version.
 
 _INSTALL_RE = re.compile(
     r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
@@ -82,20 +175,25 @@ _INSTALL_RE = re.compile(
 
 
 def _package_version() -> str:
-    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    pyproject = _REPO_ROOT / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     return data["project"]["version"]
 
 
-@pytest.mark.parametrize("name", ["daydream-review.yml", "daydream-post.yml", "single/daydream.yml"])
-def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
-    text = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+@pytest.mark.parametrize(
+    "wf_path",
+    _DAYDREAM_INSTALL_WORKFLOW_PATHS,
+    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+def test_daydream_install_is_pinned_to_current_release_tag(wf_path: Path) -> None:
+    text = wf_path.read_text(encoding="utf-8")
     refs = [m.group("ref") for m in _INSTALL_RE.finditer(text)]
-    assert refs, f"{name} must install daydream via `uv tool install git+…`"
+    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
+    assert refs, f"{rel} must install daydream via `uv tool install git+…`"
     expected = f"@v{_package_version()}"
     for ref in refs:
         assert ref == expected, (
-            f"{name} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
+            f"{rel} pins the daydream install to {ref or '(unpinned main)'}, but must pin to "
             f"{expected}. Bump the template pin in lockstep with the package version on release."
         )
 
@@ -177,8 +275,8 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     GraphQL dedup and suppresses nothing on the REST side.
 
     Pinned on BOTH the shipped template and the repo's own live workflow —
-    the two files are intentionally divergent in other fields (install-pin,
-    surface-failure guard) but this invariant must hold for both.
+    the two files retain distinct failure-surfacing conditions, but this
+    bot-login invariant must hold for both.
     """
     text = wf_path.read_text(encoding="utf-8")
     assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text, (

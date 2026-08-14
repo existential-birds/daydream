@@ -40,7 +40,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Set up uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
 
       - name: Install daydream
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
@@ -60,7 +60,7 @@ jobs:
 
       - name: Download findings artifact
         id: download
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: daydream-findings
           path: findings
