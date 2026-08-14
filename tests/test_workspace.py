@@ -474,6 +474,27 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
     assert not captured_path.exists()
 
 
+async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    with pytest.raises(
+        WorkspaceCopyPathError, match="must be relative and must not contain"
+    ):
+        async with open_workspace(
+            repo,
+            branch=None,
+            base=None,
+            force_ephemeral=True,
+            extra_copy=[Path("../retained.cfg")],
+            skip_tests=False,
+        ) as ctx:
+            pass  # never reached — the copy boundary rejects before yielding
+    # Fail-closed: no file escaped into the persistent parent (escape destination).
+    assert not (tmp_path / "retained.cfg").exists()
+    # Cleanup ran: the ephemeral worktree was removed -> worktrees dir is empty.
+    worktrees = repo / ".daydream" / "worktrees"
+    assert not any(worktrees.iterdir())
+
+
 # --- 13. Stale-local warning fires ------------------------------------------
 
 
