@@ -31,6 +31,18 @@ async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None
         print(f"No canonical merged-items.json found at {items_path}", file=sys.stderr)
         sys.exit(1)
 
+    # A present-but-corrupt/partially-written merged-items.json is a real error,
+    # not a "nothing to post": validate it here so it exits 1 (distinguishing
+    # corruption from a genuinely-empty finding list) instead of silently
+    # succeeding. The shared poster swallows JSONDecodeError into
+    # NOTHING_TO_POST for the main deep flow, which would otherwise hide input
+    # corruption behind a 0 exit code here (#400, round 2).
+    try:
+        json.loads(items_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read merged-items.json at {items_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     try:
         status = await post_review_to_pr_from_report(
             target_dir,

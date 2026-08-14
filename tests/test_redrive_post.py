@@ -102,7 +102,7 @@ def test_redrive_requires_canonical_merged_items(
     assert not (multi_stack_target / ".review-output.md").exists()
 
 
-def test_redrive_corrupt_merged_items_skips_gracefully(
+def test_redrive_corrupt_merged_items_exits_nonzero(
     multi_stack_target: Path,
     fake_gh: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -113,9 +113,11 @@ def test_redrive_corrupt_merged_items_skips_gracefully(
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "merged-items.json").write_text("{not valid json}")
 
-    _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
+    assert exc.value.code == 1  # corrupt input is an error, not a silent success
 
-    out = capsys.readouterr().out
-    assert "Could not read merged-items.json" in out
+    captured = capsys.readouterr()
+    assert "Could not read merged-items.json" in (captured.out + captured.err)
     assert fake_gh.calls("POST") == []
     assert not (multi_stack_target / ".review-output.md").exists()
