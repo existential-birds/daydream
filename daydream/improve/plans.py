@@ -1137,12 +1137,28 @@ class PlanWriteSession:
     def finish(self) -> dict[str, list[dict[str, Any]]]:
         """Reconcile the index and return what this session landed."""
         self._write_index()
+        self._release_reanchor_worktree()
         return {
             "written": _by_reservation(self._written),
             "skipped": _by_reservation(self._skipped),
             "failed": _by_reservation(self._failed),
             "diagnostics": _by_reservation(self._diagnostics),
         }
+
+    def _release_reanchor_worktree(self) -> None:
+        """Best-effort release of the re-anchor worktree's git lock.
+
+        A failed unlock must never surface or fail the plan run, so the unlock
+        is swallowed via :class:`~root.git_ops.GitError`. Clear the reference
+        regardless so a later release is a no-op.
+        """
+        if self._reanchor_worktree is None:
+            return
+        try:
+            git_ops.worktree_unlock(self._repo, self._reanchor_worktree)
+        except git_ops.GitError:
+            pass
+        self._reanchor_worktree = None
 
     @staticmethod
     def _attempt_of(selection: dict[str, Any]) -> dict[str, Any] | None:
@@ -1406,6 +1422,12 @@ class PlanWriteSession:
                 git_ops.worktree_add(
                     self._repo, worktree, new_head, detach=True
                 )
+                # Arm the git worktree lock exactly once, at creation, so a
+                # concurrent run's start-of-run prune cannot destroy the live
+                # worktree while the plan is mid-write. Released best-effort on
+                # finish()/failure; a lock failure blocks the plan (git refuses
+                # to remove a locked worktree with a single --force).
+                git_ops.worktree_lock(self._repo, worktree, reason=run_id)
                 self._reanchor_worktree = worktree
             text = render_plan(
                 finding,

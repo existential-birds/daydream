@@ -1744,6 +1744,50 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 
+def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(
+    repo: Path, head_sha: str
+) -> None:
+    """Acceptance #1/#4/#5: run B's start-of-run prune must not destroy run A's
+    live re-anchor worktree; A's finished plan still lands on finish()."""
+    from daydream import git_ops
+    from daydream.improve.plans import prune_stale_reanchor_worktrees
+
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
+    )
+    git(repo, "add", "README.md")
+    new_head = commit(repo, "advance head after plan fan-out")
+
+    # Run A: mid-write — worktree created + locked, session NOT finished yet
+    session_a = PlanWriteSession(
+        repo / "daydream_plans",
+        planned_at=head_sha,
+        run_session_id="run-A",
+    )
+    reservations_a = session_a.reserve([_finding()])
+    assert session_a.commit(reservations_a[0], _selection(repo)).status == "written"
+    worktree_a = repo / ".daydream" / "worktrees" / "run-A-reanchor"
+    assert worktree_a.is_dir()
+    assert git_ops.worktree_lock_mtime(repo, worktree_a) is not None  # live lock
+
+    # Run B starts: its start-of-run prune runs while A is mid-write
+    removed = prune_stale_reanchor_worktrees(repo)
+    assert removed == 0                        # A's live worktree is skipped
+    assert worktree_a.is_dir()                 # never force-removed
+    assert (worktree_a / "daydream_plans/001-batch-catalog-queries.md").is_file()
+
+    # A finishes: durable main copy + REANCHORED entry land; lock released
+    result_a = session_a.finish()
+    assert len(result_a["written"]) == 1
+    main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
+    assert main_plan.is_file()
+    assert f"`{new_head}`" in main_plan.read_text(encoding="utf-8")
+    assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
+        encoding="utf-8"
+    )
+    assert git_ops.worktree_lock_mtime(repo, worktree_a) is None  # released
+
+
 def test_prune_named_reanchor_worktree_removes_valid_worktree(
     repo: Path, head_sha: str
 ) -> None:
