@@ -3507,8 +3507,7 @@ def _append_structural_and_write_merged(
         )
 
     items = normalize_items(evidenced)
-    merged_root: dict[str, Any] = {"items": items}
-    items_path.write_text(json.dumps(merged_root, indent=2))
+    items_path.write_text(json.dumps({"items": items}, indent=2))
     print_info(console, f"Merged into {len(items)} items")
 
     # Render the human report FROM the canonical items, then copy from the deep
