@@ -165,14 +165,25 @@ def _load_json_dict(path: Path, *, required: bool, missing_hint: str = "") -> di
     return data
 
 
+def _make_selection(golden_urls: Collection[str] | None) -> set[str] | None:
+    """Return a set of PR URLs to restrict work to, or ``None`` for no filter."""
+    return set(golden_urls) if golden_urls is not None else None
+
+
 async def run_anthropic_extraction(
     benchmark_repo: Path,
     judge_model: str,
     *,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
+    golden_urls: Collection[str] | None = None,
 ) -> None:
-    """Extract Martian-compatible candidate issues using the injected JSON completer."""
+    """Extract Martian-compatible candidate issues using the injected JSON completer.
+
+    ``golden_urls``, when given, restricts extraction to those PR URLs; entries
+    already present in a resumable `candidates.json` for other PRs are left
+    untouched.
+    """
     benchmark_data_file = benchmark_repo / "results" / "benchmark_data.json"
     data = _load_json_dict(benchmark_data_file, required=True, missing_hint="cannot extract benchmark candidates.")
 
@@ -181,7 +192,10 @@ async def run_anthropic_extraction(
     candidates_file = results_dir / "candidates.json"
     all_candidates = _load_json_dict(candidates_file, required=False)
 
+    selected = _make_selection(golden_urls)
     for golden_url, entry in data.items():
+        if selected is not None and golden_url not in selected:
+            continue
         reviews = entry.get("reviews", []) if isinstance(entry, dict) else []
         for review in reviews:
             if not isinstance(review, dict) or review.get("tool") != tool:
@@ -210,8 +224,14 @@ async def run_anthropic_dedup(
     *,
     tool: str = _TOOL,
     client: _AnthropicJsonCompleter,
+    golden_urls: Collection[str] | None = None,
 ) -> None:
-    """Write Martian-compatible dedup groups using the injected JSON completer."""
+    """Write Martian-compatible dedup groups using the injected JSON completer.
+
+    ``golden_urls``, when given, restricts dedup to those PR URLs; entries
+    already present in a resumable `dedup_groups.json` for other PRs are left
+    untouched.
+    """
     results_dir = model_results_dir(benchmark_repo, judge_model)
     candidates_file = results_dir / "candidates.json"
     all_candidates = _load_json_dict(
@@ -221,7 +241,10 @@ async def run_anthropic_dedup(
     groups_file = results_dir / "dedup_groups.json"
     all_groups = _load_json_dict(groups_file, required=False)
 
+    selected = _make_selection(golden_urls)
     for golden_url, tools in all_candidates.items():
+        if selected is not None and golden_url not in selected:
+            continue
         if not isinstance(tools, dict):
             continue
         candidates = tools.get(tool)
@@ -265,7 +288,8 @@ async def run_direct_scoring(
     from the environment, preserving the ``anthropic-direct`` default behavior.
 
     ``judge_route`` is stamped onto every evaluation leaf so trend reports can
-    tell the in-process judge routes apart.
+    tell the in-process judge routes apart. When ``golden_urls`` is given,
+    extraction and dedup are restricted to the same selection as evaluation.
     """
     benchmark_repo = benchmark_repo.resolve()
     if client is None:
@@ -274,8 +298,8 @@ async def run_direct_scoring(
             raise BenchmarkStepError(f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run direct scoring.")
         client = AnthropicJsonClient(api_key=api_key, model=judge_model)
 
-    await run_anthropic_extraction(benchmark_repo, judge_model, tool=tool, client=client)
-    await run_anthropic_dedup(benchmark_repo, judge_model, tool=tool, client=client)
+    await run_anthropic_extraction(benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls)
+    await run_anthropic_dedup(benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls)
     evals = await run_anthropic_evaluation(
         benchmark_repo,
         judge_model,
@@ -335,7 +359,7 @@ async def run_anthropic_evaluation(
     evals = _load_json_dict(evaluations_file, required=False)
 
     judge = AnthropicFindingJudge(client)
-    selected = set(golden_urls) if golden_urls is not None else None
+    selected = _make_selection(golden_urls)
     for golden_url, entry in data.items():
         if selected is not None and golden_url not in selected:
             continue
