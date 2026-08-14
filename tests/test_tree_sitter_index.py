@@ -3,6 +3,7 @@
 import inspect
 from pathlib import Path
 
+import pytest
 from conftest import _commit, _git, _make_repo_with_main
 
 from daydream.tree_sitter_index import _MAX_IMPORTERS, detect_affected_files
@@ -54,6 +55,43 @@ def test_python_impact_surface(tmp_path: Path):
     # The api.py -> models.py forward edge must be exact.
     assert ("daydream_demo/models.py", "imports") in paths_by_role
     assert len(results) >= 2
+
+
+@pytest.mark.parametrize(
+    "api_rel, files",
+    [
+        # `from ..models` in package/feature/api.py resolves to the parent package.
+        (
+            "package/feature/api.py",
+            {
+                "package/__init__.py": "",
+                "package/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
+                "package/feature/__init__.py": "",
+                "package/feature/api.py": (
+                    '"""API module."""\nfrom ..models import User\n\ndef get_user():\n    return User()\n'
+                ),
+            },
+        ),
+        # `from ...models` in package/feature/nested/api.py resolves to the grandparent package.
+        (
+            "package/feature/nested/api.py",
+            {
+                "package/__init__.py": "",
+                "package/models.py": '"""Models module."""\n\nclass User:\n    pass\n',
+                "package/feature/__init__.py": "",
+                "package/feature/nested/__init__.py": "",
+                "package/feature/nested/api.py": (
+                    '"""API module."""\nfrom ...models import User\n\ndef get_user():\n    return User()\n'
+                ),
+            },
+        ),
+    ],
+)
+def test_python_multilevel_relative_imports(tmp_path: Path, api_rel: str, files: dict[str, str]):
+    repo = _materialize(tmp_path, files)
+    results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
+    imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
+    assert imports_pairs == {("package/models.py", "imports")}
 
 
 def test_typescript_impact_surface(tmp_path: Path):
