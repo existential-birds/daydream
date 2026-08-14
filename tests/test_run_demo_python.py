@@ -7,27 +7,28 @@ from pathlib import Path
 import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
-sys.path.insert(0, str(SCRIPTS_DIR))
-
-import _demo_common  # noqa: E402
-import run_demo_python  # noqa: E402
-
-
-class _SubprocessRecorder:
-    """Captures the daydream subprocess command without executing it."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[object, ...]] = []
-
-    def run(self, *args: object, **kwargs: object) -> types.SimpleNamespace:
-        self.calls.append(args)
-        return types.SimpleNamespace(returncode=0)
 
 
 def test_run_demo_python_skip_setup_reuses_existing_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--skip-setup`` must not create or touch an existing repo, and must run daydream on it."""
+    # Add scripts dir to sys.path inside the test, scoped by monkeypatch,
+    # to avoid session-level side effects from module-level sys.path mutation.
+    monkeypatch.setattr(sys, "path", [str(SCRIPTS_DIR)] + sys.path)
+    import _demo_common  # noqa: E402
+    import run_demo_python  # noqa: E402
+
+    class _SubprocessRecorder:
+        """Captures the daydream subprocess command without executing it."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        def run(self, *args: object, **kwargs: object) -> types.SimpleNamespace:
+            self.calls.append(args)
+            return types.SimpleNamespace(returncode=0)
+
     target = tmp_path / "existing-repo"
     target.mkdir()
     sentinel = target / "sentinel.txt"
