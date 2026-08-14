@@ -709,11 +709,12 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     so one stale worktree never blocks a plan run.
 
     The prune is lock-aware: a live re-anchor worktree (locked at creation, age
-    near zero) is refused by the single ``--force`` and skipped, so a concurrent
-    run mid-write is never destroyed. A worktree whose lock is older than
+    near zero) is skipped without any removal attempt, so a concurrent run
+    mid-write is never destroyed. A worktree whose lock is older than
     ``_REANCHOR_LOCK_STALE_AFTER_S`` is a crashed session's leftover: it is
-    unlocked first, then force-removed, so it is reclaimed rather than wedged
-    forever. Unlocked stale worktrees are removed as before.
+    reclaimed via ``git_ops.worktree_remove_unlocked`` (unlock, then
+    force-remove) rather than wedged forever. Unlocked worktrees are removed
+    the same way, the unlock being a no-op for them.
     """
     removed = 0
     for path in _iter_reanchor_worktrees(repo):
@@ -721,10 +722,12 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
             locked_at = git_ops.worktree_lock_mtime(repo, path)
             if (
                 locked_at is not None
-                and time.time() - locked_at > _REANCHOR_LOCK_STALE_AFTER_S
+                and time.time() - locked_at <= _REANCHOR_LOCK_STALE_AFTER_S
             ):
-                git_ops.worktree_unlock(repo, path)
-            git_ops.worktree_remove(repo, path, force=True)
+                # Live re-anchor worktree (lock age near zero): never unlock or
+                # remove it, so a concurrent run mid-write is not destroyed.
+                continue
+            git_ops.worktree_remove_unlocked(repo, path)
         except git_ops.GitError:
             continue
         removed += 1
@@ -1425,9 +1428,12 @@ class PlanWriteSession:
             self._release_reanchor_worktree()
             # Remove the worktree so a later re-anchorable finding can re-add
             # the path instead of failing with PLAN_REANCHOR_FAILED (fix #2).
+            # Removal goes through worktree_remove_unlocked — the single place
+            # encoding unlock-before-remove; the release above already unlocked,
+            # so the helper's unlock is a no-op.
             if failed_wt is not None:
                 try:
-                    git_ops.worktree_remove(self._repo, failed_wt, force=True)
+                    git_ops.worktree_remove_unlocked(self._repo, failed_wt)
                 except git_ops.GitError:
                     pass
             return self._block(
@@ -1456,7 +1462,8 @@ class PlanWriteSession:
                 # concurrent run's start-of-run prune cannot destroy the live
                 # worktree between an add and a separate lock (fix #3). Released
                 # best-effort on finish()/failure; git refuses to remove a
-                # locked worktree, so release unlocks before removing.
+                # locked worktree, so removal goes through
+                # git_ops.worktree_remove_unlocked (unlock, then remove).
                 git_ops.worktree_add(
                     self._repo,
                     worktree,

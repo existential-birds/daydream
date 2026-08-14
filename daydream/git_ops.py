@@ -1463,6 +1463,29 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 
 
+def worktree_remove_unlocked(repo: Path, path: Path, *, force: bool = True) -> None:
+    """Unlock *path* (if locked), then remove the worktree.
+
+    git refuses to remove a locked worktree even with ``--force``, so any
+    removal of a possibly-locked worktree must release the lock first. This is
+    the single place encoding that unlock-before-remove ordering; callers that
+    remove a worktree which may still hold a lock use this instead of inlining
+    ``worktree_unlock`` + ``worktree_remove``.
+
+    The unlock is best-effort: ``git worktree unlock`` fails on an
+    already-unlocked worktree, which is expected here and ignored. The removal
+    itself is authoritative and raises :class:`GitError` on failure.
+
+    Raises:
+        GitError: If ``git worktree remove`` fails.
+    """
+    try:
+        worktree_unlock(repo, path)
+    except GitError:
+        pass
+    worktree_remove(repo, path, force=force)
+
+
 def worktree_lock(repo: Path, path: Path, *, reason: str | None = None) -> None:
     """Lock the worktree at *path* so git refuses to remove it.
 

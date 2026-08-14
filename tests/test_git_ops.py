@@ -1583,6 +1583,28 @@ def test_worktree_lock_and_lock_mtime_roundtrip(tmp_path: Path) -> None:
     assert git_ops.worktree_lock_mtime(repo, wt) is None  # released
 
 
+def test_worktree_remove_unlocked_unlocks_before_removing(tmp_path: Path) -> None:
+    """worktree_remove_unlocked centralizes the unlock-before-remove ordering:
+    it removes a locked worktree (unlocking it first) and an already-unlocked
+    one (the unlock attempt is a no-op), so callers never inline the rule."""
+    repo = _make_repo_with_main(tmp_path)
+
+    # Locked worktree: removal must unlock first, then remove.
+    locked_wt = repo / "wt-locked"
+    git_ops.worktree_add(repo, locked_wt, "main", detach=True)
+    git_ops.worktree_lock(repo, locked_wt, reason="run-A")
+    assert git_ops.worktree_lock_mtime(repo, locked_wt) is not None
+    git_ops.worktree_remove_unlocked(repo, locked_wt)
+    assert not locked_wt.exists()
+
+    # Unlocked worktree: the unlock attempt fails harmlessly, removal proceeds.
+    unlocked_wt = repo / "wt-unlocked"
+    git_ops.worktree_add(repo, unlocked_wt, "main", detach=True)
+    assert git_ops.worktree_lock_mtime(repo, unlocked_wt) is None
+    git_ops.worktree_remove_unlocked(repo, unlocked_wt)
+    assert not unlocked_wt.exists()
+
+
 def test_worktree_add_with_lock_reason_arms_lock_atomically(
     tmp_path: Path,
 ) -> None:
