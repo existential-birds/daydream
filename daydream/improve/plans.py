@@ -48,6 +48,8 @@ _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # Re-anchor worktree dirnames end in this suffix; the prune pass and the
 # re-anchor write share it so a rename can never silently stop pruning.
 _REANCHOR_DIR_SUFFIX = "-reanchor"
+REANCHORED_STATUS_PREFIX = "REANCHORED"
+_REANCHORED_LANDED = re.compile(rf"^{re.escape(REANCHORED_STATUS_PREFIX)} \(landed at (.+)\)$")
 
 
 def load_rejections(plans_dir: Path) -> dict[str, dict[str, Any]]:
@@ -343,6 +345,16 @@ class PlanIndexEntry:
         """The plan file this entry names, or ``None`` when none was written."""
         return f"{self.number:03d}-{self.slug}.md" if self.slug else None
 
+    @property
+    def landing_path(self) -> str | None:
+        """The repo-relative landing path of a re-anchored plan, or ``None``.
+
+        ``None`` when the status lacks the ``(landed at ...)`` suffix — the
+        path is parsed tolerantly and never synthesized.
+        """
+        match = _REANCHORED_LANDED.match(self.status)
+        return match.group(1) if match else None
+
 
 def _index_field(value: Any) -> str:
     """Normalize a model- or operator-supplied index field for durable storage."""
@@ -549,6 +561,19 @@ def load_plan_index(plans_dir: Path) -> list[PlanIndexEntry]:
         entry
         for item in payload["plans"]
         if (entry := _entry_from_payload(item)) is not None
+    ]
+
+
+def reanchored_plan_rows(plans_dir: Path) -> list[PlanIndexEntry]:
+    """Return every re-anchored plan recorded in the durable index.
+
+    Reuses :func:`load_plan_index`, which treats an absent/malformed sidecar
+    as empty, so this helper never raises on a missing or broken index.
+    """
+    return [
+        entry
+        for entry in load_plan_index(plans_dir)
+        if entry.status.startswith(REANCHORED_STATUS_PREFIX)
     ]
 
 
@@ -1412,10 +1437,11 @@ class PlanWriteSession:
                 [entries[index] for index in sorted(entries)],
                 check_links=True,
             )
+            # The re-anchor worktree is pruned at the start of the next plan run,
+            # so the durable status must point at the surviving copy in the main
+            # index rather than a path that will no longer exist.
             landed_rel = (
-                (worktree / "daydream_plans" / filename)
-                .relative_to(self._repo)
-                .as_posix()
+                (self._plans_dir / filename).relative_to(self._repo).as_posix()
             )
             self._entries[number] = _index_entry(
                 number=number,
@@ -1424,7 +1450,7 @@ class PlanWriteSession:
                 fingerprint=reservation.fingerprint,
                 finding=finding,
                 planned_at=new_head,
-                status=f"REANCHORED (landed at {landed_rel})",
+                status=f"{REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
             )
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
             return _reanchor_failed()

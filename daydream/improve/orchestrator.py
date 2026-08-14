@@ -61,6 +61,7 @@ from daydream.improve.plans import (
     load_rejections,
     plan_slug,
     prune_stale_reanchor_worktrees,
+    reanchored_plan_rows,
     record_plan_write_diagnostics,
     record_rejections,
 )
@@ -2111,6 +2112,29 @@ def _finish_publication(
         )
 
 
+def _reanchored_report_section(plans_dir: Path) -> str:
+    """Render the durable ``Re-anchored plans`` report section.
+
+    Reads the durable plan index (never the session result), so prior-run
+    re-anchors surface even when the current run re-anchored none. Returns a
+    self-contained markdown section including its own header and a trailing
+    blank line.
+    """
+    rows = reanchored_plan_rows(plans_dir)
+    if not rows:
+        return "## Re-anchored plans\n\n- No re-anchored plans.\n\n"
+    table = (
+        "| Plan | Title | Status | Landing path |\n"
+        "| --- | --- | --- | --- |\n"
+    )
+    for entry in rows:
+        table += (
+            f"| {entry.number:03d} | {markdown_cell(entry.title)} "
+            f"| `{entry.status}` | `{entry.landing_path or '(unavailable)'}` |\n"
+        )
+    return f"## Re-anchored plans\n\n{table}\n"
+
+
 def _render_report(ctx: FlowContext) -> str:
     services = ctx.data["services"]
     all_services = ctx.data["all_services"]
@@ -2231,6 +2255,7 @@ def _render_report(ctx: FlowContext) -> str:
         f"- Previously rejected findings suppressed: {previously_rejected}\n"
         "\n## Plan writing\n\n"
         f"{plan_lines}\n\n"
+        f"{_reanchored_report_section(ctx.work.repo / 'daydream_plans')}"
         "## GitHub issues\n\n"
         f"{publication_lines}"
     )

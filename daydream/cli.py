@@ -1216,6 +1216,82 @@ def _handle_harvest_command(argv: list[str]) -> int:
     return 0
 
 
+def _build_list_reanchored_parser() -> argparse.ArgumentParser:
+    """Build the parser for ``daydream improve list-reanchored <target>``.
+
+    A read-only listing of re-anchored plans from the durable plan index.
+    ``--json`` switches the output from the human summary table to a JSON
+    array, so the reading is scriptable.
+    """
+    parser = argparse.ArgumentParser(
+        prog="daydream improve list-reanchored",
+        description="List every re-anchored plan from the durable plan index.",
+    )
+    parser.add_argument("target", metavar="TARGET", help="Repository to list")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit the rows as a JSON array instead of a human table.",
+    )
+    return parser
+
+
+def _handle_list_reanchored_command(argv: list[str]) -> int:
+    """Handle ``daydream improve list-reanchored <target>``.
+
+    A one-purpose, read-only listing of re-anchored plans from the durable
+    ``daydream_plans/.index.json``. Every row carries the plan number, title,
+    status, and landing path. An empty result prints a clear line and exits 0.
+
+    Returns:
+        ``0`` always on non-exceptional paths.
+    """
+    import json
+
+    from rich.markup import escape
+
+    from daydream.improve.plans import reanchored_plan_rows
+    from daydream.ui import create_console, print_info
+
+    parser = _build_list_reanchored_parser()
+    args = parser.parse_args(argv)
+    rows = reanchored_plan_rows(Path(args.target) / "daydream_plans")
+
+    console = create_console()
+    if args.json:
+        console.print(
+            json.dumps(
+                [
+                    {
+                        "number": entry.number,
+                        "title": entry.title,
+                        "status": entry.status,
+                        "landing_path": entry.landing_path,
+                    }
+                    for entry in rows
+                ],
+                indent=2,
+            ),
+            soft_wrap=True,
+            markup=False,
+        )
+        return 0
+    if not rows:
+        print_info(console, "No re-anchored plans.")
+        return 0
+    print_info(console, "Re-anchored plans:")
+    # Long landing paths must not wrap mid-string (rich would otherwise insert
+    # a newline inside the path at the console width), so rows use soft_wrap.
+    for entry in rows:
+        console.print(
+            f"[neon.cyan]ℹ[/] [neon.fg]{entry.number:03d} "
+            f"{escape(entry.title)} | {escape(entry.status)} | "
+            f"{escape(entry.landing_path) if entry.landing_path else '(unavailable)'}[/]",
+            soft_wrap=True,
+        )
+    return 0
+
+
 def _build_label_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus label <session-prefix> --outcome ...``.
 
@@ -1794,6 +1870,12 @@ def main() -> None:
             if argv[1] == "prune-reanchor":
                 sys.exit(_handle_prune_reanchor(config))
             sys.exit(_handle_list_reanchor(config))
+
+        # ``improve list-reanchored`` is a sync, read-only one-purpose command
+        # (mirroring the corpus/bench/ext short-circuits), so it never spins up
+        # a flow through ``_parse_improve_args``/``anyio.run``.
+        if verb == "improve" and len(argv) > 1 and argv[1] == "list-reanchored":
+            sys.exit(_handle_list_reanchored_command(argv[2:]))
 
         config = (
             _parse_improve_args(argv)

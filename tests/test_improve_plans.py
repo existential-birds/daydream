@@ -1,4 +1,5 @@
 import json
+import sys
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from daydream.cli import main as cli_main
 from daydream.improve.assemble import (
     AssemblyIssue,
     assemble_plan,
@@ -22,6 +24,7 @@ from daydream.improve.command_contract import (
     validate_host_commands,
     validate_recon_commands,
 )
+from daydream.improve.orchestrator import _reanchored_report_section
 from daydream.improve.plans import (
     PLAN_INDEX_FILENAME,
     PRUNE_GIT_FAILURE,
@@ -29,9 +32,12 @@ from daydream.improve.plans import (
     PRUNE_NOT_REANCHOR,
     PRUNE_REMOVED,
     PRUNE_UNSAFE_NAME,
+    PlanIndexEntry,
     PlanWriteSession,
+    _entry_payload,
     load_rejections,
     planned_fingerprints,
+    reanchored_plan_rows,
     record_rejections,
 )
 from daydream.improve.prioritize import aggregate_cross_service
@@ -1584,10 +1590,9 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     # main repo durable surface now lists the re-anchored plan
     main_index = (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
     assert "REANCHORED" in main_index
-    assert (
-        reanchor_plans.relative_to(repo).as_posix() + "/001-batch-catalog-queries.md"
-        in main_index
-    )
+    # the durable status points at the surviving main-index sibling, not the
+    # pruned re-anchor worktree path.
+    assert "landed at daydream_plans/001-batch-catalog-queries.md" in main_index
     main_sidecar = json.loads(
         (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
     )
@@ -4009,3 +4014,164 @@ def test_all_rejected_members_suppress_package_without_plan_identity(
     assert len(result["skipped"]) == 1
     assert "number" not in result["skipped"][0]
     assert "path" not in result["skipped"][0]
+
+
+def _write_single_entry_sidecar(plans_dir: Path, status: str) -> None:
+    """Write a one-entry durable plan index with the given ``status``."""
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    entry = PlanIndexEntry(
+        number=1,
+        slug="batch-catalog-queries",
+        title="Fix N+1 catalog queries",
+        fingerprint="fp-fix-n-plus-one",
+        package_fingerprint="fp-fix-n-plus-one",
+        member_fingerprints=("fp-fix-n-plus-one",),
+        member_aliases=(),
+        priority="P1",
+        effort="M",
+        risk="MED",
+        category="performance",
+        planned_at="0000000000000000000000000000000000000000",
+        status=status,
+        host_blocked=False,
+        change_shape="unknown",
+        maintenance_signals=(),
+        reuse_target="",
+    )
+    (plans_dir / ".index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "plans": [_entry_payload(entry)],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_reanchored_plan_rows_tolerant_of_status_without_landed_suffix(
+    tmp_path: Path,
+) -> None:
+    plans_dir = tmp_path / "daydream_plans"
+    _write_single_entry_sidecar(plans_dir, "REANCHORED")
+
+    rows = reanchored_plan_rows(plans_dir)
+
+    assert len(rows) == 1
+    assert rows[0].number == 1
+    assert rows[0].status.startswith("REANCHORED")
+    assert rows[0].landing_path is None
+
+
+def test_reanchored_plan_rows_returns_empty_when_none_reanchored(
+    tmp_path: Path,
+) -> None:
+    plans_dir = tmp_path / "daydream_plans"
+    _write_single_entry_sidecar(plans_dir, "TODO")
+
+    assert reanchored_plan_rows(plans_dir) == []
+    # An absent index is also an empty result, never an error.
+    assert reanchored_plan_rows(tmp_path / "does-not-exist") == []
+
+
+def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
+    """Re-anchor one plan into a fresh worktree; return the repo-relative landing path."""
+    assembled = _assembled(repo, _authored_plan(title="Fix N+1 catalog queries"))
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=head_sha,
+    )
+    assert len(result["written"]) == 1
+    # The durable landing path is what survives into the index, so source it
+    # from the sidecar rather than the (pruned) re-anchor worktree path.
+    rows = reanchored_plan_rows(repo / "daydream_plans")
+    assert rows, "expected one re-anchored plan"
+    landing = rows[0].landing_path
+    assert landing is not None
+    return landing
+
+
+def test_improve_list_reanchored_real_path_lists_reanchored_plan(
+    repo: Path,
+    head_sha: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "improve", "list-reanchored", str(repo)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "001" in out
+    assert "Fix N+1 catalog queries" in out
+    assert expected_rel in out
+
+
+def test_improve_list_reanchored_real_path_empty_exits_zero(
+    repo: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "improve", "list-reanchored", str(repo)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    assert "No re-anchored plans" in capsys.readouterr().out
+
+
+def test_improve_list_reanchored_json_mode(
+    repo: Path,
+    head_sha: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "list-reanchored", "--json", str(repo)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1
+    assert rows[0]["number"] == 1
+    assert rows[0]["title"] == "Fix N+1 catalog queries"
+    assert rows[0]["status"].startswith("REANCHORED")
+    assert rows[0]["landing_path"] == expected_rel
+
+
+def test_reanchored_report_section_lists_rows(repo: Path, head_sha: str) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    section = _reanchored_report_section(repo / "daydream_plans")
+
+    assert "## Re-anchored plans" in section
+    assert "001" in section
+    assert "Fix N+1 catalog queries" in section
+    assert expected_rel in section
+
+
+def test_reanchored_report_section_empty(tmp_path: Path) -> None:
+    plans_dir = tmp_path / "daydream_plans"
+    plans_dir.mkdir(parents=True)  # no .index.json
+
+    section = _reanchored_report_section(plans_dir)
+
+    assert "## Re-anchored plans" in section
+    assert "No re-anchored plans" in section
