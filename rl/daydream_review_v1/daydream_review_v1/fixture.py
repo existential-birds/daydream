@@ -171,13 +171,17 @@ def build_fixture_repo(dest: Path, *, red: bool = False) -> FixtureRepo:
     """Build the deterministic three-commit fixture repository at *dest*.
 
     Args:
-        dest: Directory to create the repository in; created if absent.
+        dest: New or empty directory to create the repository in; created if
+            absent. An occupied destination (an existing file or a non-empty
+            directory) is rejected before any mutation.
         red: Plant a failing assertion in the final commit's test file, to prove
             the image build's green-baseline gate actually fails.
 
     Returns:
         The built repository and its commit SHAs.
     """
+    if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
+        raise ValueError(f"fixture destination must be a new or empty directory: {dest}")
     dest.mkdir(parents=True, exist_ok=True)
     _git(dest, "init", "--quiet", "--initial-branch", "main")
     _git(dest, "config", "commit.gpgsign", "false")
@@ -204,10 +208,13 @@ def build_fixture_repo(dest: Path, *, red: bool = False) -> FixtureRepo:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dest", type=Path, help="directory to build the repository in")
+    parser.add_argument("dest", type=Path, help="new or empty directory to build the repository in")
     parser.add_argument("--red", action="store_true", help="plant a failing test in the head commit")
     args = parser.parse_args(argv)
-    repo = build_fixture_repo(args.dest, red=args.red)
+    try:
+        repo = build_fixture_repo(args.dest, red=args.red)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"repo       {repo.path}")
     print(f"base_sha   {repo.base_sha}")
     print(f"pr1_head   {repo.pr1_head_sha}")
