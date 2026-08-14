@@ -153,16 +153,39 @@ def _gh_token_env_for_request() -> dict[str, str] | None:
 # log line or error message that joins raw args masks these values.
 _SENSITIVE_HEADER_PREFIXES = ("authorization:",)
 
+# The GitHub App manifest-conversion credential rides in the single path segment
+# between the literal prefix and suffix of the ``gh api`` conversion endpoint
+# (e.g. ``/app-manifests/<code>/conversions``). Mask that segment in any
+# rendered diagnostic so the code never leaks verbatim, while preserving the
+# route for debuggability.
+_APP_MANIFEST_CONVERSION_CODE_RE = re.compile(r"(/app-manifests/)[^/\s]+(/conversions)")
+
+
+def _redact_sensitive_text(text: str) -> str:
+    """Mask secrets in *diagnostic* text only; never mutate a live request.
+
+    Replaces the credential segment of any ``/app-manifests/<code>/conversions``
+    endpoint with ``***`` (e.g. ``/app-manifests/***/conversions``), preserving
+    the surrounding route. This is a pure string transform for diagnostics such
+    as error messages and log lines — it must never be applied to the ``args``
+    list passed to :func:`subprocess.run`, which keeps the original endpoint so
+    GitHub still receives the real credential.
+    """
+    return _APP_MANIFEST_CONVERSION_CODE_RE.sub(r"\1***\2", text)
+
 
 def _redact_args(args: list[str]) -> list[str]:
-    """Mask secret-bearing args (e.g. ``Authorization: Bearer <jwt>``).
+    """Mask secret-bearing args for diagnostics (header values + manifest codes).
 
-    The token is passed as a plain ``gh``/``git`` argument, so joining raw args
-    into a warning or :class:`GitError` message would leak it into logs. The
-    header name is kept for debuggability; only the value is replaced.
+    Secrets travel as plain ``gh``/``git`` arguments, so joining raw args into a
+    warning or :class:`GitError` message would leak them into logs. This masks
+    sensitive header values (e.g. ``Authorization: Bearer <jwt>``, keeping the
+    header name for debuggability) and manifest-conversion endpoint segments. It
+    never mutates the input ``args`` list.
 
     Returns:
-        A copy with sensitive header values replaced by ``***``.
+        A copy with sensitive header values and manifest-conversion codes
+        replaced by ``***``.
     """
     redacted: list[str] = []
     for arg in args:
@@ -170,7 +193,7 @@ def _redact_args(args: list[str]) -> list[str]:
             redacted.append(f"{arg.split(':', 1)[0]}: ***")
         else:
             redacted.append(arg)
-    return redacted
+    return [_redact_sensitive_text(a) for a in redacted]
 
 
 # --- Errors ------------------------------------------------------------------
@@ -383,7 +406,9 @@ def _run_gh(
                     retries + 1,
                 )
         except (subprocess.SubprocessError, OSError) as exc:
-            raise GitError(f"gh {' '.join(_redact_args(args))} failed: {type(exc).__name__}: {exc}") from exc
+            raise GitError(
+                f"gh {' '.join(_redact_args(args))} failed: {type(exc).__name__}: {_redact_sensitive_text(str(exc))}"
+            ) from exc
 
     suffix = f" ({retries + 1} attempts)" if retries else ""
     raise GitTimeoutError(
@@ -1743,18 +1768,19 @@ def _gh_error_for(message: str, stderr: str) -> GitError:
     :class:`GitError` so non-rate-limit failures are never swallowed.
     """
     lowered = stderr.lower()
+    redacted_message = _redact_sensitive_text(message)
     is_rate_limit = (
         any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
         or re.search(r"\b429\b", lowered) is not None
         or ("403" in lowered and "rate" in lowered)
     )
     if not is_rate_limit:
-        return GitError(message)
+        return GitError(redacted_message)
     retry_after: float | None = None
     match = re.search(r"retry[- ]after[:\s]+(\d+)", lowered)
     if match:
         retry_after = float(match.group(1))
-    return RateLimitError(message, retry_after=retry_after)
+    return RateLimitError(redacted_message, retry_after=retry_after)
 
 
 def _parse_gh_json(stdout: str, jq: str | None, endpoint: str, *, payload_note: str = "") -> Any:
@@ -1769,7 +1795,9 @@ def _parse_gh_json(stdout: str, jq: str | None, endpoint: str, *, payload_note: 
             return [json.loads(line) for line in stdout.splitlines() if line.strip()]
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise GitError(f"gh api {endpoint} returned invalid JSON: {exc}{payload_note}") from exc
+        raise GitError(
+            _redact_sensitive_text(f"gh api {endpoint} returned invalid JSON: {exc}{payload_note}")
+        ) from exc
 
 
 def gh_api(

@@ -1448,6 +1448,54 @@ def test_gh_api_timeout_redacts_authorization_token(
     assert any("Authorization: ***" in w for w in warnings)
 
 
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_fragment"),
+    [
+        pytest.param("spawn-error", "synthetic subprocess failure", id="spawn-error"),
+        pytest.param("timeout", "timed out after", id="timeout"),
+        pytest.param("api-error", "synthetic API failure", id="api-error"),
+        pytest.param("invalid-json", "returned invalid JSON", id="invalid-json"),
+    ],
+)
+def test_gh_api_manifest_conversion_failures_redact_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+    expected_fragment: str,
+) -> None:
+    """Manifest-conversion codes must never appear in caller-visible gh failures.
+
+    Real-path: ``gh_api`` builds the credential-bearing endpoint and calls the
+    real ``_run_gh``; only ``subprocess.run`` (the external boundary) is faked.
+    Each row exercises one failure producer and asserts the synthetic code is
+    replaced by ``***`` while the route and diagnostic fragment survive.
+    """
+    repo = _make_repo_with_main(tmp_path)
+    sentinel = "manifest-code-sentinel"
+    endpoint = f"/app-manifests/{sentinel}/conversions"
+
+    def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if failure_mode == "spawn-error":
+            raise OSError(f"synthetic subprocess failure: {endpoint}")
+        if failure_mode == "timeout":
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        if failure_mode == "api-error":
+            return subprocess.CompletedProcess(
+                args=["gh"], returncode=1, stdout="", stderr=f"synthetic API failure: {endpoint}"
+            )
+        return subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="not-json", stderr="")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+
+    with pytest.raises(GitError) as excinfo:
+        git_ops.gh_api(repo, endpoint, method="POST")
+
+    msg = str(excinfo.value)
+    assert sentinel not in msg
+    assert "/app-manifests/***/conversions" in msg
+    assert expected_fragment in msg
+
+
 def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _Proc:
         returncode = 0
