@@ -1,10 +1,12 @@
-"""Tests for the offline benchmark report generator (bench/benchmark-report/build.py)."""
+"""Price resolution and evidence-derived improvement recommendations in
+the offline benchmark report generator (bench/benchmark-report/build.py)."""
 
 from __future__ import annotations
 
 import argparse
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -32,22 +34,44 @@ _COMPLETE_SAAS_TOOLS = ("saas-alpha", "saas-beta", "saas-delta", "saas-gamma", "
 _JUDGE_DIRNAME = "anthropic_claude-opus-4-5-20251101"
 
 
+def _leaf(tp: int = 1, fp: int = 0, fn: int = 0,
+          total_candidates: int = 1, total_golden: int = 1) -> dict[str, int]:
+    return {"tp": tp, "fp": fp, "fn": fn,
+            "total_candidates": total_candidates, "total_golden": total_golden}
+
+
+def _tools(n: int, daydream: dict[str, int] | None = None) -> dict[str, dict]:
+    tools = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(n)}
+    if daydream is not None:
+        tools["daydream-owl-alpha"] = daydream
+    return tools
+
+
+_ANCHOR = "anthropic_claude-opus-4-5-20251101"  # -> display "Opus 4.5"
+
+
 def _corpus(
     root: Path,
     *,
     pr_trajectories: dict[str, tuple[str, str | None, int, int, int, int, tuple[str, str] | None]] | None = None,
+    judges: dict[str, dict[str, dict]] | None = None,
+    labels: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
     """Minimal corpus. pr_trajectories maps PR url -> (filename, pr_repo, prompt,
     completion, cached, steps, (start_iso, end_iso) | None). Omitted -> the existing
     one-PR legacy corpus (cal.com-10600.json with no pr_repo)."""
     if pr_trajectories is None:
         pr_trajectories = {PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None)}
-    judge = root / "results" / _JUDGE_DIRNAME
-    judge.mkdir(parents=True)
-    leaf = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
-    (judge / "evaluations.json").write_text(
-        json.dumps({pr: {"daydream-owl-alpha": leaf} for pr in pr_trajectories})
-    )
+    results_root = root / "results"
+    results_root.mkdir(parents=True, exist_ok=True)
+    if judges is None:
+        judges = {_ANCHOR: _tools(5, _leaf(tp=1, fp=0))}
+    for dirname, tools in judges.items():
+        jdir = results_root / dirname
+        jdir.mkdir(parents=True, exist_ok=True)
+        (jdir / "evaluations.json").write_text(
+            json.dumps({pr: dict(tools) for pr in pr_trajectories})
+        )
     traj = root / "trajectories"
     traj.mkdir()
     for fname, pr_repo, prompt, completion, cached, steps, stamps in pr_trajectories.values():
@@ -67,8 +91,8 @@ def _corpus(
         if extra:
             body["extra"] = extra
         (traj / fname).write_text(json.dumps(body))
-    return argparse.Namespace(
-        results_root=str(root / "results"),
+    ns = argparse.Namespace(
+        results_root=str(results_root),
         daydream_tool="daydream-owl-alpha",
         exclude_tool="daydream-glm",
         price_model="glm-5.2",
@@ -77,6 +101,11 @@ def _corpus(
         dashboard="",
         speed_analysis="",
     )
+    if labels is not None:
+        labels_path = results_root / "pr_labels.json"
+        labels_path.write_text(json.dumps(labels))
+        ns.pr_labels = str(labels_path)
+    return ns
 
 
 def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> argparse.Namespace:
@@ -280,3 +309,100 @@ def test_report_allows_mixed_canonical_and_unique_legacy_trajectories(
         1.4 + 1_000_000 * 0.26 / 1e6 + 1_000_000 * 4.4 / 1e6
         + 4_000_000 * 1.4 / 1e6 + 6_000_000 * 0.26 / 1e6 + 5_000_000 * 4.4 / 1e6
     )
+
+
+TEMPLATE_HTML = BUILD_PY.with_name("template.html")
+# All six literals live only inside the old renderImprovements() body; the
+# generated index.html must contain none of them. "15–25%" uses an EN-DASH.
+_REMOVED_LITERALS = (
+    "grafana singleflight",
+    "step2_5_dedup_candidates",
+    "Sonnet 4.5",
+    "GPT-5.2",
+    "15\u201325%",
+    "bottom ~40%",
+)
+
+
+def _recommendation_case(tmp_path: Path, case: str) -> tuple[dict | None, dict | None, list[dict]]:
+    """Return (judges, labels, expected_improvements) for one evidence shape."""
+    resolved = tmp_path.resolve()
+    anchor_src = str(resolved / "results" / _ANCHOR / "evaluations.json")
+    if case == "no-evidence":
+        return None, None, []
+    if case == "aggregate-fp":
+        judges = {_ANCHOR: _tools(5, _leaf(tp=1, fp=2))}
+        return judges, None, [{
+            "priority": 1,
+            "heading": "Reduce daydream (owl-alpha) false positives under Opus 4.5",
+            "body": "daydream produced 2 FP for 1 TP under Opus 4.5 (claude-opus-4-5-20251101).",
+            "measurement": "Next-run target: FP below 2, TP at or above 1, on the same 1-PR subset.",
+            "citation": f"source: {anchor_src}",
+        }]
+    if case == "label-slice":
+        judges = {_ANCHOR: _tools(5, _leaf(tp=1, fp=3))}
+        labels = {PR_URL: {"derived": {"language": "python"}}}
+        labels_src = str(resolved / "results" / "pr_labels.json")
+        return judges, labels, [
+            {
+                "priority": 1,
+                "heading": "Reduce daydream (owl-alpha) false positives under Opus 4.5",
+                "body": "daydream produced 3 FP for 1 TP under Opus 4.5 (claude-opus-4-5-20251101).",
+                "measurement": "Next-run target: FP below 3, TP at or above 1, on the same 1-PR subset.",
+                "citation": f"source: {anchor_src}",
+            },
+            {
+                "priority": 2,
+                "heading": "Tighten the noisiest label slice: Language = python",
+                "body": "The python language cohort carries 3 FP for 1 TP across 1 PR.",
+                "measurement": "Next-run target: FP below 3 on python language slices.",
+                "citation": f"source: {labels_src} (Slices panel)",
+            },
+        ]
+    if case == "missing-judge":
+        judges = {
+            _ANCHOR: _tools(5, _leaf(tp=1, fp=0)),
+            "custom-reviewer": _tools(5),
+        }
+        return judges, None, [{
+            "priority": 3,
+            "heading": "Re-judge daydream under custom-reviewer",
+            "body": "daydream has no leaf under: custom-reviewer.",
+            "measurement": "Next-run target: fill the cross-judge panels and confirm the "
+                           "precision story is judge-robust.",
+            "citation": "source: discovered judges custom-reviewer",
+        }]
+    raise AssertionError(f"unknown case {case!r}")
+
+
+@pytest.mark.parametrize("case", ["no-evidence", "aggregate-fp", "label-slice", "missing-judge"])
+def test_improvements_derive_from_corpus_evidence(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Recommendations derive only from current-run evidence, in priority order."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    judges, labels, expected = _recommendation_case(tmp_path, case)
+    report: dict[str, Any] = build_mod.build(_corpus(tmp_path, judges=judges, labels=labels))
+    assert report["improvements"] == expected
+
+
+def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path)
+    out_dir = tmp_path / "report"
+    r = subprocess.run(  # noqa: S603 - args are paths/tool names from the fixture, not user-controlled
+        [sys.executable, str(BUILD_PY), args.results_root,
+         "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
+         "--trajectories", args.trajectories, "--out", str(out_dir)],
+        capture_output=True, text=True, cwd=BUILD_PY.parents[2],
+    )
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    data = json.loads((out_dir / "data.json").read_text())
+    assert data["improvements"] == []
+    html = (out_dir / "index.html").read_text()
+    assert "No evidence-backed recommendations were generated for this corpus." in html
+    template_text = TEMPLATE_HTML.read_text()
+    for literal in _REMOVED_LITERALS:
+        assert literal not in html
+        assert literal not in template_text
