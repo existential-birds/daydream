@@ -1,23 +1,25 @@
-"""Phase 5: the green-baseline gate, exercised against real docker builds.
+"""Container image contracts: immutable base inputs and the green-baseline gate.
 
-The gate is the only thing standing between `fix_tests_pass` and noise: it pays a
-rollout for a suite that passes after its fix, which means nothing at all if the
-suite was already failing before the agent touched anything. So the test that
-matters is not "a good repo builds" but "a red one does NOT" — and it has to be a
-real `docker build`, because the enforcement IS the build failing.
+Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
+no Docker at all — they assert the build pins every remote input to an immutable
+version and verifies it for integrity before use. The two ``slow`` tests execute
+real Docker builds for the red and green baseline paths: a repo whose suite is
+red at the head commit must produce no image, while a green one builds and bakes
+the checkout.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 from conftest import PROJECT_ROOT
 
 from daydream_review_v1.fixture import FIXTURE_SLUG
 
-pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
+DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
 
@@ -44,6 +46,7 @@ def _tags() -> set[str]:
 
 
 @pytest.mark.slow
+@DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
     before = _tags()
@@ -63,6 +66,7 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
 
 
 @pytest.mark.slow
+@DOCKER_REQUIRED
 def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     """The happy path, end to end: image builds, suite green, origin is local."""
     result = _build()
@@ -85,3 +89,15 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout
+
+
+def test_docker_skip_is_per_test_not_module_wide() -> None:
+    """M8 regression: the Docker skip is per-test, not module-wide, so the static
+    build-contract tests (added in the next task) collect in a Docker-less CI."""
+    module = sys.modules[__name__]
+    assert "pytestmark" not in vars(module), "module-wide Docker skip would gate the static tests"
+    assert "DOCKER_REQUIRED" in vars(module), "per-test DOCKER_REQUIRED marker missing"
+    # Both slow integration tests must carry the skip; neither may rely on a
+    # module-level marker that would also skip the static tests.
+    assert getattr(test_green_baseline_gate_fails_the_build_on_a_red_suite, "pytestmark", None)
+    assert getattr(test_green_baseline_builds_and_bakes_the_checkout, "pytestmark", None)
