@@ -1,5 +1,4 @@
-"""Price resolution and evidence-derived improvement recommendations in
-the offline benchmark report generator (bench/benchmark-report/build.py)."""
+"""Tests for the offline benchmark report generator in bench/benchmark-report/build.py."""
 
 from __future__ import annotations
 
@@ -13,6 +12,8 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+
+from daydream.benchmark.score import JUDGE_ERROR_RATIO_THRESHOLD
 
 BUILD_PY = Path(__file__).resolve().parents[1] / "bench" / "benchmark-report" / "build.py"
 
@@ -133,6 +134,25 @@ def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> ar
     judge = root / "results" / _JUDGE_DIRNAME
     (judge / "evaluations.json").write_text(json.dumps({PR_URL: pr1, SECOND_PR_URL: pr2}))
     return args
+
+
+@pytest.mark.parametrize(
+    ("errors_count", "expected_invalid"),
+    [pytest.param(49, False, id="below-threshold"),
+     pytest.param(50, True, id="at-threshold")],
+)
+def test_aggregate_tool_uses_shared_judge_error_ratio_threshold(
+    build_mod: ModuleType, errors_count: int, expected_invalid: bool,
+) -> None:
+    evals = {PR_URL: {"candidate-tool": {
+        "tp": 0, "fp": 0, "fn": 0,
+        "errors_count": errors_count,
+        "total_candidates": 100, "total_golden": 1,
+        "false_positives": [],
+    }}}
+    row = build_mod.aggregate_tool(evals, "candidate-tool", {PR_URL})
+    assert row is not None and row["invalid"] is expected_invalid
+    assert build_mod.JUDGE_ERROR_RATIO_THRESHOLD == JUDGE_ERROR_RATIO_THRESHOLD
 
 
 def test_price_card_comes_from_shared_pricing_table(
