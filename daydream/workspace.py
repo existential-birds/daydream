@@ -255,14 +255,7 @@ def copy_files_into_ephemeral(
         entries.extend(extra)
 
     # De-duplicate while preserving first-occurrence order.
-    unique: list[Path] = []
-    seen: set[Path] = set()
-    for rel in entries:
-        rel_path = Path(rel)
-        if rel_path in seen:
-            continue
-        seen.add(rel_path)
-        unique.append(rel_path)
+    unique = _dedupe_ordered(entries)
 
     # Fail-closed validation against BOTH the source and destination roots,
     # before any copy runs. An entry that escapes either root aborts the
@@ -288,14 +281,28 @@ def copy_files_into_ephemeral(
 # --- Internal helpers --------------------------------------------------------
 
 
-def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> Path:
-    """Resolve a workspace-copy entry against *root*, fail-closed.
+def _dedupe_ordered(entries) -> list[Path]:
+    """De-duplicate path-like *entries*, preserving first-occurrence order."""
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for rel in entries:
+        rel_path = Path(rel)
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        unique.append(rel_path)
+    return unique
 
-    Returns the validated canonical path. Mirrors the canonical-containment
-    idiom in ``daydream/improve/command_contract.py`` (``resolve(strict=False)``
-    + ``is_relative_to(root)``) but, on a containment violation, raises a
-    :class:`WorkspaceCopyPathError` naming *root_label* instead of returning a
-    bool.
+
+def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> None:
+    """Validate a workspace-copy entry against *root*, fail-closed.
+
+    Unlike ``daydream/improve/command_contract.py::path_is_confined`` -- which
+    walks each path part and rejects symlink edges up-front before its final
+    canonical containment check -- this helper relies solely on
+    ``resolve(strict=False)`` + ``is_relative_to(root)`` to detect containment
+    violations. On a violation it raises a :class:`WorkspaceCopyPathError`
+    naming *root_label* instead of returning a bool.
 
     Raises:
         WorkspaceCopyPathError: If *entry* is absolute or contains ``..``, or
@@ -317,8 +324,6 @@ def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> Pa
         raise WorkspaceCopyPathError(
             f"workspace copy path resolves outside the {root_label} worktree: {entry}"
         )
-
-    return resolved
 
 
 def _make_run_id() -> str:
@@ -393,16 +398,8 @@ def _resolve_copy_entries(source: Path) -> list[Path]:
     candidates: list[str] = list(_DEFAULT_COPY_PATHS)
     candidates.extend(p.name for p in source.glob(_DEFAULT_COPY_GLOB))
 
-    # De-duplicate while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for name in candidates:
-        if name in seen:
-            continue
-        seen.add(name)
-        ordered.append(name)
-
-    return [Path(name) for name in ordered if _is_gitignored(source, name)]
+    unique = _dedupe_ordered(candidates)
+    return [p for p in unique if _is_gitignored(source, str(p))]
 
 
 def _is_gitignored(repo: Path, relative_path: str) -> bool:
