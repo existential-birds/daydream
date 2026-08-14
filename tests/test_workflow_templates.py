@@ -126,23 +126,39 @@ def test_split_setup_preserves_privilege_split() -> None:
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
-    ids=["template", "live"],
-)
-def test_post_workflows_pin_create_github_app_token(wf_path: Path) -> None:
+_APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+
+# Every token-minting workflow, shipped or live, pins every App-token action to
+# the approved v2.2.2 commit. Lists the concrete (job, action) pairs so a renamed
+# job, a refloated pin, or a newly added unpinned token action fails loudly rather
+# than being silently absorbed by a wildcard.
+_APP_TOKEN_PIN_CASES = [
+    (TEMPLATES_DIR / "daydream-post.yml", "template-post",
+     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-post.yml", "live-post",
+     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
+    (TEMPLATES_DIR / "daydream-command.yml", "template-command",
+     [("dispatch", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command",
+     [("dispatch", _APP_TOKEN_ACTION)]),
+    (TEMPLATES_DIR / "single" / "daydream.yml", "single",
+     [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION),
+      ("surface-failure", _APP_TOKEN_ACTION)]),
+]
+
+
+@pytest.mark.parametrize("wf_path,expected",
+                         [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES],
+                         ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES])
+def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list) -> None:
     wf = load_workflow(wf_path)
-    expected_action = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
     token_action_uses = [
         (job_name, str(step.get("uses", "")))
         for job_name, job in wf["jobs"].items()
         for step in job["steps"]
         if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
     ]
-    assert sorted(token_action_uses) == sorted(
-        [("post", expected_action), ("surface-analyze-failure", expected_action)]
-    )
+    assert sorted(token_action_uses) == sorted(expected)
 
 
 @pytest.mark.parametrize(
