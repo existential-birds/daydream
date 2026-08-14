@@ -100,3 +100,22 @@ def test_redrive_requires_canonical_merged_items(
     assert f"No canonical merged-items.json found at {missing}" in capsys.readouterr().err
     assert fake_gh.calls("POST") == []       # zero GitHub requests
     assert not (multi_stack_target / ".review-output.md").exists()
+
+
+def test_redrive_corrupt_merged_items_skips_gracefully(
+    multi_stack_target: Path,
+    fake_gh: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _serve_pr_view(fake_gh, multi_stack_target)
+    deep = multi_stack_target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / "merged-items.json").write_text("{not valid json}")
+
+    _run_cli(str(multi_stack_target), "--pr", "7", "--yes", monkeypatch=monkeypatch)
+
+    out = capsys.readouterr().out
+    assert "Could not read merged-items.json" in out
+    assert fake_gh.calls("POST") == []
+    assert not (multi_stack_target / ".review-output.md").exists()

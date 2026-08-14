@@ -1083,34 +1083,24 @@ def _resolve_pr(
         cannot be resolved.
     """
     if pr_number is not None:
-        data = git_ops.gh_pr_view(target_dir, pr_number)
-        if data is None:
-            print_warning(
-                console,
-                f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
-            )
+        pr = find_pr_by_number(target_dir, pr_number)
+        if pr is None:
+            # Distinguish "PR not found" from "owner/repo slug unresolvable"
+            # so the operator gets a precise diagnostic rather than a generic
+            # "could not resolve" message.
+            if git_ops.gh_pr_view(target_dir, pr_number) is None:
+                print_warning(
+                    console,
+                    f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
+                )
+            else:
+                print_warning(
+                    console,
+                    f"PR #{pr_number} resolved via `gh pr view` but the owner/repo "
+                    "slug could not be resolved via `gh repo view`; skipping PR post.",
+                )
             return None
-        # ``gh pr view`` resolved the PR, but the owner/repo slug (needed to
-        # post) failed to resolve — a different cause than a missing PR, so
-        # report it distinctly instead of a misleading "not found" message.
-        slug = git_ops.gh_repo_view(target_dir)
-        if slug is None:
-            print_warning(
-                console,
-                f"PR #{pr_number} resolved via `gh pr view` but the owner/repo "
-                "slug could not be resolved via `gh repo view`; skipping PR post.",
-            )
-            return None
-        owner, repo = slug
-        return PRInfo(
-            number=pr_number,
-            head_sha=data["headRefOid"],
-            base_sha=data["baseRefOid"],
-            base_ref=data.get("baseRefName", ""),
-            owner=owner,
-            repo=repo,
-            url=data.get("url", ""),
-        )
+        return pr
     pr = find_open_pr(target_dir)
     if pr is None:
         print_warning(
