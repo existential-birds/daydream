@@ -219,10 +219,14 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
     return out
 
 
+def _split_pr_url(pr_url: str) -> list[str]:
+    return pr_url.rstrip("/").split("/")
+
+
 def traj_key_for_pr(pr_url: str) -> str:
     """Canonical (owner/repo, number) join key for a PR url, matching trajectories with extra.pr_repo."""
     # https://github.com/alpha/widgets/pull/7 -> "alpha/widgets/7"
-    parts = pr_url.rstrip("/").split("/")
+    parts = _split_pr_url(pr_url)
     num = parts[-1]
     owner_repo = "/".join(parts[-4:-2]) if len(parts) >= 4 else ""
     return f"{owner_repo}/{num}"
@@ -231,7 +235,7 @@ def traj_key_for_pr(pr_url: str) -> str:
 def _legacy_traj_key_for_pr(pr_url: str) -> str:
     """Legacy (repo-last-segment, number) join key, matching trajectories without extra.pr_repo."""
     # https://github.com/alpha/widgets/pull/7 -> "widgets/7"
-    parts = pr_url.rstrip("/").split("/")
+    parts = _split_pr_url(pr_url)
     num = parts[-1]
     repo_last = parts[-3] if len(parts) >= 3 else ""
     return f"{repo_last}/{num}"
@@ -364,13 +368,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         tj = trajectories.get(traj_key_for_pr(pr), {})
         if not tj:
             legacy_key = _legacy_traj_key_for_pr(pr)
-            if legacy_shares[legacy_key] > 1:
+            legacy_tj = trajectories.get(legacy_key, {})
+            if legacy_shares[legacy_key] > 1 and legacy_tj:
                 matching = sorted(pr for pr in dd_subset if _legacy_traj_key_for_pr(pr) == legacy_key)
                 raise SystemExit(
                     f"ambiguous legacy trajectory key {legacy_key!r} matches multiple benchmark PRs: "
                     f"{', '.join(matching)}; regenerate the trajectory with extra.pr_repo"
                 )
-            tj = trajectories.get(legacy_key, {})
+            tj = legacy_tj
         lab = labels.get(pr, {})
         cost = tj.get("cost_usd")
         if tj:
