@@ -228,10 +228,15 @@ def test_single_setup_preserves_privilege_split() -> None:
 # login-persistence ordering that rationale requires.
 
 
-def test_repo_review_authenticates_codex_before_running() -> None:
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
+def _assert_repo_workflow_uses_openai_credential() -> None:
+    """Assert the repo's live review workflow uses OPENAI_API_KEY as its only secret."""
     text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
     assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
+
+
+def test_repo_review_authenticates_codex_before_running() -> None:
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
+    _assert_repo_workflow_uses_openai_credential()
 
     steps = job_steps(wf, "analyze")
     login = next(s for s in steps if "codex login --with-api-key" in s.get("run", ""))
@@ -251,11 +256,8 @@ def test_repo_review_authenticates_codex_before_running() -> None:
     ids=["install", "security-model"],
 )
 def test_repo_workflow_readme_documents_codex_credential(section_start: str, section_end: str) -> None:
-    wf_text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
+    _assert_repo_workflow_uses_openai_credential()
     readme_text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
-
-    credentials = set(_SECRET_REF_RE.findall(wf_text))
-    assert credentials == {"OPENAI_API_KEY"}
 
     start = readme_text.find(section_start)
     assert start != -1, (
