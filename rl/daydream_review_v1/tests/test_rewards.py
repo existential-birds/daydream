@@ -72,6 +72,31 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
+def test_rundir_golden_contains_no_model_directed_trajectory_transcripts(rundir_golden: Path) -> None:
+    """Static fixture guard: the committed golden fixture must not carry
+    model-directed trajectory transcripts.
+
+    The per-fork transcripts under ``trajectories/`` (deep-generic,
+    deep-structure, explore-dependency-tracer, fix-tests-test-calc-py) carried
+    real prompt/directive content and absolute machine paths, and nothing reads
+    them — they must not be reintroduced. The retained root ``trajectory.json``
+    (consumed by ``test_rundir_golden_user_messages_are_inert``) must likewise
+    keep every user-authored step message empty.
+    """
+    trajectories = rundir_golden / "trajectories"
+    assert not trajectories.is_dir() or not list(trajectories.iterdir())
+
+    trajectory_files = [rundir_golden / "trajectory.json"]
+    if trajectories.is_dir():
+        trajectory_files.extend(trajectories.glob("*.json"))
+    assert trajectory_files, "expected the retained root trajectory.json"
+    for trajectory_file in trajectory_files:
+        trajectory = json.loads(trajectory_file.read_text(encoding="utf-8"))
+        for step in trajectory["steps"]:
+            if step.get("source") == "user":
+                assert step["message"] == ""
+
+
 def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:
     """Flatten ``manifest.json`` exactly as ``taskset._manifest_row`` does."""
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
