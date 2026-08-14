@@ -17,6 +17,9 @@ cannot verify and that a careless edit could silently break:
   review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth), and
   the repository workflow README names ``OPENAI_API_KEY`` as the credential the
   live Codex workflow consumes.
+- The repository workflow README declares these files as repository-only Codex
+  dogfood configuration and points to the packaged install guide (never copies
+  ``ANTHROPIC_API_KEY``).
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """
@@ -345,29 +348,32 @@ def test_repo_review_authenticates_codex_before_running() -> None:
     assert "OPENAI_API_KEY" not in steps[review_idx].get("env", {})
 
 
-@pytest.mark.parametrize(
-    "section_start,section_end",
-    [
-        ("## Install", "## Trigger matrix"),
-        ("## Security model — the privilege split", "## Dedup limitations (v1)"),
-    ],
-    ids=["install", "security-model"],
-)
-def test_repo_workflow_readme_documents_codex_credential(section_start: str, section_end: str) -> None:
-    _assert_repo_workflow_uses_openai_credential()
-    readme_text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
+def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -> None:
+    text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
 
-    start = readme_text.find(section_start)
-    assert start != -1, (
-        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing section header {section_start!r} "
-        f"— renamed or re-worded? Keep it in sync with this test."
-    )
-    end = readme_text.find(section_end, start)
-    assert end != -1, (
-        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing header {section_end!r} after "
-        f"{section_start!r} — renamed/re-worded, or did the two headers swap order?"
-    )
-    section = readme_text[start:end]
+    # Presence of the corrected contract. Prose checks are kept to the substance
+    # (rather than verbatim phrasing) so an innocuous reword does not break the
+    # test: heading mentions dogfood workflows, and the repo-only Codex dogfood
+    # stance is declared.
+    first_heading = next((ln for ln in text.splitlines() if ln.startswith("#")), "")
+    assert "dogfood" in first_heading.lower() and "workflows" in first_heading.lower()
+    assert "codex dogfood" in text.lower() and "repository-only" in text.lower()
 
-    assert "`OPENAI_API_KEY`" in section
-    assert "ANTHROPIC_API_KEY" not in section
+    # The stable technical contract (not prose, so safe to pin verbatim).
+    assert "daydream --review --backend codex" in text
+    assert "OPENAI_API_KEY" in text
+
+    # The canonical (packaged) install guide is linked to rather than duplicated:
+    # resolve the relative link against THIS README's own directory (so the target
+    # path is derived from the link itself, not reconstructed from the repo root,
+    # which would let a moved README's stale link pass) and assert the target
+    # exists with an ## Install anchor so the marketed link cannot rot.
+    install_link = "../../daydream/templates/workflows/README.md#install"
+    canonical = (REPO_WORKFLOWS_DIR / install_link.split("#")[0]).resolve()
+    assert install_link in text
+    assert canonical.exists()
+    assert re.search(r"^## ?Install\b", canonical.read_text(encoding="utf-8"), re.M)
+
+    # Absence of the stale strings.
+    for stale in ("Copy the three workflow files", "Install step 1", "ANTHROPIC_API_KEY"):
+        assert stale not in text

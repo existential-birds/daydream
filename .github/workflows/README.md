@@ -1,9 +1,7 @@
-# Daydream review bot — workflow templates
+# Daydream review bot — repository dogfood workflows
 
-Three GitHub Actions workflows that turn daydream into a self-hosted PR review
-bot: a PR gets reviewed automatically on open (or on demand via
-`@<bot> review`) and the findings are posted as inline comments by your own
-GitHub App identity — no maintainer server, no third-party service.
+These three workflows are this repository's own **repository-only Codex dogfood configuration**
+— maintained for this repository and intentionally differing from the packaged workflow templates.
 
 | File | Workflow | Role |
 |---|---|---|
@@ -13,33 +11,9 @@ GitHub App identity — no maintainer server, no third-party service.
 
 ## Install
 
-1. **Register a GitHub App** (or reuse the one from your daydream App setup)
-   and install it on the target repository. The App must request these
-   repository permissions:
-   - **Pull requests: read & write** — posting and minimizing review comments,
-     and the command workflow's 👀 acknowledgement reaction (signed by the App
-     token so it shows as the bot, not `github-actions[bot]`)
-   - **Contents: read** — required by the posting token's least-privilege trio
-   - **Metadata: read** — implicit baseline
-   - **Actions: read & write** — the command workflow mints a dispatch token
-     with `actions: write`, because a `workflow_dispatch` made with the
-     built-in `GITHUB_TOKEN` never fires the downstream `workflow_run`
-     trigger, so the post workflow would never run on the `@<bot> review`
-     path. (Chain verified PAT-vs-`GITHUB_TOKEN`; final live confirmation of
-     the App-token dispatch is tracked for the sandbox acceptance run.)
-2. **Copy the three workflow files** into the target repository's
-   `.github/workflows/` directory.
-3. **Add three repository secrets** (Settings → Secrets and variables →
-   Actions → Secrets):
-   - `DAYDREAM_APP_ID` — the App's numeric ID
-   - `DAYDREAM_APP_PRIVATE_KEY` — the App's PEM private key, pasted verbatim
-   - `OPENAI_API_KEY` — used only by the unprivileged review job to authenticate the Codex CLI
-4. **Add one repository variable** (Settings → Secrets and variables →
-   Actions → Variables):
-   - `DAYDREAM_BOT_HANDLE` — the mention handle the command workflow matches,
-     without the `@` (e.g. `daydream-review` for `@daydream-review review`)
-   - Optional: `DAYDREAM_AUTO_REVIEW` — set to `false` to disable auto-review
-     on PR open; the `@<bot> review` command keeps working.
+To install the dogfood workflows in a repository of your own, follow the
+canonical installation guide:
+[`daydream/templates/workflows/README.md#install`](../../daydream/templates/workflows/README.md#install).
 
 ## Trigger matrix
 
@@ -59,15 +33,16 @@ only the `@<bot> review` command path can serve them.
 No single job ever holds both PR code and the App private key:
 
 - **Phase A (Daydream Review)** checks out and analyzes untrusted PR code,
-  so it is unprivileged: `contents: read` GITHUB_TOKEN, `OPENAI_API_KEY`
-  as its only secret to authenticate the Codex CLI, no App material anywhere.
-  Its output is a passive data artifact (`findings.json`), never code.
+  so it is unprivileged: `contents: read` GITHUB_TOKEN, `OPENAI_API_KEY` as
+  its only model-provider credential, no App material anywhere. It
+  authenticates Codex (`codex login --with-api-key`) before running
+  `daydream --review --backend codex`. Its output is a passive data artifact
+  (`findings.json`), never code.
 - **Daydream Command** never checks out code, so it may hold App credentials:
   it mints a short-lived App token with `actions: write` (to dispatch the
-  review — see Install step 1) plus `pull-requests: write` (to post the 👀
-  reaction as the bot identity, not `github-actions[bot]`). Both writes flow
-  through the App token, so the job's default GITHUB_TOKEN is unprivileged
-  (`permissions: {}`).
+  review) plus `pull-requests: write` (to post the 👀 reaction as the bot
+  identity, not `github-actions[bot]`). Both writes flow through the App
+  token, so the job's default GITHUB_TOKEN is unprivileged (`permissions: {}`).
 - **Phase B (Daydream Post)** holds the App key but only ever checks out the
   base repo's default branch (trusted code). It mints a token with exactly
   `pull-requests: write, contents: read, metadata: read`, downloads the
@@ -78,7 +53,7 @@ No single job ever holds both PR code and the App private key:
 
 The binding security spec is the daydream repo's
 `.beagle/concepts/self-hosted-review-bot/roadmap.md` §"Sub-project #2
-security design — the privilege split"; these templates implement it.
+security design — the privilege split"; these workflows implement it.
 
 ## Dedup limitations (v1)
 
