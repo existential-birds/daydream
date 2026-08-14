@@ -171,8 +171,12 @@ def test_report_rejects_ambiguous_legacy_trajectory_fallback(
     args = _corpus(
         tmp_path,
         pr_trajectories={
-            "https://github.com/alpha/widgets/pull/7": ("widgets-7.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
-            "https://github.com/beta/widgets/pull/7": ("widgets-7.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+            "https://github.com/alpha/widgets/pull/7": (
+                "widgets-7.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None
+            ),
+            "https://github.com/beta/widgets/pull/7": (
+                "widgets-7.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None
+            ),
         },
     )
     with pytest.raises(SystemExit, match="ambiguous legacy trajectory key 'widgets/7'"):

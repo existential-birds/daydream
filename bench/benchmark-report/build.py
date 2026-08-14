@@ -26,6 +26,7 @@ import argparse
 import hashlib
 import json
 import shutil
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -174,10 +175,11 @@ def rank_of(rows: list[dict], target_tool: str, key: str) -> tuple[int, int]:
 def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model: str) -> dict[str, dict]:
     """Map PR-url -> {tokens, synth cost, wall seconds, steps} from ATIF trajectories.
 
-    Join key: (repo-last-segment, pr-number) parsed from the filename. Cost is
-    SYNTHESIZED from measured tokens (the backend records $0 for GLM via z.ai).
-    The counters are DISJOINT (prompt = fresh input, cached = cache reads), which
-    is what :func:`compute_cost` prices — not ``compute_cost_from_totals``.
+    Join key: trajectories with nonempty ``extra.pr_repo`` are indexed under
+    ``pr_repo/number``; artifacts lacking it fall back to ``repo_short/number``.
+    Cost is SYNTHESIZED from measured tokens (the backend records $0 for GLM via
+    z.ai). The counters are DISJOINT (prompt = fresh input, cached = cache reads),
+    which is what :func:`compute_cost` prices — not ``compute_cost_from_totals``.
     """
     out: dict[str, dict] = {}
     if not traj_dir.is_dir():
@@ -205,9 +207,11 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
             def _p(s: str) -> datetime:
                 return datetime.fromisoformat(s.replace("Z", "+00:00"))
             wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
-        out[f"{repo_short}/{num}"] = {
+        pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
+        key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"
+        out[key] = {
             "repo_short": repo_short, "pr_number": num,
-            "pr_repo": (d.get("extra", {}) or {}).get("pr_repo", ""),
+            "pr_repo": pr_repo,
             "prompt_tokens": prompt, "completion_tokens": completion, "cached_tokens": cached,
             "cost_usd": cost, "wall_seconds": wall, "steps": int(fm.get("total_steps", 0)),
             "price_model": price_model,
@@ -216,8 +220,17 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
 
 
 def traj_key_for_pr(pr_url: str) -> str:
-    """(repo-last-segment, number) join key for a PR url, matching trajectory filenames."""
-    # https://github.com/calcom/cal.com/pull/10600 -> "cal.com/10600"
+    """Canonical (owner/repo, number) join key for a PR url, matching trajectories with extra.pr_repo."""
+    # https://github.com/alpha/widgets/pull/7 -> "alpha/widgets/7"
+    parts = pr_url.rstrip("/").split("/")
+    num = parts[-1]
+    owner_repo = "/".join(parts[-4:-2]) if len(parts) >= 4 else ""
+    return f"{owner_repo}/{num}"
+
+
+def _legacy_traj_key_for_pr(pr_url: str) -> str:
+    """Legacy (repo-last-segment, number) join key, matching trajectories without extra.pr_repo."""
+    # https://github.com/alpha/widgets/pull/7 -> "widgets/7"
     parts = pr_url.rstrip("/").split("/")
     num = parts[-1]
     repo_last = parts[-3] if len(parts) >= 3 else ""
@@ -346,8 +359,18 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     tot_prompt = tot_completion = tot_cached = 0
     tot_cost = 0.0
     walls = []
+    legacy_shares = Counter(_legacy_traj_key_for_pr(pr) for pr in dd_subset)
     for pr in sorted(dd_subset):
         tj = trajectories.get(traj_key_for_pr(pr), {})
+        if not tj:
+            legacy_key = _legacy_traj_key_for_pr(pr)
+            if legacy_shares[legacy_key] > 1:
+                matching = sorted(pr for pr in dd_subset if _legacy_traj_key_for_pr(pr) == legacy_key)
+                raise SystemExit(
+                    f"ambiguous legacy trajectory key {legacy_key!r} matches multiple benchmark PRs: "
+                    f"{', '.join(matching)}; regenerate the trajectory with extra.pr_repo"
+                )
+            tj = trajectories.get(legacy_key, {})
         lab = labels.get(pr, {})
         cost = tj.get("cost_usd")
         if tj:
