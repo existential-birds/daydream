@@ -42,19 +42,19 @@ echo "Latest run: $RUN_ID ($(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LATEST_RUN"))"
 if [ -z "$BRANCH_NAME" ]; then
   # Try to get branch from manifest.json
   if [ -f "$LATEST_RUN/manifest.json" ]; then
-    BRANCH_NAME="$(python3 -c "import json; print(json.load(open('$LATEST_RUN/manifest.json'))['git']['branch'])" 2>/dev/null || true)"
+    BRANCH_NAME="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["git"]["branch"])' "$LATEST_RUN/manifest.json" 2>/dev/null || true)"
   fi
   # Try git in the target dir
   if [ -z "$BRANCH_NAME" ]; then
-    TARGET_DIR="$(python3 -c "
+    TARGET_DIR="$(python3 -c '
 import json, sys
-for f in ['$LATEST_RUN/trajectory.json', '$LATEST_RUN/manifest.json']:
+for f in sys.argv[1:]:
     try:
         d = json.load(open(f))
-        td = d.get('extra', {}).get('target_dir') or d.get('git', {}).get('branch')
+        td = d.get("extra", {}).get("target_dir") or d.get("git", {}).get("branch")
         if td: print(td); sys.exit()
     except: pass
-" 2>/dev/null || true)"
+' "$LATEST_RUN/trajectory.json" "$LATEST_RUN/manifest.json" 2>/dev/null || true)"
     if [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
       BRANCH_NAME="$(git -C "$TARGET_DIR" branch --show-current 2>/dev/null || true)"
     fi
