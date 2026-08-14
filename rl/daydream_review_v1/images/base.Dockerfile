@@ -135,7 +135,7 @@ RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
       esac; \
       archive="/tmp/codex-${target}.tar.gz"; \
       curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${target}.tar.gz" -o "${archive}"; \
-      printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum -c -; \
+      printf '%s *%s\n' "${checksum}" "${archive}" | sha256sum -c -; \
       tar -xzf "${archive}" -C /usr/local/bin; \
       rm "${archive}"; \
       mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex; \
@@ -163,7 +163,7 @@ RUN if [ "${INSTALL_PI}" = "1" ]; then \
       esac; \
       archive="/tmp/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"; \
       curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "${archive}"; \
-      printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum -c -; \
+      printf '%s *%s\n' "${checksum}" "${archive}" | sha256sum -c -; \
       tar -xzf "${archive}" -C /usr/local --strip-components=1 \
           --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
       rm "${archive}"; \

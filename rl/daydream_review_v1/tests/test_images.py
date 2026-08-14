@@ -119,37 +119,55 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
             "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
             id="claude-release-fingerprint",
         ),
-        pytest.param("ARG CODEX_VERSION=0.145.0", id="codex-version"),
         pytest.param(
             (
-                "amd64) target=x86_64-unknown-linux-musl; "
-                "checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;;"
+                "ARG CODEX_VERSION=0.145.0",
+                (
+                    "amd64) target=x86_64-unknown-linux-musl; "
+                    "checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;;"
+                ),
+                (
+                    "arm64) target=aarch64-unknown-linux-musl; "
+                    "checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;;"
+                ),
             ),
-            id="codex-amd64-checksum",
+            id="codex-version-and-checksums",
         ),
         pytest.param(
             (
-                "arm64) target=aarch64-unknown-linux-musl; "
-                "checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;;"
+                "ARG NODE_VERSION=22.17.1",
+                "amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;;",
+                "arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;;",
             ),
-            id="codex-arm64-checksum",
-        ),
-        pytest.param("ARG NODE_VERSION=22.17.1", id="node-version"),
-        pytest.param(
-            "amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;;",
-            id="node-amd64-checksum",
-        ),
-        pytest.param(
-            "arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;;",
-            id="node-arm64-checksum",
+            id="node-version-and-checksums",
         ),
         pytest.param("ARG PI_VERSION=0.82.1", id="pi-version"),
     ],
 )
-def test_base_dockerfile_pins_immutable_versions_and_checksums(required_literal: str) -> None:
-    """M1/M2/M3/M4 pin contract: every immutable identifier is present verbatim."""
+def test_base_dockerfile_pins_immutable_versions_and_checksums(
+    required_literal: str | tuple[str, ...],
+) -> None:
+    """M1/M2/M3/M4 pin contract: every immutable identifier is present verbatim.
+
+    Each version ARG that has inline checksums is bundled into a single
+    parameter tuple so that bumping a version without updating its matching
+    checksum(s) fails the test.
+    """
     text = BASE_DOCKERFILE.read_text(encoding="utf-8")
-    assert required_literal in text, f"missing pinned literal {required_literal!r}"
+    if isinstance(required_literal, str):
+        assert required_literal in text, f"missing pinned literal {required_literal!r}"
+    else:
+        # Tuple: first element is the version ARG, remaining are checksums.
+        # Assert ordering: version ARG appears before each checksum, so a
+        # version bump cannot land without its matching checksum update.
+        assert required_literal[0] in text, f"missing pinned literal {required_literal[0]!r}"
+        pos = text.find(required_literal[0])
+        for literal in required_literal[1:]:
+            nxt = text.find(literal, pos + 1)
+            assert nxt > pos, (
+                f"checksum {literal!r} must appear after {required_literal[0]!r}"
+            )
+            pos = nxt
 
 
 @pytest.mark.parametrize(
