@@ -206,7 +206,10 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
         if len(stamps) >= 2:
             def _p(s: str) -> datetime:
                 return datetime.fromisoformat(s.replace("Z", "+00:00"))
-            wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
+            try:
+                wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
+            except ValueError:
+                pass
         pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
         key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"
         if key in out:
