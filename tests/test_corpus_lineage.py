@@ -3,9 +3,12 @@
 Each ``run_build_corpus`` invocation writes ``lineage.json`` beside the JSONL
 output, pinning the provenance of the snapshot: the content-addressed
 ``trajectory_set_hash`` of the included sessions, the observed labeler/reward
-versions, the ``as_of`` pin, and a wall-clock ``created_at``. These tests drive
+versions, the ``as_of`` pin, and a wall-clock ``created_at``. A completed
+non-dry-run build that emits zero records removes any prior ``lineage.json``
+(rather than writing an empty-set manifest), so a stale manifest never
+survives after an empty rebuild. These tests drive
 :func:`run_build_corpus` against a real SQLite index (no archive-layer mocking)
-and assert on the manifest the user would inspect on disk.
+and assert on the manifest the user would inspect on disk (or its absence).
 """
 
 from __future__ import annotations
