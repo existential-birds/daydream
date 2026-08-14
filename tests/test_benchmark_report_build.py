@@ -29,6 +29,7 @@ PR_URL = "https://github.com/calcom/cal.com/pull/10600"
 
 SECOND_PR_URL = "https://github.com/calcom/cal.com/pull/10601"
 _COMPLETE_SAAS_TOOLS = ("saas-alpha", "saas-beta", "saas-delta", "saas-gamma", "saas-zeta")
+_JUDGE_DIRNAME = "anthropic_claude-opus-4-5-20251101"
 
 
 def _corpus(
@@ -41,7 +42,7 @@ def _corpus(
     one-PR legacy corpus (cal.com-10600.json with no pr_repo)."""
     if pr_trajectories is None:
         pr_trajectories = {PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None)}
-    judge = root / "results" / "anthropic_claude-opus-4-5-20251101"
+    judge = root / "results" / _JUDGE_DIRNAME
     judge.mkdir(parents=True)
     leaf = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
     (judge / "evaluations.json").write_text(
@@ -82,8 +83,14 @@ def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> ar
     """Two-PR corpus: daydream + five fully-covered SaaS tools on both PRs, plus one
     incomplete tool (``saas-incomplete``) present only on the first PR. The second PR's
     leaf for it is ``incomplete_leaf``: None (absent) or ``{"skipped": True}`` (skipped).
-    Reuses _corpus for the judge dir + trajectory, then overwrites evaluations.json."""
-    args = _corpus(root)
+    Reuses _corpus for the judge dir + trajectories, then overwrites evaluations.json."""
+    args = _corpus(
+        root,
+        pr_trajectories={
+            PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+            SECOND_PR_URL: ("cal.com-10601.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+        },
+    )
     dd_leaf = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
     complete_leaf = {"tp": 1, "fp": 1, "fn": 1, "total_candidates": 1, "total_golden": 1}
     pr1 = {"daydream-owl-alpha": dd_leaf}
@@ -94,7 +101,7 @@ def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> ar
     pr1["saas-incomplete"] = dd_leaf
     if incomplete_leaf is not None:
         pr2["saas-incomplete"] = incomplete_leaf
-    judge = root / "results" / "anthropic_claude-opus-4-5-20251101"
+    judge = root / "results" / _JUDGE_DIRNAME
     (judge / "evaluations.json").write_text(json.dumps({PR_URL: pr1, SECOND_PR_URL: pr2}))
     return args
 

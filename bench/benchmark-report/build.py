@@ -327,7 +327,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         field = []
         for tool in saas_tools:
             agg = aggregate_tool(evals, tool, dd_subset)
-            if agg is None or agg["n_prs"] != len(dd_subset):
+            if agg is None or agg["n_prs"] != len(overlap):
                 continue
             agg["display"] = display_names.get(tool, tool)
             agg["color"] = tool_colors.get(tool, "#5B7C99")
