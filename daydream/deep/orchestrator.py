@@ -99,6 +99,7 @@ from daydream.generated_files import (
 )
 from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
+    CrossStackMergeError,
     FixResult,
     _write_single_stack_merged_items,
     phase_alternative_review,
@@ -1692,8 +1693,20 @@ async def _step_arbiter(ctx: FlowContext) -> None:
     ctx.data["record_sources"] = record_sources
 
 
-async def _step_cross_stack_merge(ctx: FlowContext) -> None:
-    """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26)."""
+# Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).
+# Distinct from per-stack entries (``{stack_name: reason}`` str->str) so the resume
+# loader can skip it rather than misread it as a failed stack.
+MERGE_FAILURE_KEY = "__merge__"
+
+
+async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
+    """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26).
+
+    A genuinely unparseable merge response (issue #361) is salvaged rather than
+    aborting the run: the completed stacks' verdicts are consolidated into a
+    partial ``merged-items.json`` + failure record, and the run stops resumably
+    (``Stop(1)``) so a relaunch picks up without re-reviewing completed stacks.
+    """
     dd = ctx.data["dd"]
     alts_p: Path = ctx.data["alts_path"]
     all_records: list[dict[str, Any]] = ctx.data["records"]
@@ -1717,19 +1730,80 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> None:
     )
 
     # Cross-stack merge (D-23..D-26).
-    await phase_cross_stack_merge(
-        ctx.backend_for("merge"),
-        ctx.work,
-        per_stack_records_paths=ctx.data["records_paths"],
-        intent_path=ctx.data["intent_path"],
-        alternatives_path=alts_p,
-        dedup_candidates_path=dedup_p,
-        exploration_dir=ctx.data["exploration_dir"],
-        failed_stacks=failed_stacks or None,
-        structural_records_path=ctx.data["structural_records_path"],
-        intent_authoritative=ctx.data.get("intent_authoritative", False),
-        continuation=ctx.data.get("arbiter_continuation"),
+    try:
+        await phase_cross_stack_merge(
+            ctx.backend_for("merge"),
+            ctx.work,
+            per_stack_records_paths=ctx.data["records_paths"],
+            intent_path=ctx.data["intent_path"],
+            alternatives_path=alts_p,
+            dedup_candidates_path=dedup_p,
+            exploration_dir=ctx.data["exploration_dir"],
+            failed_stacks=failed_stacks or None,
+            structural_records_path=ctx.data["structural_records_path"],
+            intent_authoritative=ctx.data.get("intent_authoritative", False),
+            continuation=ctx.data.get("arbiter_continuation"),
+        )
+    except CrossStackMergeError as exc:
+        _salvage_merge_failure(ctx, exc)
+        return Stop(1)
+    return None
+
+
+def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
+    """Persist a salvageable cross-stack merge failure (issue #361).
+
+    The merge agent returned a response containing no parseable item list (e.g.
+    bare ``str`` prose/refusal/truncated JSON). Instead of aborting the run with
+    the completed stacks' verdicts stranded on disk, consolidate the surviving
+    per-stack records into a *partial* ``merged-items.json`` + ``review-output.md``
+    and record the failure as a structured entry under the reserved
+    ``MERGE_FAILURE_KEY`` in ``per-stack-failures.json``. The run then stops
+    resumably so a relaunch picks up without re-review.
+
+    Both fallible writes propagate through the project error type -- a genuinely
+    unwritable salvage must surface, not silently degrade. The only tolerance is
+    loading a missing/malformed existing ``per-stack-failures.json`` as ``{}``
+    (the "no prior failures" default); existing per-stack entries are preserved.
+    """
+    dd = ctx.data["dd"]
+    print_error(
+        console,
+        "Cross-stack merge failed",
+        f"{exc}; consolidating surviving per-stack records into a partial report. "
+        "Relaunch with --start-at fix to resume.",
     )
+
+    # Build the partial canonical merged-items.json + review-output.md from the
+    # surviving per-stack records (reusing the single-stack write helper's shared
+    # structural-tagging + render epilogue). partial=True marks it as degraded
+    # (S2) while keeping the same on-disk schema downstream consumers read.
+    _write_single_stack_merged_items(
+        ctx.work.repo,
+        dd,
+        ctx.data["records"],
+        ctx.data["structural_records_path"],
+        failed_stacks=ctx.data.get("failed_stacks") or None,
+        partial=True,
+    )
+
+    # Record the failure for resume. Never drop existing per-stack entries.
+    failures_p = per_stack_failures_path(dd)
+    failures: dict[str, Any] = {}
+    if failures_p.is_file():
+        try:
+            loaded = json.loads(failures_p.read_text())
+            if isinstance(loaded, dict):
+                failures = loaded
+        except json.JSONDecodeError:
+            failures = {}
+    failures[MERGE_FAILURE_KEY] = {
+        "response_shape": exc.response_shape,
+        "stack_context": exc.stack_context,
+        "message": str(exc),
+    }
+    failures_p.write_text(json.dumps(failures, indent=2, sort_keys=True))
+    print_info(console, f"Wrote partial merged items and merge-failure record to {dd}")
 
 
 async def _step_single_stack_merge(ctx: FlowContext) -> None:

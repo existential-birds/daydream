@@ -3404,6 +3404,8 @@ def _append_structural_and_write_merged(
     items_path: Path,
     report_path: Path,
     canonical_path: Path,
+    *,
+    partial: bool = False,
 ) -> None:
     """Append structural records to ``base_items`` and write the merged artifacts.
 
@@ -3444,6 +3446,12 @@ def _append_structural_and_write_merged(
         items_path: Canonical ``merged-items.json`` path.
         report_path: Rendered report path inside the deep artifact dir.
         canonical_path: Repo-root canonical report (``REVIEW_OUTPUT_FILE``).
+        partial: When True, mark the written ``merged-items.json`` as degraded
+            with a root ``partial: true`` field (issue #361 merge salvage) so
+            downstream consumers / the archive manifest can distinguish a
+            recoverable partial cross-stack synthesis from a full one. Consumers
+            read ``items`` via ``.get("items", [])``, so the extra root key is
+            additive.
 
     """
     from daydream.deep.render import render_report
@@ -3507,7 +3515,10 @@ def _append_structural_and_write_merged(
         )
 
     items = normalize_items(evidenced)
-    items_path.write_text(json.dumps({"items": items}, indent=2))
+    merged_root: dict[str, Any] = {"items": items}
+    if partial:
+        merged_root["partial"] = True
+    items_path.write_text(json.dumps(merged_root, indent=2))
     print_info(console, f"Merged into {len(items)} items")
 
     # Render the human report FROM the canonical items, then copy from the deep
@@ -3524,6 +3535,7 @@ def _write_single_stack_merged_items(
     structural_records_path: Path | None,
     *,
     failed_stacks: dict[str, str] | None = None,
+    partial: bool = False,
 ) -> None:
     """Write the canonical ``merged-items.json`` for a tiny-diff run (issue #172).
 
@@ -3553,6 +3565,10 @@ def _write_single_stack_merged_items(
             / ``rationale`` from ``PER_STACK_RECORD_SCHEMA`` but no ``lens``.
         structural_records_path: Optional path to the parsed structural
             meta-stack records JSON. ``None`` when no structural review ran.
+        partial: When True, mark the written ``merged-items.json`` as degraded
+            via ``partial: true`` (issue #361 merge salvage) -- the host-written
+            partial list built from surviving per-stack records when the merge
+            agent fails.
 
     """
     from daydream.deep.artifacts import merged_items_path, merged_report_path
@@ -3589,7 +3605,8 @@ def _write_single_stack_merged_items(
     # phase_cross_stack_merge (via _append_structural_and_write_merged) so the
     # lens taxonomy and downstream verifier accounting stay identical (AC6).
     _append_structural_and_write_merged(
-        per_stack_items, structural_records_path, items_path, report_path, canonical_path
+        per_stack_items, structural_records_path, items_path, report_path, canonical_path,
+        partial=partial,
     )
 
 

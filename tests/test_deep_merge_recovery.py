@@ -189,3 +189,30 @@ async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatc
     per_stack = [i["file"] for i in items["items"] if i.get("lens") == "per-stack"]
     assert per_stack == ["store/cache.py", "cli/main.py"]
     assert items.get("partial") is not True
+
+
+async def test_merge_str_response_is_salvaged_not_fatal(
+    multi_stack_target, monkeypatch
+) -> None:
+    """R2/R3/R4/R5/S1/S2: a str merge writes partial items + failure record, stops resumably."""
+    from daydream.deep.artifacts import (
+        deep_dir,
+        merged_items_path,
+        merged_report_path,
+        per_stack_failures_path,
+    )
+
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = "All stacks reviewed. No JSON item list to emit."
+    assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())
+    assert items["partial"] is True  # S2
+    assert len(items["items"]) > 0  # R3: consolidated from surviving records
+    assert merged_report_path(dd).is_file()  # S1: partial review-output.md rendered
+    failures = json.loads(per_stack_failures_path(dd).read_text())
+    assert failures["__merge__"]["response_shape"] == "str"  # R4/AC2
+    assert len(failures["__merge__"]["stack_context"]) > 0
+    assert len(list(dd.glob("stack-*-records.json"))) > 0  # R5: completed records survive
