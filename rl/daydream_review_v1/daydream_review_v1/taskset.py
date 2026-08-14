@@ -87,14 +87,20 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     never-committed files reads as "no fix" and scores ``no_fix_reward``. That
     direction costs a gradient; the other direction corrupts one.
 
-    A clean tree at a moved HEAD only counts as a fix when the *committed
-    contents differ* from the snapshot (`git diff --quiet <head_sha> HEAD --`
-    returns 1). HEAD advancing on its own — e.g. an `--allow-empty` commit that
-    leaves the tree byte-identical — is not a fix and scores ``no_fix_reward``.
+    A clean tree at a moved HEAD counts as a fix only when the *committed
+    contents differ* from the snapshot. HEAD advancing on its own — e.g. an
+    `--allow-empty` commit that leaves the tree byte-identical — is not a fix
+    and scores ``no_fix_reward``. Either way the decision is read from the
+    tracked tree, never from daydream's own ``.daydream/`` directory.
     """
     quoted = shlex.quote(repo)
     dirty = await runtime.run(
-        ["sh", "-c", f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no)"'], {}
+        [
+            "sh",
+            "-c",
+            f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no -- \':(exclude).daydream\')"',
+        ],
+        {},
     )
     if dirty.exit_code == 0:
         return True
@@ -103,10 +109,18 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     # "moved" is not enough — an empty commit advances HEAD while leaving the
     # committed tree identical to the baked snapshot, so compare the committed
     # contents, not the ref. `git diff --quiet` exits 1 when the trees differ
-    # (a fix) and 0 when they are identical (no fix); any other exit is treated
-    # as no-fix, preserving the deliberate false-negative bias.
+    # (a fix) and 0 when they are identical (no fix); any other exit (e.g. 128
+    # for an unresolvable baked SHA) is treated as no-fix, preserving the
+    # deliberate false-negative bias. Both checks exclude `.daydream/` — the
+    # agent may commit daydream's own artifacts into the tree, but they are
+    # never a fix signal.
     diff = await runtime.run(
-        ["sh", "-c", f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD --"], {}
+        [
+            "sh",
+            "-c",
+            f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD -- ':(exclude).daydream'",
+        ],
+        {},
     )
     return diff.exit_code == 1
 
