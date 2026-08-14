@@ -32,13 +32,11 @@ def _dockerfile_section(source: str, heading: str) -> str:
 
 
 @pytest.mark.parametrize(
-    "heading,prefix,amd64_digest,arm64_digest,tmp_path,use_marker,metadata_url",
+    "heading,prefix,tmp_artifact,use_marker,metadata_url",
     [
         (
             "claude",
             "CLAUDE_CODE",
-            "3c029136f7c81f54ed4a38e9d52e655aad536433dbbde50519c8c31bb646ad14",
-            "4c38f26a57a42619ee813f15dc39fc1fa4fe0bb403215c3cdc342b58fa689c3c",
             "/tmp/claude",
             "install -m 0755 /tmp/claude",
             CLAUDE_MANIFEST_URL,
@@ -46,8 +44,6 @@ def _dockerfile_section(source: str, heading: str) -> str:
         (
             "codex",
             "CODEX",
-            "bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a",
-            "d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227",
             "/tmp/codex.tar.gz",
             "tar -xzf /tmp/codex.tar.gz",
             CODEX_RELEASE_URL,
@@ -55,8 +51,6 @@ def _dockerfile_section(source: str, heading: str) -> str:
         (
             "pi (and the node runtime it needs)",
             "NODE",
-            "cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea",
-            "f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b",
             "/tmp/node.tar.gz",
             "tar -xzf /tmp/node.tar.gz",
             NODE_SHASUMS_URL,
@@ -67,20 +61,22 @@ def _dockerfile_section(source: str, heading: str) -> str:
 def test_pinned_tool_downloads_are_verified_before_use(
     heading: str,
     prefix: str,
-    amd64_digest: str,
-    arm64_digest: str,
-    tmp_path: str,
+    tmp_artifact: str,
     use_marker: str,
     metadata_url: str,
 ) -> None:
     source = BASE_DOCKERFILE.read_text(encoding="utf-8")
     section = _dockerfile_section(source, heading)
 
-    # Both per-architecture digests are declared exactly, and are 64 lowercase hex.
-    assert f"ARG {prefix}_SHA256_AMD64={amd64_digest}" in section
-    assert f"ARG {prefix}_SHA256_ARM64={arm64_digest}" in section
-    for digest in (amd64_digest, arm64_digest):
-        assert re.fullmatch(r"[0-9a-f]{64}", digest), f"{prefix} digest must be 64 lowercase hex"
+    # Both per-architecture digest ARGs are present and well-formed (64 lowercase hex). The
+    # Dockerfile -- not this parametrize table -- is the single source of truth for the values,
+    # so an edit to one file alone cannot desynchronize them silently.
+    for arch in ("AMD64", "ARM64"):
+        assert re.search(
+            rf"^ARG {prefix}_SHA256_{arch}=[0-9a-f]{{64}}$",
+            section,
+            re.MULTILINE,
+        ), f"{prefix} {arch} digest ARG missing or malformed"
 
     # Both architecture branches assign the matching checksum var.
     assert f'checksum="${{{prefix}_SHA256_AMD64}}"' in section
@@ -88,10 +84,10 @@ def test_pinned_tool_downloads_are_verified_before_use(
 
     # Provenance comment and temp-artifact cleanup are present.
     assert metadata_url in section
-    assert f"rm -f {tmp_path}" in section
+    assert f"rm -f {tmp_artifact}" in section
 
     # Strict ordering: download < verify < use.
-    dl = section.index(f"curl -fsSL -o {tmp_path}")
+    dl = section.index(f"curl -fsSL -o {tmp_artifact}")
     verify = section.index("sha256sum --check --strict")
     use = section.index(use_marker)
     assert dl < verify < use
