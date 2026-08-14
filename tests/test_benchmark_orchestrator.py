@@ -14,10 +14,23 @@ import pytest
 from rich.console import Console
 
 from daydream.benchmark.acquire import AcquiredCheckout
+from daydream.benchmark.anthropic_score import (
+    _DEDUP_SYSTEM,
+    _EXTRACTION_SYSTEM,
+    AnthropicJsonClient,
+    run_anthropic_dedup,
+    run_anthropic_extraction,
+)
 from daydream.benchmark.config import BenchConfig
+from daydream.benchmark.judge import _JUDGE_SYSTEM
 from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import load_evaluable_prs
-from daydream.benchmark.score import DaydreamScores
+from daydream.benchmark.score import (
+    ANTHROPIC_JUDGE_API_KEY_ENV,
+    JUDGE_BASE_URL_ENV,
+    DaydreamScores,
+    model_results_dir,
+)
 
 
 def _item(file: str, line: int, **kw: Any) -> dict[str, Any]:
@@ -363,6 +376,110 @@ def test_scoring_ignores_unselected_prs_left_in_evaluations(tmp_path, monkeypatc
     assert "aggregate over 1 PR(s)" in out
     assert stale not in out
     assert "precision=1.000" in out and "recall=1.000" in out
+
+
+def test_limit_restricts_direct_extraction_and_dedup_to_selected_prs(tmp_path, monkeypatch):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    grafana = [url for url in data if "grafana" in url]
+    selected, unselected = grafana[0], grafana[1]
+    for url in (selected, unselected):  # give both PRs a valid daydream review
+        # The judge only reads golden comments carrying the "comment" key.
+        data[url]["golden_comments"] = [{"comment": "golden", "severity": "medium"}]
+        data[url]["reviews"].append({
+            "tool": "daydream", "repo_name": "daydream", "pr_url": url,
+            "review_comments": [{"path": "f.py", "line": 1, "body": "real review comment"}],
+        })
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    results_dir = model_results_dir(tmp_path, "judge-model")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    unselected_candidates = {
+        "daydream": [
+            {"text": "keep unselected candidate one", "path": None, "line": None, "source": "extracted"},
+            {"text": "keep unselected candidate two", "path": None, "line": None, "source": "extracted"},
+        ],
+        "other-tool": [{"text": "keep other tool candidate", "path": None, "line": None, "source": "extracted"}],
+    }
+    unselected_groups = {"daydream": [[0], [1]], "other-tool": [[0]]}
+    (results_dir / "candidates.json").write_text(
+        json.dumps({unselected: unselected_candidates}, indent=2), encoding="utf-8")
+    (results_dir / "dedup_groups.json").write_text(
+        json.dumps({unselected: unselected_groups}, indent=2), encoding="utf-8")
+
+    monkeypatch.setenv(ANTHROPIC_JUDGE_API_KEY_ENV, "sk-ant-test")
+    monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
+
+    async def _canned(self, *, system, user, max_tokens):
+        if system == _EXTRACTION_SYSTEM:
+            return {"issues": ["fresh selected one", "fresh selected two"]}
+        if system == _DEDUP_SYSTEM:
+            return {"groups": [[0, 1]]}
+        assert system == _JUDGE_SYSTEM
+        return {"reasoning": "same underlying issue", "match": True, "confidence": 1.0}
+
+    monkeypatch.setattr(AnthropicJsonClient, "complete_json", _canned)
+    _mock_review(tmp_path, monkeypatch)
+
+    cfg = replace(_config(tmp_path, data_path, score=True, only="grafana"),
+                  limit=1, judge_route="anthropic-direct", model="judge-model")
+    assert run_bench(cfg) == 0
+
+    candidates = json.loads((results_dir / "candidates.json").read_text(encoding="utf-8"))
+    groups = json.loads((results_dir / "dedup_groups.json").read_text(encoding="utf-8"))
+    # selected recomputed fresh
+    assert [c["text"] for c in candidates[selected]["daydream"]] == ["fresh selected one", "fresh selected two"]
+    assert groups[selected]["daydream"] == [[0, 1]]
+    # unselected leaves preserved byte-for-byte (extraction+dedup skipped them)
+    assert candidates[unselected] == unselected_candidates
+    assert groups[unselected] == unselected_groups
+    # evaluation restricted to the selected PR only
+    evals = json.loads((results_dir / "evaluations.json").read_text(encoding="utf-8"))
+    assert list(evals) == [selected]
+    assert evals[selected]["daydream"]["tp"] == 1
+
+
+class _CountingJudgeClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete_json(self, *, system: str, user: str, max_tokens: int) -> dict:
+        self.calls += 1
+        return {}
+
+
+async def test_empty_selection_skips_all_extraction_and_dedup_judge_calls(tmp_path):
+    data_path = _seed_benchmark_data_with_all_26_keys(tmp_path)
+    data = json.loads(data_path.read_text(encoding="utf-8"))
+    url = next(u for u in data if "grafana" in u)
+    data[url]["reviews"].append({
+        "tool": "daydream", "repo_name": "daydream", "pr_url": url,
+        "review_comments": [{"path": "f.py", "line": 1, "body": "real review comment"}],
+    })
+    data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    results_dir = model_results_dir(tmp_path, "judge-model")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    seeded_candidates = {
+        "daydream": [{"text": "a", "path": None, "line": None, "source": "extracted"},
+                     {"text": "b", "path": None, "line": None, "source": "extracted"}],
+    }
+    seeded_groups = {"daydream": [[0], [1]]}
+    (results_dir / "candidates.json").write_text(
+        json.dumps({url: seeded_candidates}, indent=2), encoding="utf-8")
+    (results_dir / "dedup_groups.json").write_text(
+        json.dumps({url: seeded_groups}, indent=2), encoding="utf-8")
+
+    client = _CountingJudgeClient()
+
+    await run_anthropic_extraction(tmp_path, "judge-model", tool="daydream", client=client, golden_urls=[])
+    await run_anthropic_dedup(tmp_path, "judge-model", tool="daydream", client=client, golden_urls=[])
+
+    assert client.calls == 0
+    candidates = json.loads((results_dir / "candidates.json").read_text(encoding="utf-8"))
+    groups = json.loads((results_dir / "dedup_groups.json").read_text(encoding="utf-8"))
+    assert candidates[url] == seeded_candidates
+    assert groups[url] == seeded_groups
 
 
 def test_materiality_gate_filters_submission(tmp_path, monkeypatch):
