@@ -172,6 +172,22 @@ async def test_nonzero_exit_raises_with_captured_output():
 
 
 @pytest.mark.asyncio
+async def test_nonzero_exit_with_no_output_still_informative():
+    """If codex crashes with zero output, the error says so explicitly."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process([])
+    mock_proc.returncode = 1
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="return code 1") as exc_info:
+            async for _ in backend.execute(Path("/tmp"), "Fail"):
+                pass
+
+    assert "no non-JSON output captured" in str(exc_info.value)
+    assert exc_info.value.category == "PROCESS_EXIT"
+
+
+@pytest.mark.asyncio
 async def test_continuation_token_resumes():
     """Test that continuation token is passed as 'resume' argument."""
     from daydream.backends import ContinuationToken
