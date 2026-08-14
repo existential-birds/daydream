@@ -131,10 +131,16 @@ _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
 
 def test_rundir_golden_step_11_message_is_inert(rundir_golden: Path) -> None:
-    """The committed golden trajectory's single user-authored step must not carry
+    """No user-authored step in the committed golden trajectory may carry
     instruction-bearing text an automated reviewer could mistake for trusted
-    direction. A directive-shaped message returning to this slot fails the build."""
+    direction. This is a clean-pass fixture, so every user slot must be inert;
+    a directive reappearing in any user slot fails the build. The step-11
+    message is the canonical case and must also keep its structural shape."""
     trajectory = json.loads((rundir_golden / "trajectory.json").read_text(encoding="utf-8"))
+    user_steps = [s for s in trajectory["steps"] if s.get("source") == "user"]
+    assert user_steps, "expected at least one user-authored step"
+    for step in user_steps:
+        assert step["message"] == ""
     step_11 = [s for s in trajectory["steps"] if s.get("step_id") == 11]
     assert len(step_11) == 1
     step = step_11[0]
