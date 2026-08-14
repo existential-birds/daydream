@@ -103,25 +103,28 @@ def test_daydream_install_is_pinned_to_current_release_tag(name: str) -> None:
 # no job ever holds both untrusted PR code and the App key.
 
 
-def test_split_setup_preserves_privilege_split() -> None:
+@pytest.mark.parametrize(
+    "post_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+    ids=["template", "live"],
+)
+def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
     review = load_workflow(TEMPLATES_DIR / "daydream-review.yml")
     review_text = (TEMPLATES_DIR / "daydream-review.yml").read_text(encoding="utf-8")
     command_text = (TEMPLATES_DIR / "daydream-command.yml").read_text(encoding="utf-8")
-    post = load_workflow(TEMPLATES_DIR / "daydream-post.yml")
-    post_text = (TEMPLATES_DIR / "daydream-post.yml").read_text(encoding="utf-8")
+    post = load_workflow(post_path)
+    post_text = post_path.read_text(encoding="utf-8")
 
     # Phase A runs untrusted PR code: read-only, and its only secret is the API key.
     assert review["permissions"] == {"contents": "read"}
     assert set(_SECRET_REF_RE.findall(review_text)) == {"ANTHROPIC_API_KEY"}
 
-    # The two App-key holders never check out untrusted code: the command job
-    # never checks out at all; the post job may only take the trusted default
-    # branch (no PR / workflow_run ref override).
+    # The App-key holders never check out code: the command workflow never checks
+    # out at all, and every job in each privileged post workflow performs no
+    # checkout.
     assert "actions/checkout" not in command_text
     for job in post["jobs"].values():
-        for step in job["steps"]:
-            if "actions/checkout" in step.get("uses", ""):
-                assert "workflow_run" not in str(step.get("with", {}).get("ref", ""))
+        assert not has_checkout(job)
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
 
