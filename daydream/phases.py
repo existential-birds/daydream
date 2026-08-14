@@ -173,6 +173,16 @@ def _build_fix_prompt(
 
 
 
+def _render_bash_allowlist() -> str:
+    """Render the read-only Bash allowlist as a comma-separated back-ticked list.
+
+    Single source for the ``READ_ONLY_BASH_ALLOWLIST`` render so the setup-
+    investigator and failure-summarizer prompts stay word-for-word in sync with
+    the commands the backend guard hook actually enforces.
+    """
+    return ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+
+
 def _build_setup_investigator_prompt(test_output: str) -> str:
     """Build a read-only diagnostic prompt for the setup-investigator subagent.
 
@@ -196,7 +206,7 @@ def _build_setup_investigator_prompt(test_output: str) -> str:
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect files.\n"
         "- You MAY use Bash for NON-MUTATING discovery only. Permitted commands: "
-        + ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST) + ".\n"
+        + _render_bash_allowlist() + ".\n"
         "- You MUST NOT run tests, build steps, or installers.\n"
         "- You MUST NOT modify, create, or delete any files.\n"
         "- You MUST NOT invoke Write, Edit, or any file-mutating tool.\n\n"
@@ -382,7 +392,7 @@ def _build_failure_summarizer_prompt(
         "## Hard Constraints (read-only contract)\n"
         "- You MAY use Read, Grep, and Glob to inspect the artifacts listed below.\n"
         "- You MAY use Bash for NON-MUTATING inspection ONLY. Permitted commands: "
-        + ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
+        + _render_bash_allowlist()
         + ". "
         "These are read-only — they inspect history and never change the repo. Use "
         "them to VERIFY any claim about cause or history before you write it as fact. "
