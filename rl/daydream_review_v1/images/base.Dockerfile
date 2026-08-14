@@ -105,9 +105,11 @@ RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
       esac; \
       curl -fsSL -o /tmp/codex.tar.gz "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${target}.tar.gz"; \
       printf '%s  %s\n' "${checksum}" /tmp/codex.tar.gz | sha256sum --check --strict -; \
-      tar -xzf /tmp/codex.tar.gz -C /usr/local/bin; \
+      mkdir -p /tmp/codex_extract; \
+      tar -xzf /tmp/codex.tar.gz -C /tmp/codex_extract; \
       rm -f /tmp/codex.tar.gz; \
-      mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex; \
+      mv "/tmp/codex_extract/codex-${target}" /usr/local/bin/codex; \
+      rm -rf /tmp/codex_extract; \
       chmod +x /usr/local/bin/codex; \
       codex --version; \
     fi

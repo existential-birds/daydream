@@ -25,7 +25,10 @@ NODE_SHASUMS_URL = "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
 def _dockerfile_section(source: str, heading: str) -> str:
     """Return the section beginning at '# --- {heading} ' through the next '# --- ' marker."""
     marker = f"# --- {heading} "
-    start = source.index(marker)
+    try:
+        start = source.index(marker)
+    except ValueError:
+        raise ValueError(f"heading {heading!r} not found in Dockerfile") from None
     rest = source[start + len(marker) :]
     nxt = rest.find("\n# --- ")
     return rest if nxt == -1 else rest[:nxt]
@@ -78,9 +81,13 @@ def test_pinned_tool_downloads_are_verified_before_use(
             re.MULTILINE,
         ), f"{prefix} {arch} digest ARG missing or malformed"
 
-    # Both architecture branches assign the matching checksum var.
-    assert f'checksum="${{{prefix}_SHA256_AMD64}}"' in section
-    assert f'checksum="${{{prefix}_SHA256_ARM64}}"' in section
+    # Both architecture branches assign the matching checksum var. Extract each case
+    # branch separately so crossed-wiring (amd64 branch referencing ARM64 digest) cannot
+    # pass the assertion.
+    amd64_branch = section[section.index("amd64)") : section.index(";;", section.index("amd64)"))]
+    arm64_branch = section[section.index("arm64)") : section.index(";;", section.index("arm64)"))]
+    assert f'checksum="${{{prefix}_SHA256_AMD64}}"' in amd64_branch
+    assert f'checksum="${{{prefix}_SHA256_ARM64}}"' in arm64_branch
 
     # Provenance comment and temp-artifact cleanup are present.
     assert metadata_url in section
