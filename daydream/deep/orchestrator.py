@@ -1155,19 +1155,34 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
         from daydream.deep.artifacts import per_stack_review_path
 
         failures_p = per_stack_failures_path(dd)
-        if failures_p.is_file():
-            try:
-                loaded = json.loads(failures_p.read_text())
-                if isinstance(loaded, dict):
-                    # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
-                    # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
-                    # so it is never misread as a failed stack that would surface as
-                    # a garbled "Uncovered stacks" line on a resume (issue #361).
-                    failed_stacks = {
-                        str(k): str(v) for k, v in loaded.items() if isinstance(v, str)
-                    }
-            except json.JSONDecodeError:
-                failed_stacks = {}
+        loaded = _load_failures(failures_p)
+        # Surface a prior cross-stack synthesis failure (issue #361): the
+        # structured ``MERGE_FAILURE_KEY`` entry is deliberately excluded from
+        # ``failed_stacks`` (below) so it can't be misread as a failed stack /
+        # garbled "Uncovered stacks" line, but resuming into a *partial* review
+        # must not look clean -- say so explicitly so a ``--start-at fix``
+        # relaunch doesn't fix + commit partial findings as if the cross-stack
+        # merge had succeeded.
+        merge_entry = loaded.get(MERGE_FAILURE_KEY)
+        if merge_entry is not None:
+            merge_message = (
+                merge_entry.get("message")
+                if isinstance(merge_entry, dict)
+                else str(merge_entry)
+            )
+            print_warning(
+                console,
+                "Prior cross-stack synthesis failed; merged results are PARTIAL. "
+                f"{merge_message} (issue #361) -- this resume fixes/verifies the "
+                "partial per-stack findings as-is.",
+            )
+        # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
+        # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
+        # so it is never misread as a failed stack that would surface as
+        # a garbled "Uncovered stacks" line on a resume (issue #361).
+        failed_stacks = {
+            str(k): str(v) for k, v in loaded.items() if isinstance(v, str)
+        }
         per_stack_outputs = {
             stack.stack_name: per_stack_review_path(dd, stack.stack_name)
             for stack in stacks
@@ -1705,6 +1720,68 @@ async def _step_arbiter(ctx: FlowContext) -> None:
 MERGE_FAILURE_KEY = "__merge__"
 
 
+def _load_failures(path: Path) -> dict[str, Any]:
+    """Load a ``per-stack-failures.json`` into a dict, defaulting to ``{}`` on absent/malformed.
+
+    Shared defensive loader for the "load existing per-stack-failures.json"
+    pattern (resume loader in ``_per_stack_body`` and merge-failure salvage in
+    ``_salvage_merge_failure``). Content is returned verbatim -- including the
+    structured ``MERGE_FAILURE_KEY`` entry, which each caller filters or
+    handles per its own contract. Only a missing file, malformed JSON, or a
+    non-dict root degrades to the ``{}`` "no prior failures" default.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply the D-27 dedup pre-filter to a host-written partial merge (issue #361).
+
+    In a full merge the merge agent adjudicates ``record_duplicate_pairs``
+    (cross-stack records describing the same concern). A salvage writes the
+    partial list with no merge agent, so it must apply the pre-filter's computed
+    cross-stack duplicate pairs itself -- otherwise the partial
+    ``merged-items.json`` carries duplicates into the resume verifier and fix
+    gate. Keeps the ``record_a`` side of each pair (deterministic sort order)
+    and drops the ``record_b`` side, matched on ``(id, file)`` because per-stack
+    record ids are not globally unique.
+    """
+    dedup_p = dedup_candidates_path(dd)
+    if not dedup_p.is_file():
+        return records
+    try:
+        dedup = json.loads(dedup_p.read_text())
+    except json.JSONDecodeError:
+        return records
+    dropped_keys: set[tuple[str, str]] = set()
+    for pair in dedup.get("record_duplicate_pairs", []) or []:
+        if not isinstance(pair, dict):
+            continue
+        b_id = pair.get("record_b_id")
+        b_file = pair.get("record_b_file")
+        if b_id is not None and b_file is not None:
+            dropped_keys.add((str(b_id), str(b_file)))
+    if not dropped_keys:
+        return records
+    kept = [
+        r
+        for r in records
+        if (str(r.get("id", "")), str(r.get("file", ""))) not in dropped_keys
+    ]
+    if len(kept) != len(records):
+        print_info(
+            console,
+            f"Cross-stack merge salvage: dropped {len(records) - len(kept)} "
+            "duplicate per-stack record(s) via the D-27 dedup pre-filter",
+        )
+    return kept
+
+
 async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26).
 
@@ -1782,27 +1859,24 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
 
     # Build the partial canonical merged-items.json + review-output.md from the
     # surviving per-stack records (reusing the single-stack write helper's shared
-    # structural-tagging + render epilogue). partial=True marks it as degraded
-    # (S2) while keeping the same on-disk schema downstream consumers read.
+    # structural-tagging + render epilogue). Recoverability comes from the
+    # structured ``__merge__`` failure record + resumable stop, not a root
+    # ``partial`` flag in merged-items.json (no consumer reads it -- issue #361
+    # follow-up). Apply the D-27 dedup pre-filter (issue #361): with no merge
+    # agent to adjudicate, drop the duplicate side of cross-stack record pairs so
+    # the partial list doesn't carry duplicates into the resume verifier/fix gate.
+    records = _drop_cross_stack_duplicates(dd, ctx.data["records"])
     _write_single_stack_merged_items(
         ctx.work.repo,
         dd,
-        ctx.data["records"],
+        records,
         ctx.data["structural_records_path"],
         failed_stacks=ctx.data.get("failed_stacks") or None,
-        partial=True,
     )
 
     # Record the failure for resume. Never drop existing per-stack entries.
     failures_p = per_stack_failures_path(dd)
-    failures: dict[str, Any] = {}
-    if failures_p.is_file():
-        try:
-            loaded = json.loads(failures_p.read_text())
-            if isinstance(loaded, dict):
-                failures = loaded
-        except json.JSONDecodeError:
-            failures = {}
+    failures = _load_failures(failures_p)
     failures[MERGE_FAILURE_KEY] = {
         "response_shape": exc.response_shape,
         "stack_context": exc.stack_context,

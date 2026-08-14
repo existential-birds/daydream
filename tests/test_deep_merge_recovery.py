@@ -77,6 +77,102 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     return inputs
 
 
+def test_load_failures_defaults_and_filters() -> None:
+    """F3: the shared ``_load_failures`` loader parses or degrades to {}."""
+    import tempfile
+    from pathlib import Path
+
+    from daydream.deep.artifacts import per_stack_failures_path
+    from daydream.deep.orchestrator import _load_failures
+
+    with tempfile.TemporaryDirectory() as td:
+        dd = Path(td) / ".daydream" / "deep"
+        dd.mkdir(parents=True)
+        p = per_stack_failures_path(dd)
+        # Absent file -> {} (no prior failures default).
+        assert _load_failures(p) == {}
+        # Malformed JSON -> {}.
+        p.write_text("{ not json")
+        assert _load_failures(p) == {}
+        # Non-dict root -> {}.
+        p.write_text("[1, 2]")
+        assert _load_failures(p) == {}
+        # Verbatim content preserved (including the structured __merge__ entry).
+        p.write_text(
+            json.dumps({"s1": "boom", "__merge__": {"response_shape": "str", "message": "m"}})
+        )
+        assert _load_failures(p) == {
+            "s1": "boom",
+            "__merge__": {"response_shape": "str", "message": "m"},
+        }
+
+
+async def test_merge_salvage_applies_dedup_prefilter(
+    multi_stack_target, monkeypatch, mute_side_effects
+) -> None:
+    """F2: the salvage path applies the D-27 dedup pre-filter to the partial items.
+
+    With no merge agent to adjudicate cross-stack duplicates, a salvage drops
+    the duplicate (record_b) side of record<->record pairs computed by the
+    pre-filter; otherwise the partial merged-items.json carries duplicates into
+    the resume verifier and fix gate.
+    """
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    # python + react emit near-identical descriptions at distinct files, so the
+    # D-27 pre-filter flags them as a single cross-stack duplicate pair.
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "high", "confidence": "HIGH",
+            "file": "api.py", "line": 1, "description": "unbounded cache write",
+        },
+        "react": {
+            "severity": "high", "confidence": "HIGH",
+            "file": "App.tsx", "line": 1, "description": "unbounded cache write",
+        },
+    }
+    stub.merge_emit_str = "no item list"
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())
+    # The dead ``partial: true`` root flag (unread by any consumer) is not
+    # written; recoverability comes from the ``__merge__`` failure record +
+    # resumable stop, not a flag in merged-items.json.
+    assert "partial" not in items
+    per_stack = [i for i in items["items"] if i.get("lens") == "per-stack"]
+    files = [i["file"] for i in per_stack]
+    # The duplicate react side (record_b) is dropped; the python side survives.
+    assert "api.py" in files
+    assert "App.tsx" not in files, f"cross-stack duplicate leaked into partial items: {files}"
+
+
+async def test_merge_failure_resume_surfaces_prior_failure(
+    multi_stack_target, monkeypatch, mute_side_effects, capsys
+) -> None:
+    """F1/R6: a --start-at fix relaunch after salvage surfaces the merge failure.
+
+    The structured ``__merge__`` entry is kept out of ``failed_stacks`` (so it
+    cannot garble "Uncovered stacks") but resuming into a partial synthesis must
+    not look clean -- the resume loader warns that the cross-stack synthesis
+    failed and the merged results are partial.
+    """
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = "prose with no item list"
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    stub.calls.clear()
+    stub.merge_emit_str = None
+    assert await _run_deep(multi_stack_target, start_at="fix") == 0
+    out = capsys.readouterr().out
+    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in out
+
+
 def _merge_args(tmp_path: Path) -> dict[str, Any]:
     """Common keyword args for a ``phase_cross_stack_merge`` call."""
     inputs = _write_merge_inputs(tmp_path)
@@ -209,12 +305,19 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
     dd = deep_dir(multi_stack_target)
     items = json.loads(merged_items_path(dd).read_text())
-    assert items["partial"] is True  # S2
+    # The ``partial: true`` root flag is dead metadata (no consumer reads it -
+    # issue #361 follow-up); the salvage is recoverable via the ``__merge__``
+    # failure record + resumable stop, not a merged-items flag.
+    assert "partial" not in items
     assert len(items["items"]) > 0  # R3: consolidated from surviving records
     assert merged_report_path(dd).is_file()  # S1: partial review-output.md rendered
     failures = json.loads(per_stack_failures_path(dd).read_text())
     assert failures["__merge__"]["response_shape"] == "str"  # R4/AC2
-    assert len(failures["__merge__"]["stack_context"]) > 0
+    # R4/AC2: pin the deterministic stack names instead of only asserting
+    # non-empty. multi_stack_target routes api.py/App.tsx/README.md to the
+    # python + react + generic stacks; the structural meta-stack is partitioned
+    # out of the merge's per-stack records, so it is absent from the context.
+    assert failures["__merge__"]["stack_context"] == ["generic", "python", "react"]
     assert len(list(dd.glob("stack-*-records.json"))) > 0  # R5: completed records survive
 
 
@@ -230,9 +333,25 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
     stub.calls.clear()
     stub.merge_emit_str = None
+    # Force the fix gate to accept so the resume reaches the fix phase and
+    # consumes the salvaged partial items; without this the gate declines in
+    # non-interactive mode and the run stops (0) before any fix prompt exists.
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.resolve_or_prompt", lambda *_a, **_k: True
+    )
     assert await _run_deep(multi_stack_target, start_at="fix") == 0
     assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
     assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
+    # R6 positive outcome: the fix phase consumed the salvaged partial items --
+    # the fix prompt (built from merged-items.json) references the surviving
+    # per-stack finding's description + file. A regression where --start-at fix
+    # fails to load the partial merged-items.json would fail this assertion.
+    fix_calls = [
+        c["prompt"]
+        for c in stub.calls
+        if "fix these" in c["prompt"].lower() or "fix this issue" in c["prompt"].lower()
+    ]
+    assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
 
 
 async def test_merge_failure_merge_resume_skips_merge_entry(
