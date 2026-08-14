@@ -51,12 +51,11 @@ TERMINATE_GRACE_S = 5.0
 class StreamStalledError(Exception):
     """Raised when a backend CLI produces no stdout for the idle window.
 
-    ``retryable`` is ``False``: the idle window is a terminal bound for a
-    subprocess invocation, so a persistent stalled stream cannot consume the
-    generic retry budget.
+    A stalled request may be a transient provider/network failure, so the
+    normal bounded backend retry loop gets a chance to re-arm the subprocess.
     """
 
-    retryable = False
+    retryable = True
 
     def __init__(self, cli: str, timeout_s: float) -> None:
         super().__init__(
