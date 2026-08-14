@@ -5,7 +5,6 @@ Live panel and its multi-panel registry, and the shutdown progress panel.
 """
 
 import re
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -54,39 +53,20 @@ from daydream.ui.tools import (
 
 
 class LiveThinkingPanel:
-    """Animated thinking panel with crazy spinners in title.
+    """Thinking panel rendered statically.
 
     Displays the AI's thought process in a purple-styled panel
-    with animated spinners alongside the thought bubble icon.
+    with a stable title, rendered immediately.
     """
 
     def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
         """Initialize the panel."""
         self._console = console
         self._content = content if len(content) <= max_length else content[:max_length] + "..."
-        self._spinner = CrazySpinner(num_spinners=3)
 
-    def __rich__(self) -> Panel:
-        """Render panel with animated title."""
-        title = Text()
-        title.append("💭 Thinking")
-        title.append_text(self._spinner.render())
-
-        return Panel(
-            Markdown(self._content),
-            title=title,
-            title_align="left",
-            box=box.ROUNDED,
-            border_style=STYLE_PURPLE,
-            style=Style(color=NEON_COLORS["purple"], italic=True),
-            padding=(0, 1),
-        )
-
-    def show(self, duration: float = 1.0) -> None:
-        """Show animated panel for duration, then persist final state."""
+    def show(self) -> None:
+        """Render the thinking panel immediately."""
         self._console.print()
-        with Live(self, console=self._console, refresh_per_second=10, transient=True):
-            time.sleep(duration)
         self._console.print(
             Panel(
                 Markdown(self._content),
@@ -101,13 +81,13 @@ class LiveThinkingPanel:
 
 
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
-    """Print a thinking panel with brief animation.
+    """Print a stable thinking panel.
 
     Displays the AI's thought process in a purple-styled panel
-    with animated spinners in the title that settle after a brief duration.
+    with a static title, rendered immediately.
     """
     panel = LiveThinkingPanel(console, content, max_length)
-    panel.show(duration=0.5)
+    panel.show()
 
 
 class CrazySpinner:
