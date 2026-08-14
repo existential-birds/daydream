@@ -327,7 +327,7 @@ def test_duplicate_trajectory_identity_is_rejected(
             ),
         },
     )
-    with pytest.raises(ValueError, match=r"duplicate trajectory key 'calcom/cal\.com/10600'"):
+    with pytest.raises(SystemExit, match=r"duplicate trajectory key 'calcom/cal\.com/10600'"):
         build_mod.build(args)
 
 
