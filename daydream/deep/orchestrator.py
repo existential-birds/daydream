@@ -1230,6 +1230,11 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         async with phase_scope(DaydreamPhase.PARSE):
             async with anyio.create_task_group() as tg:
                 for stack_name, output_path in sorted(per_stack_outputs.items()):
+                    # An exhausted per-stack review has no review markdown to parse.
+                    # Keep completed siblings in the parse/merge pipeline; the
+                    # failure map is the explicit coverage record for this stack.
+                    if stack_name in failed_stacks:
+                        continue
                     # Every stack -- language or the structural meta-stack --
                     # parses with the severity-bearing PER_STACK_RECORD_SCHEMA.
                     # Issue #314: the structural reviewer calibrates anti-slop
