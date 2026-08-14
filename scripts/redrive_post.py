@@ -14,6 +14,7 @@ reintroduce deduped findings or drop structural ones.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -30,13 +31,17 @@ async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None
         print(f"No canonical merged-items.json found at {items_path}", file=sys.stderr)
         sys.exit(1)
 
-    status = await post_review_to_pr_from_report(
-        target_dir,
-        items_path,
-        console=create_console(),
-        post=auto_yes,
-        pr_number=pr_number,
-    )
+    try:
+        status = await post_review_to_pr_from_report(
+            target_dir,
+            items_path,
+            console=create_console(),
+            post=auto_yes,
+            pr_number=pr_number,
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read merged-items.json at {items_path}: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     if status in (PostStatus.NO_PR, PostStatus.FAILED):
         sys.exit(1)

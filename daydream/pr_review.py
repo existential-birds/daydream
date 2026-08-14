@@ -188,7 +188,17 @@ async def post_review_to_pr_from_report(
     """
     if not merged_items_path.exists():
         return PostStatus.NOTHING_TO_POST
-    items = json.loads(merged_items_path.read_text()).get("items", [])
+    try:
+        items = json.loads(merged_items_path.read_text()).get("items", [])
+    except (OSError, json.JSONDecodeError):
+        # A corrupt/partially-written merged-items.json must not crash the run
+        # with an unhandled JSONDecodeError; treat it like a missing file and
+        # skip the post cleanly (#400).
+        print_warning(
+            console,
+            f"Could not read {merged_items_path.name}; skipping PR post.",
+        )
+        return PostStatus.NOTHING_TO_POST
     issues = parsed_issues_from_items(items)
     if not issues and not approve_on_clean:
         print_info(console, "No parseable issues in review output; skipping PR post.")
@@ -1056,6 +1066,61 @@ def build_payload(
 # --- Core orchestration ---------------------------------------------------
 
 
+def _resolve_pr(
+    target_dir: Path,
+    console: Console,
+    pr_number: int | None,
+) -> PRInfo | None:
+    """Resolve the target PR for posting.
+
+    Handles both the current-branch discovery path (:func:`find_open_pr`) and
+    the explicitly-pinned path (:func:`find_pr_by_number`). On failure it
+    prints a warning describing the cause — distinguishing a missing PR from a
+    failed owner/repo slug resolution — and returns ``None``.
+
+    Returns:
+        The resolved :class:`PRInfo`, or ``None`` (after warning) when the PR
+        cannot be resolved.
+    """
+    if pr_number is not None:
+        data = git_ops.gh_pr_view(target_dir, pr_number)
+        if data is None:
+            print_warning(
+                console,
+                f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
+            )
+            return None
+        # ``gh pr view`` resolved the PR, but the owner/repo slug (needed to
+        # post) failed to resolve — a different cause than a missing PR, so
+        # report it distinctly instead of a misleading "not found" message.
+        slug = git_ops.gh_repo_view(target_dir)
+        if slug is None:
+            print_warning(
+                console,
+                f"PR #{pr_number} resolved via `gh pr view` but the owner/repo "
+                "slug could not be resolved via `gh repo view`; skipping PR post.",
+            )
+            return None
+        owner, repo = slug
+        return PRInfo(
+            number=pr_number,
+            head_sha=data["headRefOid"],
+            base_sha=data["baseRefOid"],
+            base_ref=data.get("baseRefName", ""),
+            owner=owner,
+            repo=repo,
+            url=data.get("url", ""),
+        )
+    pr = find_open_pr(target_dir)
+    if pr is None:
+        print_warning(
+            console,
+            "No open PR found for the current branch; skipping PR post.",
+        )
+        return None
+    return pr
+
+
 async def _post(
     target_dir: Path,
     issues: list[ParsedIssue],
@@ -1065,22 +1130,9 @@ async def _post(
     approve_on_clean: bool = False,
     pr_number: int | None = None,
 ) -> PostStatus:
-    if pr_number is not None:
-        pr = find_pr_by_number(target_dir, pr_number)
-        if pr is None:
-            print_warning(
-                console,
-                f"PR #{pr_number} not found via `gh pr view`; skipping PR post.",
-            )
-            return PostStatus.NO_PR
-    else:
-        pr = find_open_pr(target_dir)
-        if pr is None:
-            print_warning(
-                console,
-                "No open PR found for the current branch; skipping PR post.",
-            )
-            return PostStatus.NO_PR
+    pr = _resolve_pr(target_dir, console, pr_number)
+    if pr is None:
+        return PostStatus.NO_PR
 
     classified = classify(target_dir, pr, issues)
     if classified.is_empty() and not approve_on_clean:
