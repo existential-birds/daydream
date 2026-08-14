@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,43 @@ def test_fixture_repo_rejects_occupied_destination(tmp_path: Path, kind: str) ->
         assert sorted(p.name for p in dest.iterdir()) == ["caller.txt"]
     else:
         assert dest.read_text(encoding="utf-8") == "caller-owned"
+
+
+def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_path: Path) -> None:
+    """An occupied git destination is rejected before any mutation; the CLI exits 2."""
+    dest = tmp_path / "occupied"
+    dest.mkdir()
+    subprocess.run(["git", "-C", str(dest), "init", "--quiet", "--initial-branch", "main"], check=True)
+    subprocess.run(["git", "-C", str(dest), "config", "user.name", "Caller"], check=True)
+    subprocess.run(["git", "-C", str(dest), "config", "user.email", "caller@example.com"], check=True)
+    (dest / "caller.txt").write_text("caller-owned", encoding="utf-8")
+    subprocess.run(["git", "-C", str(dest), "add", "caller.txt"], check=True)
+    subprocess.run(["git", "-C", str(dest), "commit", "-m", "caller commit"], check=True)
+
+    head_before = (dest / ".git" / "HEAD").read_text(encoding="utf-8")
+    config_before = (dest / ".git" / "config").read_text(encoding="utf-8")
+    status_before = subprocess.run(
+        ["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True
+    ).stdout
+    entries_before = sorted(p.name for p in dest.iterdir())
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "daydream_review_v1.fixture", str(dest)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert "fixture destination must be a new or empty directory" in proc.stderr
+    assert (dest / "caller.txt").read_text(encoding="utf-8") == "caller-owned"
+    assert (dest / ".git" / "HEAD").read_text(encoding="utf-8") == head_before
+    assert (dest / ".git" / "config").read_text(encoding="utf-8") == config_before
+    assert (
+        subprocess.run(["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True).stdout
+        == status_before
+    )
+    assert sorted(p.name for p in dest.iterdir()) == entries_before
 
 
 def test_load_builds_tasks_from_fixture_corpus(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:

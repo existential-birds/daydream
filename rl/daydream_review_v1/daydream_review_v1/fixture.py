@@ -208,10 +208,13 @@ def build_fixture_repo(dest: Path, *, red: bool = False) -> FixtureRepo:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("dest", type=Path, help="directory to build the repository in")
+    parser.add_argument("dest", type=Path, help="new or empty directory to build the repository in")
     parser.add_argument("--red", action="store_true", help="plant a failing test in the head commit")
     args = parser.parse_args(argv)
-    repo = build_fixture_repo(args.dest, red=args.red)
+    try:
+        repo = build_fixture_repo(args.dest, red=args.red)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(f"repo       {repo.path}")
     print(f"base_sha   {repo.base_sha}")
     print(f"pr1_head   {repo.pr1_head_sha}")
