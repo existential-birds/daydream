@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 from daydream.pricing import ModelPrice, compute_cost, load_user_prices, resolve_prices
+from daydream.timeutil import parse_iso_timestamp
 
 # Judge-error guard from daydream/benchmark/score.py: above this ratio of failed
 # comparisons the tp/fp/fn collapse to noise, not a real zero.
@@ -204,9 +205,11 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
         stamps = [e.get("timestamp") for e in events if e.get("timestamp")]
         wall = None
         if len(stamps) >= 2:
-            def _p(s: str) -> datetime:
-                return datetime.fromisoformat(s.replace("Z", "+00:00"))
-            wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
+            try:
+                wall = (parse_iso_timestamp(max(stamps)) - parse_iso_timestamp(min(stamps))).total_seconds()
+            except ValueError:
+                # malformed timestamp nulls only this trajectory's wall time (intentional fallback)
+                pass
         pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
         key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"
         if key in out:

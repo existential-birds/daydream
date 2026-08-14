@@ -53,12 +53,12 @@ _ANCHOR = "anthropic_claude-opus-4-5-20251101"  # -> display "Opus 4.5"
 def _corpus(
     root: Path,
     *,
-    pr_trajectories: dict[str, tuple[str, str | None, int, int, int, int, tuple[str, str] | None]] | None = None,
+    pr_trajectories: dict[str, tuple[str, str | None, int, int, int, int, tuple[str, ...] | None]] | None = None,
     judges: dict[str, dict[str, dict]] | None = None,
     labels: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
     """Minimal corpus. pr_trajectories maps PR url -> (filename, pr_repo, prompt,
-    completion, cached, steps, (start_iso, end_iso) | None). Omitted -> the existing
+    completion, cached, steps, (start_iso, ...) | None). Omitted -> the existing
     one-PR legacy corpus (cal.com-10600.json with no pr_repo)."""
     if pr_trajectories is None:
         pr_trajectories = {PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None)}
@@ -172,6 +172,41 @@ def test_unknown_price_model_is_rejected(
     args.price_model = "no-such-model"
     with pytest.raises(SystemExit, match="unknown --price-model"):
         build_mod.build(args)
+
+
+def test_malformed_phase_event_timestamp_preserves_trajectory_metrics(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed phase-event timestamp nulls only that trajectory's wall time;
+    its token counters and synthesized cost are retained in the report."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(
+        tmp_path,
+        pr_trajectories={
+            PR_URL: (
+                "cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3,
+                ("2026-01-01T00:00:00Z", "2026-01-01T00:02:00Z", "not-a-timestamp"),
+            ),
+        },
+    )
+    report = build_mod.build(args)  # must NOT raise
+
+    row = report["per_pr"][0]
+    assert row["wall_seconds"] is None
+    assert row["prompt_tokens"] == 1_000_000
+    assert row["completion_tokens"] == 1_000_000
+    assert row["cached_tokens"] == 1_000_000
+    assert row["cost_usd"] == pytest.approx(6.06)
+
+    eco = report["economy"]
+    assert eco["n_with_trajectory"] == 1
+    assert eco["n_with_wall"] == 0
+    assert eco["median_wall_seconds"] is None
+    assert eco["mean_wall_seconds"] is None
+    assert eco["total_prompt_tokens"] == 1_000_000
+    assert eco["total_completion_tokens"] == 1_000_000
+    assert eco["total_cached_tokens"] == 1_000_000
+    assert eco["total_cost_usd"] == pytest.approx(6.06)
 
 
 @pytest.mark.parametrize("incomplete_leaf", [None, {"skipped": True}], ids=["missing", "skipped"])
