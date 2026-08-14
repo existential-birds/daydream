@@ -2,7 +2,7 @@
 #
 # Pre-push hook: lint + typecheck + the full test suite.
 #
-# Install with: ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
+# Install with: make hooks
 #
 set -euo pipefail
 
