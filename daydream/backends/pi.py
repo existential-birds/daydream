@@ -46,6 +46,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
+    resolve_fanout_concurrency,
 )
 from daydream.backends._subprocess import (
     cancel_processes,
@@ -192,29 +193,6 @@ def _warn_migration_mismatch_once(key: str, message: str, *args: object) -> None
         return
     _warned_migration_mismatches.add(key)
     logger.warning(message, *args)
-
-
-def _pi_fanout_concurrency() -> int:
-    raw = os.environ.get("DAYDREAM_PI_FANOUT_CONCURRENCY")
-    if raw is None:
-        return _PI_DEFAULT_FANOUT_CONCURRENCY
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "DAYDREAM_PI_FANOUT_CONCURRENCY is not a valid integer; "
-            "using default %d",
-            _PI_DEFAULT_FANOUT_CONCURRENCY,
-        )
-        return _PI_DEFAULT_FANOUT_CONCURRENCY
-    if value <= 0:
-        logger.warning(
-            "DAYDREAM_PI_FANOUT_CONCURRENCY must be positive; "
-            "using default %d",
-            _PI_DEFAULT_FANOUT_CONCURRENCY,
-        )
-        return _PI_DEFAULT_FANOUT_CONCURRENCY
-    return value
 
 
 def _pi_retry_attempts() -> int:
@@ -561,7 +539,9 @@ class PiBackend:
             configured = _configured_pi_model(cwd)
             self._configured_cache = (cwd, configured)
         self.model = model or configured or DEFAULT_PI_MODEL
-        self.fanout_concurrency = _pi_fanout_concurrency()
+        self.fanout_concurrency = resolve_fanout_concurrency(
+            "DAYDREAM_PI_FANOUT_CONCURRENCY", _PI_DEFAULT_FANOUT_CONCURRENCY
+        )
         self.retry_attempts = _pi_retry_attempts()
         self.retry_base_delay_s = _pi_retry_base_delay()
         self.retry_max_delay_s = _pi_retry_max_delay()
