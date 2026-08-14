@@ -28,6 +28,8 @@ import json
 import shutil
 from collections import Counter
 from datetime import UTC, datetime
+
+from daydream.timeutil import parse_iso_timestamp
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -204,11 +206,9 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
         stamps = [e.get("timestamp") for e in events if e.get("timestamp")]
         wall = None
         if len(stamps) >= 2:
-            def _p(s: str) -> datetime:
-                return datetime.fromisoformat(s.replace("Z", "+00:00"))
             try:
-                wall = (_p(max(stamps)) - _p(min(stamps))).total_seconds()
-            except ValueError:
+                wall = (parse_iso_timestamp(max(stamps)) - parse_iso_timestamp(min(stamps))).total_seconds()
+            except (ValueError, TypeError, AttributeError):
                 pass
         pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
         key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"

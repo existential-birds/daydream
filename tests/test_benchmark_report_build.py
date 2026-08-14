@@ -58,7 +58,7 @@ def _corpus(
     labels: dict[str, Any] | None = None,
 ) -> argparse.Namespace:
     """Minimal corpus. pr_trajectories maps PR url -> (filename, pr_repo, prompt,
-    completion, cached, steps, (start_iso, end_iso) | None). Omitted -> the existing
+    completion, cached, steps, (start_iso, ...) | None). Omitted -> the existing
     one-PR legacy corpus (cal.com-10600.json with no pr_repo)."""
     if pr_trajectories is None:
         pr_trajectories = {PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None)}
