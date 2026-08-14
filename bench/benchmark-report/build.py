@@ -208,6 +208,7 @@ def load_trajectories(traj_dir: Path, prices: dict[str, ModelPrice], price_model
             try:
                 wall = (parse_iso_timestamp(max(stamps)) - parse_iso_timestamp(min(stamps))).total_seconds()
             except ValueError:
+                # malformed timestamp nulls only this trajectory's wall time (intentional fallback)
                 pass
         pr_repo = (d.get("extra", {}) or {}).get("pr_repo", "")
         key = f"{pr_repo}/{num}" if pr_repo else f"{repo_short}/{num}"
