@@ -124,9 +124,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           PR_NUMBER="${DERIVED_PR_NUMBER:-$EVENT_PR_NUMBER}"
-          if [ -z "$PR_NUMBER" ] && [ -f findings/findings.json ]; then
-            PR_NUMBER="$(jq -r '.pr_number // empty' findings/findings.json)"
-          fi
           if [ -z "$PR_NUMBER" ]; then
             echo "no PR resolvable; cannot surface the failure" >&2
             exit 0

@@ -291,6 +291,52 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     assert '--bot-login "$BOT_LOGIN"' in text, f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
 
 
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+    ids=["template", "live"],
+)
+def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> None:
+    """The 'Surface failure on the PR' handler must derive its comment target
+    only from DERIVED_PR_NUMBER or EVENT_PR_NUMBER — never from the
+    findings/findings.json artifact, which is unvalidated in this failure
+    path (issue #384). When both sources are empty it logs the diagnostic
+    and exits 0 without writing a comment.
+
+    Pinned on BOTH the shipped template and the repo's own live workflow —
+    the two files retain distinct failure-surfacing conditions, but this
+    target-source invariant must hold for both.
+    """
+    wf = load_workflow(wf_path)
+    steps = job_steps(wf, "post")
+    handler = next(s for s in steps if s.get("name") == "Surface failure on the PR")
+    run = handler["run"]
+
+    # Exactly one PR_NUMBER assignment, sourced only from the two allowed env vars.
+    assert run.count("PR_NUMBER=") == 1, (
+        f"{wf_path.name}: failure handler must assign PR_NUMBER exactly once"
+    )
+    assert 'PR_NUMBER="${DERIVED_PR_NUMBER:-$EVENT_PR_NUMBER}"' in run, (
+        f"{wf_path.name}: failure target must come only from DERIVED_PR_NUMBER or EVENT_PR_NUMBER (issue #384)"
+    )
+
+    # No unvalidated artifact read / jq extraction in the failure handler.
+    assert "findings/findings.json" not in run, (
+        f"{wf_path.name}: failure handler must not read findings/findings.json (issue #384)"
+    )
+    assert "jq" not in run, (
+        f"{wf_path.name}: failure handler must not run jq over an artifact (issue #384)"
+    )
+
+    # The empty-result guard precedes the comment write, so no write happens
+    # when neither source yields a number.
+    guard = 'echo "no PR resolvable; cannot surface the failure" >&2'
+    assert guard in run, f"{wf_path.name}: empty-result diagnostic must be present"
+    assert run.index(guard) < run.index('gh api "repos/${REPO}/issues/${PR_NUMBER}/comments"'), (
+        f"{wf_path.name}: empty-result guard must precede the comment write (issue #384)"
+    )
+
+
 def test_single_setup_preserves_privilege_split() -> None:
     wf = load_workflow(TEMPLATES_DIR / "single" / "daydream.yml")
     text = (TEMPLATES_DIR / "single" / "daydream.yml").read_text(encoding="utf-8")
