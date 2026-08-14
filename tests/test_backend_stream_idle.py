@@ -264,7 +264,7 @@ def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_stall_is_not_retried(
+async def test_stall_is_retried_within_bounded_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A persistently-stalling ``pi`` consumes only the bounded retry budget."""

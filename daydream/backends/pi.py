@@ -803,6 +803,7 @@ class PiBackend:
 
                 elif event_type == "turn_start":
                     saw_turn_start = True
+                    saw_finish_reason = False
 
                 elif event_type == "message_end":
                     msg = event.get("message") or {}
