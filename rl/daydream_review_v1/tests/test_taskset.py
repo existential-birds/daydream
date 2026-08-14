@@ -77,6 +77,30 @@ def test_fixture_repo_is_deterministic(tmp_path: Path, precreate_dest: bool) -> 
     assert green.returncode == 0, green.stderr
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["non-empty-dir", "existing-file"],
+    ids=["non-empty-directory", "existing-file"],
+)
+def test_fixture_repo_rejects_occupied_destination(tmp_path: Path, kind: str) -> None:
+    """build_fixture_repo raises before mutating an occupied destination."""
+    dest = tmp_path / "occupied"
+    if kind == "non-empty-dir":
+        dest.mkdir()
+        (dest / "caller.txt").write_text("caller-owned", encoding="utf-8")
+    else:
+        dest.write_text("caller-owned", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fixture destination must be a new or empty directory"):
+        build_fixture_repo(dest)
+
+    if kind == "non-empty-dir":
+        assert (dest / "caller.txt").read_text(encoding="utf-8") == "caller-owned"
+        assert sorted(p.name for p in dest.iterdir()) == ["caller.txt"]
+    else:
+        assert dest.read_text(encoding="utf-8") == "caller-owned"
+
+
 def test_load_builds_tasks_from_fixture_corpus(corpus_mini_dir: Path, fixture_manifest_path: Path) -> None:
     taskset = DaydreamReviewTaskset(
         DaydreamReviewConfig(
