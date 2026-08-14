@@ -12,7 +12,9 @@ cannot verify and that a careless edit could silently break:
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
-  review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth).
+  review runs (``codex exec`` does not read ``OPENAI_API_KEY`` for auth), and
+  the repository workflow README names ``OPENAI_API_KEY`` as the credential the
+  live Codex workflow consumes.
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """
@@ -221,9 +223,10 @@ def test_single_setup_preserves_privilege_split() -> None:
     }
 
 
-# Repo dogfood workflow (Codex): the one non-obvious behavioral constraint worth
-# guarding — `codex exec` does not read OPENAI_API_KEY for model-API auth, so
-# `codex login --with-api-key` must persist auth.json BEFORE the review runs.
+# Repo dogfood workflow (Codex): `codex exec` does not read OPENAI_API_KEY for
+# model-API auth, so `codex login --with-api-key` must persist auth.json BEFORE
+# the review runs, and the repo workflow README documents OPENAI_API_KEY as the
+# credential this live workflow consumes.
 
 
 def test_repo_review_authenticates_codex_before_running() -> None:
