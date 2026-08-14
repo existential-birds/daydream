@@ -23,7 +23,7 @@ check: lockcheck lint typecheck test
 
 # Install git hooks
 hooks:
-	ln -sf ../../scripts/hooks/pre-push .git/hooks/pre-push
+	ln -sf "$$(git rev-parse --show-toplevel)/scripts/hooks/pre-push" "$$(git rev-parse --git-path hooks/pre-push)"
 	@echo "Pre-push hook installed"
 
 # Generate the offline benchmark report from a benchmark run.
