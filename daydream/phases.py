@@ -865,6 +865,40 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
 }
 
 
+class CrossStackMergeError(ValueError):
+    """Structured, salvageable cross-stack merge failure (issue #361).
+
+    Raised by ``phase_cross_stack_merge`` (via ``_step_cross_stack_merge``) when
+    the merge agent returns a result that contains no parseable item list in any
+    shape (a bare ``dict`` with an ``items`` list *or* a bare ``list`` are both
+    normalized and merged; anything else -- prose, markdown, a refusal, truncated
+    JSON -- is genuinely unparseable). The orchestrator catches this exception to
+    salvage the completed stacks' verdicts instead of aborting the run.
+
+    Attributes:
+        response_shape: Type name of the offending merge result (e.g. ``"str"``).
+        stack_context: Stack names parsed from the per-stack records that fed the
+            merge (``stack-<name>-records.json`` -> ``<name>``), in input order.
+    """
+
+    def __init__(
+        self,
+        response_shape: str,
+        stack_context: list[str],
+        *,
+        message: str | None = None,
+    ) -> None:
+        self.response_shape = response_shape
+        self.stack_context = stack_context
+        super().__init__(
+            message
+            or (
+                f"Cross-stack merge returned no item list (got {response_shape}); "
+                f"stacks: {stack_context}"
+            )
+        )
+
+
 def normalize_items(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Assign fresh contiguous unique integer ids to every item.
 
@@ -3664,10 +3698,29 @@ async def phase_cross_stack_merge(
     )
 
     # Fail loudly on empty/invalid output -- a silent [] would hide a broken
-    # merge and ship an empty report downstream.
-    if not isinstance(result, dict) or not isinstance(result.get("items"), list):
-        raise ValueError(f"Cross-stack merge returned no item list (got {type(result).__name__})")
-    agent_items: list[dict[str, Any]] = result["items"]
+    # merge and ship an empty report downstream (issue #361). A schema-valid item
+    # list may arrive in either shape -- a ``dict`` with an ``items`` list (the
+    # status quo) or a bare ``list`` (surfaced by ``extract_json`` when the model
+    # emits a bare JSON array, which the old gate dismissed with ``got list``).
+    # Normalize both; only a genuinely unparseable result (str prose/refusal/
+    # truncated JSON) raises the structured CrossStackMergeError so the deep run
+    # can salvage the completed stacks' verdicts rather than abort.
+    item_list: list[dict[str, Any]] | None = None
+    if isinstance(result, dict) and isinstance(result.get("items"), list):
+        item_list = result["items"]
+    elif isinstance(result, list):
+        item_list = result
+    if item_list is None:
+        stack_context = [
+            p.stem.removeprefix("stack-").removesuffix("-records")
+            for p in per_stack_records_paths
+        ]
+        raise CrossStackMergeError(
+            type(result).__name__,
+            stack_context,
+            message=f"Cross-stack merge returned no item list (got {type(result).__name__})",
+        )
+    agent_items: list[dict[str, Any]] = item_list
 
     # Structural append + normalize + render + copy is shared with
     # _write_single_stack_merged_items via _append_structural_and_write_merged

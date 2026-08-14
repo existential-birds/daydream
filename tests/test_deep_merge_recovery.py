@@ -1,0 +1,168 @@
+"""Recoverable cross-stack merge failure (issue #361).
+
+Regression coverage for turning a malformed cross-stack merge response into a
+structured, salvageable failure instead of a fatal run abort:
+
+  R1  -- a bare ``list`` merge result (surfaced by ``extract_json`` when the
+         model emits a bare JSON array) is normalized + merged, not rejected.
+  R2  -- a genuinely unparseable result raises a structured
+         ``CrossStackMergeError`` carrying the response shape + stack context.
+  R3  -- a merge failure writes a *partial* ``merged-items.json`` built from
+         the surviving per-stack records.
+  R4  -- the failure is recorded in ``per-stack-failures.json`` under the
+         reserved ``__merge__`` key (shape + stack context).
+  R5  -- completed per-stack records survive a merge failure.
+  R6  -- a ``--start-at fix`` relaunch picks up the salvaged partial items
+         without re-reviewing completed stacks or re-running the merge agent.
+  R7  -- a ``str``-shaped merge response (mirroring the arbiter
+         ``_SplitTextBackend`` "got str" pattern) triggers the salvage path,
+         while a bare-``list`` response containing a parseable item list is
+         merged normally.
+
+The phase-level tests drive the real production path
+(``phase_cross_stack_merge -> run_agent -> backend ResultEvent``) with only the
+backend mocked; ``_MergeTextBackend`` reproduces the pi contract faithfully
+(structured output delivered via ``ResultEvent``, prose via ``TextEvent``).
+Integration tests run the full deep pipeline through ``runner.run``.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from daydream.backends import ResultEvent, TextEvent
+from daydream.phases import phase_cross_stack_merge
+
+
+def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
+    """Write the merged-findings inputs under *tmp_path*'s deep artifact dir.
+
+    ``phase_cross_stack_merge`` anchors its artifact writes at
+    ``target / .daydream / deep``, so that directory must exist before the phase
+    runs. The merge prompt builder embeds the input *paths* (it does not parse
+    their contents), so minimal placeholders are sufficient.
+    """
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    inputs = {
+        "deep": deep,
+        "intent": deep / "intent.md",
+        "alts": deep / "alternatives.json",
+        "dedup": deep / "dedup.json",
+        "records": deep / "stack-python-records.json",
+    }
+    inputs["intent"].write_text("# Intent\n")
+    inputs["alts"].write_text("{\"alternatives\": []}\n")
+    inputs["dedup"].write_text('{"record_alt_pairs": [], "record_duplicate_pairs": []}\n')
+    inputs["records"].write_text(
+        json.dumps(
+            [
+                {
+                    "id": 1,
+                    "file": "api.py",
+                    "line": 1,
+                    "severity": "high",
+                    "confidence": "HIGH",
+                    "rationale": "r",
+                    "evidence": "api.py:1",
+                }
+            ]
+        )
+    )
+    return inputs
+
+
+def _merge_args(tmp_path: Path) -> dict[str, Any]:
+    """Common keyword args for a ``phase_cross_stack_merge`` call."""
+    inputs = _write_merge_inputs(tmp_path)
+    return {
+        "per_stack_records_paths": [inputs["records"]],
+        "intent_path": inputs["intent"],
+        "alternatives_path": inputs["alts"],
+        "dedup_candidates_path": inputs["dedup"],
+    }
+
+
+class _MergeTextBackend:
+    """Emits prose text and a structured merge result (the real pi contract).
+
+    Mirrors the arbiter ``_SplitTextBackend`` in
+    ``tests/test_arbiter_prose_extraction.py``: when a structured output schema
+    is requested the ResultEvent carries the structured answer, otherwise the
+    caller drives the unparseable-text path by passing ``structured=None``.
+    """
+
+    model = "op-5"
+    fanout_concurrency = 4
+
+    def __init__(self, text: str, structured: Any) -> None:
+        self._text = text
+        self._structured = structured
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ):
+        yield TextEvent(text=self._text)
+        yield ResultEvent(
+            structured_output=self._structured if output_schema else None, continuation=None
+        )
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None:
+    """R1: a bare-list result is normalized + merged, not treated as a failure."""
+    from daydream.deep.artifacts import deep_dir, merged_items_path
+
+    args = _merge_args(tmp_path)
+    await phase_cross_stack_merge(
+        _MergeTextBackend(
+            "prose",
+            [
+                {
+                    "id": 1,
+                    "file": "api.py",
+                    "line": 1,
+                    "severity": "high",
+                    "confidence": "HIGH",
+                    "rationale": "r",
+                    "evidence": "api.py:1",
+                }
+            ],
+        ),
+        make_work(tmp_path),
+        **args,
+    )
+    items = json.loads(merged_items_path(deep_dir(tmp_path)).read_text())
+    assert [i["file"] for i in items["items"]] == ["api.py"]
+    assert items.get("partial") is not True
+
+
+async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work) -> None:
+    """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
+    from daydream.phases import CrossStackMergeError
+
+    args = _merge_args(tmp_path)
+    with pytest.raises(CrossStackMergeError) as excinfo:
+        await phase_cross_stack_merge(
+            _MergeTextBackend("The review is done; no JSON items list here.", None),
+            make_work(tmp_path),
+            **args,
+        )
+    assert excinfo.value.response_shape == "str"
+    assert excinfo.value.stack_context == ["python"]
