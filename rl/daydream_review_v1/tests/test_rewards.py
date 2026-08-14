@@ -84,12 +84,11 @@ def test_rundir_golden_contains_no_model_directed_trajectory_transcripts(rundir_
     keep every user-authored step message empty.
     """
     trajectories = rundir_golden / "trajectories"
-    assert not trajectories.is_dir() or not list(trajectories.iterdir())
+    assert not trajectories.is_dir() or not next(trajectories.iterdir(), None)
 
     trajectory_files = [rundir_golden / "trajectory.json"]
     if trajectories.is_dir():
         trajectory_files.extend(trajectories.glob("*.json"))
-    assert trajectory_files, "expected the retained root trajectory.json"
     for trajectory_file in trajectory_files:
         trajectory = json.loads(trajectory_file.read_text(encoding="utf-8"))
         for step in trajectory["steps"]:
