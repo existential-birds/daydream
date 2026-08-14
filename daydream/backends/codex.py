@@ -67,7 +67,19 @@ def _unwrap_shell_command(command: str) -> str:
 
 
 class CodexError(Exception):
-    """Raised when a Codex turn fails."""
+    """Raised when a Codex turn fails or the Codex CLI subprocess exits non-zero.
+
+    Two failure shapes, discriminated by ``category``:
+
+    * ``category is None`` — a structured ``turn.failed`` event (the default,
+      used for model-level errors surfaced in the JSONL stream).
+    * ``category == "PROCESS_EXIT"`` — the ``codex`` subprocess exited with a
+      non-zero return code, carrying captured diagnostic output.
+    """
+
+    def __init__(self, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.category = category
 
 
 class CodexBackend:

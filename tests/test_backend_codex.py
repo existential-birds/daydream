@@ -141,9 +141,12 @@ async def test_turn_failed_raises():
     mock_proc = make_mock_process_from_fixture("turn_failed.jsonl")
 
     with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
-        with pytest.raises(CodexError, match="Model returned an error"):
+        with pytest.raises(CodexError, match="Model returned an error") as exc_info:
             async for _ in backend.execute(Path("/tmp"), "Fail"):
                 pass
+
+    # Structured turn.failed is NOT reclassified — category stays None.
+    assert exc_info.value.category is None
 
 
 @pytest.mark.asyncio
