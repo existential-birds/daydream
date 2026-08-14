@@ -393,6 +393,26 @@ def test_copy_rejects_resolved_symlink_escape(
     assert secret.read_text() == "KEEP\n"
 
 
+def test_copy_allows_source_symlink_resolving_inside_source(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    (repo / "actual.cfg").write_text("inside\n")
+    # A RELATIVE symlink whose target stays inside the source root.
+    (repo / "inside-link.cfg").symlink_to("actual.cfg")
+
+    dest = tmp_path / "ephemeral"
+    dest.mkdir()
+
+    copied = copy_files_into_ephemeral(
+        repo, dest, extra=[Path("inside-link.cfg")], skip=False
+    )
+
+    assert copied == [Path("inside-link.cfg")]
+    assert (dest / "inside-link.cfg").read_text() == "inside\n"
+    assert not (dest / "inside-link.cfg").is_symlink()
+
+
 # --- 8. extra paths combine -------------------------------------------------
 
 
