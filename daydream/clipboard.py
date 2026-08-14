@@ -2,9 +2,11 @@
 
 Detects the first available clipboard mechanism in priority order
 (``pbcopy`` for macOS, ``xclip`` then ``xsel`` for Linux/X11, ``clip.exe``
-for WSL/Windows) and pipes text into it via ``subprocess.run``. Returns
-False when no mechanism is available or any subprocess call fails so
-callers can degrade gracefully without raising.
+for WSL/Windows) and pipes text into it via ``subprocess.run``. Every
+subprocess is bounded to a five-second timeout so a hung clipboard utility
+cannot block the caller; a timeout is treated as a failure. Returns False
+when no mechanism is available or any subprocess call fails so callers can
+degrade gracefully without raising.
 
 Exports:
     clipboard_available: Check whether a clipboard mechanism is present.
@@ -25,6 +27,10 @@ _CLIPBOARD_COMMANDS: tuple[list[str], ...] = (
     ["xsel", "--clipboard", "--input"],
     ["clip.exe"],
 )
+
+# Every clipboard subprocess is bounded to five seconds so a hung clipboard
+# utility cannot block the caller indefinitely.
+_CLIPBOARD_TIMEOUT_SECONDS: int = 5
 
 
 def _detect_clipboard_command() -> list[str] | None:
@@ -49,9 +55,11 @@ def copy_to_clipboard(text: str) -> bool:
     """Copy *text* to the system clipboard using the first available tool.
 
     Detection order is macOS (``pbcopy``) → Linux/X11 (``xclip``,
-    ``xsel``) → WSL/Windows (``clip.exe``). Returns False if no mechanism
-    is available or the subprocess fails for any reason — callers should
-    treat False as "tell the user to copy from the printed path".
+    ``xsel``) → WSL/Windows (``clip.exe``). Every subprocess is bounded to a
+    five-second timeout (:data:`_CLIPBOARD_TIMEOUT_SECONDS`); a timeout is
+    treated as a failure. Returns False if no mechanism is available or the
+    subprocess fails for any reason — callers should treat False as "tell the
+    user to copy from the printed path".
 
     Args:
         text: Content to place on the clipboard.
@@ -68,6 +76,7 @@ def copy_to_clipboard(text: str) -> bool:
             input=text,
             text=True,
             check=True,
+            timeout=_CLIPBOARD_TIMEOUT_SECONDS,
         )
     except (subprocess.SubprocessError, OSError):
         return False
