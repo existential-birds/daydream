@@ -94,15 +94,17 @@ def _stage_repo(
             WITHOUT an edit is the contamination case: daydream writes that file
             into the repository under review and its own untracked artifacts leak
             into it, so it must never be read as "a fix landed".
-        commit: Commit the edit, moving HEAD past the baked snapshot — what the
-            deep flow does once the suite goes green.
+        commit: Commit, moving HEAD past the baked snapshot — what the deep
+            flow does once the suite goes green. Without an ``edit`` this is an
+            ``--allow-empty`` commit: HEAD advances but the committed tree is
+            byte-identical to the snapshot (the empty-commit regression).
     """
     build_fixture_repo(repo_path)
     subprocess.run(["git", "-C", str(repo_path), "checkout", "--quiet", "--detach", head_sha], check=True)
     if edit is not None:
         (repo_path / "calc.py").write_text(edit, encoding="utf-8")
-        if commit:
-            subprocess.run(["git", "-C", str(repo_path), "commit", "--quiet", "-am", "fix"], check=True)
+    if commit:
+        subprocess.run(["git", "-C", str(repo_path), "commit", "--quiet", "--allow-empty", "-am", "fix"], check=True)
     if patch is not None:
         daydream_dir = repo_path / ".daydream"
         daydream_dir.mkdir(parents=True, exist_ok=True)
@@ -251,12 +253,17 @@ async def test_fix_tests_pass_red(
 
 
 @pytest.mark.parametrize(
-    "patch",
-    [None, "", _REAL_PATCH],
-    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree"],
+    "patch, commit",
+    [
+        (None, False),
+        ("", False),
+        (_REAL_PATCH, False),
+        (None, True),  # empty commit: HEAD advances, committed tree unchanged
+    ],
+    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
 )
 async def test_no_fixes_returns_no_fix_reward(
-    patch: str | None, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    patch: str | None, commit: bool, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """An untouched tree earns no_fix_reward however recommended.patch looks.
 
@@ -270,7 +277,7 @@ async def test_no_fixes_returns_no_fix_reward(
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch, commit=commit)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
