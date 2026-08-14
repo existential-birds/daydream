@@ -272,6 +272,7 @@ def _build_improvements(
     slices: list[dict],
     daydream_tool: str,
     labels_source: str | None,
+    anchor_id: str,
 ) -> list[dict]:
     """Derive ordered improvement recommendations from current-run evidence.
 
@@ -281,7 +282,7 @@ def _build_improvements(
     improvements: list[dict] = []
 
     # ── FP-burden (priority 1) ──
-    anchor = next((j for j in judges_out if j.get("has_daydream") and j.get("daydream")), None)
+    anchor = next((j for j in judges_out if j.get("id") == anchor_id), None)
     if anchor and anchor["daydream"]["fp"] > 0:
         d = anchor["daydream"]
         improvements.append({
@@ -358,11 +359,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     # The daydream-scored PR set is the fixed cross-judge anchor (daydream only ran on these).
     dd_subset: set[str] = set()
-    dd_source_dir = ""
+    anchor_judge_id = ""
     for canon, b in judges_raw.items():
         prs = {pr for pr, t in b["evals"].items() if _leaf_present(t.get(dd_tool))}
         if len(prs) > len(dd_subset):
-            dd_subset, dd_source_dir = prs, canon
+            dd_subset, anchor_judge_id = prs, canon
     if not dd_subset:
         raise SystemExit(f"no judge has a present leaf for --daydream-tool {dd_tool!r}")
 
@@ -432,8 +433,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("\n".join(lines))
 
     # ── daydream economy (judge-independent: token/cost/wall come from ATIF trajectories) ──
-    anchor_judge = next((j for j in judges_out if j["has_daydream"]), None)
-    anchor_evals = judges_raw[dd_source_dir]["evals"]
+    anchor_judge = next((j for j in judges_out if j["id"] == anchor_judge_id), None)
+    anchor_evals = judges_raw[anchor_judge_id]["evals"]
     per_pr_rows = []
     tot_prompt = tot_completion = tot_cached = 0
     tot_cost = 0.0
@@ -551,7 +552,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "daydream_tool": dd_tool,
             "daydream_display": daydream_display(dd_tool),
             "excluded_tool": args.exclude_tool,
-            "anchor_judge": dd_source_dir,
+            "anchor_judge": anchor_judge_id,
             "subset_pr_count": len(dd_subset),
             "subset_prs": sorted(dd_subset),
             "judge_error_ratio_threshold": JUDGE_ERROR_RATIO_THRESHOLD,
@@ -568,7 +569,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "per_pr_scores": per_pr_scores,
         "slices": slices,
         "latency_field": latency_field,
-        "improvements": _build_improvements(judges_out, slices, dd_tool, labels_source),
+        "improvements": _build_improvements(judges_out, slices, dd_tool, labels_source, anchor_judge_id),
     }
 
 
