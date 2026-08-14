@@ -13,7 +13,7 @@ def main():
     args = parser.parse_args()
 
     try:
-        target = validate_repo_path(args.repo_path, skip_setup=False)
+        target = validate_repo_path(args.repo_path, args.skip_setup)
         if target is None:
             return 1
 
