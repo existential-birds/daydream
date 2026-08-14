@@ -423,6 +423,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "field": sorted(field, key=lambda r: r["f1"], reverse=True),
         })
 
+    if not judges_out:
+        lines = [
+            f"no eligible judge panel: every judge lacks a {_MIN_SAAS_TOOLS_FOR_PANEL}-SaaS-tool comparison field",
+        ]
+        for s in skipped_judges:
+            lines.append(f"  - {s['id']} ({s['saas_tools']} saas tools): {s['reason']}")
+        raise SystemExit("\n".join(lines))
+
     # ── daydream economy (judge-independent: token/cost/wall come from ATIF trajectories) ──
     anchor_judge = next((j for j in judges_out if j["has_daydream"]), None)
     anchor_evals = judges_raw[dd_source_dir]["evals"]
