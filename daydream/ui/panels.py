@@ -5,7 +5,6 @@ Live panel and its multi-panel registry, and the shutdown progress panel.
 """
 
 import re
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -83,10 +82,8 @@ class LiveThinkingPanel:
         )
 
     def show(self, duration: float = 1.0) -> None:
-        """Show animated panel for duration, then persist final state."""
+        """Render the thinking panel immediately."""
         self._console.print()
-        with Live(self, console=self._console, refresh_per_second=10, transient=True):
-            time.sleep(duration)
         self._console.print(
             Panel(
                 Markdown(self._content),
@@ -101,13 +98,13 @@ class LiveThinkingPanel:
 
 
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
-    """Print a thinking panel with brief animation.
+    """Print a stable thinking panel.
 
     Displays the AI's thought process in a purple-styled panel
-    with animated spinners in the title that settle after a brief duration.
+    with a static title, rendered immediately.
     """
     panel = LiveThinkingPanel(console, content, max_length)
-    panel.show(duration=0.5)
+    panel.show()
 
 
 class CrazySpinner:

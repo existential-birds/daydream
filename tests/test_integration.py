@@ -282,7 +282,7 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch):
 
     Also tests that:
     - AgentTextRenderer displays streamed text with spinner cursor effect
-    - LiveThinkingPanel displays thinking blocks with animated title
+    - LiveThinkingPanel displays thinking blocks with stable title
     """
     tool_use_id = "test-glob-lifecycle-123"
     glob_result = """/project/src/main.py
