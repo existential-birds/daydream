@@ -223,10 +223,11 @@ def test_single_setup_preserves_privilege_split() -> None:
     }
 
 
-# Repo dogfood workflow (Codex): `codex exec` does not read OPENAI_API_KEY for
-# model-API auth, so `codex login --with-api-key` must persist auth.json BEFORE
-# the review runs, and the repo workflow README documents OPENAI_API_KEY as the
-# credential this live workflow consumes.
+# Repo dogfood workflow (Codex). The full rationale — the `codex exec` auth
+# gap, the `codex login --with-api-key` persistence, and the README's naming of
+# the live credential — lives in the module docstring and is exercised by
+# test_repo_workflow_readme_documents_codex_credential; this test asserts the
+# login-persistence ordering that rationale requires.
 
 
 def test_repo_review_authenticates_codex_before_running() -> None:
@@ -260,10 +261,17 @@ def test_repo_workflow_readme_documents_codex_credential(
     credentials = set(_SECRET_REF_RE.findall(wf_text))
     assert credentials == {"OPENAI_API_KEY"}
 
-    start = readme_text.index(section_start)
-    end = readme_text.index(section_end, start)
+    start = readme_text.find(section_start)
+    assert start != -1, (
+        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing section header {section_start!r} "
+        f"— renamed or re-worded? Keep it in sync with this test."
+    )
+    end = readme_text.find(section_end, start)
+    assert end != -1, (
+        f"{REPO_WORKFLOWS_DIR.name}/README.md: missing header {section_end!r} after "
+        f"{section_start!r} — renamed/re-worded, or did the two headers swap order?"
+    )
     section = readme_text[start:end]
 
-    for cred in credentials:
-        assert f"`{cred}`" in section
+    assert "`OPENAI_API_KEY`" in section
     assert "ANTHROPIC_API_KEY" not in section
