@@ -1169,7 +1169,10 @@ class PlanWriteSession:
 
         A failed unlock must never surface or fail the plan run, so the unlock
         is swallowed via :class:`~root.git_ops.GitError`. Clear the reference
-        regardless so a later release is a no-op.
+        regardless so a later release is a no-op. The worktree itself is kept on
+        a successful finish() (the durable plan lives in the main index and the
+        worktree is pruned at the next run); only a re-anchor failure removes it
+        (see ``_reanchor_failed``) so the path can be re-used.
         """
         if self._reanchor_worktree is None:
             return
@@ -1418,7 +1421,15 @@ class PlanWriteSession:
         def _reanchor_failed() -> PlanOutcome:
             # Best-effort release: a graceful re-anchor failure must not leave
             # the worktree locked forever (it would wedge a later prune).
+            failed_wt = self._reanchor_worktree
             self._release_reanchor_worktree()
+            # Remove the worktree so a later re-anchorable finding can re-add
+            # the path instead of failing with PLAN_REANCHOR_FAILED (fix #2).
+            if failed_wt is not None:
+                try:
+                    git_ops.worktree_remove(self._repo, failed_wt, force=True)
+                except git_ops.GitError:
+                    pass
             return self._block(
                 reservation,
                 selection,
@@ -1441,15 +1452,18 @@ class PlanWriteSession:
                 if _SAFE_DIRNAME.fullmatch(run_id) is None:
                     run_id = f"run-{self._planned_at[:12]}"
                 worktree = _worktrees_dir(self._repo) / f"{run_id}{_REANCHOR_DIR_SUFFIX}"
-                git_ops.worktree_add(
-                    self._repo, worktree, new_head, detach=True
-                )
-                # Arm the git worktree lock exactly once, at creation, so a
+                # Create the worktree already-locked in one git invocation so a
                 # concurrent run's start-of-run prune cannot destroy the live
-                # worktree while the plan is mid-write. Released best-effort on
-                # finish()/failure; a lock failure blocks the plan (git refuses
-                # to remove a locked worktree with a single --force).
-                git_ops.worktree_lock(self._repo, worktree, reason=run_id)
+                # worktree between an add and a separate lock (fix #3). Released
+                # best-effort on finish()/failure; git refuses to remove a
+                # locked worktree, so release unlocks before removing.
+                git_ops.worktree_add(
+                    self._repo,
+                    worktree,
+                    new_head,
+                    detach=True,
+                    lock_reason=run_id,
+                )
                 self._reanchor_worktree = worktree
             text = render_plan(
                 finding,

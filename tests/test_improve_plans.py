@@ -4294,8 +4294,52 @@ def test_reanchored_failure_releases_worktree_lock(
     assert out.status == "blocked"
 
     worktree = repo / ".daydream" / "worktrees" / "run-A-reanchor"
-    assert worktree.is_dir()                                   # created
+    assert not worktree.exists()                               # removed (fix #2)
     assert git_ops.worktree_lock_mtime(repo, worktree) is None  # released
+
+def test_failed_reanchor_frees_worktree_for_later_finding(
+    repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fix #2: a re-anchor failure must remove the worktree so a later
+    re-anchorable finding in the same run can re-add the path instead of
+    failing with PLAN_REANCHOR_FAILED."""
+    from daydream.improve.plans import PlanWriteSession
+
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n", encoding="utf-8"
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+
+    calls = {"n": 0}
+
+    from daydream.improve import plans as plans_mod
+
+    real_render = plans_mod.render_plan
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("first re-anchor render fails")
+        # second render (re-anchor of the next finding) succeeds
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
+
+    session = PlanWriteSession(
+        repo / "daydream_plans", planned_at=head_sha, run_session_id="run-A"
+    )
+    reservations = session.reserve([_finding(), _finding()])
+    first = session.commit(reservations[0], _selection(repo))
+    assert first.status == "blocked"
+
+    second = session.commit(reservations[1], _selection(repo))
+    assert second.status == "written", "later re-anchorable finding must still land"
+
+    result = session.finish()
+    assert len(result["written"]) == 1
+
+
 
 
 def test_stale_locked_reanchor_worktree_is_reclaimed(

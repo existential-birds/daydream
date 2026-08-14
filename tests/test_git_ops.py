@@ -1581,3 +1581,24 @@ def test_worktree_lock_and_lock_mtime_roundtrip(tmp_path: Path) -> None:
 
     git_ops.worktree_unlock(repo, wt)
     assert git_ops.worktree_lock_mtime(repo, wt) is None  # released
+
+
+def test_worktree_add_with_lock_reason_arms_lock_atomically(
+    tmp_path: Path,
+) -> None:
+    """Fix #3: worktree_add(lock_reason=...) must create the worktree already
+    locked in a single git invocation, so there is no unlocked window in which
+    a concurrent prune could force-remove the fresh worktree."""
+    repo = _make_repo_with_main(tmp_path)
+    wt = repo / "wt-locked"
+
+    git_ops.worktree_add(repo, wt, "main", detach=True, lock_reason="run-A")
+
+    # locked marker present with the reason; no separate worktree_lock call needed
+    assert git_ops.worktree_lock_mtime(repo, wt) is not None
+    git_dir = Path(_git(repo, "rev-parse", "--git-common-dir").strip())
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / wt.name / "locked"
+    assert locked.is_file()
+    assert "run-A" in locked.read_text(encoding="utf-8")

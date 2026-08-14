@@ -1410,12 +1410,24 @@ def clean_untracked(repo: Path) -> None:
         raise GitError(f"git clean -fd failed in {repo}: {proc.stderr.strip()}")
 
 
-def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> None:
+def worktree_add(
+    repo: Path,
+    path: Path,
+    ref: str,
+    *,
+    detach: bool = True,
+    lock_reason: str | None = None,
+) -> None:
     """Create a new worktree at *path* pointing at *ref*.
 
     Args:
         path: Filesystem path for the new worktree (must not already exist).
         detach: When True, pass ``--detach`` so the new worktree is detached.
+        lock_reason: When set, pass ``--lock --reason <lock_reason>`` so the
+            worktree is created already-locked in the same ``git worktree add``
+            invocation. Arming the lock atomically with creation closes the
+            window in which a concurrent prune could force-remove the fresh
+            worktree between an add and a separate lock call.
 
     Raises:
         GitError: If ``git worktree add`` fails.
@@ -1423,6 +1435,9 @@ def worktree_add(repo: Path, path: Path, ref: str, *, detach: bool = True) -> No
     args = ["worktree", "add"]
     if detach:
         args.append("--detach")
+    if lock_reason is not None:
+        args.append("--lock")
+        args.extend(["--reason", lock_reason])
     args.extend([str(path), ref])
     proc = _run_git(repo, args, timeout=30, retries=0)
     if proc.returncode != 0:
