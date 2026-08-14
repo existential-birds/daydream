@@ -434,6 +434,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     # ── daydream economy (judge-independent: token/cost/wall come from ATIF trajectories) ──
     anchor_judge = next((j for j in judges_out if j["id"] == anchor_judge_id), None)
+    if anchor_judge is None:
+        # The largest-subset judge may be panel-skipped (fails the SaaS-coverage
+        # gate), so it never reaches judges_out. Fall back to a retained judge that
+        # still carries daydream so the report-wide anchor, label slices, and
+        # priority-1 improvements don't silently vanish.
+        anchor_judge = next((j for j in judges_out if j.get("has_daydream")), None)
+        if anchor_judge is not None:
+            anchor_judge_id = anchor_judge["id"]
     anchor_evals = judges_raw[anchor_judge_id]["evals"]
     per_pr_rows = []
     tot_prompt = tot_completion = tot_cached = 0
