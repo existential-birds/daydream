@@ -1448,6 +1448,61 @@ def worktree_remove(repo: Path, path: Path, *, force: bool = True) -> None:
         raise GitError(f"git worktree remove {path} failed: {proc.stderr.strip()}")
 
 
+def worktree_lock(repo: Path, path: Path, *, reason: str | None = None) -> None:
+    """Lock the worktree at *path* so git refuses to remove it.
+
+    Args:
+        reason: Human-readable lock reason (e.g. the run_id), shown by
+            ``git worktree list --porcelain`` and stored in the ``locked`` file.
+
+    Raises:
+        GitError: If ``git worktree lock`` fails.
+    """
+    args = ["worktree", "lock"]
+    if reason is not None:
+        args.extend(["--reason", reason])
+    args.append(str(path))
+    proc = _run_git(repo, args, timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree lock {path} failed: {proc.stderr.strip()}")
+
+
+def worktree_unlock(repo: Path, path: Path) -> None:
+    """Unlock the worktree at *path*, releasing git's removal guard.
+
+    Raises:
+        GitError: If ``git worktree unlock`` fails.
+    """
+    proc = _run_git(repo, ["worktree", "unlock", str(path)], timeout=30, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git worktree unlock {path} failed: {proc.stderr.strip()}")
+
+
+def worktree_lock_mtime(repo: Path, path: Path) -> float | None:
+    """Return the lock-armed time of the worktree at *path*, or None if unlocked.
+
+    The lock file lives at ``<git_dir>/worktrees/<path.name>/locked``; its mtime
+    is when the lock was armed, and its absence means the worktree is unlocked.
+    Returns ``None`` only for a genuinely absent lock file, never on a git
+    failure (which propagates as :class:`GitError`).
+
+    Raises:
+        GitError: If ``git rev-parse --git-dir`` fails.
+    """
+    proc = _run_git(repo, ["rev-parse", "--git-dir"], timeout=5)
+    if proc.returncode != 0:
+        raise GitError(
+            f"git rev-parse --git-dir failed in {repo}: {proc.stderr.strip()}"
+        )
+    git_dir = Path(proc.stdout.strip())
+    if not git_dir.is_absolute():
+        git_dir = repo / git_dir
+    locked = git_dir / "worktrees" / path.name / "locked"
+    if not locked.is_file():
+        return None
+    return locked.stat().st_mtime
+
+
 def create_branch(repo: Path, name: str) -> None:
     """Create and check out a new branch *name* via ``git checkout -b``.
 

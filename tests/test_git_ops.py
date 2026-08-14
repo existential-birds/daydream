@@ -1560,3 +1560,24 @@ def test_log_shas_since_warns_on_git_error(tmp_path: Path, caplog: pytest.LogCap
         result = git_ops.log_shas_since(repo, "main", "nonexistent-ref")
     assert result == []
     assert any("log_shas_since" in record.message for record in caplog.records)
+
+
+def test_worktree_lock_and_lock_mtime_roundtrip(tmp_path: Path) -> None:
+    """The lock primitives arm a real git worktree lock, expose its mtime,
+    make a single-force remove refuse it, and release it on unlock."""
+    repo = _make_repo_with_main(tmp_path)
+    wt = repo / "wt1"
+    git_ops.worktree_add(repo, wt, "main", detach=True)
+
+    assert git_ops.worktree_lock_mtime(repo, wt) is None  # unlocked
+
+    git_ops.worktree_lock(repo, wt, reason="run-A")
+    locked_at = git_ops.worktree_lock_mtime(repo, wt)
+    assert locked_at is not None
+
+    # the liveness guard: a single --force remove is refused while locked
+    with pytest.raises(GitError):
+        git_ops.worktree_remove(repo, wt, force=True)
+
+    git_ops.worktree_unlock(repo, wt)
+    assert git_ops.worktree_lock_mtime(repo, wt) is None  # released
