@@ -56,8 +56,9 @@ def has_checkout(job: dict[str, Any]) -> bool:
 
 # Action-ref policy (all bot workflows, live + shipped): every non-local
 # `uses:` must resolve to a full commit SHA, never a mutable tag, branch,
-# expression, Docker reference, short hash, or non-hex revision. Repo-local
-# `./…` actions are exempt. Rides the root pytest suite in ci.yml.
+# expression, Docker reference, short hash, or non-hex revision, and must carry
+# the human-readable `# vX.Y.Z` inline comment naming the release that SHA pins.
+# Repo-local `./…` actions are exempt. Rides the root pytest suite in ci.yml.
 
 _BOT_WORKFLOW_PATHS = sorted(
     [*REPO_WORKFLOWS_DIR.glob("daydream-*.yml"), *TEMPLATES_DIR.rglob("*.yml")],
@@ -65,6 +66,21 @@ _BOT_WORKFLOW_PATHS = sorted(
 )
 
 _PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+
+# Approved SHA → release mapping every pinned action ref must match, so the
+# `# vX.Y.Z` inline comment is verifiable rather than decorative (yaml.safe_load
+# strips it, so the comment can only be checked against the raw text). Concrete
+# pairs, in the style of _APP_TOKEN_ACTION below: a refloated pin or a mistyped
+# comment fails loudly instead of being silently absorbed by a wildcard.
+_PINNED_ACTION_VERSIONS = {
+    "actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5": "v4.3.1",
+    "astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a": "v4.2.0",
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02": "v4.6.2",
+    "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093": "v4.3.0",
+    "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349": "v2.2.2",
+}
+
+_USES_LINE_RE = re.compile(r"^\s*uses:\s*(?P<ref>\S+)(?:\s*#\s*(?P<comment>\S+))?$")
 
 _DAYDREAM_INSTALL_WORKFLOW_PATHS = [
     REPO_WORKFLOWS_DIR / "daydream-review.yml",
@@ -126,6 +142,26 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
         assert _PINNED_ACTION_RE.fullmatch(ref), (
             f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
             f"(expected owner/repo@<40 hex chars>)"
+        )
+    # yaml.safe_load strips inline comments, so the declared `# vX.Y.Z` version
+    # comment is only visible in the raw text. Every non-local uses: line must
+    # carry the approved release comment for its pinned SHA.
+    for line in wf_path.read_text(encoding="utf-8").splitlines():
+        m = _USES_LINE_RE.match(line)
+        if m is None:
+            continue
+        ref, comment = m.group("ref"), m.group("comment")
+        if ref.startswith("./"):
+            continue
+        expected = _PINNED_ACTION_VERSIONS.get(ref)
+        assert expected is not None, (
+            f"{rel}: non-local action reference {ref!r} is not in the approved "
+            f"pinned-action map; add it (with its release version) or its version "
+            f"comment cannot be verified"
+        )
+        assert comment == expected, (
+            f"{rel}: action reference {ref!r} carries version comment {comment!r}, "
+            f"but must carry the approved {expected!r} inline comment"
         )
 
 
