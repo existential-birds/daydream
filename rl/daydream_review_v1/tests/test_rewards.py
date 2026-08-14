@@ -85,6 +85,7 @@ def _stage_repo(
     edit: str | None = None,
     patch: str | None = None,
     commit: bool = False,
+    commit_patch: bool = False,
 ) -> Path:
     """Build the fixture repo detached at *head_sha*, as the rollout image does.
 
@@ -94,19 +95,33 @@ def _stage_repo(
             WITHOUT an edit is the contamination case: daydream writes that file
             into the repository under review and its own untracked artifacts leak
             into it, so it must never be read as "a fix landed".
-        commit: Commit the edit, moving HEAD past the baked snapshot — what the
-            deep flow does once the suite goes green.
+        commit: Commit, moving HEAD past the baked snapshot — what the deep
+            flow does once the suite goes green. Without an ``edit`` this is an
+            ``--allow-empty`` commit: HEAD advances but the committed tree is
+            byte-identical to the snapshot (the empty-commit regression).
+        commit_patch: ALSO force-add and commit the planted ``.daydream/``
+            directory. Real targets don't gitignore ``.daydream/`` (only the
+            fixture does), so committing it faithfully reproduces a no-fix
+            rollout whose agent committed daydream's own artifacts — a tree
+            that differs from the snapshot for no reason other than the
+            artifacts. Without this option, ``commit=True`` stages only real
+            edits.
     """
     build_fixture_repo(repo_path)
     subprocess.run(["git", "-C", str(repo_path), "checkout", "--quiet", "--detach", head_sha], check=True)
     if edit is not None:
         (repo_path / "calc.py").write_text(edit, encoding="utf-8")
-        if commit:
-            subprocess.run(["git", "-C", str(repo_path), "commit", "--quiet", "-am", "fix"], check=True)
     if patch is not None:
         daydream_dir = repo_path / ".daydream"
         daydream_dir.mkdir(parents=True, exist_ok=True)
         (daydream_dir / "recommended.patch").write_text(patch, encoding="utf-8")
+    if commit:
+        subprocess.run(["git", "-C", str(repo_path), "add", "-A"], check=True)
+        if commit_patch:
+            # The fixture gitignores .daydream/ (fixture.py _GITIGNORE), unlike
+            # real targets, so force-add it to stage the committed-artifacts case.
+            subprocess.run(["git", "-C", str(repo_path), "add", "-f", ".daydream"], check=True)
+        subprocess.run(["git", "-C", str(repo_path), "commit", "--quiet", "--allow-empty", "-m", "fix"], check=True)
     return repo_path
 
 
@@ -251,12 +266,17 @@ async def test_fix_tests_pass_red(
 
 
 @pytest.mark.parametrize(
-    "patch",
-    [None, "", _REAL_PATCH],
-    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree"],
+    "patch, commit",
+    [
+        (None, False),
+        ("", False),
+        (_REAL_PATCH, False),
+        (None, True),  # empty commit: HEAD advances, committed tree unchanged
+    ],
+    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
 )
 async def test_no_fixes_returns_no_fix_reward(
-    patch: str | None, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+    patch: str | None, commit: bool, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """An untouched tree earns no_fix_reward however recommended.patch looks.
 
@@ -270,7 +290,7 @@ async def test_no_fixes_returns_no_fix_reward(
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=patch, commit=commit)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
@@ -280,6 +300,33 @@ async def test_no_fixes_returns_no_fix_reward(
     assert "test_claim_mismatch" not in trace.metrics
     # No archived run at all, so there is no claim to record either.
     assert "test_claim_passed_without_fix" not in trace.metrics
+
+
+@pytest.mark.parametrize("head_sha", ["0" * 40], ids=["unresolvable-head"])
+async def test_unresolvable_head_sha_scores_no_fix(
+    head_sha: str, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """A baked snapshot object that no longer resolves must read as no fix.
+
+    `git diff --quiet <head_sha> HEAD` exits 128 when the head object is absent
+    from the object store (the documented `exit_code != 1` branch in
+    `_fixes_applied`). Unlike a string comparison on `rev-parse`, that must not
+    be scored as a fix: every non-1 exit is `no_fix_reward`, honoring the
+    deliberate false-negative bias.
+    """
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # Stage the real, resolvable snapshot first so the checkout succeeds, then
+    # simulate snapshot/object-store drift: the baked head object is gone.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha)
+    task.data = task.data.model_copy(update={"head_sha": head_sha})
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
 
 
 @pytest.mark.parametrize("claimed", [True, False], ids=["claimed-green", "claimed-red"])
@@ -420,6 +467,67 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 1.0
+
+
+async def test_committed_daydream_artifacts_not_a_fix(
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """Committing daydream's own .daydream/ artifacts must not read as a fix.
+
+    The pathspec exclusion owns the commit path. Real targets don't gitignore
+    ``.daydream/`` (only the fixture does), so a no-fix rollout whose agent
+    commits daydream's own untracked artifacts produces a tree that differs from
+    the baked snapshot — which ``git diff --quiet <head_sha> HEAD`` would read as
+    a fix and pay the full ``w_tests`` off a still-green baseline. Committing the
+    artifacts (force-added, since the fixture ignores them) must score
+    ``no_fix_reward``.
+    """
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(
+        tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH, commit=True, commit_patch=True
+    )
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_unresolvable_snapshot_sha_reads_as_no_fix(
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """A fix signal that cannot be evaluated reads as no-fix, not a free win.
+
+    ``fix_tests_pass`` stays deliberately false-negative biased: any ``git diff
+    --quiet`` exit other than 1 (0 = identical trees, 128 = unresolvable baked
+    SHA, 127 = missing sh/git) means "no fix found". Here the baked snapshot SHA
+    is not present in the repository at all, so the diff exits 128 — the reward
+    must be ``no_fix_reward``, never the full ``w_tests`` for nothing.
+    """
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "fix@fixture.invalid"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "fixture"], check=True)
+    (repo / "calc.py").write_text(_CALC_BROKEN, encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "snapshot"], check=True)
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # task.data.head_sha is the baked snapshot SHA from the corpus; this fresh
+    # repo has never contained it, so the fix-signal diff cannot resolve it.
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
 
 
 async def test_reward_version_is_pinned(
