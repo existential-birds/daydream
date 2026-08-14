@@ -51,10 +51,8 @@ def test_python_impact_surface(tmp_path: Path):
     paths_by_role = {(r.path, r.role) for r in results}
     assert ("daydream_demo/api.py", "modified") in paths_by_role
     assert ("daydream_demo/models.py", "modified") in paths_by_role
-    # The api.py -> models.py edge must be visible somewhere.
-    assert any(r.role == "imports" and r.path.endswith("models.py") for r in results) or any(
-        r.role == "imported_by" for r in results
-    )
+    # The api.py -> models.py forward edge must be exact.
+    assert ("daydream_demo/models.py", "imports") in paths_by_role
     assert len(results) >= 2
 
 
