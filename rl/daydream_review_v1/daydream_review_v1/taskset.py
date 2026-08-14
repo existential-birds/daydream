@@ -86,6 +86,11 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     Deliberately biased toward false negatives: a fix consisting ONLY of new,
     never-committed files reads as "no fix" and scores ``no_fix_reward``. That
     direction costs a gradient; the other direction corrupts one.
+
+    A clean tree at a moved HEAD only counts as a fix when the *committed
+    contents differ* from the snapshot (`git diff --quiet <head_sha> HEAD --`
+    returns 1). HEAD advancing on its own — e.g. an `--allow-empty` commit that
+    leaves the tree byte-identical — is not a fix and scores ``no_fix_reward``.
     """
     quoted = shlex.quote(repo)
     dirty = await runtime.run(
@@ -94,9 +99,16 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     if dirty.exit_code == 0:
         return True
     # The deep flow commits and pushes once the suite is green, so a clean tree
-    # at a moved HEAD is the successful-fix case, not the untouched one.
-    head = await runtime.run(["sh", "-c", f"cd {quoted} && git rev-parse HEAD"], {})
-    return head.exit_code == 0 and head.stdout.strip() != head_sha
+    # at a moved HEAD is the successful-fix case, not the untouched one. But
+    # "moved" is not enough — an empty commit advances HEAD while leaving the
+    # committed tree identical to the baked snapshot, so compare the committed
+    # contents, not the ref. `git diff --quiet` exits 1 when the trees differ
+    # (a fix) and 0 when they are identical (no fix); any other exit is treated
+    # as no-fix, preserving the deliberate false-negative bias.
+    diff = await runtime.run(
+        ["sh", "-c", f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD --"], {}
+    )
+    return diff.exit_code == 1
 
 
 async def _claimed_test_verdict(runtime: vf.Runtime, archive_root: str) -> bool | None:
