@@ -1,25 +1,29 @@
-"""Phase 5: the green-baseline gate, exercised against real docker builds.
+"""Container image contracts: immutable base inputs and the green-baseline gate.
 
-The gate is the only thing standing between `fix_tests_pass` and noise: it pays a
-rollout for a suite that passes after its fix, which means nothing at all if the
-suite was already failing before the agent touched anything. So the test that
-matters is not "a good repo builds" but "a red one does NOT" — and it has to be a
-real `docker build`, because the enforcement IS the build failing.
+Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
+no Docker at all — they assert the build pins every remote input to an immutable
+version and verifies it for integrity before use. The two ``slow`` tests execute
+real Docker builds for the red and green baseline paths: a repo whose suite is
+red at the head commit must produce no image, while a green one builds and bakes
+the checkout.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 
 import pytest
 from conftest import PROJECT_ROOT
 
 from daydream_review_v1.fixture import FIXTURE_SLUG
 
-pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
+DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
+
+BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
 
 
 def _build(*args: str) -> subprocess.CompletedProcess[str]:
@@ -44,6 +48,7 @@ def _tags() -> set[str]:
 
 
 @pytest.mark.slow
+@DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
     before = _tags()
@@ -63,6 +68,7 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
 
 
 @pytest.mark.slow
+@DOCKER_REQUIRED
 def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     """The happy path, end to end: image builds, suite green, origin is local."""
     result = _build()
@@ -85,3 +91,140 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout
+
+
+def test_docker_skip_is_per_test_not_module_wide() -> None:
+    """M8 regression: the Docker skip is per-test, not module-wide, so the static
+    build-contract tests (added in the next task) collect in a Docker-less CI."""
+    module = sys.modules[__name__]
+    assert "pytestmark" not in vars(module), "module-wide Docker skip would gate the static tests"
+    assert "DOCKER_REQUIRED" in vars(module), "per-test DOCKER_REQUIRED marker missing"
+    # Both slow integration tests must carry the skip; neither may rely on a
+    # module-level marker that would also skip the static tests.
+    assert getattr(test_green_baseline_gate_fails_the_build_on_a_red_suite, "pytestmark", None)
+    assert getattr(test_green_baseline_builds_and_bakes_the_checkout, "pytestmark", None)
+
+
+@pytest.mark.parametrize(
+    "required_literal",
+    [
+        pytest.param(
+            "FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
+            id="python-base-index-digest",
+        ),
+        pytest.param("ARG UV_VERSION=0.11.29", id="uv-pin"),
+        pytest.param('pip install --no-cache-dir "uv==${UV_VERSION}"', id="uv-exact-install"),
+        pytest.param("ARG CLAUDE_CODE_VERSION=2.1.214", id="claude-version"),
+        pytest.param(
+            "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+            id="claude-release-fingerprint",
+        ),
+        pytest.param(
+            (
+                "ARG CODEX_VERSION=0.145.0",
+                (
+                    "amd64) target=x86_64-unknown-linux-musl; "
+                    "checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;;"
+                ),
+                (
+                    "arm64) target=aarch64-unknown-linux-musl; "
+                    "checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;;"
+                ),
+            ),
+            id="codex-version-and-checksums",
+        ),
+        pytest.param(
+            (
+                "ARG NODE_VERSION=22.17.1",
+                "amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;;",
+                "arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;;",
+            ),
+            id="node-version-and-checksums",
+        ),
+        pytest.param("ARG PI_VERSION=0.82.1", id="pi-version"),
+    ],
+)
+def test_base_dockerfile_pins_immutable_versions_and_checksums(
+    required_literal: str | tuple[str, ...],
+) -> None:
+    """M1/M2/M3/M4 pin contract: every immutable identifier is present verbatim.
+
+    Each version ARG that has inline checksums is bundled into a single
+    parameter tuple so that bumping a version without updating its matching
+    checksum(s) fails the test.
+    """
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    if isinstance(required_literal, str):
+        assert required_literal in text, f"missing pinned literal {required_literal!r}"
+    else:
+        # Tuple: first element is the version ARG, remaining are checksums.
+        # Assert ordering: version ARG appears before each checksum, so a
+        # version bump cannot land without its matching checksum update.
+        assert required_literal[0] in text, f"missing pinned literal {required_literal[0]!r}"
+        pos = text.find(required_literal[0])
+        for literal in required_literal[1:]:
+            nxt = text.find(literal, pos + 1)
+            assert nxt > pos, (
+                f"checksum {literal!r} must appear after {required_literal[0]!r}"
+            )
+            pos = nxt
+
+
+@pytest.mark.parametrize(
+    "marker_chain",
+    [
+        pytest.param(
+            (
+                "claude-code.asc",        # release-key download
+                '!= "${release_fingerprint}"',  # fingerprint-mismatch guard (real `!=` on the pin)
+                "--import",               # gpg signing-key import
+                "manifest.json",          # manifest download
+                "manifest.json.sig",      # detached-signature download
+                "--verify",               # gpg verification
+                '"checksum"',             # manifest checksum extraction
+                "sha256sum -c -",         # binary checksum verification
+                "install -D -m 0755",     # install onto PATH
+            ),
+            id="claude",
+        ),
+        pytest.param(
+            (
+                "codex-${target}.tar.gz",  # archive download
+                "sha256sum -c -",          # verify
+                "tar -xzf",                # extract
+            ),
+            id="codex",
+        ),
+        pytest.param(
+            (
+                "node-v${NODE_VERSION}-linux-${node_arch}.tar.gz",  # archive download
+                "sha256sum -c -",                                   # verify
+                "tar -xzf",                                         # extract
+            ),
+            id="node",
+        ),
+    ],
+)
+def test_base_dockerfile_verifies_downloads_before_use(marker_chain: tuple[str, ...]) -> None:
+    """M3/M4/S2: each download-verify-extract chain is strictly ordered; verify precedes use."""
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    pos = text.find(marker_chain[0])
+    assert pos != -1, f"chain start {marker_chain[0]!r} not found"
+    for marker in marker_chain[1:]:
+        nxt = text.find(marker, pos + 1)
+        assert nxt > pos, f"{marker!r} must appear after {text[pos : pos + 40]!r}"
+        pos = nxt
+
+
+@pytest.mark.parametrize(
+    "forbidden_literal",
+    [
+        pytest.param("https://claude.ai/install.sh", id="remote-installer"),
+        pytest.param("| bash", id="bash-pipe"),
+        pytest.param("| tar", id="tar-pipe"),
+    ],
+)
+def test_base_dockerfile_does_not_pipe_downloads_into_shell_or_tar(forbidden_literal: str) -> None:
+    """M3/M4: no remote execution pipeline remains in the build contract."""
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    assert forbidden_literal not in text, f"Dockerfile must not contain {forbidden_literal!r}"
