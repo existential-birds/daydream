@@ -1163,19 +1163,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
         # must not look clean -- say so explicitly so a ``--start-at fix``
         # relaunch doesn't fix + commit partial findings as if the cross-stack
         # merge had succeeded.
-        merge_entry = loaded.get(MERGE_FAILURE_KEY)
-        if merge_entry is not None:
-            merge_message = (
-                merge_entry.get("message")
-                if isinstance(merge_entry, dict)
-                else str(merge_entry)
-            )
-            print_warning(
-                console,
-                "Prior cross-stack synthesis failed; merged results are PARTIAL. "
-                f"{merge_message} (issue #361) -- this resume fixes/verifies the "
-                "partial per-stack findings as-is.",
-            )
+        _warn_prior_merge_failure(loaded)
         # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
         # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
         # so it is never misread as a failed stack that would surface as
@@ -1739,6 +1727,49 @@ def _load_failures(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _warn_prior_merge_failure(loaded: dict[str, Any]) -> None:
+    """Warn on resume that a prior cross-stack synthesis failed (issue #361).
+
+    The structured ``MERGE_FAILURE_KEY`` entry is deliberately excluded from
+    ``failed_stacks`` (see caller) so it can't be misread as a failed stack /
+    garbled "Uncovered stacks" line, but resuming into a *partial* review must
+    not look clean -- say so explicitly so a ``--start-at fix`` relaunch doesn't
+    fix + commit partial findings as if the cross-stack merge had succeeded.
+    """
+    merge_entry = loaded.get(MERGE_FAILURE_KEY)
+    if merge_entry is not None:
+        merge_message = (
+            merge_entry.get("message")
+            if isinstance(merge_entry, dict)
+            else str(merge_entry)
+        )
+        print_warning(
+            console,
+            "Prior cross-stack synthesis failed; merged results are PARTIAL. "
+            f"{merge_message} (issue #361) -- this resume fixes/verifies the "
+            "partial per-stack findings as-is.",
+        )
+
+
+def _clear_merge_failure(dd: Path) -> None:
+    """Clear a stale ``__merge__`` salvage record after a successful re-merge.
+
+    ``_salvage_merge_failure`` is the only writer of ``MERGE_FAILURE_KEY``; a
+    later successful cross-stack merge (or a fix resume that commits the partial
+    findings) must supersede it so a subsequent resume doesn't emit a misleading
+    'merged results are PARTIAL' warning for a merge that actually succeeded.
+    """
+    failures_p = per_stack_failures_path(dd)
+    loaded = _load_failures(failures_p)
+    if MERGE_FAILURE_KEY not in loaded:
+        return
+    loaded.pop(MERGE_FAILURE_KEY, None)
+    if loaded:
+        failures_p.write_text(json.dumps(loaded, indent=2, sort_keys=True))
+    elif failures_p.exists():
+        failures_p.unlink()
+
+
 def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Apply the D-27 dedup pre-filter to a host-written partial merge (issue #361).
 
@@ -1830,6 +1861,11 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     except CrossStackMergeError as exc:
         _salvage_merge_failure(ctx, exc)
         return Stop(1)
+    # Issue #361: a successful re-merge supersedes any stale salvage record, so
+    # the structured ``MERGE_FAILURE_KEY`` entry is cleared here -- otherwise a
+    # later ``--start-at merge``/``fix`` resume still warns 'merged results are
+    # PARTIAL' even though the cross-stack merge has since succeeded.
+    _clear_merge_failure(dd)
     return None
 
 
