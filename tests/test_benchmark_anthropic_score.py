@@ -11,13 +11,17 @@ from daydream.benchmark.anthropic_score import (
 from daydream.benchmark.score import model_results_dir
 
 URL = "https://x/pull/1"
+UNSELECTED_URL = "https://x/pull/2"
+UNSELECTED_SENTINEL = "unselected review must not be scored"
 
 
 class FakeAnthropicJson:
     def __init__(self, responses):
         self._responses = list(responses)
+        self.requests = []
 
     async def complete_json(self, *, system, user, max_tokens):
+        self.requests.append((system, user, max_tokens))
         return self._responses.pop(0)
 
 
