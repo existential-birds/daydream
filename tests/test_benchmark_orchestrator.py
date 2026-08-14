@@ -413,7 +413,12 @@ def test_limit_restricts_direct_extraction_and_dedup_to_selected_prs(tmp_path, m
         "other-tool": [{"text": "keep other tool candidate", "path": None, "line": None, "source": "extracted"}],
     }
     unselected_groups = {"daydream": [[0], [1]], "other-tool": [[0]]}
-    _seed_resumable_scoring_artifacts(tmp_path, url=unselected, candidates=unselected_candidates, groups=unselected_groups)
+    _seed_resumable_scoring_artifacts(
+        tmp_path,
+        url=unselected,
+        candidates=unselected_candidates,
+        groups=unselected_groups,
+    )
 
     monkeypatch.setenv(ANTHROPIC_JUDGE_API_KEY_ENV, "sk-ant-test")
     monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
