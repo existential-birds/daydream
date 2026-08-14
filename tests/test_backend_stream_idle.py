@@ -125,7 +125,7 @@ async def test_pi_silent_stream_trips_idle_timeout_and_reaps_subprocess(
 
     assert excinfo.value.cli == "pi"
     assert excinfo.value.timeout_s == float(TINY_WINDOW)
-    assert excinfo.value.retryable is False
+    assert excinfo.value.retryable is True
     assert_stalled_and_reaped(spawner)
 
 
@@ -141,7 +141,7 @@ async def test_codex_silent_stream_trips_idle_timeout_and_reaps_subprocess(
         await drain(CodexBackend(model="test-model"), tmp_path)
 
     assert excinfo.value.cli == "codex"
-    assert excinfo.value.retryable is False
+    assert excinfo.value.retryable is True
     assert_stalled_and_reaped(spawner)
 
 
@@ -267,7 +267,7 @@ def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_stall_is_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A persistently-stalling ``pi`` reaches the caller without relaunching."""
+    """A persistently-stalling ``pi`` consumes only the bounded retry budget."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "3")
@@ -290,7 +290,7 @@ async def test_stall_is_not_retried(
         async with recorder:
             await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
 
-    assert_stalled_and_reaped(spawner, expected_spawns=1)
+    assert_stalled_and_reaped(spawner, expected_spawns=4)
 
     trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert trajectory["extra"]["partial"] is True
