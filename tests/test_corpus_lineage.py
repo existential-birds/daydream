@@ -29,3 +29,21 @@ def test_build_corpus_emits_lineage_manifest(tmp_path, archive_dir):
                         "as_of", "created_at"}
     assert man["trajectory_set_hash"] == hashlib.sha256(b"s1").hexdigest()
     assert man["as_of"] == "2026-04-01T00:00:00+00:00"
+
+
+def test_build_corpus_removes_stale_lineage_when_rebuilt_empty(tmp_path, archive_dir):
+    _seed_run_with_annotation(archive_dir, "s1", label="accepted",
+                              reward_version="r1", observed_at="2026-03-01T00:00:00+00:00",
+                              valid_at="2026-03-01T00:00:00+00:00")
+    out = tmp_path / "c.jsonl"
+    as_of = "2026-04-01T00:00:00+00:00"
+    # First build emits a non-empty corpus with a lineage manifest.
+    run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive_dir,
+                                       filters=CorpusFilters(), as_of=as_of))
+    assert (tmp_path / "lineage.json").exists()
+    # Rebuild the same path with no admitted runs -> empty JSONL, no lineage.
+    summary = run_build_corpus(BuildCorpusConfig(out_path=out, archive_dir=archive_dir,
+                                                 filters=CorpusFilters(labels=()), as_of=as_of))
+    assert summary["emitted"] == 0
+    assert out.read_text() == ""
+    assert not (tmp_path / "lineage.json").exists()

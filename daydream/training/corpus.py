@@ -995,7 +995,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # 9. Lineage manifest beside the JSONL: the included set drives the
     #    content-address; versions reflect the post-stratify annotations; as_of
     #    falls back to write-time. Skipped when empty (an empty-set hash misleads).
+    #    When empty, any prior lineage.json from an earlier build is removed so a
+    #    stale manifest never survives.
     if not records:
+        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
         print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
         return _summary(total_in_index, after_filters, after_stratify, 0)
     included_session_ids = [r["session_id"] for r in records]
