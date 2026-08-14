@@ -181,3 +181,51 @@ def test_report_rejects_ambiguous_legacy_trajectory_fallback(
     )
     with pytest.raises(SystemExit, match="ambiguous legacy trajectory key 'widgets/7'"):
         build_mod.build(args)
+
+
+def test_report_allows_mixed_canonical_and_unique_legacy_trajectories(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical PR plus a same-basename PR resolving via a UNIQUE legacy trajectory must not crash.
+
+    Regression for the legacy-guard false positive: pre-fix, the share counter
+    counted every PR (including ones resolving canonically), so a single legacy
+    trajectory shared its basename with a canonical PR and failed closed despite
+    the legacy key being unambiguous.
+    """
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(
+        tmp_path,
+        pr_trajectories={
+            # Resolves canonically via extra.pr_repo.
+            "https://github.com/alpha/widgets/pull/7": (
+                "alpha_widgets-7.json", "alpha/widgets", 1_000_000, 1_000_000, 1_000_000, 3, None
+            ),
+            # Same basename, but only a unique legacy trajectory (no pr_repo).
+            "https://github.com/beta/widgets/pull/7": (
+                "widgets-7.json", None, 4_000_000, 5_000_000, 6_000_000, 9, None
+            ),
+        },
+    )
+    report = build_mod.build(args)  # must NOT raise SystemExit
+
+    rows = {r["pr_url"]: r for r in report["per_pr"]}
+    assert len(rows) == 2
+    alpha = rows["https://github.com/alpha/widgets/pull/7"]
+    beta = rows["https://github.com/beta/widgets/pull/7"]
+    assert alpha["prompt_tokens"] == 1_000_000
+    assert alpha["steps"] == 3
+    assert beta["prompt_tokens"] == 4_000_000
+    assert beta["completion_tokens"] == 5_000_000
+    assert beta["cached_tokens"] == 6_000_000
+    assert beta["steps"] == 9
+
+    eco = report["economy"]
+    assert eco["n_with_trajectory"] == 2
+    assert eco["total_prompt_tokens"] == 5_000_000
+    assert eco["total_completion_tokens"] == 6_000_000
+    assert eco["total_cached_tokens"] == 7_000_000
+    assert eco["total_cost_usd"] == pytest.approx(
+        1.4 + 1_000_000 * 0.26 / 1e6 + 1_000_000 * 4.4 / 1e6
+        + 4_000_000 * 1.4 / 1e6 + 6_000_000 * 0.26 / 1e6 + 5_000_000 * 4.4 / 1e6
+    )

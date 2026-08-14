@@ -363,7 +363,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     tot_prompt = tot_completion = tot_cached = 0
     tot_cost = 0.0
     walls = []
-    legacy_shares = Counter(_legacy_traj_key_for_pr(pr) for pr in dd_subset)
+    # Count legacy basename shares only across PRs that genuinely need the
+    # legacy fallback (no canonical trajectory), so a canonical PR whose
+    # basename happens to collide does not inflate the ambiguity guard.
+    legacy_needed = [pr for pr in dd_subset if not trajectories.get(traj_key_for_pr(pr), {})]
+    legacy_shares = Counter(_legacy_traj_key_for_pr(pr) for pr in legacy_needed)
     for pr in sorted(dd_subset):
         tj = trajectories.get(traj_key_for_pr(pr), {})
         if not tj:
