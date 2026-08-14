@@ -1,4 +1,4 @@
-"""Price resolution in the offline benchmark report generator (bench/benchmark-report/build.py)."""
+"""Tests for the offline benchmark report generator (bench/benchmark-report/build.py)."""
 
 from __future__ import annotations
 
@@ -26,6 +26,9 @@ def build_mod() -> ModuleType:
 
 
 PR_URL = "https://github.com/calcom/cal.com/pull/10600"
+
+SECOND_PR_URL = "https://github.com/calcom/cal.com/pull/10601"
+_COMPLETE_SAAS_TOOLS = ("saas-alpha", "saas-beta", "saas-delta", "saas-gamma", "saas-zeta")
 
 
 def _corpus(
@@ -75,6 +78,27 @@ def _corpus(
     )
 
 
+def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> argparse.Namespace:
+    """Two-PR corpus: daydream + five fully-covered SaaS tools on both PRs, plus one
+    incomplete tool (``saas-incomplete``) present only on the first PR. The second PR's
+    leaf for it is ``incomplete_leaf``: None (absent) or ``{"skipped": True}`` (skipped).
+    Reuses _corpus for the judge dir + trajectory, then overwrites evaluations.json."""
+    args = _corpus(root)
+    dd_leaf = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
+    complete_leaf = {"tp": 1, "fp": 1, "fn": 1, "total_candidates": 1, "total_golden": 1}
+    pr1 = {"daydream-owl-alpha": dd_leaf}
+    pr2 = {"daydream-owl-alpha": dd_leaf}
+    for tool in _COMPLETE_SAAS_TOOLS:
+        pr1[tool] = complete_leaf
+        pr2[tool] = complete_leaf
+    pr1["saas-incomplete"] = dd_leaf
+    if incomplete_leaf is not None:
+        pr2["saas-incomplete"] = incomplete_leaf
+    judge = root / "results" / "anthropic_claude-opus-4-5-20251101"
+    (judge / "evaluations.json").write_text(json.dumps({PR_URL: pr1, SECOND_PR_URL: pr2}))
+    return args
+
+
 def test_price_card_comes_from_shared_pricing_table(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -112,6 +136,26 @@ def test_unknown_price_model_is_rejected(
     args.price_model = "no-such-model"
     with pytest.raises(SystemExit, match="unknown --price-model"):
         build_mod.build(args)
+
+
+@pytest.mark.parametrize("incomplete_leaf", [None, {"skipped": True}], ids=["missing", "skipped"])
+def test_build_excludes_incomplete_saas_tools_from_field_and_rank(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    incomplete_leaf: dict[str, Any] | None,
+) -> None:
+    """A SaaS tool measured on fewer than the full daydream subset is omitted from the
+    field and rank denominator; every admitted tool is fully covered. Regression for #382."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    report: dict[str, Any] = build_mod.build(_comparison_corpus(tmp_path, incomplete_leaf))
+
+    judge = next(j for j in report["judges"] if j["id"] == "claude-opus-4-5-20251101")
+    field_tools = {r["tool"] for r in judge["field"]}
+    assert field_tools == set(_COMPLETE_SAAS_TOOLS)
+    assert "saas-incomplete" not in field_tools
+    assert {r["n_prs"] for r in judge["field"]} == {2}
+    assert judge["subset_pr_count"] == 2
+    assert judge["ranks"]["f1"] == (1, 6)
+    assert report["meta"]["subset_pr_count"] == 2
 
 
 def test_report_joins_trajectories_by_full_repository_identity(
