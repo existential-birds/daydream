@@ -1589,6 +1589,7 @@ async def phase_verify_recommendations(
         tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
         wall_budget_s=DEFAULT_WALL_BUDGET_S,
         phase=DaydreamPhase.VERIFY,
+        read_only=True,
     )
 
     candidate: Any = result

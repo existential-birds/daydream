@@ -3014,6 +3014,9 @@ async def test_verifier_excludes_structural_lens(tmp_path, make_work, silence_co
     assert "bug" in backend.last_prompt
     # Verdicts file is written for downstream consumers.
     assert verdicts_path(dd).is_file()
+    # The single backend call in this phase is the verifier diagnostic —
+    # it must run with the non-mutating read-only profile.
+    assert backend.read_only_calls == [True]
 
 
 async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, make_work, silence_console):
