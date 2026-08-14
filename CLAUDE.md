@@ -59,23 +59,6 @@ substitute. Reference exemplar: the non-interactive/EOF gate tests in `tests/tes
 **No caveats.** All work is completed and proven, or explicitly in progress. No deferred items, no
 "optional" follow-ups, no smoke-tests substituted for real coverage.
 
-## Non-negotiable: fix bugs at the root
-
-The highest-priority directive in this file. Violating it makes the agent dangerous and unusable.
-
-1. A bug in a safety or verification mechanism is fixed at its root cause, never bypassed.
-   `git push --no-verify`, skipping tests, commenting out checks, deleting guards, and lowering
-   assertions are all forbidden. Making the gate pass honestly IS the goal.
-2. Own your own bugs in plain language. Do not describe your own defect as the tool, hook, or framework
-   being "destructive" or "buggy."
-3. Fix the bug where it lives, not at a convenient downstream layer.
-4. A dangerous bug (state corruption, data loss, compromised safety mechanism) outranks the assigned
-   task. Stop and fix it first.
-5. Never claim success that isn't verified-working. "Committed" or "pushed" is not "working" unless the
-   actual behavior is verified.
-6. When the user pushes back more than once on the same point, stop defending and do the direct,
-   root-cause fix.
-
 ## Architecture
 
 ```text
