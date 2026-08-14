@@ -436,3 +436,78 @@ def test_main_rejects_report_with_no_eligible_judge_panel(
     assert "no SaaS field (superseded or partial run)" in msg
     # both skipped judges listed, in sorted (skipped_judges) order
     assert msg.index("claude-opus-4-5-20251101") < msg.index("gpt-5.2")
+
+def _anchor_corpus(root: Path) -> argparse.Namespace:
+    """Two retained judges where sorted-first (a-first-judge, daydream on 1 PR,
+    totals TP=1/FP=9/FN=0) and largest-subset (z-anchor-judge, daydream on 2 PRs,
+    totals TP=5/FP=1/FN=1) differ. Both carry 5 fully-covered SaaS tools so both
+    are panel-retained; the shared daydream subset is z-anchor's 2 PRs."""
+    args = _corpus(
+        root,
+        pr_trajectories={
+            PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+            SECOND_PR_URL: ("cal.com-10601.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+        },
+        judges={},
+        labels={
+            PR_URL: {"derived": {"language": "python"}},
+            SECOND_PR_URL: {"derived": {"language": "python"}},
+        },
+    )
+    saas = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    a_first = dict(saas)
+    a_first["daydream-owl-alpha"] = _leaf(tp=1, fp=9, fn=0)
+    z_anchor = dict(saas)
+    evals = {
+        "a-first-judge": {PR_URL: dict(a_first)},  # SECOND_PR_URL absent -> 1-PR subset
+        "z-anchor-judge": {
+            PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+            SECOND_PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=3, fp=0, fn=0)},
+        },
+    }
+    for dname, j_evals in evals.items():
+        jdir = root / "results" / dname
+        jdir.mkdir(parents=True, exist_ok=True)
+        (jdir / "evaluations.json").write_text(json.dumps(j_evals))
+    return args
+
+
+def test_report_build_resolves_anchor_judge_by_id(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Report-wide build outputs all trace to the serialized largest-subset anchor,
+    not the sorted-first judge. Regression for #392."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path))
+
+    # Judge order stays sorted; the anchor is the largest-subset judge.
+    assert [j["id"] for j in report["judges"]] == ["a-first-judge", "z-anchor-judge"]
+    assert report["meta"]["anchor_judge"] == "z-anchor-judge"
+
+    by_id = {j["id"]: j for j in report["judges"]}
+    af = by_id["a-first-judge"]["daydream"]
+    za = by_id["z-anchor-judge"]["daydream"]
+    assert (af["tp"], af["fp"], af["fn"]) == (1, 9, 0)
+    assert (za["tp"], za["fp"], za["fn"]) == (5, 1, 1)
+
+    # Slice evidence is keyed off the anchor's evaluation data, spanning both PRs.
+    lang = next(sl for sl in report["slices"] if sl["title"] == "Language")
+    row = next(r for r in lang["rows"] if r["label"] == "python")
+    assert (row["n_prs"], row["tp"], row["fp"], row["fn"]) == (2, 5, 1, 1)
+
+    # Improvement metrics cite the canonical anchor, not the sorted-first judge.
+    p1 = next(im for im in report["improvements"] if im["priority"] == 1)
+    assert "z-anchor-judge" in p1["heading"]
+    assert "a-first-judge" not in p1["body"]
+
+
+def test_template_consumers_resolve_anchor_judge_by_id(tmp_path: Path) -> None:
+    """The template defines one anchorJudge() helper keyed on DATA.meta.anchor_judge
+    and routes its 3 report-wide consumers through it; no first-scored re-selection
+    remains. Regression for #392."""
+    template = TEMPLATE_HTML.read_text()
+
+    assert "function anchorJudge(){return DATA.judges.find(j=>j.id===DATA.meta.anchor_judge);}" in template
+    assert template.count("const anchor=anchorJudge();") == 2  # renderLead, renderSlices
+    assert "const ddtp=(anchorJudge()||{daydream:{tp:1}})" in template  # renderCost
+    assert "DATA.judges.find(j=>j.has_daydream)" not in template
