@@ -241,8 +241,9 @@ class CodexBackend:
                     # Codex occasionally emits non-JSON status lines on stdout;
                     # skip them but leave a debug breadcrumb for triage.
                     # Capture non-JSON lines for diagnostic surfacing on non-zero exit.
-                    if len(non_json_lines) < 20:
-                        non_json_lines.append(raw_line)
+                    if len(non_json_lines) >= 20:
+                        non_json_lines.pop(0)
+                    non_json_lines.append(raw_line)
                     _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 
@@ -544,9 +545,8 @@ class CodexBackend:
         if returncode is not None and returncode != 0:
             tail = "\n".join(non_json_lines[-10:])
             if non_json_lines:
-                shown = min(len(non_json_lines), 10)
                 detail = (
-                    f"\nCodex CLI output (last {shown} "
+                    f"\nCodex CLI output (last {min(len(non_json_lines), 10)} "
                     f"non-JSON lines):\n{tail}"
                 )
             else:
