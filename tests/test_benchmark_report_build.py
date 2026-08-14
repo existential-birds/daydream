@@ -354,7 +354,7 @@ def _recommendation_case(tmp_path: Path, case: str) -> tuple[dict | None, dict |
             {
                 "priority": 2,
                 "heading": "Tighten the noisiest label slice: Language = python",
-                "body": "The python language cohort carries 3 FP for 1 TP across 1 PRs.",
+                "body": "The python language cohort carries 3 FP for 1 TP across 1 PR.",
                 "measurement": "Next-run target: FP below 3 on python language slices.",
                 "citation": f"source: {labels_src} (Slices panel)",
             },

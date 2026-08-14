@@ -309,7 +309,7 @@ def _build_improvements(
             "priority": 2,
             "heading": f"Tighten the noisiest label slice: {worst['dim']} = {worst['label']}",
             "body": f"The {worst['label']} {worst['dim'].lower()} cohort carries {worst['fp']} FP "
-                    f"for {worst['tp']} TP across {worst['n_prs']} PRs.",
+                    f"for {worst['tp']} TP across {worst['n_prs']} PR{'s' if worst['n_prs'] != 1 else ''}.",
             "measurement": f"Next-run target: FP below {worst['fp']} on {worst['label']} "
                            f"{worst['dim'].lower()} slices.",
             "citation": f"source: {labels_source} (Slices panel)",
