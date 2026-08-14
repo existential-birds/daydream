@@ -4,8 +4,7 @@
 # artifact, and posts the findings to the PR as the operator's App bot. This
 # job holds the App key, so it NEVER checks out or executes PR code, per the
 # locked privilege split: no single job ever holds both PR code and the App key.
-# The artifact is passive
-# data, validated by `daydream post-findings` against a strict schema before
+# The artifact is passive data, validated by `daydream post-findings` against a strict schema before
 # anything is posted.
 #
 # Target derivation (Task 0 spike, Step 2 — the event payload is NOT uniform):
