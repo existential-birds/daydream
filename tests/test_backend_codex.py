@@ -150,6 +150,28 @@ async def test_turn_failed_raises():
 
 
 @pytest.mark.asyncio
+async def test_nonzero_exit_raises_with_captured_output():
+    """Non-zero exit surfaces codex's diagnostic output as a PROCESS_EXIT CodexError."""
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process(
+        ["Error: authentication required. Run `codex login` to authenticate."]
+    )
+    mock_proc.returncode = 1
+
+    events = []
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="return code 1") as exc_info:
+            async for event in backend.execute(Path("/tmp"), "Fail"):
+                events.append(event)
+
+    # No events yielded — the run must not appear successful.
+    assert events == []
+    msg = str(exc_info.value)
+    assert "authentication required" in msg
+    assert exc_info.value.category == "PROCESS_EXIT"
+
+
+@pytest.mark.asyncio
 async def test_continuation_token_resumes():
     """Test that continuation token is passed as 'resume' argument."""
     from daydream.backends import ContinuationToken

@@ -177,6 +177,7 @@ class CodexBackend:
         pending_item_ids: dict[str, str] = {}  # "type:content" → generated id (legacy)
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
         parse_warnings: list[str] = []  # observable parse-failure surface
+        stderr_lines: list[str] = []  # non-JSON stdout lines for error diagnostics
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
         def _warn(msg: str, **detail: Any) -> None:
@@ -238,6 +239,9 @@ class CodexBackend:
                 except json.JSONDecodeError:
                     # Codex occasionally emits non-JSON status lines on stdout;
                     # skip them but leave a debug breadcrumb for triage.
+                    # Capture non-JSON lines for diagnostic surfacing on non-zero exit.
+                    if len(stderr_lines) < 20:
+                        stderr_lines.append(raw_line)
                     _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 
@@ -473,6 +477,28 @@ class CodexBackend:
                     pass
 
             await proc.wait()
+
+            # Fail fast on non-zero exit: if codex crashed without emitting a
+            # turn.failed event, surface the failure with diagnostic output
+            # instead of reporting a successful completion with empty/partial
+            # output.
+            returncode = proc.returncode
+            if returncode is not None and returncode != 0:
+                stderr_tail = "\n".join(stderr_lines[-10:])
+                if stderr_lines:
+                    detail = (
+                        f"\nCodex CLI output (last {len(stderr_lines)} "
+                        f"non-JSON lines):\n{stderr_tail}"
+                    )
+                else:
+                    detail = (
+                        "\n(no non-JSON output captured — codex may have "
+                        "crashed before writing to stdout)"
+                    )
+                raise CodexError(
+                    f"Codex CLI exited with return code {returncode}.{detail}",
+                    category="PROCESS_EXIT",
+                )
 
         finally:
             if proc is not None:
