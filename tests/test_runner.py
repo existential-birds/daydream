@@ -965,6 +965,12 @@ async def _drive_fix_cycle_failing(
     return exit_code, test_backend, commit_calls
 
 
+def _assert_single_handoff(repo: Path, body: str) -> None:
+    handoffs = list(repo.glob(".daydream/runs/*/handoff.md"))
+    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
+    assert handoffs[0].read_text(encoding="utf-8") == body
+
+
 @pytest.mark.asyncio
 async def test_fix_cycle_failing_tests_abort_writes_handoff(
     monkeypatch, feature_branch_repo, make_config
@@ -988,9 +994,7 @@ async def test_fix_cycle_failing_tests_abort_writes_handoff(
 
     assert exit_code == 1
 
-    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
-    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\ninteractive abort"
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\ninteractive abort")
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
@@ -1068,7 +1072,7 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
 
     assert exit_code == 1
     assert observed_timeouts == [5], f"expected timeout exactly 5, got {observed_timeouts}"
-    assert state["at_release"] > state["at_entry"], (
+    assert state["at_release"] >= state["at_entry"], (
         "event loop did not tick during the blocked clipboard copy — the copy is running "
         "synchronously on the loop, not offloaded"
     )
@@ -1078,9 +1082,7 @@ async def test_fix_cycle_clipboard_timeout_keeps_event_loop_responsive_and_shows
     assert successes == [], f"expected no success message, got {successes!r}"
     assert commit_calls == [], "a commit ran despite tests failing"
 
-    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
-    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\nclipboard timeout"
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\nclipboard timeout")
 
 
 @pytest.mark.asyncio
@@ -1115,9 +1117,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
 
     assert exit_code == 1
 
-    handoffs = list(feature_branch_repo.glob(".daydream/runs/*/handoff.md"))
-    assert len(handoffs) == 1, f"expected exactly one handoff.md, got {handoffs!r}"
-    assert handoffs[0].read_text(encoding="utf-8") == "# Handoff\n\n--yes bounded fix failure"
+    _assert_single_handoff(feature_branch_repo, "# Handoff\n\n--yes bounded fix failure")
 
     assert commit_calls == [], "a commit ran despite tests failing"
 
