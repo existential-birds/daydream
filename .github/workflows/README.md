@@ -59,9 +59,9 @@ only the `@<bot> review` command path can serve them.
 No single job ever holds both PR code and the App private key:
 
 - **Phase A (Daydream Review)** checks out and analyzes untrusted PR code,
-  so it is unprivileged: `contents: read` GITHUB_TOKEN, `ANTHROPIC_API_KEY`
-  as its only secret, no App material anywhere. Its output is a passive data
-  artifact (`findings.json`), never code.
+  so it is unprivileged: `contents: read` GITHUB_TOKEN, `OPENAI_API_KEY`
+  as its only secret to authenticate the Codex CLI, no App material anywhere.
+  Its output is a passive data artifact (`findings.json`), never code.
 - **Daydream Command** never checks out code, so it may hold App credentials:
   it mints a short-lived App token with `actions: write` (to dispatch the
   review — see Install step 1) plus `pull-requests: write` (to post the 👀
