@@ -27,8 +27,9 @@ from typing import Any
 import pytest
 import yaml
 
-TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "daydream" / "templates" / "workflows"
-REPO_WORKFLOWS_DIR = Path(__file__).resolve().parents[1] / ".github" / "workflows"
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+TEMPLATES_DIR = _REPO_ROOT / "daydream" / "templates" / "workflows"
+REPO_WORKFLOWS_DIR = _REPO_ROOT / ".github" / "workflows"
 
 _SECRET_REF_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
 
@@ -49,6 +50,35 @@ def job_steps(wf: dict[str, Any], job: str) -> list[dict[str, Any]]:
 
 def has_checkout(job: dict[str, Any]) -> bool:
     return any("actions/checkout" in s.get("uses", "") for s in job["steps"])
+
+
+# Action-ref policy (all bot workflows, live + shipped): every non-local
+# `uses:` must resolve to a full commit SHA, never a mutable tag, branch,
+# expression, Docker reference, short hash, or non-hex revision. Repo-local
+# `./…` actions are exempt. Rides the root pytest suite in ci.yml.
+
+_BOT_WORKFLOW_PATHS = sorted(
+    [*REPO_WORKFLOWS_DIR.glob("daydream-*.yml"), *TEMPLATES_DIR.rglob("*.yml")],
+    key=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+
+_PINNED_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
+
+
+def _action_references(wf: dict[str, Any]) -> list[str]:
+    """Return job-level and step-level ``uses:`` executable references, in document order."""
+    refs: list[str] = []
+    for job in wf["jobs"].values():
+        job_uses = job.get("uses")
+        if isinstance(job_uses, str):
+            refs.append(job_uses)
+        steps = job.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                step_uses = step.get("uses")
+                if isinstance(step_uses, str):
+                    refs.append(step_uses)
+    return refs
 
 
 # Injection guard (all templates): untrusted event data must reach run: via env:,
@@ -72,6 +102,23 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
                 )
 
 
+@pytest.mark.parametrize(
+    "wf_path",
+    _BOT_WORKFLOW_PATHS,
+    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
+)
+def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path) -> None:
+    wf = load_workflow(wf_path)
+    rel = wf_path.relative_to(_REPO_ROOT).as_posix()
+    for ref in _action_references(wf):
+        if ref.startswith("./"):
+            continue
+        assert _PINNED_ACTION_RE.fullmatch(ref), (
+            f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
+            f"(expected owner/repo@<40 hex chars>)"
+        )
+
+
 # Install-pin drift guard: the bot must install a pinned daydream release, never
 # the moving `main` tip. Fails on release until the template pin is bumped in
 # lockstep with the package version.
@@ -82,7 +129,7 @@ _INSTALL_RE = re.compile(
 
 
 def _package_version() -> str:
-    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    pyproject = _REPO_ROOT / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     return data["project"]["version"]
 
