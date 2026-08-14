@@ -8,6 +8,7 @@ cannot verify and that a careless edit could silently break:
 - No untrusted event data is interpolated into a ``run:`` body (injection).
 - The daydream install stays pinned to the current release tag (cross-file
   drift against ``pyproject.toml``).
+- Every App-token action in the live and packaged posting workflows stays pinned to the approved v2.2.2 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
 - The repo's own Codex dogfood workflow persists ``codex login`` before the
@@ -123,6 +124,25 @@ def test_split_setup_preserves_privilege_split() -> None:
             if "actions/checkout" in step.get("uses", ""):
                 assert "workflow_run" not in str(step.get("with", {}).get("ref", ""))
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+    ids=["template", "live"],
+)
+def test_post_workflows_pin_create_github_app_token(wf_path: Path) -> None:
+    wf = load_workflow(wf_path)
+    expected_action = "actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349"
+    token_action_uses = [
+        (job_name, str(step.get("uses", "")))
+        for job_name, job in wf["jobs"].items()
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
+    ]
+    assert sorted(token_action_uses) == sorted(
+        [("post", expected_action), ("surface-analyze-failure", expected_action)]
+    )
 
 
 @pytest.mark.parametrize(
