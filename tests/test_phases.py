@@ -1662,6 +1662,9 @@ async def test_phase_test_and_heal_option1_verdict_correct_uses_original_prompt(
     # Retry reuses the original generic prompt (no pinned command).
     assert backend.prompts[2] == backend.prompts[0]
     assert "Run this exact test command" not in backend.prompts[2]
+    # The three backend calls in order: initial test run (mutating),
+    # setup-investigator diagnostic (read-only), retry test run (mutating).
+    assert backend.read_only_calls == [False, True, False]
 
 
 @pytest.mark.asyncio

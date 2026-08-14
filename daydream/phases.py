@@ -274,6 +274,7 @@ async def _run_setup_investigator(
                 prompt,
                 output_schema=SETUP_INVESTIGATOR_SCHEMA,
                 phase=DaydreamPhase.TEST,
+                read_only=True,
             )
         except Exception:  # noqa: BLE001 - investigator failure is non-fatal
             _logger.debug("setup-investigator agent failed", exc_info=True)
