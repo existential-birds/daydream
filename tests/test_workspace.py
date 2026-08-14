@@ -491,7 +491,7 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: P
             force_ephemeral=True,
             extra_copy=[Path("../retained.cfg")],
             skip_tests=False,
-        ) as ctx:
+        ):
             pass  # never reached — the copy boundary rejects before yielding
     # Fail-closed: a regressed guard would copy the seeded source into
     # dest/../retained.cfg == repo/.daydream/worktrees/retained.cfg (the escape
