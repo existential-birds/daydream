@@ -326,7 +326,8 @@ _REMOVED_LITERALS = (
 
 def _recommendation_case(tmp_path: Path, case: str) -> tuple[dict | None, dict | None, list[dict]]:
     """Return (judges, labels, expected_improvements) for one evidence shape."""
-    anchor_src = str(tmp_path / "results" / _ANCHOR / "evaluations.json")
+    resolved = tmp_path.resolve()
+    anchor_src = str(resolved / "results" / _ANCHOR / "evaluations.json")
     if case == "no-evidence":
         return None, None, []
     if case == "aggregate-fp":
@@ -341,7 +342,7 @@ def _recommendation_case(tmp_path: Path, case: str) -> tuple[dict | None, dict |
     if case == "label-slice":
         judges = {_ANCHOR: _tools(5, _leaf(tp=1, fp=3))}
         labels = {PR_URL: {"derived": {"language": "python"}}}
-        labels_src = str(tmp_path / "results" / "pr_labels.json")
+        labels_src = str(resolved / "results" / "pr_labels.json")
         return judges, labels, [
             {
                 "priority": 1,
