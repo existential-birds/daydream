@@ -89,6 +89,18 @@ def _write_items(checkout: Path, items: list[dict[str, Any]]) -> Path:
     return artifact
 
 
+def _seed_resumable_scoring_artifacts(
+    tmp_path: Path, *, url: str, candidates: dict[str, Any], groups: dict[str, Any]
+) -> None:
+    """Seed resumable candidates.json/dedup_groups.json leaves for a PR."""
+    results_dir = model_results_dir(tmp_path, "judge-model")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    (results_dir / "candidates.json").write_text(
+        json.dumps({url: candidates}, indent=2), encoding="utf-8")
+    (results_dir / "dedup_groups.json").write_text(
+        json.dumps({url: groups}, indent=2), encoding="utf-8")
+
+
 def _config(tmp_path: Path, data_path: Path, *, score: bool, only: str) -> BenchConfig:
     """Build a BenchConfig whose benchmark_repo derives data_path.
 
@@ -393,7 +405,6 @@ def test_limit_restricts_direct_extraction_and_dedup_to_selected_prs(tmp_path, m
     data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     results_dir = model_results_dir(tmp_path, "judge-model")
-    results_dir.mkdir(parents=True, exist_ok=True)
     unselected_candidates = {
         "daydream": [
             {"text": "keep unselected candidate one", "path": None, "line": None, "source": "extracted"},
@@ -402,10 +413,7 @@ def test_limit_restricts_direct_extraction_and_dedup_to_selected_prs(tmp_path, m
         "other-tool": [{"text": "keep other tool candidate", "path": None, "line": None, "source": "extracted"}],
     }
     unselected_groups = {"daydream": [[0], [1]], "other-tool": [[0]]}
-    (results_dir / "candidates.json").write_text(
-        json.dumps({unselected: unselected_candidates}, indent=2), encoding="utf-8")
-    (results_dir / "dedup_groups.json").write_text(
-        json.dumps({unselected: unselected_groups}, indent=2), encoding="utf-8")
+    _seed_resumable_scoring_artifacts(tmp_path, url=unselected, candidates=unselected_candidates, groups=unselected_groups)
 
     monkeypatch.setenv(ANTHROPIC_JUDGE_API_KEY_ENV, "sk-ant-test")
     monkeypatch.delenv(JUDGE_BASE_URL_ENV, raising=False)
@@ -459,16 +467,12 @@ async def test_empty_selection_skips_all_extraction_and_dedup_judge_calls(tmp_pa
     data_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     results_dir = model_results_dir(tmp_path, "judge-model")
-    results_dir.mkdir(parents=True, exist_ok=True)
     seeded_candidates = {
         "daydream": [{"text": "a", "path": None, "line": None, "source": "extracted"},
                      {"text": "b", "path": None, "line": None, "source": "extracted"}],
     }
     seeded_groups = {"daydream": [[0], [1]]}
-    (results_dir / "candidates.json").write_text(
-        json.dumps({url: seeded_candidates}, indent=2), encoding="utf-8")
-    (results_dir / "dedup_groups.json").write_text(
-        json.dumps({url: seeded_groups}, indent=2), encoding="utf-8")
+    _seed_resumable_scoring_artifacts(tmp_path, url=url, candidates=seeded_candidates, groups=seeded_groups)
 
     client = _CountingJudgeClient()
 

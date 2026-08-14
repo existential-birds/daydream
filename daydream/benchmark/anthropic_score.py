@@ -187,8 +187,9 @@ async def run_anthropic_extraction(
     candidates_file = results_dir / "candidates.json"
     all_candidates = _load_json_dict(candidates_file, required=False)
 
+    selected = set(golden_urls) if golden_urls is not None else None
     for golden_url, entry in data.items():
-        if golden_urls is not None and golden_url not in golden_urls:
+        if selected is not None and golden_url not in selected:
             continue
         reviews = entry.get("reviews", []) if isinstance(entry, dict) else []
         for review in reviews:
@@ -235,8 +236,9 @@ async def run_anthropic_dedup(
     groups_file = results_dir / "dedup_groups.json"
     all_groups = _load_json_dict(groups_file, required=False)
 
+    selected = set(golden_urls) if golden_urls is not None else None
     for golden_url, tools in all_candidates.items():
-        if golden_urls is not None and golden_url not in golden_urls:
+        if selected is not None and golden_url not in selected:
             continue
         if not isinstance(tools, dict):
             continue
