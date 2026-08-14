@@ -267,6 +267,69 @@ def slice_daydream(evals: dict, subset: set[str], labels: dict, dd_tool: str, di
     return sorted(out, key=lambda x: x["n_prs"], reverse=True)
 
 
+def _build_improvements(
+    judges_out: list[dict],
+    slices: list[dict],
+    daydream_tool: str,
+    labels_source: str | None,
+) -> list[dict]:
+    """Derive ordered improvement recommendations from current-run evidence.
+
+    Returns a list of up to 3 dicts (priority 1, 2, 3) with keys:
+    priority, heading, body, measurement, citation. Empty when no evidence fires.
+    """
+    improvements: list[dict] = []
+
+    # ── FP-burden (priority 1) ──
+    anchor = next((j for j in judges_out if j.get("has_daydream") and j.get("daydream")), None)
+    if anchor and anchor["daydream"]["fp"] > 0:
+        d = anchor["daydream"]
+        improvements.append({
+            "priority": 1,
+            "heading": f"Reduce {daydream_display(daydream_tool)} false positives under {anchor['display']}",
+            "body": f"daydream produced {d['fp']} FP for {d['tp']} TP under {anchor['display']} ({anchor['id']}).",
+            "measurement": f"Next-run target: FP below {d['fp']}, TP at or above {d['tp']}, "
+                           f"on the same {anchor['subset_pr_count']}-PR subset.",
+            "citation": f"source: {'; '.join(anchor['dirs'])}",
+        })
+
+    # ── Noisiest slice (priority 2) ──
+    worst = None
+    for sl in slices:
+        for r in sl["rows"]:
+            if r["fp"] < 3:
+                continue
+            ratio = r["fp"] / r["tp"] if r["tp"] > 0 else 99.0
+            if worst is None or ratio > worst["ratio"]:
+                worst = {"dim": sl["title"], "label": r["label"],
+                         "fp": r["fp"], "tp": r["tp"], "n_prs": r["n_prs"],
+                         "ratio": ratio}
+    if worst is not None and labels_source:
+        improvements.append({
+            "priority": 2,
+            "heading": f"Tighten the noisiest label slice: {worst['dim']} = {worst['label']}",
+            "body": f"The {worst['label']} {worst['dim'].lower()} cohort carries {worst['fp']} FP "
+                    f"for {worst['tp']} TP across {worst['n_prs']} PRs.",
+            "measurement": f"Next-run target: FP below {worst['fp']} on {worst['label']} {worst['dim'].lower()} slices.",
+            "citation": f"source: {labels_source} (Slices panel)",
+        })
+
+    # ── Missing-judge (priority 3) ──
+    missing = [j for j in judges_out if not j.get("has_daydream")]
+    if missing:
+        displays = ", ".join(j["display"] for j in missing)
+        ids = ", ".join(j["id"] for j in missing)
+        improvements.append({
+            "priority": 3,
+            "heading": f"Re-judge daydream under {displays}",
+            "body": f"daydream has no leaf under: {ids}.",
+            "measurement": "Next-run target: fill the cross-judge panels and confirm the precision story is judge-robust.",
+            "citation": f"source: discovered judges {ids}",
+        })
+
+    return improvements
+
+
 def build(args: argparse.Namespace) -> dict[str, Any]:
     results_root = Path(args.results_root).resolve()
     dd_tool = args.daydream_tool
@@ -285,7 +348,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     dashboard = json.loads(Path(args.dashboard).read_text()) if Path(args.dashboard).is_file() else {}
     display_names = dashboard.get("tool_display_names", {})
     tool_colors = dashboard.get("tool_colors", {})
-    labels = json.loads(Path(args.pr_labels).read_text()) if Path(args.pr_labels).is_file() else {}
+    labels_path = Path(args.pr_labels)
+    labels = json.loads(labels_path.read_text()) if labels_path.is_file() else {}
+    labels_source = str(labels_path.resolve()) if labels_path.is_file() else None
 
     judges_raw = discover_judges(results_root, args.exclude_tool)
 
@@ -493,6 +558,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "per_pr_scores": per_pr_scores,
         "slices": slices,
         "latency_field": latency_field,
+        "improvements": _build_improvements(judges_out, slices, dd_tool, labels_source),
     }
 
 
