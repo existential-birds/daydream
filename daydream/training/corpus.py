@@ -876,6 +876,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         config.out_path.parent.mkdir(parents=True, exist_ok=True)
         schema_dst = config.out_path.parent / "schema.json"
         shutil.copyfile(SCHEMA_V1_PATH, schema_dst)
+        # Emits no records, so any prior lineage.json from an earlier build is
+        # removed to keep the manifest faithful to the (now empty) JSONL.
+        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
         return _summary(0, 0, 0, 0)
 
     # 2. Resolve archive dir.
