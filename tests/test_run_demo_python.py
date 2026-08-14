@@ -1,5 +1,6 @@
 """Regression: ``scripts/run_demo_python.py --skip-setup`` must reuse an existing repo."""
 
+import importlib.util
 import sys
 import types
 from pathlib import Path
@@ -9,15 +10,23 @@ import pytest
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 
 
+def _load_script_module(name: str) -> types.ModuleType:
+    """Load a scripts/ module without mutating interpreter sys.path."""
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS_DIR / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_run_demo_python_skip_setup_reuses_existing_repo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--skip-setup`` must not create or touch an existing repo, and must run daydream on it."""
-    # Add scripts dir to sys.path inside the test, scoped by monkeypatch,
-    # to avoid session-level side effects from module-level sys.path mutation.
-    monkeypatch.setattr(sys, "path", [str(SCRIPTS_DIR)] + sys.path)
-    import _demo_common  # noqa: E402
-    import run_demo_python  # noqa: E402
+    # Load scripts/ modules via importlib so we never mutate interpreter sys.path.
+    _demo_common = _load_script_module("_demo_common")
+    run_demo_python = _load_script_module("run_demo_python")
 
     class _SubprocessRecorder:
         """Captures the daydream subprocess command without executing it."""
