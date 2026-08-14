@@ -1,7 +1,7 @@
 """Idle-stall detection and teardown for the pi/codex subprocess backends.
 
 Deterministic by construction — no test here races two clocks. The stall,
-no-retry, wall-budget, and SIGKILL-escalation tests drive the real backend
+retry, wall-budget, and SIGKILL-escalation tests drive the real backend
 code (spawn call, readline loop, idle window, shielded teardown) against an
 in-process :class:`~tests.harness.fake_cli_process.FakeCliProcess` at the
 ``asyncio.create_subprocess_exec`` boundary. Silence is modeled as a
@@ -258,8 +258,8 @@ def test_default_exceeds_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # --------------------------------------------------------------------------
-# Terminal — driven through run_agent, the production call site. A stalled
-# stream must not cause the backend to relaunch after the full idle window.
+# Retryable — driven through run_agent, the production call site. A stalled
+# stream consumes the backend's bounded retry budget after the full idle window.
 # --------------------------------------------------------------------------
 
 

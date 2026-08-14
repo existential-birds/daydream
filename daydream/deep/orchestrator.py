@@ -1149,15 +1149,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
             # Fresh successful run supersedes any stale failures record.
             failures_p.unlink()
     else:
-        # Resume: reconstruct the expected per-stack output paths on disk.
+        # Resume: resurrect any prior failure summary before reconstructing
+        # outputs, so failed stacks never re-enter the parse pipeline.
         from daydream.deep.artifacts import per_stack_review_path
 
-        per_stack_outputs = {
-            stack.stack_name: per_stack_review_path(dd, stack.stack_name)
-            for stack in stacks
-        }
-        # Resume also resurrects any prior failure summary so the merge
-        # prompt can still note uncovered stacks.
         failures_p = per_stack_failures_path(dd)
         if failures_p.is_file():
             try:
@@ -1166,6 +1161,11 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                     failed_stacks = {str(k): str(v) for k, v in loaded.items()}
             except json.JSONDecodeError:
                 failed_stacks = {}
+        per_stack_outputs = {
+            stack.stack_name: per_stack_review_path(dd, stack.stack_name)
+            for stack in stacks
+            if stack.stack_name not in failed_stacks
+        }
     ctx.data["per_stack_outputs"] = per_stack_outputs
     ctx.data["failed_stacks"] = failed_stacks
 
@@ -1190,10 +1190,12 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         expected_paths: list[Path] = []
         missing_stacks: list[str] = []
         for stack in stacks:
+            if stack.stack_name in failed_stacks:
+                continue
             records_path = per_stack_records_path(dd, stack.stack_name)
             if records_path.is_file():
                 expected_paths.append(records_path)
-            elif stack.stack_name not in failed_stacks:
+            else:
                 missing_stacks.append(stack.stack_name)
         if missing_stacks:
             print_error(
@@ -1230,11 +1232,6 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         async with phase_scope(DaydreamPhase.PARSE):
             async with anyio.create_task_group() as tg:
                 for stack_name, output_path in sorted(per_stack_outputs.items()):
-                    # An exhausted per-stack review has no review markdown to parse.
-                    # Keep completed siblings in the parse/merge pipeline; the
-                    # failure map is the explicit coverage record for this stack.
-                    if stack_name in failed_stacks:
-                        continue
                     # Every stack -- language or the structural meta-stack --
                     # parses with the severity-bearing PER_STACK_RECORD_SCHEMA.
                     # Issue #314: the structural reviewer calibrates anti-slop

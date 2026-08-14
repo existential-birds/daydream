@@ -313,6 +313,13 @@ _SERVER_ERROR_TOKENS = (
 )
 
 
+def _is_stream_truncation_message(normalized_message: str) -> bool:
+    """Return True when a normalized message reports an unfinished stream."""
+    return "finish_reason" in normalized_message and any(
+        token in normalized_message for token in ("stream", "ended", "end")
+    )
+
+
 def _is_retryable_error_message(message: str) -> bool:
     """Return True if the error message signals a transient overload or rate-limit.
 
@@ -327,7 +334,7 @@ def _is_retryable_error_message(message: str) -> bool:
     # Unambiguous literals — plain substring is safe.
     if any(token in lower for token in _RATE_LIMIT_TOKENS + _SERVER_ERROR_TOKENS):
         return True
-    if "finish_reason" in lower and any(token in lower for token in ("stream", "ended", "end")):
+    if _is_stream_truncation_message(lower):
         return True
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return True
@@ -369,7 +376,7 @@ def _pi_error_category(message: str) -> str:
         return "SERVER_ERROR"
     if any(token in lower for token in ("timed out", "timeout", "deadline exceeded")):
         return "TIMEOUT"
-    if "finish_reason" in lower and any(token in lower for token in ("stream", "ended", "end")):
+    if _is_stream_truncation_message(lower):
         return "STREAM_TRUNCATION"
     if any(signature in lower for signature in STREAM_DROP_SIGNATURES):
         return "STREAM_DROP"
