@@ -57,9 +57,7 @@ def has_checkout(job: dict[str, Any]) -> bool:
 # never ${{ }} interpolation, which would splice attacker-controlled text into the
 # shell.
 
-_EVENT_INTERP = re.compile(
-    r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}"
-)
+_EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
 
 
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
@@ -69,8 +67,7 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
         for step in job["steps"]:
             if "run" in step:
                 assert not _EVENT_INTERP.search(step["run"]), (
-                    f"{wf_path.name}:{job_name}: event data must reach run: via env:, "
-                    f"never ${{{{ }}}} interpolation"
+                    f"{wf_path.name}:{job_name}: event data must reach run: via env:, never ${{{{ }}}} interpolation"
                 )
 
 
@@ -78,9 +75,7 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
 # the moving `main` tip. Fails on release until the template pin is bumped in
 # lockstep with the package version.
 
-_INSTALL_RE = re.compile(
-    r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
-)
+_INSTALL_RE = re.compile(r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?")
 
 
 def _package_version() -> str:
@@ -138,23 +133,29 @@ _APP_TOKEN_ACTION = "actions/create-github-app-token@fee1f7d63c2ff003460e3d13972
 # job, a refloated pin, or a newly added unpinned token action fails loudly rather
 # than being silently absorbed by a wildcard.
 _APP_TOKEN_PIN_CASES = [
-    (TEMPLATES_DIR / "daydream-post.yml", "template-post",
-     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
-    (REPO_WORKFLOWS_DIR / "daydream-post.yml", "live-post",
-     [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)]),
-    (TEMPLATES_DIR / "daydream-command.yml", "template-command",
-     [("dispatch", _APP_TOKEN_ACTION)]),
-    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command",
-     [("dispatch", _APP_TOKEN_ACTION)]),
-    (TEMPLATES_DIR / "single" / "daydream.yml", "single",
-     [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION),
-      ("surface-failure", _APP_TOKEN_ACTION)]),
+    (
+        TEMPLATES_DIR / "daydream-post.yml",
+        "template-post",
+        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
+    ),
+    (
+        REPO_WORKFLOWS_DIR / "daydream-post.yml",
+        "live-post",
+        [("post", _APP_TOKEN_ACTION), ("surface-analyze-failure", _APP_TOKEN_ACTION)],
+    ),
+    (TEMPLATES_DIR / "daydream-command.yml", "template-command", [("dispatch", _APP_TOKEN_ACTION)]),
+    (REPO_WORKFLOWS_DIR / "daydream-command.yml", "live-command", [("dispatch", _APP_TOKEN_ACTION)]),
+    (
+        TEMPLATES_DIR / "single" / "daydream.yml",
+        "single",
+        [("gate", _APP_TOKEN_ACTION), ("post", _APP_TOKEN_ACTION), ("surface-failure", _APP_TOKEN_ACTION)],
+    ),
 ]
 
 
-@pytest.mark.parametrize("wf_path,expected",
-                         [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES],
-                         ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES])
+@pytest.mark.parametrize(
+    "wf_path,expected", [(p, e) for p, _id, e in _APP_TOKEN_PIN_CASES], ids=[_id for _, _id, _ in _APP_TOKEN_PIN_CASES]
+)
 def test_workflows_pin_create_github_app_token(wf_path: Path, expected: list) -> None:
     wf = load_workflow(wf_path)
     token_action_uses = [
@@ -184,12 +185,9 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     """
     text = wf_path.read_text(encoding="utf-8")
     assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text, (
-        f"{wf_path.name}: Post findings step must export BOT_LOGIN from "
-        f"vars.DAYDREAM_BOT_HANDLE (issue #254)"
+        f"{wf_path.name}: Post findings step must export BOT_LOGIN from vars.DAYDREAM_BOT_HANDLE (issue #254)"
     )
-    assert '--bot-login "$BOT_LOGIN"' in text, (
-        f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
-    )
+    assert '--bot-login "$BOT_LOGIN"' in text, f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
 
 
 def test_single_setup_preserves_privilege_split() -> None:
@@ -252,9 +250,7 @@ def test_repo_review_authenticates_codex_before_running() -> None:
     ],
     ids=["install", "security-model"],
 )
-def test_repo_workflow_readme_documents_codex_credential(
-    section_start: str, section_end: str
-) -> None:
+def test_repo_workflow_readme_documents_codex_credential(section_start: str, section_end: str) -> None:
     wf_text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
     readme_text = (REPO_WORKFLOWS_DIR / "README.md").read_text(encoding="utf-8")
 
