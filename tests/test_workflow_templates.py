@@ -6,8 +6,10 @@ permission dicts). They guard only the handful of properties a single file-read
 cannot verify and that a careless edit could silently break:
 
 - No untrusted event data is interpolated into a ``run:`` body (injection).
+- Every non-local action ``uses:`` in the live and shipped bot workflows
+  resolves to a full commit SHA (never a mutable tag/branch/expression).
 - The daydream install stays pinned to the current release tag (cross-file
-  drift against ``pyproject.toml``).
+  drift against ``pyproject.toml``), in every live and shipped workflow.
 - Every App-token action in the live and packaged posting workflows stays pinned to the approved v2.2.2 commit.
 - The privilege split holds: the job that checks out untrusted PR code never
   holds the App key, and the privileged jobs never check out PR code.
@@ -128,8 +130,8 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
 
 
 # Install-pin drift guard: the bot must install a pinned daydream release, never
-# the moving `main` tip. Fails on release until the template pin is bumped in
-# lockstep with the package version.
+# the moving `main` tip, across every live and shipped workflow. Fails on
+# release until the pin is bumped in lockstep with the package version.
 
 _INSTALL_RE = re.compile(
     r"uv tool install\s+git\+https://github\.com/existential-birds/daydream(?P<ref>@\S+)?"
@@ -237,8 +239,8 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     GraphQL dedup and suppresses nothing on the REST side.
 
     Pinned on BOTH the shipped template and the repo's own live workflow —
-    the two files are intentionally divergent in other fields (install-pin,
-    surface-failure guard) but this invariant must hold for both.
+    the two files retain distinct failure-surfacing conditions, but this
+    bot-login invariant must hold for both.
     """
     text = wf_path.read_text(encoding="utf-8")
     assert "BOT_LOGIN: ${{ vars.DAYDREAM_BOT_HANDLE }}" in text, (
