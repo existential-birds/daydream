@@ -100,6 +100,12 @@ async def test_five_thinking_panels_render_in_under_two_seconds(monkeypatch: pyt
         ResultEvent(structured_output=None, continuation=None),
     ]
 
+    # Warm up run_agent/ScriptedBackend setup and Console construction so that
+    # setup cost is not counted against the wall-clock bound: under loaded
+    # parallel CI (pytest -n auto) that setup can push elapsed past 2.0s and
+    # flake the regression (issue #336).
+    await render_agent(monkeypatch, events, quiet=False)
+
     start = time.perf_counter()
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
     elapsed = time.perf_counter() - start

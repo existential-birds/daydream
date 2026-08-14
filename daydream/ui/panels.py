@@ -53,35 +53,18 @@ from daydream.ui.tools import (
 
 
 class LiveThinkingPanel:
-    """Animated thinking panel with crazy spinners in title.
+    """Thinking panel rendered statically.
 
     Displays the AI's thought process in a purple-styled panel
-    with animated spinners alongside the thought bubble icon.
+    with a stable title, rendered immediately.
     """
 
     def __init__(self, console: Console, content: str, max_length: int = 300) -> None:
         """Initialize the panel."""
         self._console = console
         self._content = content if len(content) <= max_length else content[:max_length] + "..."
-        self._spinner = CrazySpinner(num_spinners=3)
 
-    def __rich__(self) -> Panel:
-        """Render panel with animated title."""
-        title = Text()
-        title.append("💭 Thinking")
-        title.append_text(self._spinner.render())
-
-        return Panel(
-            Markdown(self._content),
-            title=title,
-            title_align="left",
-            box=box.ROUNDED,
-            border_style=STYLE_PURPLE,
-            style=Style(color=NEON_COLORS["purple"], italic=True),
-            padding=(0, 1),
-        )
-
-    def show(self, duration: float = 1.0) -> None:
+    def show(self) -> None:
         """Render the thinking panel immediately."""
         self._console.print()
         self._console.print(
