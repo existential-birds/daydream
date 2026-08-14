@@ -49,7 +49,7 @@ _SAFE_DIRNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 # re-anchor write share it so a rename can never silently stop pruning.
 _REANCHOR_DIR_SUFFIX = "-reanchor"
 REANCHORED_STATUS_PREFIX = "REANCHORED"
-_REANCHORED_LANDED = re.compile(r"^REANCHORED \(landed at (.+)\)$")
+_REANCHORED_LANDED = re.compile(rf"^{re.escape(REANCHORED_STATUS_PREFIX)} \(landed at (.+)\)$")
 
 
 def load_rejections(plans_dir: Path) -> dict[str, dict[str, Any]]:
