@@ -130,6 +130,19 @@ _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
 
+def test_rundir_golden_step_11_message_is_inert(rundir_golden: Path) -> None:
+    """The committed golden trajectory's single user-authored step must not carry
+    instruction-bearing text an automated reviewer could mistake for trusted
+    direction. A directive-shaped message returning to this slot fails the build."""
+    trajectory = json.loads((rundir_golden / "trajectory.json").read_text(encoding="utf-8"))
+    step_11 = [s for s in trajectory["steps"] if s.get("step_id") == 11]
+    assert len(step_11) == 1
+    step = step_11[0]
+    assert set(step) == {"extra", "message", "source", "step_id", "timestamp"}
+    assert step["source"] == "user"
+    assert step["message"] == ""
+
+
 async def test_intrinsic_composite_parity(
     tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
