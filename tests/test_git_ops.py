@@ -1455,11 +1455,14 @@ def test_gh_api_timeout_redacts_authorization_token(
         pytest.param("timeout", "timed out after", id="timeout"),
         pytest.param("api-error", "synthetic API failure", id="api-error"),
         pytest.param("invalid-json", "returned invalid JSON", id="invalid-json"),
+        pytest.param("rate-limit", "rate limit", id="rate-limit"),
+        pytest.param("timeout-warning", "timed out after", id="timeout-warning"),
     ],
 )
 def test_gh_api_manifest_conversion_failures_redact_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     failure_mode: str,
     expected_fragment: str,
 ) -> None:
@@ -1477,8 +1480,12 @@ def test_gh_api_manifest_conversion_failures_redact_code(
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if failure_mode == "spawn-error":
             raise OSError(f"synthetic subprocess failure: {endpoint}")
-        if failure_mode == "timeout":
+        if failure_mode in ("timeout", "timeout-warning"):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+        if failure_mode == "rate-limit":
+            return subprocess.CompletedProcess(
+                args=["gh"], returncode=1, stdout="", stderr=f"secondary rate limit: {endpoint}"
+            )
         if failure_mode == "api-error":
             return subprocess.CompletedProcess(
                 args=["gh"], returncode=1, stdout="", stderr=f"synthetic API failure: {endpoint}"
@@ -1487,13 +1494,32 @@ def test_gh_api_manifest_conversion_failures_redact_code(
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
 
-    with pytest.raises(GitError) as excinfo:
-        git_ops.gh_api(repo, endpoint, method="POST")
+    # The timeout retry-warning renderer (git_ops.py:403) only fires when the
+    # call is idempotent and _gh_retries()>0; the other rows run with the
+    # default retries=0 to exercise the non-retry paths.
+    kwargs: dict[str, Any] = {"method": "POST"}
+    if failure_mode == "timeout-warning":
+        monkeypatch.setattr(git_ops, "_gh_retries", lambda: 1)
+        kwargs["idempotent"] = True
+
+    with caplog.at_level(logging.WARNING, logger="daydream.git_ops"):
+        with pytest.raises(GitError) as excinfo:
+            git_ops.gh_api(repo, endpoint, **kwargs)
+
+    # The rate-limit stderr must classify into a RateLimitError, not a plain GitError.
+    if failure_mode == "rate-limit":
+        assert isinstance(excinfo.value, git_ops.RateLimitError)
 
     msg = str(excinfo.value)
     assert sentinel not in msg
     assert "/app-manifests/***/conversions" in msg
     assert expected_fragment in msg
+
+    if failure_mode == "timeout-warning":
+        warnings = [r.getMessage() for r in caplog.records]
+        assert warnings, "expected a retry warning to be logged"
+        assert all(sentinel not in w for w in warnings)
+        assert any("/app-manifests/***/conversions" in w for w in warnings)
 
 
 def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
