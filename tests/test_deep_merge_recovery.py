@@ -216,3 +216,48 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert failures["__merge__"]["response_shape"] == "str"  # R4/AC2
     assert len(failures["__merge__"]["stack_context"]) > 0
     assert len(list(dd.glob("stack-*-records.json"))) > 0  # R5: completed records survive
+
+
+async def test_merge_failure_relaunch_picks_up_salvage(
+    multi_stack_target, monkeypatch, mute_side_effects
+) -> None:
+    """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = "prose with no item list"
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    stub.calls.clear()
+    stub.merge_emit_str = None
+    assert await _run_deep(multi_stack_target, start_at="fix") == 0
+    assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
+    assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
+
+
+async def test_merge_failure_merge_resume_skips_merge_entry(
+    multi_stack_target, monkeypatch, mute_side_effects
+) -> None:
+    """R6/AC4: a --start-at merge resume does not surface __merge__ as a failed stack.
+
+    Exercises the resume-loader skip directly: without it, the structured
+    ``__merge__`` failure entry would be str-coerced into ``failed_stacks`` and
+    re-surface as a garbled "Uncovered stacks" line in the relaunched merge
+    prompt, corrupting the resume contract.
+    """
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = "prose with no item list"
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    stub.calls.clear()
+    stub.merge_emit_str = None
+    stub.merge_emit_bare_list = [
+        _merge_item(1, "store/cache.py", "high", desc="unbounded cache write")
+    ]
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
+    assert merge_calls, "expected a merge-agent relaunch"
+    prompt = "\n".join(c["prompt"].lower() for c in merge_calls)
+    assert "__merge__" not in prompt

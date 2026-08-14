@@ -1159,7 +1159,13 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
             try:
                 loaded = json.loads(failures_p.read_text())
                 if isinstance(loaded, dict):
-                    failed_stacks = {str(k): str(v) for k, v in loaded.items()}
+                    # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
+                    # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
+                    # so it is never misread as a failed stack that would surface as
+                    # a garbled "Uncovered stacks" line on a resume (issue #361).
+                    failed_stacks = {
+                        str(k): str(v) for k, v in loaded.items() if isinstance(v, str)
+                    }
             except json.JSONDecodeError:
                 failed_stacks = {}
         per_stack_outputs = {
