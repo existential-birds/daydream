@@ -266,16 +266,55 @@ _GH_DEFAULT_TIMEOUT = 60
 _GH_DEFAULT_RETRIES = 2
 
 
+def _gh_int_env(name: str, default: int, *, is_valid: Callable[[int], bool], invalid_msg: str) -> int:
+    """Read *name* from the environment as an int, falling back to *default*.
+
+    A missing, non-integer, or invalid (per :func:`is_valid`) value logs a
+    warning and returns *default*, never raising.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        _logger.warning(
+            "%s=%r is not a valid integer; using default %d",
+            name,
+            raw,
+            default,
+        )
+        return default
+    if not is_valid(value):
+        _logger.warning(
+            "%s=%r %s; using default %d",
+            name,
+            raw,
+            invalid_msg,
+            default,
+        )
+        return default
+    return value
+
+
 def _gh_timeout() -> int:
     """Default ``gh`` subprocess timeout in seconds (env-overridable)."""
-    raw = os.environ.get("DAYDREAM_GH_TIMEOUT_SECONDS")
-    return int(raw) if raw else _GH_DEFAULT_TIMEOUT
+    return _gh_int_env(
+        "DAYDREAM_GH_TIMEOUT_SECONDS",
+        _GH_DEFAULT_TIMEOUT,
+        is_valid=lambda value: value > 0,
+        invalid_msg="must be positive",
+    )
 
 
 def _gh_retries() -> int:
     """Read-only ``gh`` timeout-retry budget (env-overridable)."""
-    raw = os.environ.get("DAYDREAM_GH_TIMEOUT_RETRIES")
-    return int(raw) if raw else _GH_DEFAULT_RETRIES
+    return _gh_int_env(
+        "DAYDREAM_GH_TIMEOUT_RETRIES",
+        _GH_DEFAULT_RETRIES,
+        is_valid=lambda value: value >= 0,
+        invalid_msg="is negative",
+    )
 
 
 def _run_git(
