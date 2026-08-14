@@ -286,3 +286,67 @@ async def test_direct_route_recomputes_existing_artifacts_for_current_review(tmp
     assert [c["text"] for c in candidates[URL]["daydream"]] == ["new candidate"]
     assert evals[URL]["daydream"]["total_candidates"] == 1
     assert scores.total_tp == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_scoring_filters_extraction_and_dedup_to_selected_urls(tmp_path):
+    model = "claude-opus-4-5-20251101"
+    model_dir = model_results_dir(tmp_path, model)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # Two benchmark-data entries: selected (URL) and unselected (UNSELECTED_URL,
+    # whose golden comment + review body carry the sentinel).
+    (tmp_path / "results" / "benchmark_data.json").write_text(json.dumps({
+        URL: {
+            "golden_comments": [{"comment": "Bug one", "severity": "medium"}],
+            "reviews": [{"tool": "daydream", "repo_name": "repo", "pr_url": URL,
+                         "review_comments": [{"body": "Bug one.\n\nBug two in cache keys."}]}],
+        },
+        UNSELECTED_URL: {
+            "golden_comments": [{"comment": UNSELECTED_SENTINEL, "severity": "medium"}],
+            "reviews": [{"tool": "daydream", "repo_name": "repo", "pr_url": UNSELECTED_URL,
+                         "review_comments": [{"body": UNSELECTED_SENTINEL}]}],
+        },
+    }))
+
+    # Stale selected leaves + preserved unselected leaves (sentinel-bearing).
+    preserved_candidates = [{"text": UNSELECTED_SENTINEL, "path": None, "line": None}]
+    (model_dir / "candidates.json").write_text(json.dumps({
+        URL: {"daydream": [{"text": "stale selected candidate", "path": None, "line": None}]},
+        UNSELECTED_URL: {"daydream": preserved_candidates},
+    }))
+    preserved_groups = [[0, 1]]
+    (model_dir / "dedup_groups.json").write_text(json.dumps({
+        URL: {"daydream": [[0]]},
+        UNSELECTED_URL: {"daydream": preserved_groups},
+    }))
+
+    client = FakeAnthropicJson([
+        {"issues": ["Bug one", "Bug two"]},          # extraction (selected only)
+        {"groups": [[0, 1]]},                         # dedup (selected only)
+        {"reasoning": "matches", "match": True, "confidence": 0.9},    # judge: golden x cand 0
+        {"reasoning": "no match", "match": False, "confidence": 0.2},  # judge: golden x cand 1
+    ])
+
+    scores = await run_anthropic_scoring(
+        tmp_path, model, golden_urls=[URL], tool="daydream", client=client,
+    )
+
+    # Exactly four completions: extraction, dedup, two golden-candidate verdicts.
+    assert len(client.requests) == 4
+    # No model work touches unselected PR text.
+    assert all(UNSELECTED_SENTINEL not in req[1] for req in client.requests)
+
+    # Selected leaves replaced with fresh artifacts.
+    candidates = json.loads((model_dir / "candidates.json").read_text())
+    assert [c["text"] for c in candidates[URL]["daydream"]] == ["Bug one", "Bug two"]
+    dedup = json.loads((model_dir / "dedup_groups.json").read_text())
+    assert dedup[URL]["daydream"] == [[0, 1]]
+
+    # Unselected leaves structurally unchanged (load-then-merge preservation).
+    assert candidates[UNSELECTED_URL]["daydream"] == preserved_candidates
+    assert dedup[UNSELECTED_URL]["daydream"] == preserved_groups
+
+    # Selected-only scoring.
+    assert scores.scored_pr_count == 1
+    assert scores.total_tp == 1
