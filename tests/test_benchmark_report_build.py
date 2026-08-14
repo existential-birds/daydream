@@ -437,11 +437,14 @@ def test_main_rejects_report_with_no_eligible_judge_panel(
     # both skipped judges listed, in sorted (skipped_judges) order
     assert msg.index("claude-opus-4-5-20251101") < msg.index("gpt-5.2")
 
-def _anchor_corpus(root: Path) -> argparse.Namespace:
-    """Two retained judges where sorted-first (a-first-judge, daydream on 1 PR,
-    totals TP=1/FP=9/FN=0) and largest-subset (z-anchor-judge, daydream on 2 PRs,
-    totals TP=5/FP=1/FN=1) differ. Both carry 5 fully-covered SaaS tools so both
-    are panel-retained; the shared daydream subset is z-anchor's 2 PRs."""
+def _anchor_corpus(root: Path, judge_evals: dict[str, dict[str, dict]]) -> argparse.Namespace:
+    """Two-PR corpus whose per-judge evaluations are given verbatim.
+
+    Each judge dir receives its own evaluations.json from ``judge_evals`` (judge id
+    -> {pr url -> tool leaves}); trajectories and PR labels are shared. The caller
+    controls retention/skip by how many SaaS tools each judge carries (>=5 is
+    panel-retained) and the daydream coverage, i.e. which PRs have a present
+    ``daydream-owl-alpha`` leaf."""
     args = _corpus(
         root,
         pr_trajectories={
@@ -454,18 +457,7 @@ def _anchor_corpus(root: Path) -> argparse.Namespace:
             SECOND_PR_URL: {"derived": {"language": "python"}},
         },
     )
-    saas = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
-    a_first = dict(saas)
-    a_first["daydream-owl-alpha"] = _leaf(tp=1, fp=9, fn=0)
-    z_anchor = dict(saas)
-    evals = {
-        "a-first-judge": {PR_URL: dict(a_first)},  # SECOND_PR_URL absent -> 1-PR subset
-        "z-anchor-judge": {
-            PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
-            SECOND_PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=3, fp=0, fn=0)},
-        },
-    }
-    for dname, j_evals in evals.items():
+    for dname, j_evals in judge_evals.items():
         jdir = root / "results" / dname
         jdir.mkdir(parents=True, exist_ok=True)
         (jdir / "evaluations.json").write_text(json.dumps(j_evals))
@@ -478,7 +470,20 @@ def test_report_build_resolves_anchor_judge_by_id(
     """Report-wide build outputs all trace to the serialized largest-subset anchor,
     not the sorted-first judge. Regression for #392."""
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
-    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path))
+    saas = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    a_first = dict(saas)
+    a_first["daydream-owl-alpha"] = _leaf(tp=1, fp=9, fn=0)
+    z_anchor = dict(saas)
+    # Both judges carry 5 SaaS tools (both panel-retained) and differ only in the
+    # sorted-first (1-PR daydream) vs largest-subset (2-PR daydream) identity.
+    evals = {
+        "a-first-judge": {PR_URL: dict(a_first)},  # SECOND_PR_URL absent -> 1-PR subset
+        "z-anchor-judge": {
+            PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+            SECOND_PR_URL: {**z_anchor, "daydream-owl-alpha": _leaf(tp=3, fp=0, fn=0)},
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
 
     # Judge order stays sorted; the anchor is the largest-subset judge.
     assert [j["id"] for j in report["judges"]] == ["a-first-judge", "z-anchor-judge"]
@@ -513,24 +518,13 @@ def test_template_consumers_resolve_anchor_judge_by_id(tmp_path: Path) -> None:
     assert "DATA.judges.find(j=>j.has_daydream)" not in template
 
 
-def _anchor_skipped_corpus(root: Path) -> argparse.Namespace:
-    """Two-PR corpus where the LARGEST-subset judge (a-skip-anchor, daydream on both
-    PRs) is panel-skipped for failing the SaaS-coverage gate (<5 SaaS tools), while a
-    later retained judge (z-retained, 5 SaaS tools) carries daydream on both PRs.
-    Pre-fix this made the report-wide anchor resolve to None: slices and the
-    priority-1 improvement silently vanished and the template anchor was undefined."""
-    args = _corpus(
-        root,
-        pr_trajectories={
-            PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
-            SECOND_PR_URL: ("cal.com-10601.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
-        },
-        judges={},
-        labels={
-            PR_URL: {"derived": {"language": "python"}},
-            SECOND_PR_URL: {"derived": {"language": "python"}},
-        },
-    )
+def test_report_anchor_falls_back_to_retained_judge_when_largest_subset_is_skipped(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the largest-subset judge is panel-skipped, the report-wide anchor, label
+    slices, and priority-1 improvement resolve to a retained judge carrying daydream
+    instead of silently vanishing. Regressions #384/#392."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
     saas5 = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
     skip_anchor = {"saas-0": _leaf(tp=1, fp=0), "saas-1": _leaf(tp=1, fp=0)}
     evals = {
@@ -539,27 +533,14 @@ def _anchor_skipped_corpus(root: Path) -> argparse.Namespace:
             PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=1, fp=2, fn=1)},
             SECOND_PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
         },
-        # Retained judge carrying daydream on both PRs -> the fallback anchor.
+        # Retained judge carrying daydream on both PRs, so its coverage equals the
+        # skipped judge's subset -> the fallback anchor.
         "z-retained": {
             PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
             SECOND_PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=3, fp=0, fn=0)},
         },
     }
-    for dname, j_evals in evals.items():
-        jdir = root / "results" / dname
-        jdir.mkdir(parents=True, exist_ok=True)
-        (jdir / "evaluations.json").write_text(json.dumps(j_evals))
-    return args
-
-
-def test_report_anchor_falls_back_to_retained_judge_when_largest_subset_is_skipped(
-    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """When the largest-subset judge is panel-skipped, the report-wide anchor, label
-    slices, and priority-1 improvement resolve to a retained judge carrying daydream
-    instead of silently vanishing. Regressions #384/#392."""
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
-    report: dict[str, Any] = build_mod.build(_anchor_skipped_corpus(tmp_path))
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
 
     # The skipped judge is not retained, and the anchor re-points to a retained one.
     assert [j["id"] for j in report["judges"]] == ["z-retained"]
@@ -570,6 +551,51 @@ def test_report_anchor_falls_back_to_retained_judge_when_largest_subset_is_skipp
     lang = next(sl for sl in report["slices"] if sl["title"] == "Language")
     row = next(r for r in lang["rows"] if r["label"] == "python")
     assert (row["n_prs"], row["tp"], row["fp"], row["fn"]) == (2, 5, 1, 1)
+
+    # Priority-1 cites the retained fallback anchor, not the skipped one.
+    p1 = next(im for im in report["improvements"] if im["priority"] == 1)
+    assert "z-retained" in p1["heading"]
+    assert "a-skip-anchor" not in p1["body"]
+
+
+def test_report_anchor_falls_back_to_retained_judge_with_strict_smaller_dd_subset(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strict-subset fallback: the retained fallback judge's daydream coverage is a
+    PROPER subset of the skipped largest-subset judge's daydream set. The anchor
+    re-points to the retained judge and its label slices and priority-1 improvement
+    reflect the retained judge's SMALLER daydream subset, rather than vanishing."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    saas5 = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    skip_anchor = {"saas-0": _leaf(tp=1, fp=0), "saas-1": _leaf(tp=1, fp=0)}
+    evals = {
+        # Largest daydream subset (2 PRs) but only 2 SaaS tools -> SaaS-coverage skip.
+        "a-skip-anchor": {
+            PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=1, fp=2, fn=1)},
+            SECOND_PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+        },
+        # Retained judge (5 SaaS tools) but daydream scored on ONLY the first PR:
+        # a strict subset of the skipped judge's 2-PR daydream set.
+        "z-retained": {
+            PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=4, fp=2, fn=0)},
+            SECOND_PR_URL: dict(saas5),  # no daydream leaf on the second PR
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
+
+    # The skipped judge is not retained; the anchor re-points to the retained one.
+    assert [j["id"] for j in report["judges"]] == ["z-retained"]
+    assert [s["id"] for s in report["skipped_judges"]] == ["a-skip-anchor"]
+    assert report["meta"]["anchor_judge"] == "z-retained"
+    # On fallback the cross-judge subset re-points to the retained anchor's real
+    # (smaller) daydream coverage, not the skipped judge's larger 2-PR set.
+    assert report["meta"]["subset_pr_count"] == 1
+    assert report["meta"]["subset_prs"] == [PR_URL]
+
+    # Slice evidence is keyed off the fallback anchor's OWN (smaller) daydream subset.
+    lang = next(sl for sl in report["slices"] if sl["title"] == "Language")
+    row = next(r for r in lang["rows"] if r["label"] == "python")
+    assert (row["n_prs"], row["tp"], row["fp"], row["fn"]) == (1, 4, 2, 0)
 
     # Priority-1 cites the retained fallback anchor, not the skipped one.
     p1 = next(im for im in report["improvements"] if im["priority"] == 1)

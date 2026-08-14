@@ -442,6 +442,15 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         anchor_judge = next((j for j in judges_out if j.get("has_daydream")), None)
         if anchor_judge is not None:
             anchor_judge_id = anchor_judge["id"]
+            # The fallback anchor's real daydream coverage may be a strict subset
+            # of the (skipped) largest-subset judge's. Re-point dd_subset to it so
+            # economy.n_prs, meta.subset_pr_count/subset_prs, anchor_evals, and the
+            # label slices all trace to the retained anchor instead of reporting the
+            # skipped judge's larger subset.
+            dd_subset = {
+                pr for pr, t in judges_raw[anchor_judge_id]["evals"].items()
+                if _leaf_present(t.get(dd_tool))
+            }
     anchor_evals = judges_raw[anchor_judge_id]["evals"]
     per_pr_rows = []
     tot_prompt = tot_completion = tot_cached = 0
