@@ -476,6 +476,11 @@ async def test_cleanup_runs_on_exception(tmp_path: Path) -> None:
 
 async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
+    # Seed the source file the traversal entry reads. `../retained.cfg` resolves
+    # from the source root to tmp_path/retained.cfg; without it the copy loop
+    # would silently skip (not a file) and the fail-closed assertion below could
+    # never detect a regressed guard.
+    (tmp_path / "retained.cfg").write_text("secret\n")
     with pytest.raises(
         WorkspaceCopyPathError, match="must be relative and must not contain"
     ):
@@ -488,8 +493,10 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: P
             skip_tests=False,
         ) as ctx:
             pass  # never reached — the copy boundary rejects before yielding
-    # Fail-closed: no file escaped into the persistent parent (escape destination).
-    assert not (tmp_path / "retained.cfg").exists()
+    # Fail-closed: a regressed guard would copy the seeded source into
+    # dest/../retained.cfg == repo/.daydream/worktrees/retained.cfg (the escape
+    # destination). Assert nothing was written there.
+    assert not (repo / ".daydream" / "worktrees" / "retained.cfg").exists()
     # Cleanup ran: the ephemeral worktree was removed -> worktrees dir is empty.
     worktrees = repo / ".daydream" / "worktrees"
     assert not any(worktrees.iterdir())
