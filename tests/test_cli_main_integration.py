@@ -154,6 +154,52 @@ def test_cli_main_wrong_branch_exits_1(
     assert exc.value.code == 1
 
 
+def test_cli_main_rejects_workspace_copy_traversal(
+    repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An invalid --copy entry through the real entrypoint exits 1, touches no
+    external file, and leaves no stray ephemeral worktree.
+
+    ``--worktree`` forces an ephemeral workspace, so ``copy_files_into_ephemeral``
+    runs (with ``--copy`` supplying the offending entry). The WorkspaceCopyPathError
+    propagates out of ``open_workspace`` to runner.run's ``except git_ops.GitError``
+    -> return 1. The WrongBranch guard is bypassed because force_worktree is set
+    (runner.py:762), so the copy error fires first.
+    """
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+    _install_stub_backend(monkeypatch, repo_with_origin)
+    # The error path renders a "Workspace Error" panel via runner.print_error; silence it.
+    monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
+
+    outside = repo_with_origin.parent / "outside-source.txt"
+    outside.write_text("KEEP\n")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "daydream",
+            str(repo_with_origin),
+            "--worktree",
+            "--copy",
+            "safe.txt",
+            "--copy",
+            "../outside-source.txt",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    # The escaped destination was never written; the external source is untouched.
+    assert outside.read_text() == "KEEP\n"
+    # No stray ephemeral worktree child remains after cleanup.
+    wt_root = repo_with_origin / ".daydream" / "worktrees"
+    assert not wt_root.exists() or not any(wt_root.iterdir())
+
+
 def test_non_tty_auto_enables_non_interactive(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
