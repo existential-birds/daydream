@@ -1,4 +1,5 @@
 import json
+import sys
 from copy import deepcopy
 from datetime import date
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
+from daydream.cli import main as cli_main
 from daydream.improve.assemble import (
     AssemblyIssue,
     assemble_plan,
@@ -3943,3 +3945,79 @@ def test_reanchored_plan_rows_returns_empty_when_none_reanchored(
     assert reanchored_plan_rows(plans_dir) == []
     # An absent index is also an empty result, never an error.
     assert reanchored_plan_rows(tmp_path / "does-not-exist") == []
+
+
+def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
+    """Re-anchor one plan into a fresh worktree; return the repo-relative landing path."""
+    assembled = _assembled(repo, _authored_plan(title="Fix N+1 catalog queries"))
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+    result = _write_plans(
+        repo / "daydream_plans",
+        [{"finding": _finding(), **assembled}],
+        planned_at=head_sha,
+    )
+    assert len(result["written"]) == 1
+    return Path(result["written"][0]["path"]).relative_to(repo).as_posix()
+
+
+def test_improve_list_reanchored_real_path_lists_reanchored_plan(
+    repo: Path,
+    head_sha: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "improve", "list-reanchored", str(repo)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "001" in out
+    assert "Fix N+1 catalog queries" in out
+    assert expected_rel in out
+
+
+def test_improve_list_reanchored_real_path_empty_exits_zero(
+    repo: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        sys, "argv", ["daydream", "improve", "list-reanchored", str(repo)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    assert "No re-anchored plans" in capsys.readouterr().out
+
+
+def test_improve_list_reanchored_json_mode(
+    repo: Path,
+    head_sha: str,
+    monkeypatch,
+    capsys,
+) -> None:
+    expected_rel = _make_reanchored_repo(repo, head_sha)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["daydream", "improve", "list-reanchored", "--json", str(repo)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli_main()
+    assert exc.value.code == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert len(rows) == 1
+    assert rows[0]["number"] == 1
+    assert rows[0]["title"] == "Fix N+1 catalog queries"
+    assert rows[0]["status"].startswith("REANCHORED")
+    assert rows[0]["landing_path"] == expected_rel
