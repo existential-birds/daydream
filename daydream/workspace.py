@@ -41,6 +41,16 @@ _DEFAULT_COPY_GLOB = ".env.*"
 # --- Public types ------------------------------------------------------------
 
 
+class WorkspaceCopyPathError(GitError):
+    """Raised when a ``[tool.daydream.workspace] copy`` / ``--copy`` entry
+    escapes the source checkout or the ephemeral destination worktree.
+
+    This is the fail-closed boundary of :func:`copy_files_into_ephemeral`:
+    no workspace-copy entry may read a file outside the source checkout or
+    write outside the ephemeral worktree. Raised before any file is copied.
+    """
+
+
 @dataclass(frozen=True)
 class WorkContext:
     """Resolved working environment for a daydream run.
@@ -222,6 +232,12 @@ def copy_files_into_ephemeral(
     Files that do not exist in *source* (or are not regular files) are
     skipped silently.
 
+    Before anything is copied, every entry (de-duplicated, first-occurrence
+    order) is validated fail-closed against BOTH *source* and *dest* roots by
+    :func:`_resolve_workspace_copy_path`. An absolute/``..`` entry or one that
+    resolves outside either root raises :class:`WorkspaceCopyPathError` and
+    aborts the whole copy, leaving nothing partially copied.
+
     Args:
         extra: Optional additional relative paths from CLI flags.
         skip: When True, return ``[]`` immediately (no-op for read-only
@@ -238,14 +254,25 @@ def copy_files_into_ephemeral(
     if extra:
         entries.extend(extra)
 
-    copied: list[Path] = []
+    # De-duplicate while preserving first-occurrence order.
+    unique: list[Path] = []
     seen: set[Path] = set()
     for rel in entries:
         rel_path = Path(rel)
         if rel_path in seen:
             continue
         seen.add(rel_path)
+        unique.append(rel_path)
 
+    # Fail-closed validation against BOTH the source and destination roots,
+    # before any copy runs. An entry that escapes either root aborts the
+    # whole copy, leaving nothing partially copied.
+    for rel in unique:
+        _resolve_workspace_copy_path(rel, source, "source")
+        _resolve_workspace_copy_path(rel, dest, "destination")
+
+    copied: list[Path] = []
+    for rel_path in unique:
         src_file = source / rel_path
         if not src_file.is_file():
             continue
@@ -259,6 +286,39 @@ def copy_files_into_ephemeral(
 
 
 # --- Internal helpers --------------------------------------------------------
+
+
+def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> Path:
+    """Resolve a workspace-copy entry against *root*, fail-closed.
+
+    Returns the validated canonical path. Mirrors the canonical-containment
+    idiom in ``daydream/improve/command_contract.py`` (``resolve(strict=False)``
+    + ``is_relative_to(root)``) but, on a containment violation, raises a
+    :class:`WorkspaceCopyPathError` naming *root_label* instead of returning a
+    bool.
+
+    Raises:
+        WorkspaceCopyPathError: If *entry* is absolute or contains ``..``, or
+            resolves outside *root*, or cannot be resolved at all.
+    """
+    if entry.is_absolute() or ".." in entry.parts:
+        raise WorkspaceCopyPathError(
+            f"workspace copy path must be relative and must not contain '..': {entry}"
+        )
+
+    try:
+        resolved = (root / entry).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCopyPathError(
+            f"workspace copy path could not be resolved in the {root_label} worktree: {entry}"
+        ) from exc
+
+    if not resolved.is_relative_to(root.resolve()):
+        raise WorkspaceCopyPathError(
+            f"workspace copy path resolves outside the {root_label} worktree: {entry}"
+        )
+
+    return resolved
 
 
 def _make_run_id() -> str:

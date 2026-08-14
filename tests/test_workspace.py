@@ -18,6 +18,7 @@ from daydream import git_ops
 from daydream.git_ops import BranchNotFoundError
 from daydream.workspace import (
     WorkContext,
+    WorkspaceCopyPathError,
     copy_files_into_ephemeral,
     open_workspace,
 )
@@ -304,6 +305,92 @@ def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) ->
     rel = {str(p) for p in copied}
     assert ".env" in rel
     assert (dest / ".env").read_text() == "SECRET=1\n"
+
+
+# --- 7b. fail-closed copy entry validation --------------------------------
+
+
+@pytest.mark.parametrize("source_kind", ["config", "extra"])
+@pytest.mark.parametrize("escape_kind", ["parent", "absolute"])
+def test_copy_rejects_absolute_and_parent_entries_before_copy(
+    tmp_path: Path, source_kind: str, escape_kind: str
+) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    (repo / ".gitignore").write_text(".env\n")
+    _git(repo, "add", ".gitignore")
+    _commit(repo, "ignore env")
+    (repo / ".env").write_text("E=1\n")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("KEEP\n")
+    entry = "../outside.txt" if escape_kind == "parent" else str(outside)
+
+    if source_kind == "config":
+        (repo / "pyproject.toml").write_text(
+            f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n'
+        )
+        extra = None
+    else:
+        (repo / "pyproject.toml").write_text(
+            '[tool.daydream.workspace]\ncopy = [".env"]\n'
+        )
+        extra = [Path(entry)]
+
+    dest = tmp_path / "ephemeral"
+    dest.mkdir()
+
+    with pytest.raises(
+        WorkspaceCopyPathError, match="must be relative and must not contain"
+    ):
+        copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
+
+    # Fail-closed: the valid earlier ".env" entry was NOT copied.
+    assert not (dest / ".env").exists()
+    # The external file was never read or modified.
+    assert outside.read_text() == "KEEP\n"
+
+
+@pytest.mark.parametrize("root_kind", ["source", "destination"])
+def test_copy_rejects_resolved_symlink_escape(
+    tmp_path: Path, root_kind: str
+) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    secret = outside_dir / "secret.txt"
+    secret.write_text("KEEP\n")
+    (repo / "pyproject.toml").write_text(
+        '[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n'
+    )
+    (repo / "sub").mkdir()
+
+    dest = tmp_path / "ephemeral"
+    dest.mkdir()
+    (dest / "sub").mkdir()
+
+    if root_kind == "source":
+        # The SOURCE-side "sub" is a symlink escaping the checkout. Do not
+        # write the real nested file first -- the directory is replaced by the
+        # symlink below.
+        (repo / "sub").rmdir()
+        (repo / "sub").symlink_to(outside_dir, target_is_directory=True)
+        root_label = "source"
+    else:
+        # The source has a real nested file (passes source containment); the
+        # DESTINATION-side "sub" is a symlink escaping the worktree.
+        (repo / "sub" / "leak.txt").write_text("real\n")
+        (dest / "sub").rmdir()
+        (dest / "sub").symlink_to(outside_dir, target_is_directory=True)
+        root_label = "destination"
+
+    with pytest.raises(
+        WorkspaceCopyPathError,
+        match=f"resolves outside the {root_label} worktree",
+    ):
+        copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
+
+    # Nothing was written into the escaped directory.
+    assert not (outside_dir / "leak.txt").exists()
+    assert secret.read_text() == "KEEP\n"
 
 
 # --- 8. extra paths combine -------------------------------------------------
