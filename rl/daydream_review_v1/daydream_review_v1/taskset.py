@@ -70,6 +70,13 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
     return {**manifest, **metrics}
 
 
+#: Git pathspec (shell-quoted) excluding daydream's own ``.daydream/`` artifacts
+#: from the fix signal. Shared by both dirty-tree and moved-HEAD probes so the
+#: exclusion set only drifts by intentional edit, never by one string falling
+#: out of sync.
+DAYDREAM_EXCLUDE = "':(exclude).daydream'"
+
+
 async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     """Whether the rollout actually changed the code under review.
 
@@ -98,7 +105,7 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
         [
             "sh",
             "-c",
-            f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no -- \':(exclude).daydream\')"',
+            f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no -- {DAYDREAM_EXCLUDE}")',
         ],
         {},
     )
@@ -118,7 +125,7 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
         [
             "sh",
             "-c",
-            f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD -- ':(exclude).daydream'",
+            f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD -- {DAYDREAM_EXCLUDE}",
         ],
         {},
     )
