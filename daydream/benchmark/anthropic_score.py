@@ -165,6 +165,11 @@ def _load_json_dict(path: Path, *, required: bool, missing_hint: str = "") -> di
     return data
 
 
+def _make_selection(golden_urls: Collection[str] | None) -> set[str] | None:
+    """Return a set of PR URLs to restrict work to, or ``None`` for no filter."""
+    return set(golden_urls) if golden_urls is not None else None
+
+
 async def run_anthropic_extraction(
     benchmark_repo: Path,
     judge_model: str,
@@ -187,7 +192,7 @@ async def run_anthropic_extraction(
     candidates_file = results_dir / "candidates.json"
     all_candidates = _load_json_dict(candidates_file, required=False)
 
-    selected = set(golden_urls) if golden_urls is not None else None
+    selected = _make_selection(golden_urls)
     for golden_url, entry in data.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -236,7 +241,7 @@ async def run_anthropic_dedup(
     groups_file = results_dir / "dedup_groups.json"
     all_groups = _load_json_dict(groups_file, required=False)
 
-    selected = set(golden_urls) if golden_urls is not None else None
+    selected = _make_selection(golden_urls)
     for golden_url, tools in all_candidates.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -354,7 +359,7 @@ async def run_anthropic_evaluation(
     evals = _load_json_dict(evaluations_file, required=False)
 
     judge = AnthropicFindingJudge(client)
-    selected = set(golden_urls) if golden_urls is not None else None
+    selected = _make_selection(golden_urls)
     for golden_url, entry in data.items():
         if selected is not None and golden_url not in selected:
             continue
