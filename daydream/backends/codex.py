@@ -67,7 +67,19 @@ def _unwrap_shell_command(command: str) -> str:
 
 
 class CodexError(Exception):
-    """Raised when a Codex turn fails."""
+    """Raised when a Codex turn fails or the Codex CLI subprocess exits non-zero.
+
+    Two failure shapes, discriminated by ``category``:
+
+    * ``category is None`` — a structured ``turn.failed`` event (the default,
+      used for model-level errors surfaced in the JSONL stream).
+    * ``category == "PROCESS_EXIT"`` — the ``codex`` subprocess exited with a
+      non-zero return code, carrying captured diagnostic output.
+    """
+
+    def __init__(self, message: str, *, category: str | None = None):
+        super().__init__(message)
+        self.category = category
 
 
 class CodexBackend:
@@ -165,6 +177,8 @@ class CodexBackend:
         pending_item_ids: dict[str, str] = {}  # "type:content" → generated id (legacy)
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
         parse_warnings: list[str] = []  # observable parse-failure surface
+        _pending_result: ResultEvent | None = None
+        non_json_lines: list[str] = []  # non-JSON lines (stdout merged with stderr) for error diagnostics
         unmatched_seq = 0  # monotonic source for orphaned tool-result ids
 
         def _warn(msg: str, **detail: Any) -> None:
@@ -226,6 +240,10 @@ class CodexBackend:
                 except json.JSONDecodeError:
                     # Codex occasionally emits non-JSON status lines on stdout;
                     # skip them but leave a debug breadcrumb for triage.
+                    # Capture non-JSON lines for diagnostic surfacing on non-zero exit.
+                    if len(non_json_lines) >= 20:
+                        non_json_lines.pop(0)
+                    non_json_lines.append(raw_line)
                     _logger.debug("codex: non-JSON line skipped: %r", raw_line[:80])
                     continue
 
@@ -448,7 +466,7 @@ class CodexBackend:
                             data={"thread_id": thread_id},
                         )
 
-                    yield ResultEvent(
+                    _pending_result = ResultEvent(
                         structured_output=structured_result,
                         continuation=continuation_token,
                     )
@@ -461,6 +479,14 @@ class CodexBackend:
                     pass
 
             await proc.wait()
+
+            # Fail fast on non-zero exit: if codex crashed without emitting a
+            # turn.failed event, surface the failure with diagnostic output
+            # instead of reporting a successful completion with empty/partial
+            # output.
+            self._check_return_code(proc.returncode, non_json_lines)
+            if _pending_result is not None:
+                yield _pending_result
 
         finally:
             if proc is not None:
@@ -509,6 +535,29 @@ class CodexBackend:
             if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
                 parts.append(block.get("text", ""))
         return "".join(parts)
+
+    @staticmethod
+    def _check_return_code(
+        returncode: int | None,
+        non_json_lines: list[str],
+    ) -> None:
+        """Raise CodexError(PROCESS_EXIT) if the subprocess exited non-zero."""
+        if returncode is not None and returncode != 0:
+            tail = "\n".join(non_json_lines[-10:])
+            if non_json_lines:
+                detail = (
+                    f"\nCodex CLI output (last {min(len(non_json_lines), 10)} "
+                    f"non-JSON lines):\n{tail}"
+                )
+            else:
+                detail = (
+                    "\n(no non-JSON output captured — codex may have "
+                    "crashed before writing to stdout)"
+                )
+            raise CodexError(
+                f"Codex CLI exited with return code {returncode}.{detail}",
+                category="PROCESS_EXIT",
+            )
 
     @staticmethod
     def _write_temp_schema(schema: dict[str, Any]) -> str:
