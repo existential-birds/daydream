@@ -23,6 +23,8 @@ DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="doc
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
 
+BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
+
 
 def _build(*args: str) -> subprocess.CompletedProcess[str]:
     """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
@@ -101,3 +103,110 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
     # module-level marker that would also skip the static tests.
     assert getattr(test_green_baseline_gate_fails_the_build_on_a_red_suite, "pytestmark", None)
     assert getattr(test_green_baseline_builds_and_bakes_the_checkout, "pytestmark", None)
+
+
+@pytest.mark.parametrize(
+    "required_literal",
+    [
+        pytest.param(
+            "FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
+            id="python-base-index-digest",
+        ),
+        pytest.param("ARG UV_VERSION=0.11.29", id="uv-pin"),
+        pytest.param('pip install --no-cache-dir "uv==${UV_VERSION}"', id="uv-exact-install"),
+        pytest.param("ARG CLAUDE_CODE_VERSION=2.1.214", id="claude-version"),
+        pytest.param(
+            "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+            id="claude-release-fingerprint",
+        ),
+        pytest.param("ARG CODEX_VERSION=0.145.0", id="codex-version"),
+        pytest.param(
+            (
+                "amd64) target=x86_64-unknown-linux-musl; "
+                "checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;;"
+            ),
+            id="codex-amd64-checksum",
+        ),
+        pytest.param(
+            (
+                "arm64) target=aarch64-unknown-linux-musl; "
+                "checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;;"
+            ),
+            id="codex-arm64-checksum",
+        ),
+        pytest.param("ARG NODE_VERSION=22.17.1", id="node-version"),
+        pytest.param(
+            "amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;;",
+            id="node-amd64-checksum",
+        ),
+        pytest.param(
+            "arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;;",
+            id="node-arm64-checksum",
+        ),
+        pytest.param("ARG PI_VERSION=0.82.1", id="pi-version"),
+    ],
+)
+def test_base_dockerfile_pins_immutable_versions_and_checksums(required_literal: str) -> None:
+    """M1/M2/M3/M4 pin contract: every immutable identifier is present verbatim."""
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    assert required_literal in text, f"missing pinned literal {required_literal!r}"
+
+
+@pytest.mark.parametrize(
+    "marker_chain",
+    [
+        pytest.param(
+            (
+                "claude-code.asc",        # release-key download
+                "release_fingerprint",    # fingerprint comparison
+                "--import",               # gpg signing-key import
+                "manifest.json",          # manifest download
+                "manifest.json.sig",      # detached-signature download
+                "--verify",               # gpg verification
+                '"checksum"',             # manifest checksum extraction
+                "sha256sum -c -",         # binary checksum verification
+                "install -D -m 0755",     # install onto PATH
+            ),
+            id="claude",
+        ),
+        pytest.param(
+            (
+                "codex-${target}.tar.gz",  # archive download
+                "sha256sum -c -",          # verify
+                "tar -xzf",                # extract
+            ),
+            id="codex",
+        ),
+        pytest.param(
+            (
+                "node-v${NODE_VERSION}-linux-${node_arch}.tar.gz",  # archive download
+                "sha256sum -c -",                                   # verify
+                "tar -xzf",                                         # extract
+            ),
+            id="node",
+        ),
+    ],
+)
+def test_base_dockerfile_verifies_downloads_before_use(marker_chain: tuple[str, ...]) -> None:
+    """M3/M4/S2: each download-verify-extract chain is strictly ordered; verify precedes use."""
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    pos = text.find(marker_chain[0])
+    assert pos != -1, f"chain start {marker_chain[0]!r} not found"
+    for marker in marker_chain[1:]:
+        nxt = text.find(marker, pos + 1)
+        assert nxt > pos, f"{marker!r} must appear after {text[pos : pos + 40]!r}"
+        pos = nxt
+
+
+@pytest.mark.parametrize(
+    "forbidden_literal",
+    [
+        pytest.param("https://claude.ai/install.sh", id="remote-installer"),
+        pytest.param("| bash", id="bash-pipe"),
+        pytest.param("| tar", id="tar-pipe"),
+    ],
+)
+def test_base_dockerfile_does_not_pipe_downloads_into_shell_or_tar(forbidden_literal: str) -> None:
+    """M3/M4: no remote execution pipeline remains in the build contract."""
+    text = BASE_DOCKERFILE.read_text(encoding="utf-8")
+    assert forbidden_literal not in text, f"Dockerfile must not contain {forbidden_literal!r}"

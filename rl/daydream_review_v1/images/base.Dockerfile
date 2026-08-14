@@ -12,11 +12,17 @@
 # contract at rollout time — DaydreamReviewHarness.setup() refuses an image whose
 # selected backend's binary is missing (daydream_review_v1/harness.py:66-79).
 
-FROM python:3.12-slim
+# The base is pinned by its immutable multi-platform index digest, not a mutable
+# tag: a tag like `3.12-slim` tracks whatever `latest`-flavored manifest it
+# currently resolves to, so a base rebuilt later could silently pick up a moved
+# tag. The digest names one specific index for Python 3.12.13 slim and cannot
+# drift.
+FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 # git: the repo image clones from an in-container mirror and daydream shells out
 #   to git for every diff, patch and commit it takes.
 # curl + ca-certificates: how the three CLI layers below fetch their releases.
+# gnupg: verifies the signed Claude release manifest before its binary is trusted.
 # procps: daydream's subprocess backends terminate and reap child CLIs; without
 #   ps/kill a stalled-stream teardown is undiagnosable from inside the container.
 RUN apt-get update \
@@ -24,13 +30,17 @@ RUN apt-get update \
       ca-certificates \
       curl \
       git \
+      gnupg \
       procps \
  && rm -rf /var/lib/apt/lists/*
 
 # uv installs the daydream wheel into the system interpreter. There is no venv
 # on purpose: `daydream` must be on PATH for any process the harness starts,
-# and a rollout container hosts exactly one application.
-RUN pip install --no-cache-dir uv
+# and a rollout container hosts exactly one application. uv itself is pinned to
+# an exact version so the bootstrap tool cannot drift between builds.
+ARG UV_VERSION=0.11.29
+RUN pip install --no-cache-dir "uv==${UV_VERSION}" \
+ && uv --version
 
 # HOME is set before the CLI installs, not after, so the claude installer writes
 # its binary and its cache under the SAME home the harness later hands daydream
@@ -54,14 +64,55 @@ RUN uv pip install --system /tmp/${DAYDREAM_WHEEL} \
  && command -v daydream
 
 # --- claude ---------------------------------------------------------------
-# Cheapest of the three: one static binary from Anthropic's own installer, which
-# drops it at $HOME/.local/bin/claude (already on PATH above). Pinned, because an
-# unpinned agent CLI would silently change the rollout's tool loop between runs.
+# One static binary from Anthropic's signed release channel. Instead of piping
+# an upstream installer script into bash, the manifest is verified against a
+# pinned release-key fingerprint, the image's own Python extracts the expected
+# checksum from the signed manifest, and the binary is checksum-verified before
+# it is installed to /rollout/.local/bin/claude (already on PATH above). Pinned,
+# because an unpinned agent CLI would silently change the rollout's tool loop
+# between runs. Every failure here terminates the layer: no fallback release.
 ARG INSTALL_CLAUDE=1
 ARG CLAUDE_CODE_VERSION=2.1.214
 RUN if [ "${INSTALL_CLAUDE}" = "1" ]; then \
       set -eu; \
-      curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"; \
+      case "$(dpkg --print-architecture)" in \
+        amd64) platform=linux-x64 ;; \
+        arm64) platform=linux-arm64 ;; \
+        *) echo "claude: unsupported architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
+      esac; \
+      release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE; \
+      tmp="$(mktemp -d)"; \
+      export GNUPGHOME="${tmp}/gnupg"; \
+      mkdir -m 0700 "${GNUPGHOME}"; \
+      release_key="${tmp}/release_key"; \
+      key_info="${tmp}/key_info"; \
+      manifest="${tmp}/manifest"; \
+      signature="${tmp}/signature"; \
+      claude_path="${tmp}/claude"; \
+      curl -fsSL https://downloads.claude.ai/keys/claude-code.asc -o "${release_key}"; \
+      gpg --batch --with-colons --import-options show-only --import "${release_key}" 2>/dev/null \
+        | awk -F: '$1 == "fpr" { print $10; exit }' > "${key_info}"; \
+      actual_fingerprint="$(cat "${key_info}")"; \
+      if [ "${actual_fingerprint}" != "${release_fingerprint}" ]; then \
+        echo "claude: release key fingerprint mismatch: got ${actual_fingerprint}, want ${release_fingerprint}" >&2; \
+        exit 1; \
+      fi; \
+      gpg --batch --import "${release_key}"; \
+      release_url="https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}"; \
+      curl -fsSL "${release_url}/manifest.json" -o "${manifest}"; \
+      curl -fsSL "${release_url}/manifest.json.sig" -o "${signature}"; \
+      gpg --batch --verify "${signature}" "${manifest}"; \
+      checksum="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["platforms"][sys.argv[2]]["checksum"])' "${manifest}" "${platform}")"; \
+      case "${checksum}" in \
+        *[!0-9a-f]*) echo "claude: manifest checksum contains a non-hex character" >&2; exit 1 ;; \
+      esac; \
+      if [ "${#checksum}" -ne 64 ]; then \
+        echo "claude: manifest checksum is not 64 hex chars: ${checksum}" >&2; exit 1; \
+      fi; \
+      curl -fsSL "${release_url}/${platform}/claude" -o "${claude_path}"; \
+      printf '%s  %s\n' "${checksum}" "${claude_path}" | sha256sum -c -; \
+      install -D -m 0755 "${claude_path}" /rollout/.local/bin/claude; \
+      rm -rf "${tmp}"; \
       claude --version; \
     fi
 
@@ -70,17 +121,22 @@ RUN if [ "${INSTALL_CLAUDE}" = "1" ]; then \
 # does not drag a node runtime in ahead of the pi layer that actually needs one.
 # Release tags are `rust-vX.Y.Z`; each asset unpacks to a single file named after
 # its target triple, which is why it is renamed rather than extracted in place.
+# The archive is downloaded to a temp file, verified against the published GitHub
+# release asset digest, then extracted — never piped straight into tar.
 ARG INSTALL_CODEX=1
 ARG CODEX_VERSION=0.145.0
 RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
       set -eu; \
       case "$(dpkg --print-architecture)" in \
-        amd64) target=x86_64-unknown-linux-musl ;; \
-        arm64) target=aarch64-unknown-linux-musl ;; \
+        amd64) target=x86_64-unknown-linux-musl; checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;; \
+        arm64) target=aarch64-unknown-linux-musl; checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;; \
         *) echo "codex: unsupported architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
       esac; \
-      curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${target}.tar.gz" \
-        | tar -xz -C /usr/local/bin; \
+      archive="/tmp/codex-${target}.tar.gz"; \
+      curl -fsSL "https://github.com/openai/codex/releases/download/rust-v${CODEX_VERSION}/codex-${target}.tar.gz" -o "${archive}"; \
+      printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum -c -; \
+      tar -xzf "${archive}" -C /usr/local/bin; \
+      rm "${archive}"; \
       mv "/usr/local/bin/codex-${target}" /usr/local/bin/codex; \
       chmod +x /usr/local/bin/codex; \
       codex --version; \
@@ -90,20 +146,25 @@ RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
 # Heaviest, therefore last: pi ships only as an npm package, so this layer pulls
 # a full node distribution. Node goes to /usr/local so `npm install -g` puts the
 # `pi` binary in /usr/local/bin with no prefix juggling. The .tar.gz build is
-# used, not .tar.xz, so the base needs no xz-utils.
+# used, not .tar.xz, so the base needs no xz-utils. The Node archive is
+# downloaded to a temp file and verified against the checksums in v22.17.1's
+# published signed SHASUMS256.txt before it is extracted.
 ARG INSTALL_PI=1
 ARG NODE_VERSION=22.17.1
 ARG PI_VERSION=0.82.1
 RUN if [ "${INSTALL_PI}" = "1" ]; then \
       set -eu; \
       case "$(dpkg --print-architecture)" in \
-        amd64) node_arch=x64 ;; \
-        arm64) node_arch=arm64 ;; \
+        amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;; \
+        arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;; \
         *) echo "pi: unsupported architecture $(dpkg --print-architecture)" >&2; exit 1 ;; \
       esac; \
-      curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
-        | tar -xz -C /usr/local --strip-components=1 \
-            --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+      archive="/tmp/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"; \
+      curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" -o "${archive}"; \
+      printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum -c -; \
+      tar -xzf "${archive}" -C /usr/local --strip-components=1 \
+          --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
+      rm "${archive}"; \
       npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}"; \
       npm cache clean --force; \
       pi --version; \
