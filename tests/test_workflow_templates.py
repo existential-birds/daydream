@@ -328,12 +328,17 @@ def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> N
         f"{wf_path.name}: failure handler must not run jq over an artifact (issue #384)"
     )
 
-    # The empty-result guard precedes the comment write, so no write happens
-    # when neither source yields a number.
+    # The empty-result guard exits 0 before the comment write, so no write
+    # happens when neither source yields a number.
     guard = 'echo "no PR resolvable; cannot surface the failure" >&2'
+    exit_guard = "exit 0"
     assert guard in run, f"{wf_path.name}: empty-result diagnostic must be present"
-    assert run.index(guard) < run.index('gh api "repos/${REPO}/issues/${PR_NUMBER}/comments"'), (
-        f"{wf_path.name}: empty-result guard must precede the comment write (issue #384)"
+    assert exit_guard in run, f"{wf_path.name}: exit 0 must be present in the empty-result guard"
+    assert run.index(guard) < run.index(exit_guard), (
+        f"{wf_path.name}: empty-result diagnostic must precede exit 0"
+    )
+    assert run.index(exit_guard) < run.index('gh api "repos/${REPO}/issues/${PR_NUMBER}/comments"'), (
+        f"{wf_path.name}: exit 0 must precede the comment write (issue #384)"
     )
 
 
