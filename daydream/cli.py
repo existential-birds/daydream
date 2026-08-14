@@ -1228,6 +1228,8 @@ def _handle_list_reanchored_command(argv: list[str]) -> int:
     """
     import json
 
+    from rich.markup import escape
+
     from daydream.improve.plans import reanchored_plan_rows
     from daydream.ui import create_console, print_info
 
@@ -1251,6 +1253,7 @@ def _handle_list_reanchored_command(argv: list[str]) -> int:
                 indent=2,
             ),
             soft_wrap=True,
+            markup=False,
         )
         return 0
     if not rows:
@@ -1261,9 +1264,9 @@ def _handle_list_reanchored_command(argv: list[str]) -> int:
     # a newline inside the path at the console width), so rows use soft_wrap.
     for entry in rows:
         console.print(
-            f"[neon.cyan]ℹ[/] [neon.fg]{entry.number:03d} {entry.title} "
-            f"| {entry.status} | "
-            f"{entry.landing_path or '(unavailable)'}[/]",
+            f"[neon.cyan]ℹ[/] [neon.fg]{entry.number:03d} "
+            f"{escape(entry.title)} | {escape(entry.status)} | "
+            f"{escape(entry.landing_path) if entry.landing_path else '(unavailable)'}[/]",
             soft_wrap=True,
         )
     return 0

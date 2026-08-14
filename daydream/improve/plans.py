@@ -1355,10 +1355,11 @@ class PlanWriteSession:
                 [entries[index] for index in sorted(entries)],
                 check_links=True,
             )
+            # The re-anchor worktree is pruned at the start of the next plan run,
+            # so the durable status must point at the surviving copy in the main
+            # index rather than a path that will no longer exist.
             landed_rel = (
-                (worktree / "daydream_plans" / filename)
-                .relative_to(self._repo)
-                .as_posix()
+                (self._plans_dir / filename).relative_to(self._repo).as_posix()
             )
             self._entries[number] = _index_entry(
                 number=number,
@@ -1367,7 +1368,7 @@ class PlanWriteSession:
                 fingerprint=reservation.fingerprint,
                 finding=finding,
                 planned_at=new_head,
-                status=f"REANCHORED (landed at {landed_rel})",
+                status=f"{REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
             )
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
             return _reanchor_failed()

@@ -1585,10 +1585,9 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     # main repo durable surface now lists the re-anchored plan
     main_index = (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
     assert "REANCHORED" in main_index
-    assert (
-        reanchor_plans.relative_to(repo).as_posix() + "/001-batch-catalog-queries.md"
-        in main_index
-    )
+    # the durable status points at the surviving main-index sibling, not the
+    # pruned re-anchor worktree path.
+    assert "landed at daydream_plans/001-batch-catalog-queries.md" in main_index
     main_sidecar = json.loads(
         (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
     )
@@ -3963,7 +3962,13 @@ def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
         planned_at=head_sha,
     )
     assert len(result["written"]) == 1
-    return Path(result["written"][0]["path"]).relative_to(repo).as_posix()
+    # The durable landing path is what survives into the index, so source it
+    # from the sidecar rather than the (pruned) re-anchor worktree path.
+    rows = reanchored_plan_rows(repo / "daydream_plans")
+    assert rows, "expected one re-anchored plan"
+    landing = rows[0].landing_path
+    assert landing is not None
+    return landing
 
 
 def test_improve_list_reanchored_real_path_lists_reanchored_plan(
