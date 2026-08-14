@@ -1606,6 +1606,52 @@ def test_head_change_after_planning_reanchors_into_new_worktree(
     assert "REANCHORED" in main_index
 
 
+def test_reanchored_main_index_is_written_before_finish(
+    repo: Path,
+    head_sha: str,
+) -> None:
+    """The main sidecar indexes a re-anchored plan before finish() is called.
+
+    Regression for the crash window: the re-anchor path deferred the main
+    index write to finish(), so a process death between the durable file
+    write and finish() left a plan file with no index entry — silently
+    re-planned and orphaned on the next run. The sidecar must already carry
+    the REANCHORED entry (and its fingerprint) as soon as the re-anchor
+    lands, before finish() runs.
+    """
+    (repo / "README.md").write_text(
+        "# Catalog service\n\nConcurrent branch update.\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", "README.md")
+    commit(repo, "advance head after plan fan-out")
+
+    session = PlanWriteSession(
+        repo / "daydream_plans",
+        planned_at=head_sha,
+    )
+    reservations = session.reserve([_finding()])
+    outcome = session.commit(reservations[0], _selection(repo))
+    assert outcome.status == "written"
+
+    # crash-window invariant: main sidecar already indexes the re-anchor
+    sidecar = json.loads(
+        (repo / "daydream_plans" / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")
+    )
+    reanchored = [e for e in sidecar["plans"] if e["number"] == 1]
+    assert len(reanchored) == 1
+    assert reanchored[0]["status"].startswith("REANCHORED")
+    assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
+    # no silent re-plan on the next run: the fingerprint is already durable
+    assert "fp-fix-n-plus-one" in planned_fingerprints(repo / "daydream_plans")
+
+    # finish() must not be what made the index correct
+    session.finish()
+    assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_reanchored_plan_survives_worktree_pruning(
     repo: Path,
     head_sha: str,

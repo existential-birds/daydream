@@ -1452,6 +1452,10 @@ class PlanWriteSession:
                 planned_at=new_head,
                 status=f"{REANCHORED_STATUS_PREFIX} (landed at {landed_rel})",
             )
+            # Index the durable main copy immediately so an interrupted run can
+            # never leave a plan file without a main-index entry (which the next
+            # run would silently re-plan and orphan). Mirror _land/finish().
+            self._write_index()
         except Exception:  # noqa: BLE001 - persist a safe re-anchor disposition
             return _reanchor_failed()
 
