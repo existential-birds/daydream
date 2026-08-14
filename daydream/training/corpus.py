@@ -33,8 +33,10 @@ pinning the snapshot's provenance: a content-addressed ``trajectory_set_hash``
 scalar when uniform, the sorted distinct set when the corpus mixes versions),
 the ``as_of`` pin (echoed from config, or the resolved write-time when
 unpinned), and a wall-clock UTC ``created_at``. The manifest is written
-atomically (tempfile + ``os.replace``) and skipped on ``dry_run``; it subsumes
-the retired ``daydream snapshot`` verb's reproducibility role.
+atomically (tempfile + ``os.replace``) and skipped on ``dry_run``; a completed
+non-dry-run build that emits zero records removes any prior ``lineage.json``
+(rather than writing an empty-set manifest); it subsumes the retired
+``daydream snapshot`` verb's reproducibility role.
 
 The projection is pure: no git, no network, no manifest write-back.
 ``base_sha`` is *read* from the on-disk manifest (harvest materializes it);
@@ -858,6 +860,8 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     9. Write ``lineage.json`` beside the JSONL pinning the snapshot's
        provenance (``trajectory_set_hash``, labeler/reward versions, ``as_of``,
        ``created_at``) so the snapshot is reproducible from immutable inputs.
+       When the output is empty (zero records), any prior ``lineage.json`` from
+       an earlier build is removed rather than writing an empty-set manifest.
 
     Returns:
         Summary dict with keys ``total_runs_in_index``, ``after_filters``,
@@ -872,6 +876,9 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         config.out_path.parent.mkdir(parents=True, exist_ok=True)
         schema_dst = config.out_path.parent / "schema.json"
         shutil.copyfile(SCHEMA_V1_PATH, schema_dst)
+        # Emits no records, so any prior lineage.json from an earlier build is
+        # removed to keep the manifest faithful to the (now empty) JSONL.
+        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
         return _summary(0, 0, 0, 0)
 
     # 2. Resolve archive dir.
@@ -995,7 +1002,10 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # 9. Lineage manifest beside the JSONL: the included set drives the
     #    content-address; versions reflect the post-stratify annotations; as_of
     #    falls back to write-time. Skipped when empty (an empty-set hash misleads).
+    #    When empty, any prior lineage.json from an earlier build is removed so a
+    #    stale manifest never survives.
     if not records:
+        (config.out_path.parent / "lineage.json").unlink(missing_ok=True)
         print_info(console, f"Wrote 0 records to {config.out_path} — skipping lineage manifest")
         return _summary(total_in_index, after_filters, after_stratify, 0)
     included_session_ids = [r["session_id"] for r in records]
