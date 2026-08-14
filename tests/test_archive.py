@@ -974,8 +974,6 @@ def test_append_label_observation_writes_through_to_runs_cache(tmp_path: Path) -
 
 def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
     """Same-session multiple observations all persist; latest wins for the cache."""
-    import time
-
     _seed_one_run(tmp_path, "sess-3")
     append_label_observation(
         tmp_path,
@@ -985,7 +983,6 @@ def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
         labeler_version="v1",
         evidence_sha=None,
     )
-    time.sleep(0.01)
     append_label_observation(
         tmp_path,
         "sess-3",
@@ -1007,8 +1004,6 @@ def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
 def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     """Snapshot pinning: latest_label_observation(..., as_of=ts) returns the
     latest observation whose observed_at <= as_of."""
-    import time
-
     _seed_one_run(tmp_path, "sess-4")
     append_label_observation(
         tmp_path,
@@ -1021,7 +1016,6 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
     early_row = latest_label_observation(tmp_path, "sess-4")
     assert early_row is not None
     early = early_row["observed_at"]
-    time.sleep(0.01)
     append_label_observation(
         tmp_path,
         "sess-4",
