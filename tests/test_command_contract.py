@@ -151,6 +151,37 @@ def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
     assert path_is_confined(tmp_path, value, directory_scope=True)
 
 
+CONSISTENCY_ACCEPT = PATH_ACCEPTS + MULTI_DOT_PATHS
+CONSISTENCY_REJECT = PATH_REJECTS
+
+
+def test_schema_and_lexical_gate_agree_on_corpus() -> None:
+    """Schema-valid must equal runtime-accepted for every corpus path."""
+    file_validator = Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA)
+    for value in CONSISTENCY_ACCEPT:
+        assert file_validator.is_valid(value), f"schema should accept {value!r}"
+        assert valid_repository_file_path(value), f"lexical gate should accept {value!r}"
+    for value in CONSISTENCY_REJECT:
+        assert not file_validator.is_valid(value), f"schema should reject {value!r}"
+        assert not valid_repository_file_path(value), f"lexical gate should reject {value!r}"
+
+
+def test_legal_filenames_are_confined(tmp_path: Path) -> None:
+    """Legal filenames pass the confinement walk for real files; traversal never does."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
+                 "a&b.py", "~.bashrc", "space name.py"]:
+        (repo / name).write_text("x")
+    for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
+                 "a&b.py", "~.bashrc", "space name.py", "./foo bar.py"]:
+        assert path_is_confined(repo, name), f"{name!r} must be confined"
+    # security carve-outs still rejected by the confinement gate too
+    assert not path_is_confined(repo, "../x")
+    assert not path_is_confined(repo, "/abs/path")
+    assert not path_is_confined(repo, "a/../b")
+
+
 def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     (repo / "improve").mkdir(parents=True)
