@@ -940,6 +940,73 @@ def test_quality_verbosity_flags_clones_across_files(tmp_path: Path):
     assert result["verbosity"] > 0
 
 
+def test_quality_candidate_scope_indexes_valid_peers_for_clones(
+    tmp_path: Path,
+) -> None:
+    """Candidate mode indexes valid peer text for cross-file clone attribution."""
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def a():\n" + block,
+            "peer.py": "def b():\n" + block,  # clone source, NOT a candidate
+            "other.py": "def c():\n    return 3\n",  # neither candidate nor peer source
+        },
+    )
+
+    result = analyze_quality(ws / ".daydream", candidate_paths={"app.py"})
+
+    assert result["scoped_files"] == 1
+    assert set(result["per_file"]) == {"app.py"}
+    assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed
+    assert result["erosion"] is not None
+
+
+def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path) -> None:
+    """candidate_paths=None is byte-identical to the default whole-workspace call."""
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},
+    )
+    default = analyze_quality(ws / ".daydream")
+    explicit_none = analyze_quality(ws / ".daydream", candidate_paths=None)
+    assert explicit_none == default
+
+
+def test_quality_candidate_empty_set_returns_empty_without_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly empty candidate set reports zero files without walking the workspace."""
+    from daydream.eval import analyzer as analyzer_mod
+
+    ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n"})
+
+    def _boom(_workspace: Path):
+        raise AssertionError("workspace must not be enumerated for an empty candidate set")
+
+    monkeypatch.setattr(analyzer_mod, "_scoped_python_files", _boom)
+    result = analyze_quality(ws / ".daydream", candidate_paths=set())
+
+    assert result["scoped_files"] == 0
+    assert result["per_file"] == {}
+    assert result["erosion"] is None
+    assert result["verbosity"] is None
+
+
+def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
+    """A candidate that fails the generated-file eligibility rule is not reported."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def a():\n    return 1\n",
+            "schema_generated.py": "def x():\n    return 1\n",  # *_generated.py glob excludes it
+        },
+    )
+    result = analyze_quality(ws / ".daydream", candidate_paths={"schema_generated.py", "app.py"})
+    assert result["scoped_files"] == 1
+    assert set(result["per_file"]) == {"app.py"}
+
+
 def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path):
     """A block present in only one file flags neither file."""
     ws = _quality_workspace(
@@ -1100,6 +1167,31 @@ def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_pat
 
     assert dirty["scoped_files"] == 2
     assert list(dirty["per_file"]) == ["app.py"]
+    assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
+    assert clean["verbosity"] == dirty["verbosity"]
+
+
+def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones(
+    tmp_path: Path,
+) -> None:
+    """Finding #1 holds in candidate mode: a malformed peer never flags a valid candidate.
+
+    Candidate mode indexes scoped peers as clone sources, but a peer that fails to
+    parse must be excluded from the cross-file clone index so its garbage lines
+    cannot inflate a valid candidate's verbosity (regression #457 round 2).
+    """
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    clean_ws = _quality_workspace(tmp_path, {"app.py": "def a():\n" + block}, name="clean")
+    dirty_ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block},
+        name="dirty",
+    )
+
+    clean = analyze_quality(clean_ws / ".daydream", candidate_paths={"app.py"})
+    dirty = analyze_quality(dirty_ws / ".daydream", candidate_paths={"app.py"})
+
+    assert set(dirty["per_file"]) == {"app.py"}
     assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
     assert clean["verbosity"] == dirty["verbosity"]
 
