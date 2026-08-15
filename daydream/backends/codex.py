@@ -116,11 +116,18 @@ class CodexBackend:
                 can inspect history (read-only git, cat, ls) but cannot modify
                 the working tree. Accepted residual (Task 0 spike): the sandbox
                 does not reliably block ``git commit`` — a commit can still
-                advance a branch inside the sandbox. That residual is why the
-                improve flow isolates model turns in a detached audit worktree:
-                the worktree confines any such commit away from the target's
-                HEAD, named refs, and staged index by construction. Default
-                False keeps ``danger-full-access``.
+                advance a branch inside the working tree. That residual is why
+                the improve flow isolates model turns in a detached audit
+                worktree: an undirected model commit there lands only in the
+                detached audit HEAD and is discarded with the worktree at
+                exit — it cannot advance the target's HEAD or staged index
+                (named refs live in the repository's shared ref store and can
+                be written from any worktree). This is not a hard guarantee:
+                the audit worktree is a descendant of the target, and the
+                sandbox's residual is that it does not reliably block git
+                commit against any reachable repo, so a deliberate
+                cd-up-then-commit against the parent target remains possible.
+                Default False keeps ``danger-full-access``.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 

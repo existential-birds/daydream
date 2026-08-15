@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import secrets
 import shutil
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -198,15 +199,7 @@ async def open_workspace(
             try:
                 git_ops.worktree_remove(source, worktree_path, force=True)
             except GitError as exc:
-                # Best-effort cleanup -- never let removal failure mask the
-                # primary outcome of the run.
-                from daydream.agent import console
-                from daydream.ui import print_warning
-
-                print_warning(
-                    console,
-                    f"Failed to remove ephemeral worktree {worktree_path}: {exc}",
-                )
+                _warn_removal_failed(worktree_path, exc, kind="ephemeral worktree")
 
 
 @asynccontextmanager
@@ -221,20 +214,40 @@ async def open_audit_workspace(
     :func:`daydream.git_ops.stash_create` (a dangling commit that never touches
     the target working tree, index, or refs) and materializes it as a detached
     worktree under ``<source>/.daydream/audit/<run_id>``. The audit worktree is
-    the model's ``cwd`` for improve advisory turns, so any commit a model makes
-    lands only in the detached HEAD and can never reach the target's HEAD,
-    named refs, or staged index.
+    the model's ``cwd`` for improve advisory turns, so a commit a model makes
+    lands only in the detached audit HEAD and cannot advance the target's HEAD
+    or mutate its staged index.
 
-    The worktree is created locked (``lock_reason=<run_id>``) so concurrent
-    stale-worktree pruning on the target repository cannot grab it mid-run, and
-    removed with :func:`daydream.git_ops.worktree_remove_unlocked` on exit.
+    Isolation is not "by construction": the audit worktree is a strict
+    descendant of the target (``<source>/.daydream/audit/<run_id>``), so the
+    target stays reachable from the model's cwd — climbing ``..`` up through
+    the ``.daydream`` directory lands in the target worktree (whose staged
+    changes physically sit there) and ``git worktree list`` enumerates it. And
+    named-ref operations (``git branch`` / ``git update-ref`` / ``git push``)
+    run inside the worktree write to the repository's single shared ref store
+    and persist after the worktree is removed. The worktree confines
+    *commits*; it does not confine refs or a determined model.
+
+    The worktree is created locked (``lock_reason=<run_id>``) so
+    :func:`prune_stale_audit_worktrees` (a concurrent run's stale-worktree
+    prune) cannot grab it mid-run, and removed with
+    :func:`daydream.git_ops.worktree_remove_unlocked` on exit. A hard-killed
+    run never reaches that exit path, so its locked audit worktree would wedge
+    forever (git refuses to remove or prune a locked worktree) — the next
+    run's :func:`prune_stale_audit_worktrees` is the reclamation path for
+    those leftovers.
+
+    If *source* is on an unborn HEAD (no initial commit), there is nothing to
+    snapshot and git cannot materialize a worktree without a commit, so
+    *source* itself is yielded instead — without isolation.
 
     Args:
         source: The target worktree to snapshot (must be a worktree root).
         run_id: Unique run identifier used for the audit worktree path.
 
     Yields:
-        The audit worktree path (detached; the model's ``cwd`` for the run).
+        The audit worktree path (detached; the model's ``cwd`` for the run),
+        or *source* itself when *source* has no initial commit.
 
     Raises:
         GitError: If the snapshot or worktree creation fails — the audit
@@ -244,10 +257,18 @@ async def open_audit_workspace(
     """
     git_ops.assert_is_worktree(source)
 
+    if _is_unborn_head(source):
+        # No initial commit: nothing to snapshot, and ``git worktree add``
+        # cannot materialize a worktree without a commit. Yield the source
+        # itself — there are no commits, refs, or staged index to protect.
+        yield source
+        return
+
     snapshot = git_ops.stash_create(source)
     ref = snapshot or git_ops.head_sha(source)
 
-    worktree_path = source / ".daydream" / "audit" / run_id
+    worktree_path = source / _AUDIT_WORKTREES_DIR / run_id
+    worktree_created = False
     try:
         worktree_path.parent.mkdir(parents=True, exist_ok=True)
         git_ops.worktree_add(
@@ -257,20 +278,64 @@ async def open_audit_workspace(
             detach=True,
             lock_reason=run_id,
         )
+        worktree_created = True
         yield worktree_path
     finally:
-        try:
-            git_ops.worktree_remove_unlocked(source, worktree_path, force=True)
-        except GitError as exc:
-            # Best-effort cleanup -- never let removal failure mask the
-            # primary outcome of the run (mirrors open_workspace).
-            from daydream.agent import console
-            from daydream.ui import print_warning
+        if worktree_created:
+            try:
+                git_ops.worktree_remove_unlocked(source, worktree_path, force=True)
+            except GitError as exc:
+                _warn_removal_failed(worktree_path, exc, kind="audit worktree")
 
-            print_warning(
-                console,
-                f"Failed to remove audit worktree {worktree_path}: {exc}",
-            )
+
+_AUDIT_WORKTREES_DIR = Path(".daydream") / "audit"
+#: A locked audit worktree older than this is a crashed run's leftover — the
+#: owning run's ``finally`` removes it on exit, so only a hard-killed run
+#: leaves one behind — and is reclaimed by :func:`prune_stale_audit_worktrees`.
+_AUDIT_LOCK_STALE_AFTER_S = 24 * 3600
+
+
+def prune_stale_audit_worktrees(repo: Path) -> int:
+    """Remove leftover locked audit worktrees from hard-killed improve runs.
+
+    Audit worktrees live under ``<repo>/.daydream/audit/<run_id>`` and are
+    created locked (see :func:`open_audit_workspace`) so concurrent pruning
+    cannot grab one mid-run; only the owning run's exit removes it. A
+    hard-killed run therefore leaves its audit worktree locked forever, and
+    ``prune_stale_reanchor_worktrees`` cannot reclaim it (it matches only
+    ``*-reanchor`` names) — this prune is the reclamation path for those
+    leftovers.
+
+    The prune is lock-aware, mirroring the re-anchor prune: a live audit
+    worktree (lock age near zero) is skipped without any removal attempt, so a
+    concurrent run mid-write is never destroyed. A worktree whose lock is
+    older than ``_AUDIT_LOCK_STALE_AFTER_S`` is a crashed run's leftover: it
+    is reclaimed via ``git_ops.worktree_remove_unlocked`` (unlock, then
+    force-remove) rather than wedged forever. Unlocked worktrees are removed
+    the same way, the unlock being a no-op for them. Individual failures are
+    tolerated so one stale worktree never blocks a plan run.
+    """
+    removed = 0
+    audit_dir = repo / _AUDIT_WORKTREES_DIR
+    if not audit_dir.is_dir():
+        return 0
+    for path in audit_dir.glob("*"):
+        if not path.is_dir():
+            continue
+        try:
+            locked_at = git_ops.worktree_lock_mtime(repo, path)
+            if (
+                locked_at is not None
+                and time.time() - locked_at <= _AUDIT_LOCK_STALE_AFTER_S
+            ):
+                # Live audit worktree (lock age near zero): never unlock or
+                # remove it, so a concurrent run mid-write is not destroyed.
+                continue
+            git_ops.worktree_remove_unlocked(repo, path)
+        except git_ops.GitError:
+            continue
+        removed += 1
+    return removed
 
 
 def copy_files_into_ephemeral(
@@ -339,6 +404,31 @@ def copy_files_into_ephemeral(
 
 
 # --- Internal helpers --------------------------------------------------------
+
+
+def _warn_removal_failed(path: Path, exc: GitError, *, kind: str = "worktree") -> None:
+    """Warn that cleanup of *path* failed, without raising.
+
+    Best-effort cleanup contract shared by every worktree-teardown path:
+    a removal failure must never mask the primary outcome of the run.
+    """
+    from daydream.agent import console
+    from daydream.ui import print_warning
+
+    print_warning(console, f"Failed to remove {kind} {path}: {exc}")
+
+
+def _is_unborn_head(repo: Path) -> bool:
+    """Return True iff *repo*'s HEAD is unborn (no initial commit yet).
+
+    ``git stash create`` and ``git worktree add`` both fail on an unborn HEAD,
+    so the caller must detect it before attempting either.
+    """
+    try:
+        git_ops.head_sha(repo)
+    except GitError:
+        return True
+    return False
 
 
 def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:

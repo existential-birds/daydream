@@ -960,9 +960,15 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         # Every improve advisory model turn (recon/audit/vet/plan-write) runs
         # with a detached audit worktree as its cwd; the target worktree is
         # never a model cwd. The audit worktree snapshots the target's
-        # committed + staged + unstaged tracked state, so any model commit
-        # lands only in its detached HEAD and can never touch the target's
-        # HEAD, named refs, or staged index.
+        # committed + staged + unstaged tracked state, so an undirected model
+        # commit lands only in the detached audit HEAD and is discarded with
+        # the worktree at exit — it cannot advance the target's HEAD or staged
+        # index (named refs live in the repository's shared ref store and can
+        # be written from any worktree). This is not a hard guarantee: the
+        # audit worktree is a descendant of the target, and the sandbox's
+        # accepted residual is that it does not reliably block git commit
+        # against any reachable repo, so a deliberate cd-up-then-commit
+        # against the parent target remains possible.
         async with open_audit_workspace(work.repo, run_id=work.run_id) as audit_repo:
             ctx.data["audit_repo"] = audit_repo
             return await run_flow(ctx.registry, "improve", ctx)

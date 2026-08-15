@@ -1,6 +1,8 @@
 import json
+import os
 import re
 import subprocess
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -471,6 +473,12 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     assert "`in-scope-paths`" in prompt
     # Roots only: the recon prompt never inlines an individual tracked file.
     assert "apps/svc00/api.py" not in prompt
+    # Service roots are printed anchored at the audit snapshot (the model's
+    # cwd), never as bare relative paths a model could resolve against the
+    # live target, so resolving a service root reads the snapshot.
+    audit_cwd = recon_calls[0]["cwd"]
+    assert f"- svc00: {(audit_cwd / 'apps/svc00').as_posix()}" in prompt
+    assert f"- svc01: {(audit_cwd / 'apps/svc01').as_posix()}" in prompt
 
 
 @pytest.mark.anyio
@@ -2674,11 +2682,46 @@ async def test_improve_run_leaves_no_stray_audit_worktree(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
     assert code == 0
     # After a full improve run, no audit worktree remains linked to the target.
-    worktrees = subprocess.run(
-        ["git", "-C", str(improve_monorepo_target), "worktree", "list", "--porcelain"],
-        check=True, capture_output=True, text=True,
-    ).stdout
+    worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
     assert ".daydream/audit/" not in worktrees
+
+
+@pytest.mark.anyio
+async def test_improve_run_prunes_stale_audit_worktree_from_crashed_run(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """A hard-killed improve run's locked audit worktree is reclaimed by the
+    next run (the ``*-reanchor``-only prune cannot see it)."""
+    install_improve_stub(monkeypatch, improve_monorepo_target)
+    # Simulate a crashed prior run: the audit worktree was created locked and
+    # only the owning run's finally-block removes it, so it survives the kill.
+    stale_dir = improve_monorepo_target / ".daydream" / "audit" / "run-crashed"
+    git(
+        improve_monorepo_target,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-crashed",
+        str(stale_dir),
+        "HEAD",
+    )
+    common = Path(git(improve_monorepo_target, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = improve_monorepo_target / common
+    old = time.time() - 48 * 3600
+    os.utime(common / "worktrees" / stale_dir.name / "locked", (old, old))
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
+    assert "run-crashed" not in worktrees
+    assert ".daydream/audit/" not in worktrees
+    assert not stale_dir.exists()
 
 
 @pytest.mark.anyio
@@ -2712,11 +2755,18 @@ class _AuditCommittingBackend(ImproveStubBackend):
     file is written first so the commit always has something to commit (the
     audit worktree is materialized exactly at the snapshot, so a plain
     add+commit on a clean tree would be a no-op failure).
+
+    Each turn also exercises the escape class: it attempts to commit against
+    the reachable parent target (the target worktree, via the relative path
+    ``../../..`` from the audit cwd) instead of the confined cwd. git rejects
+    a pathspec outside the audit repository, so the escape fails cleanly and
+    never reaches the target's HEAD, refs, or index.
     """
 
     def __init__(self, target: Path) -> None:
         super().__init__(target)
         self._commit_count = 0
+        self.escape_attempts = 0
 
     async def execute(
         self, cwd, prompt, output_schema=None, continuation=None,
@@ -2728,6 +2778,14 @@ class _AuditCommittingBackend(ImproveStubBackend):
         )
         git(cwd, "add", "-A")
         git(cwd, "commit", "-m", "model residual commit")
+        # Escape attempt: commit against the reachable parent target instead of
+        # the confined cwd. The detached-worktree construction rejects the
+        # relative pathspec as outside the audit repository, so both commands
+        # fail cleanly and the target stays pristine.
+        self.escape_attempts += 1
+        escape_target = os.path.relpath(self._target, cwd)
+        git(cwd, "add", escape_target, check=False)
+        git(cwd, "commit", "-m", "escaped model commit", check=False)
         async for event in super().execute(
             cwd, prompt, output_schema=output_schema, continuation=continuation,
             agents=agents, max_turns=max_turns, read_only=read_only,
@@ -2754,6 +2812,9 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
 
     assert code == 0
     assert stub.calls
+    # Every model turn also attempted the escape, so the escape-class coverage
+    # is real, not vacuous; the target assertions below prove it was confined.
+    assert stub.escape_attempts == len(stub.calls)
     # Every model turn ran in ONE detached audit worktree (a single non-target path).
     audit_cwds = {str(call["cwd"]) for call in stub.calls}
     assert len(audit_cwds) == 1, audit_cwds

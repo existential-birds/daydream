@@ -7,7 +7,9 @@ mocking — every code path runs against actual git.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -15,13 +17,14 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.git_ops import BranchNotFoundError
+from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.workspace import (
     WorkContext,
     WorkspaceCopyPathError,
     copy_files_into_ephemeral,
     open_audit_workspace,
     open_workspace,
+    prune_stale_audit_worktrees,
 )
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -578,3 +581,122 @@ async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path) -> None
             captured = audit
             raise RuntimeError("boom")
     assert captured is not None and not captured.exists()
+
+
+@pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_reclaims_crashed_run_leftover(
+    tmp_path: Path,
+) -> None:
+    """A hard-killed improve run's locked audit worktree is reclaimed.
+
+    ``open_audit_workspace`` creates the worktree locked and only the owning
+    run's exit removes it, so a hard-killed run leaves a locked audit worktree
+    behind with no ``*-reanchor`` name for ``prune_stale_reanchor_worktrees``
+    to match — this prune is its reclamation path.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    stale_dir = repo / ".daydream" / "audit" / "run-crashed"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-crashed",
+        str(stale_dir),
+        "HEAD",
+    )
+    (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
+    # Age the lock beyond the staleness window so it reads as a crashed session.
+    common = Path(_git(repo, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = repo / common
+    old = time.time() - 48 * 3600
+    os.utime(common / "worktrees" / stale_dir.name / "locked", (old, old))
+
+    removed = prune_stale_audit_worktrees(repo)
+
+    assert removed == 1
+    assert not stale_dir.exists()
+    assert "run-crashed" not in _git(repo, "worktree", "list")
+
+
+@pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_skips_live_locked_worktree(
+    tmp_path: Path,
+) -> None:
+    """A live audit worktree (fresh lock) is never destroyed by the prune."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    live_dir = repo / ".daydream" / "audit" / "run-live"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-live",
+        str(live_dir),
+        "HEAD",
+    )
+
+    removed = prune_stale_audit_worktrees(repo)
+
+    assert removed == 0
+    assert live_dir.is_dir()  # a concurrent run mid-write is never destroyed
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_yields_source_when_head_unborn(tmp_path: Path) -> None:
+    """A repo with no initial commit runs without a snapshot worktree.
+
+    ``git stash create`` (and ``git worktree add``) fail on an unborn HEAD —
+    there is no commit to snapshot or materialize — so the source itself is
+    yielded and the improve run proceeds without worktree isolation.
+    """
+    repo = tmp_path / "unborn"
+    _init_repo(repo)
+    (repo / "staged.txt").write_text("v1")
+    _git(repo, "add", "staged.txt")
+
+    async with open_audit_workspace(repo, run_id="audit-unborn") as audit:
+        assert audit == repo
+        # No worktree was created, and the source's staged state was untouched.
+        assert not (repo / ".daydream" / "audit").exists()
+        proc = subprocess.run(  # noqa: S603
+            ["git", "rev-parse", "--verify", "HEAD"],  # noqa: S607
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0  # still unborn while the workspace is open
+    assert (repo / "staged.txt").read_text() == "v1"
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_does_not_warn_when_worktree_add_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed ``git worktree add`` must not trigger cleanup of a never-created worktree.
+
+    The pre-existing run path makes ``git worktree add`` fail after the parent
+    ``mkdir`` succeeded; cleanup must not then attempt to remove a worktree
+    that was never created, which would surface a spurious "Failed to remove
+    audit worktree" warning over the primary add error.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    doomed = repo / ".daydream" / "audit" / "audit-fail"
+    doomed.mkdir(parents=True, exist_ok=True)
+    (doomed / "marker.txt").write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(GitError, match="already exists"):
+        async with open_audit_workspace(repo, run_id="audit-fail"):
+            pytest.fail("the audit body must not run")
+
+    assert "Failed to remove audit worktree" not in capsys.readouterr().out

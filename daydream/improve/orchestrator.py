@@ -92,6 +92,7 @@ from daydream.trajectory import (
     redact_text,
 )
 from daydream.ui import print_error, print_info, print_success, print_warning
+from daydream.workspace import prune_stale_audit_worktrees
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -219,7 +220,7 @@ def _build_recon_prompt(
     exploration_summary: str,
 ) -> str:
     service_lines = "\n".join(
-        f"- {service.name}: {service.root.as_posix()}" for service in services
+        f"- {service.name}: {(repo / service.root).as_posix()}" for service in services
     )
     audited_roots = sorted(
         {root for group in groups for root in group.roots if root != "."}
@@ -409,13 +410,14 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
+    audit_repo = _audit_repo(ctx)
     async with phase_scope(DaydreamPhase.RECON):
-        exploration = await repo_scan(backend, _audit_repo(ctx))
+        exploration = await repo_scan(backend, audit_repo)
         recon, _, _ = await run_agent(
             backend,
-            _audit_repo(ctx),
+            audit_repo,
             _build_recon_prompt(
-                _audit_repo(ctx), services, groups, exploration.to_prompt_section()
+                audit_repo, services, groups, exploration.to_prompt_section()
             ),
             phase=DaydreamPhase.RECON,
             output_schema=RECON_SCHEMA,
@@ -1540,6 +1542,7 @@ def _expected_plan_fingerprints(finding: dict[str, Any]) -> list[str]:
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
     prune_stale_reanchor_worktrees(ctx.work.repo)
+    prune_stale_audit_worktrees(ctx.work.repo)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]
