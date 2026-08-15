@@ -566,7 +566,7 @@ async def test_partition_bound_splits_oversized_trees_via_config(
 
 
 @pytest.mark.anyio
-async def test_group_ceiling_skips_smallest_groups_and_reports_them(
+async def test_group_ceiling_reports_full_and_partial_stack_coverage(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -593,8 +593,15 @@ async def test_group_ceiling_skips_smallest_groups_and_reports_them(
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
     coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
-    skipped = {entry["partition"]: entry["reason"] for entry in coverage["not_audited"]}
-    assert skipped == {"frontend": "group-ceiling", "residue": "group-ceiling"}
+    not_audited = {entry["partition"]: entry for entry in coverage["not_audited"]}
+    assert set(not_audited) == {"frontend"}
+    assert not_audited["frontend"]["reason"] == "group-ceiling"
+    assert not_audited["frontend"]["omitted_stacks"] == ["react"]
+    partially = {entry["partition"]: entry for entry in coverage["partially_audited"]}
+    assert set(partially) == {"residue"}
+    assert partially["residue"]["reason"] == "group-ceiling"
+    assert partially["residue"]["audited_stacks"] == ["python"]
+    assert partially["residue"]["omitted_stacks"] == ["generic"]
 
 
 @pytest.mark.anyio
@@ -700,13 +707,24 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     # Every ceiling-skipped partition is named with its root and reason.
     assert "**frontend**" in section and "group-ceiling" in section
     assert "`frontend/`" in section
+    # residue's only retained group (group-01) failed its docs audit, so the
+    # python stack is not counted as audited: the partition is reported as not
+    # audited, naming both the ceiling-omitted and the failed stacks.
+    assert "**residue**" in section
+    assert "not audited" in section
+    assert "omitted: generic, python" in section
+    assert "partially audited" not in section
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
     # The failed assignment resolves to its group's roots, not just a key.
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
     coverage = json.loads(
         improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text()
     )
-    assert {entry["reason"] for entry in coverage["not_audited"]} == {"group-ceiling"}
+    assert {entry["reason"] for entry in coverage["not_audited"]} == {
+        "group-ceiling",
+        "group-failed",
+    }
+    assert coverage["partially_audited"] == []
     assert coverage["groups"] and coverage["partitions"]
     assert [entry["status"] for entry in coverage["groups"]] == ["failed"]
     assert "docs:group-01" in coverage["failed_assignments"]
