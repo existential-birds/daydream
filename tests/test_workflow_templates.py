@@ -20,6 +20,10 @@ cannot verify and that a careless edit could silently break:
 - The repository workflow README declares these files as repository-only Codex
   dogfood configuration and points to the packaged install guide (never copies
   ``ANTHROPIC_API_KEY``).
+- The CI actionlint step covers every workflow the project ships — the repo's
+  own top-level workflows plus all recursively discovered template workflows
+  (the nested ``single/daydream.yml`` included) — and each selector still has
+  to match at least one real workflow file (no stale selectors).
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """
@@ -428,3 +432,40 @@ def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -
     # Absence of the stale strings.
     for stale in ("Copy the three workflow files", "Install step 1", "ANTHROPIC_API_KEY"):
         assert stale not in text
+
+
+# CI coverage guard: the actionlint step in .github/workflows/ci.yml must
+# receive EVERY workflow the project ships — the repo's own top-level workflows
+# plus all recursively discovered template workflows (the nested
+# single/daydream.yml included). Reads the live selectors out of the ci.yml
+# actionlint step and expands them, so a selector that stops covering a shipped
+# file (or a newly nested template) fails this test rather than silently
+# shipping un-linted workflows.
+
+
+def test_ci_actionlint_covers_all_workflow_sources() -> None:
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
+    steps = job_steps(wf, "check")
+    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
+    selectors = [
+        tok for tok in actionlint["run"].split() if tok.endswith(".yml") and not tok.startswith("-")
+    ]
+
+    actual: set[Path] = set()
+    for selector in selectors:
+        matches = set(_REPO_ROOT.glob(selector))
+        assert matches, (
+            f"actionlint selector {selector!r} in .github/workflows/ci.yml matches "
+            "no workflow files; drop the stale selector or fix its glob"
+        )
+        actual |= matches
+    expected = {*REPO_WORKFLOWS_DIR.glob("*.yml"), *TEMPLATES_DIR.rglob("*.yml")}
+    actual_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in actual)
+    expected_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in expected)
+    assert actual == expected, (
+        "actionlint selectors in .github/workflows/ci.yml cover a different set "
+        "of workflows than the project ships. "
+        f"actual={actual_rel} expected={expected_rel}. "
+        "Extend the actionlint run's selectors so the glob-expanded set equals "
+        "the repo workflows plus all shipped template workflows (nested included)."
+    )
