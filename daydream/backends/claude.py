@@ -196,7 +196,7 @@ def _read_only_deny(reason: str) -> HookJSONOutput:
 
 
 async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
-    """PreToolUse hook enforcing the read-only summarizer contract.
+    """PreToolUse hook enforcing the read-only guard contract.
 
     Fires for ALL tools (matcher ``.*``). Explicitly allows only the safe set
     (Read, Grep, Glob, StructuredOutput, and allowlisted Bash commands) and
@@ -208,13 +208,13 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
         if _is_read_only_command(command):
             return {}
         return _read_only_deny(
-            f"read-only summarizer: non-read-only Bash command blocked: {command!r}"
+            f"read-only guard: non-read-only Bash command blocked: {command!r}"
         )
     tool_name = input_data.get("tool_name") if isinstance(input_data, dict) else None
     if tool_name in _READ_ONLY_ALLOWED_TOOLS:
         return {}
     return _read_only_deny(
-        f"read-only summarizer: tool {tool_name!r} is blocked (non-mutating contract)"
+        f"read-only guard: tool {tool_name!r} is blocked (non-mutating contract)"
     )
 
 
