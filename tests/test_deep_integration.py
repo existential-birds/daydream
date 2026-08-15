@@ -351,7 +351,6 @@ def test_existing_tests_still_collect() -> None:
 
 async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: Path, monkeypatch) -> None:
     """#647: the 'Default backend' status line never shows a review override."""
-    from daydream.deep import orchestrator
     from daydream.exploration import ExplorationContext
     from daydream.runner import RunConfig, run
 
