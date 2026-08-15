@@ -161,17 +161,21 @@ def build_base_image() -> list[str]:
     return tags
 
 
-def _build_base() -> int:
-    """Build the base image and report its tags. Returns a process exit code."""
+def _build_base() -> tuple[int, str | None]:
+    """Build the base image and report its tags. Returns ``(exit_code, versioned_tag)``.
+
+    On success the versioned tag (``base_tag()``, ``tags[0]``) is returned as the
+    identity a snapshot build must consume — never the mutable alias.
+    """
     try:
         tags = build_base_image()
     except subprocess.CalledProcessError as exc:
         # The docker log above is the message; a traceback would only bury it.
         print(f"FAILED base image: exit {exc.returncode}", file=sys.stderr)
-        return 1
+        return (1, None)
     for tag in tags:
         print(f"built {tag}")
-    return 0
+    return (0, tags[0])
 
 
 def write_setup_script(ctx: Path, setup_cmds: list[str]) -> None:
@@ -315,7 +319,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.base_only:
-        return _build_base()
+        status, _ = _build_base()
+        return status
 
     manifest = load_manifest(args.manifest)
     prs = sorted(harvested_corpus(args.corpus).prs, key=lambda pr: (_repo_slug(pr.clone_url), pr.pr_number))
@@ -340,11 +345,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"skipping base build; reusing {base_image}")
     else:
-        status = _build_base()
+        status, base_image = _build_base()
         if status:
             return status
-        # Placeholder until Task 2 retypes _build_base and threads the versioned tag.
-        base_image = BASE_LATEST
+        # A successful base build must produce the versioned tag; a None tag on
+        # the success path is an invariant violation, never a cue to fall back.
+        assert base_image is not None
 
     built: list[str] = []
     failed: list[str] = []
@@ -367,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
                     entry,
                     head_sha=pr.head_sha,
                     base_sha=pr.base_sha,
-                    base_image=BASE_LATEST,
+                    base_image=base_image,
                     red=args.red,
                 )
             )

@@ -102,6 +102,36 @@ def test_no_base_requires_immutable_base_identity() -> None:
     assert status == 2
 
 
+def test_main_uses_immutable_base_for_repository_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh and --no-base paths both pass exactly one immutable base to every repo build."""
+    versioned = "daydream-rl/base:v1.2.3"
+    digest = "daydream-rl/base@sha256:" + "a" * 64
+
+    received: list[str] = []
+
+    def _record(entry, *, head_sha, base_sha, base_image, red):
+        received.append(base_image)
+        return f"{entry.image}:{head_sha[:12]}"
+
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, versioned))
+    monkeypatch.setattr(build_images, "build_repo_image", _record)
+
+    # Fresh path (no --no-base): every build uses the versioned tag from the base build.
+    assert build_images.main(["--only", FIXTURE_SLUG]) == 0
+    assert received, "fresh path built no repo image"
+    assert received == [versioned] * len(received)
+
+    # --no-base path: every build uses the explicit immutable identity.
+    received.clear()
+    assert build_images.main(["--only", FIXTURE_SLUG, "--no-base", digest]) == 0
+    assert received == [digest] * len(received)
+
+    # The mutable alias is never selected for a snapshot build.
+    assert build_images.BASE_LATEST not in received
+
+
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
