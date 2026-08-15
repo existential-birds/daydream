@@ -20,8 +20,12 @@ ARG BASE_SHA
 ARG TEST_COMMAND
 
 # The build context already holds a bare mirror, written by build_images.py.
-# NOTHING in this Dockerfile touches the network: the image must be rebuildable
-# from a stale corpus long after the upstream branch has moved or vanished.
+# Only the git/mirror layer is mirror-only: it clones from the in-container
+# mirror and never touches the network. The per-repo setup_cmds layer below,
+# however, runs `uv sync --locked` (manifest.toml) and fetches the locked
+# dependency set from the package index at build time — so the image does NOT
+# rebuild from a stale corpus with no index access. The in-container mirror
+# still needs no credentials and keeps rollouts from reaching the real repo.
 COPY mirror.git /srv/mirror.git
 
 # `origin` therefore points at the in-container mirror. That is deliberate:
