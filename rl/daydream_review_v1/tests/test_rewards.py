@@ -30,6 +30,7 @@ from daydream_review_v1.taskset import (
     DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
+    _claimed_test_verdict,
     _review_state,
 )
 
@@ -75,11 +76,18 @@ def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> 
 def _assert_gate_held(trace: vf.Trace) -> None:
     """A test-oracle change must earn a literal zero, never the w_tests reward.
 
-    The staged ``deep/test-verdict.json`` claim (passed=True) makes the tripwire
-    load-bearing: any execution of test_command records ``test_claim_mismatch``,
-    so its absence proves the gate held rather than passing vacuously over an
-    empty archive.
+    The helper reconstructs the archived run dir and enforces that its
+    ``deep/test-verdict.json`` claim is parseable before checking the tripwire.
+    This makes absence of ``test_claim_mismatch`` prove the gate held rather
+    than pass vacuously over an empty claim.
     """
+    runs_root = Path(trace.info["daydream_archive_root"]) / "runs"
+    run_dirs = [entry for entry in runs_root.iterdir() if entry.is_dir()]
+    assert len(run_dirs) == 1, f"expected exactly one archived run dir under {runs_root}, found {len(run_dirs)}"
+    assert _claimed_test_verdict(run_dirs[0]) is not None, (
+        "missing or malformed deep/test-verdict.json claim; without it, the test_claim_mismatch-absence "
+        "assertion would pass vacuously"
+    )
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 0.0
     assert trace.rewards["fix_tests_pass"] == 0.0
