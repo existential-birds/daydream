@@ -693,3 +693,24 @@ def test_base_image_has_distinct_agent_identity() -> None:
     assert "gosu" in dockerfile
     assert "useradd" in dockerfile or "adduser" in dockerfile
     assert "chmod" in dockerfile and "archive" in dockerfile  # archive made agent-inaccessible
+
+
+def test_readme_documents_single_reward_axis_and_metric() -> None:
+    from conftest import PROJECT_ROOT
+
+    readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "two axes" not in readme.lower()
+    assert "suite_non_regression" in readme
+    assert "intrinsic_composite" in readme
+
+
+def test_configs_and_pyproject_reflect_the_new_contract() -> None:
+    from conftest import PROJECT_ROOT
+
+    docker = (PROJECT_ROOT / "configs" / "eval-docker.toml").read_text(encoding="utf-8")
+    stub = (PROJECT_ROOT / "configs" / "eval-stub.toml").read_text(encoding="utf-8")
+    pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "verdict" not in docker.lower()  # stale "it's a verdict" wording
+    assert "suite_non_regression" in docker or "non-regression" in docker
+    assert "reward axes" not in stub.lower()  # stale "both reward axes" wording
+    assert "0.2.0" in pyproject

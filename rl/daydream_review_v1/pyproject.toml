@@ -1,7 +1,7 @@
 [project]
 name = "daydream-review-v1"
-version = "0.1.0"
-description = "verifiers v1 environment: the daydream deep review-fix-test loop as a Harness with sandboxed fix verification"
+version = "0.2.0"
+description = "verifiers v1 environment: the daydream deep review-fix-test loop as a Harness with sandboxed fix verification, scored only on sealed artifacts with the suite result demoted to non-regression telemetry"
 # Lower bound is daydream's own floor (root pyproject requires-python = ">=3.12.13");
 # upper bound is verifiers 0.2.1's (">=3.11,<3.14").
 requires-python = ">=3.12.13,<3.14"

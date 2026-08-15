@@ -446,7 +446,7 @@ dev = [
 
 [[package]]
 name = "daydream-review-v1"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "daydream" },

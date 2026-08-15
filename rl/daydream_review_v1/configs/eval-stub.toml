@@ -2,8 +2,9 @@
 #
 # Proves the plumbing, not the policy: env injection reaches the CLI, the CLI
 # speaks to the interception server in the right dialect with the rollout secret,
-# artifacts land in the archive, and both reward axes score. The replies are
-# garbage by construction, so near-zero rewards are the expected outcome.
+# artifacts land in the archive and are sealed by the supervisor, and the single
+# intrinsic reward scores alongside the suite_non_regression metric. The replies
+# are garbage by construction, so near-zero rewards are the expected outcome.
 #
 #   uv run python -m daydream_review_v1.fixture /tmp/daydream-rl-smoke/repo
 #   mkdir -p /tmp/daydream-rl-smoke/archive /tmp/daydream-rl-smoke/home
