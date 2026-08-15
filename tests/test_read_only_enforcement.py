@@ -1,9 +1,11 @@
 # tests/test_read_only_enforcement.py
-"""Cross-backend gate: both backends construct a non-mutating profile under read_only.
+"""Cross-backend gate: each backend selects its read-only profile under read_only.
 
-In-process proof that each backend, given ``read_only=True``, builds a profile
-that refuses mutation and permits read-only inspection. The *real* CLI/SDK
-denial equivalence is the standing proof of the Task 0 spike
+In-process proof that each backend, given ``read_only=True``, builds the
+profile it is supposed to. Claude's profile refuses mutation; Codex's
+``--sandbox read-only`` has an accepted residual where ``git commit`` still
+succeeds (worktree isolation, not this sandbox flag, is the defense for Codex).
+The *real* CLI/SDK denial equivalence is the standing proof of the Task 0 spike
 (`.beagle/concepts/handoff-accuracy-redesign/task0-spike-notes.md`); this gate
 fails the plan if either backend's profile construction regresses.
 """
@@ -42,8 +44,14 @@ async def test_claude_read_only_guard_blocks_write_tool():
 
 
 @pytest.mark.asyncio
-async def test_codex_read_only_profile_refuses_mutation():
-    """Codex passes --sandbox read-only (never danger-full-access) under read_only."""
+async def test_codex_read_only_profile_selects_read_only_sandbox():
+    """Codex passes --sandbox read-only (never danger-full-access) under read_only.
+
+    This is the argv-selection contract test: read_only=True must select the
+    read-only sandbox. It does NOT assert ref-integrity -- ``--sandbox read-only``
+    has an accepted residual where ``git commit`` still succeeds; worktree
+    isolation (the audit worktree) is the defense, not this sandbox flag.
+    """
     from daydream.backends.codex import CodexBackend
 
     backend = CodexBackend(model="gpt-x")

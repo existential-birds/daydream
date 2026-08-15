@@ -113,11 +113,21 @@ class CodexBackend:
             agents: Optional subagent mapping. Codex does not support non-empty
                 subagent maps and will raise if provided.
             read_only: When True, run under ``--sandbox read-only`` so the agent
-                can inspect history (read-only git, cat, ls) but cannot mutate
-                the working tree, index, or refs. Accepted residual (Task 0
-                spike): ``--sandbox read-only`` does not block ``git commit``;
-                the working tree — the failure-handoff incident's danger — is
-                fully protected. Default False keeps ``danger-full-access``.
+                can inspect history (read-only git, cat, ls) but cannot modify
+                the working tree. Accepted residual (Task 0 spike): the sandbox
+                does not reliably block ``git commit`` — a commit can still
+                advance a branch inside the working tree. That residual is why
+                the improve flow isolates model turns in a detached audit
+                worktree: an undirected model commit there lands only in the
+                detached audit HEAD and is discarded with the worktree at
+                exit — it cannot advance the target's HEAD or staged index
+                (named refs live in the repository's shared ref store and can
+                be written from any worktree). This is not a hard guarantee:
+                the audit worktree is a descendant of the target, and the
+                sandbox's residual is that it does not reliably block git
+                commit against any reachable repo, so a deliberate
+                cd-up-then-commit against the parent target remains possible.
+                Default False keeps ``danger-full-access``.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 
@@ -135,8 +145,9 @@ class CodexBackend:
                 "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        # Read-only sandbox blocks working-tree/index/ref mutation but (accepted
-        # residual, Task 0 spike) not `git commit`; the working tree is protected.
+        # Read-only sandbox protects the working tree but (accepted residual,
+        # Task 0 spike) does not reliably block `git commit`; the audit worktree
+        # is the defense that confines any such commit.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
             "codex",
