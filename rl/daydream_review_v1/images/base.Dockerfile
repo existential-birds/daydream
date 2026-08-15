@@ -12,6 +12,12 @@
 # contract at rollout time — DaydreamReviewHarness.setup() refuses an image whose
 # selected backend's binary is missing (daydream_review_v1/harness.py:66-79).
 
+# The uv bootstrap comes from a digest-pinned image stage, not pip: pip is the
+# last moving installer a base build could still resolve at build time, and the
+# digest names one specific multi-platform index for uv 0.11.29 that cannot
+# drift. /uv and /uvx are copied onto PATH in the python stage below.
+FROM ghcr.io/astral-sh/uv:0.11.29@sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv
+
 # The base is pinned by its immutable multi-platform index digest, not a mutable
 # tag: a tag like `3.12-slim` tracks whatever `latest`-flavored manifest it
 # currently resolves to, so a base rebuilt later could silently pick up a moved
@@ -36,11 +42,11 @@ RUN apt-get update \
 
 # uv installs the daydream wheel into the system interpreter. There is no venv
 # on purpose: `daydream` must be on PATH for any process the harness starts,
-# and a rollout container hosts exactly one application. uv itself is pinned to
-# an exact version so the bootstrap tool cannot drift between builds.
-ARG UV_VERSION=0.11.29
-RUN pip install --no-cache-dir "uv==${UV_VERSION}" \
- && uv --version
+# and a rollout container hosts exactly one application. The binary came from
+# the digest-pinned uv image stage above, so the bootstrap tool cannot drift
+# between builds.
+COPY --from=uv /uv /uvx /bin/
+RUN uv --version
 
 # HOME is set before the CLI installs, not after, so the claude installer writes
 # its binary and its cache under the SAME home the harness later hands daydream

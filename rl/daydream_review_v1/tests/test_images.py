@@ -311,8 +311,14 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
             "FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
             id="python-base-index-digest",
         ),
-        pytest.param("ARG UV_VERSION=0.11.29", id="uv-pin"),
-        pytest.param('pip install --no-cache-dir "uv==${UV_VERSION}"', id="uv-exact-install"),
+        pytest.param(
+            (
+                "FROM ghcr.io/astral-sh/uv:0.11.29@"
+                "sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv"
+            ),
+            id="uv-image-digest-pin",
+        ),
+        pytest.param("COPY --from=uv /uv /uvx /bin/", id="uv-copy-from-image"),
         pytest.param("ARG CLAUDE_CODE_VERSION=2.1.214", id="claude-version"),
         pytest.param(
             "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
