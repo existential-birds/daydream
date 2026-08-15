@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -56,16 +57,32 @@ class _RendezvousParseStub(StubBackend):
             yield event
 
 
-def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
+def _install_raw(
+    monkeypatch: pytest.MonkeyPatch, stub: StubBackend,
+    install_backend: Callable[[object], object],
+) -> None:
+    """Install a *caller-supplied custom* stub backend via the shared
+    ``install_backend`` fixture, then pin skill availability.
+
+    Unlike ``install_stub_backend`` (which builds its own ``StubBackend`` from a
+    target), this installs a custom stub (e.g. a rendezvous or failing stub) at
+    the ``create_backend`` seam so tests can observe parse concurrency / failure
+    behavior. The two skill-availability pins are identical to
+    ``install_stub_backend``'s defaults and keep the test off the local Beagle
+    plugin registry.
+    """
+    install_backend(stub)
     monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
 
 
-async def test_parse_runs_concurrently(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_parse_runs_concurrently(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
+) -> None:
     """The N per-stack parse calls overlap; every stack's records land on disk."""
     stub = _RendezvousParseStub(multi_stack_target)
-    _install_raw(monkeypatch, stub)
+    _install_raw(monkeypatch, stub, install_backend)
 
     with anyio.fail_after(15):
         exit_code = await _run_deep(multi_stack_target)
@@ -104,11 +121,12 @@ class _FailingParseStub(StubBackend):
 
 
 async def test_parse_failure_propagates_original_exception_type(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config, install_backend: Callable[[object], object],
 ) -> None:
     """One stack's parse failure fails the run with its own exception type."""
     stub = _FailingParseStub(multi_stack_target, failing_stack="python")
-    _install_raw(monkeypatch, stub)
+    _install_raw(monkeypatch, stub, install_backend)
     from daydream.runner import run
 
     trajectory_path = tmp_path / "trajectory.json"
