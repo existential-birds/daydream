@@ -174,6 +174,31 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert "# daydream recommended change" not in diff_text
 
 
+async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_files(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    """A pre-existing untracked file (present before the run) is absent from the
+    archived recommended.patch while a fix-created untracked file is present."""
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(
+        multi_stack_target, monkeypatch, real_internal_phases=True
+    )
+    stub.fix_edit_line = "# daydream recommended change\n"
+    stub.fix_new_generated = "migrations/0002_add_x.sql"  # fix-created, untracked
+    (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    recommended = (run_dir / "recommended.patch").read_text()
+    assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
+    assert "notes.txt" not in recommended              # pre-existing file excluded
+
+
 async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
 ) -> None:
@@ -445,6 +470,32 @@ def test_capture_recommended_patch_clean_tree_uses_head_base(tmp_path: Path) -> 
     assert wrote is True
     assert out.is_file()
     assert "+y = 2" in out.read_text()
+
+
+def test_capture_recommended_patch_excludes_only_preexisting_untracked_files(tmp_path: Path) -> None:
+    """R1-R4: a pre-existing untracked file (in preexisting_untracked) contributes
+    no creation hunk; a fix-created untracked file still does; tracked edits
+    serialize as today; omitting the snapshot keeps pre-existing files."""
+    repo = _init_repo_with_commit(tmp_path)
+    base = git_ops.head_sha(repo)                       # captured before the "fix"
+    (repo / "a.py").write_text("x = 1\ny = 2\n")        # tracked fix edit
+    (repo / "notes.txt").write_text("pre-existing\n")   # in the snapshot (pre-fix)
+    (repo / "new.py").write_text("fix = 1\n")           # created during the fix
+
+    out = repo / ".daydream" / "recommended.patch"
+    wrote = git_ops.capture_recommended_patch(
+        repo, base, out, preexisting_untracked={"notes.txt"}
+    )
+    assert wrote is True
+    text = out.read_text()
+    assert "new.py" in text            # fix-created untracked file captured
+    assert "notes.txt" not in text     # pre-existing untracked file excluded
+    assert "+y = 2" in text            # tracked diff unaffected
+
+    # R4 backward-compat: no snapshot -> the pre-existing file IS captured.
+    out2 = repo / ".daydream" / "recommended2.patch"
+    git_ops.capture_recommended_patch(repo, base, out2)
+    assert "notes.txt" in out2.read_text()
 
 
 def test_capture_recommended_patch_none_base_writes_nothing(tmp_path: Path) -> None:

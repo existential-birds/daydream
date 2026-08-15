@@ -2716,7 +2716,11 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # a run that generated a recommendation always archives it — even when
     # tests fail or a fix group is reverted. Best-effort; never raises.
     git_ops.capture_recommended_patch_with_base(
-        work.repo, pre_fix_snapshot, pre_fix_head, daydream_dir / "recommended.patch"
+        work.repo,
+        pre_fix_snapshot,
+        pre_fix_head,
+        daydream_dir / "recommended.patch",
+        preexisting_untracked=pre_fix_untracked,
     )
     fix_failures_p = fix_failures_path(dd)
     # Partition failures: budget-exceeded groups have their already-applied fixes
