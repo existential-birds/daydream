@@ -11,8 +11,9 @@ The adapter consumes JSONL protocol version 2 and translates the producer’s
 text, thinking, tool, usage, turn, and terminal records into Daydream’s
 existing backend event union. Osprey remains the only agent loop and the owner
 of tool execution, Tool Search, MCP transport/lifecycle, hooks, approvals,
-posture, result caps/spill, persistence, telemetry, and cancellation policy.
-Daydream does not add an MCP catalog or eager deferred-tool schemas.
+posture, result caps/spill, persistence, and telemetry. Daydream owns
+cancellation of its child subprocesses. It does not add an MCP catalog or eager
+deferred-tool schemas.
 
 ## Configuration boundary
 
@@ -41,7 +42,7 @@ or policy settings.
 
 ## Stream and terminal semantics
 
-The first line must be `{"event":"protocol","version":2}` followed by one
+The first nonblank line must be `{"event":"protocol","version":2}` followed by one
 `session_start`. A successful stream ends with `session_end.outcome` equal to
 `completed` or `terminal_tool`, then a Daydream `ResultEvent`. Usage is emitted
 only when Osprey reports `usage_reported: true`; absent tokens, costs, cache
@@ -49,9 +50,10 @@ counts, and durations remain absent rather than becoming fabricated zeroes.
 
 Other terminal outcomes (`failed`, `cancelled`, `max_continuations`,
 `budget_expired`, and `actionless_timeout`) raise `OspreyTerminalError` with the
-producer’s outcome. Missing headers, malformed required fields, unknown event
-names, truncated streams, and non-zero process exits are explicit bounded
-backend failures.
+producer’s outcome when the subprocess exits successfully. A non-zero subprocess
+exit is a backend failure even if the stream reported a terminal outcome. Missing
+headers, malformed required fields, unknown event names, and truncated streams
+are also explicit bounded backend failures.
 
 ## Identity and tool calls
 
