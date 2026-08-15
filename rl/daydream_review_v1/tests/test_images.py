@@ -529,23 +529,25 @@ def test_build_emits_canonical_argv_for_all_call_sites(
     monkeypatch.setattr(subprocess, "run", _capture)
     base = "daydream-rl/base:v1.2.3"
 
-    _build(base)
-    _build(base, "--red")
-    _build(base, "--corpus", str(REFERENCE_CORPUS), slug=REFERENCE_SLUG)
+    # One shared 5-element prefix; each case is (extra _build args, slug,
+    # expected argv tail) so the delta between call sites — slug, --red,
+    # --corpus — is the visible invariant, not three verbatim argv copies.
+    prefix = ["uv", "run", "python", "images/build_images.py", "--only"]
+    cases: list[tuple[tuple[str, ...], str | None, list[str]]] = [
+        ((), None, [FIXTURE_SLUG, "--no-base", base]),
+        (("--red",), None, [FIXTURE_SLUG, "--no-base", base, "--red"]),
+        (
+            ("--corpus", str(REFERENCE_CORPUS)),
+            REFERENCE_SLUG,
+            [REFERENCE_SLUG, "--no-base", base, "--corpus", str(REFERENCE_CORPUS)],
+        ),
+    ]
+    for extra_args, slug, expected_tail in cases:
+        kwargs: dict[str, str] = {} if slug is None else {"slug": slug}
+        _build(base, *extra_args, **kwargs)
+        assert captured[-1] == prefix + expected_tail, captured[-1]
 
-    assert captured[0] == [
-        "uv", "run", "python", "images/build_images.py",
-        "--only", FIXTURE_SLUG, "--no-base", base,
-    ]
-    assert captured[1] == [
-        "uv", "run", "python", "images/build_images.py",
-        "--only", FIXTURE_SLUG, "--no-base", base, "--red",
-    ]
-    assert captured[2] == [
-        "uv", "run", "python", "images/build_images.py",
-        "--only", REFERENCE_SLUG, "--no-base", base,
-        "--corpus", str(REFERENCE_CORPUS),
-    ]
+    assert len(captured) == 3, "exactly the three canonical _build call sites may emit subprocess.run"
     assert "_build_reference" not in vars(sys.modules[__name__])
 
 
@@ -555,7 +557,14 @@ def test_corpus_and_slug_literals_single_source() -> None:
     corpus = "corpus-" + "reference"          # built to avoid self-matching
     slug = "pallets/" + "itsdangerous"        # built to avoid self-matching
     assert src.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
-    assert src.count(slug) == 3, "slug literal must be REFERENCE_SLUG + the 2 manifest markers"
+    # The slug literal must be REFERENCE_SLUG plus one occurrence per
+    # manifest-entry marker; counting relative to the markers keeps the guard
+    # valid when a third manifest test is added or the marker is extracted
+    # into a shared constant.
+    marker = '[repos."' + slug + '"]'
+    assert src.count(slug) == 1 + src.count(marker), (
+        "slug literal must be REFERENCE_SLUG once plus once per manifest marker"
+    )
     assert "REFERENCE_CORPUS" in src and "REFERENCE_SLUG" in src
 
 
@@ -565,7 +574,7 @@ def test_module_docstring_describes_actual_contracts() -> None:
     for kind in ("Dockerfile", "--red", "manifest", "slow", "reference"):
         assert kind in doc, f"docstring must name contract kind/area {kind!r}"
     assert "three" in doc.lower(), "docstring must count the three slow tests"
-    assert "two" not in doc.lower(), "stale 'two slow tests' count must be gone"
+    assert "two slow" not in doc.lower(), "stale 'two slow tests' count must be gone"
 
 
 def test_reference_probe_quotes_the_work_repo_path() -> None:
@@ -574,5 +583,9 @@ def test_reference_probe_quotes_the_work_repo_path() -> None:
     src = Path(__file__).read_text(encoding="utf-8")
     quoted = '\\"' + "/work/repo" + '\\"'   # built to avoid self-matching
     bare = "'" + "/work/repo" + "'"         # built to avoid self-matching
-    assert quoted in src, "python -c body must receive a quoted path literal"
-    assert bare not in src, "a single-quoted path would break the sh -c region"
+    # Scan only the reference probe's own sh -c payload, so a prose comment or
+    # docstring elsewhere quoting the path cannot trip the guard.
+    probe_start = src.index('REFERENCE_TAG, "sh", "-c"')
+    probe_src = src[probe_start : src.index("capture_output=True", probe_start)]
+    assert quoted in probe_src, "python -c body must receive a quoted path literal"
+    assert bare not in probe_src, "a single-quoted path would break the sh -c region"
