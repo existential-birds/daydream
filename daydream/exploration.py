@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -128,23 +130,33 @@ class ExplorationContext:
         if not sections:
             return ""
 
-        return "# Exploration Context\n\n" + "\n\n".join(sections) + "\n"
+        return (
+            "# Exploration Context\n\n"
+            + UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+            + "\n\n"
+            + "\n\n".join(sections)
+            + "\n"
+        )
 
     def write_to_dir(self, exploration_dir: Path) -> Path:
         """Write exploration results as markdown files for on-demand agent access."""
         exploration_dir.mkdir(parents=True, exist_ok=True)
 
         if self.affected_files:
-            lines = ["# Affected Files\n", "Files relevant to the current review, discovered by exploration.\n",
+            lines = ["# Affected Files", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+                     "Files relevant to the current review, discovered by exploration.",
                      "| File | Role | Summary |", "|------|------|---------|"]
             for f in self.affected_files:
                 lines.append(f"| `{f.path}` | {f.role} | {f.summary} |")
             (exploration_dir / "affected_files.md").write_text("\n".join(lines) + "\n")
         else:
-            (exploration_dir / "affected_files.md").write_text("# Affected Files\n\nNo data collected.\n")
+            (exploration_dir / "affected_files.md").write_text(
+                f"# Affected Files\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
+            )
 
         if self.conventions or self.guidelines:
-            lines = ["# Codebase Conventions\n", "Conventions detected during pre-scan exploration.\n"]
+            lines = ["# Codebase Conventions", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+                     "Conventions detected during pre-scan exploration."]
             if self.conventions:
                 lines.append("## Conventions")
                 for c in self.conventions:
@@ -160,18 +172,24 @@ class ExplorationContext:
                 lines.append("")
             (exploration_dir / "conventions.md").write_text("\n".join(lines))
         else:
-            (exploration_dir / "conventions.md").write_text("# Codebase Conventions\n\nNo data collected.\n")
+            (exploration_dir / "conventions.md").write_text(
+                f"# Codebase Conventions\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
+            )
 
         if self.dependencies:
-            lines = ["# Dependencies\n", "Import and call relationships between files.\n",
+            lines = ["# Dependencies", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+                     "Import and call relationships between files.",
                      "| Source | Relationship | Target |", "|--------|-------------|--------|"]
             for d in self.dependencies:
                 lines.append(f"| `{d.source}` | {d.relationship} | `{d.target}` |")
             (exploration_dir / "dependencies.md").write_text("\n".join(lines) + "\n")
         else:
-            (exploration_dir / "dependencies.md").write_text("# Dependencies\n\nNo data collected.\n")
+            (exploration_dir / "dependencies.md").write_text(
+                f"# Dependencies\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
+            )
 
-        summary_lines = ["# Exploration Summary\n", "Pre-scan exploration results for the current review.\n",
+        summary_lines = ["# Exploration Summary", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+                         "Pre-scan exploration results for the current review.",
                          "| File | Contents |", "|------|----------|"]
         if self.affected_files:
             role_counts: dict[str, int] = {}

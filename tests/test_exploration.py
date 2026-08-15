@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo, merge_contexts, safe_explore
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
 
 def test_file_info_creates_valid_instance():
@@ -62,6 +63,9 @@ def test_populated_context_produces_markdown():
     assert "imports" in output
     assert "Use type annotations everywhere" in output
     assert "Found interesting patterns in the codebase." in output
+    output = ctx.to_prompt_section()
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in output
+    assert output.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < output.index("## Affected Files")
 
 
 @pytest.mark.parametrize(
@@ -247,6 +251,13 @@ def test_write_to_dir_creates_all_files(tmp_path):
     assert "Additional Notes" in summary
     assert "Found interesting patterns." in summary
 
+    for name in ("summary.md", "affected_files.md", "conventions.md", "dependencies.md"):
+        content = (exploration_dir / name).read_text()
+        assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in content
+    # Boundary sits directly below the top-level heading, before the table/data.
+    affected = (exploration_dir / "affected_files.md").read_text()
+    assert affected.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < affected.index("src/app.py")
+
 
 def test_write_to_dir_empty_context(tmp_path):
     ctx = ExplorationContext()
@@ -260,6 +271,9 @@ def test_write_to_dir_empty_context(tmp_path):
     assert "No data collected" in (exploration_dir / "affected_files.md").read_text()
     assert "No data collected" in (exploration_dir / "conventions.md").read_text()
     assert "No data collected" in (exploration_dir / "dependencies.md").read_text()
+
+    for name in ("summary.md", "affected_files.md", "conventions.md", "dependencies.md"):
+        assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in (exploration_dir / name).read_text()
 
 
 def test_write_to_dir_creates_directory(tmp_path):
