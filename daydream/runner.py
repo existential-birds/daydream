@@ -148,9 +148,8 @@ class RunConfig:
             the logs may contain sensitive data. Default None.
         trajectory_hub_repo: HuggingFace dataset repo id (``owner/repo``) that each
             run's archive bundle is uploaded to, keyed by session id. Opt-in via
-            ``--trajectory-hub-repo`` / ``DAYDREAM_TRAJECTORY_HUB_REPO`` /
-            ``trajectory_hub_repo`` file config; requires ``HF_TOKEN``. Default None
-            (feature off).
+            ``--trajectory-hub-repo`` / ``DAYDREAM_TRAJECTORY_HUB_REPO``; requires
+            ``HF_TOKEN``. Default None (feature off).
         force_worktree: Force ephemeral worktree even when ``branch`` is None.
         shallow: Single-stack review (skip multi-stack auto-detection).
         extra_copy: Extra paths to copy into ephemeral worktrees.
