@@ -6721,13 +6721,23 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
 async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
+    """An over-budget diff falls back to today's diff.patch pointer in both prompts.
+
+    The committed file is named ``0big.py`` so it sorts FIRST in the git diff
+    (``git diff`` emits paths in byte order): its single block alone exceeds
+    ``INLINE_DIFF_BUDGET_BYTES``, so the gather bound keeps it whole (oversize
+    rule) and the bounded in-memory diff is STILL over the inline budget — the
+    pointer fallback is genuinely exercised rather than replaced by an inline
+    of the small retained blocks. A multi-file over-budget diff whose trailing
+    block is dropped instead yields a small bounded diff that is inlined
+    (``test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full``).
+    """
     from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
 
     # Push the diff over the byte budget with a large committed file.
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
-    (multi_stack_target / "big.py").write_text(big + "\n")
-    _git(multi_stack_target, "add", "big.py")
+    (multi_stack_target / "0big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "0big.py")
     _git(multi_stack_target, "commit", "-m", "add big file")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -6746,6 +6756,42 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     assert "diff.patch" in wonder_prompt
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
         assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
+
+
+async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL.
+
+    Discriminating: a wiring bug either (a) fails to bound ctx.data['diff']
+    (helper never invoked), or (b) bounds the on-disk diff.patch (disk write
+    loses the truncated block). Both must be caught.
+    """
+    import daydream.deep.orchestrator as orch_mod
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
+    (multi_stack_target / "big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "big.py")
+    _git(multi_stack_target, "commit", "-m", "add big file")
+
+    called_with: list[str] = []
+    real = orch_mod.bound_deep_diff
+
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+        called_with.append(diff)
+        return real(diff, budget)
+
+    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    # (a) the helper was invoked at gather with the full diff (gather wiring).
+    assert len(called_with) == 1 and called_with[0] == (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    # (b) diff.patch on disk is FULL: the big committed file's content survives.
+    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    assert "line 50 of filler content" in patch  # a line far into big.py is present
 
 
 # --- Task 12b: each TTT step writes its own artifact -------------------------

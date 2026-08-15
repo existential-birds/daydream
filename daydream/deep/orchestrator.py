@@ -171,6 +171,7 @@ except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
 from daydream.deep.prompts import (
     _DIFF_BLOCK_SPLIT,
     _diff_block_path,
+    bound_deep_diff,
 )
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
@@ -3680,13 +3681,27 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
 
         # Flow context (steps communicate through ctx.data); ctx shares
         # run_deep's backend cache so instance-sharing semantics are unchanged.
+        # Issue #644 — the in-memory diff is bounded at gather time to
+        # ``INLINE_DIFF_BUDGET_BYTES`` via whole-block retention (``diff.patch``
+        # above stays FULL on disk for the archival/coverage/eval/training
+        # consumers; tiering / ``diff_key`` / ``changed_files`` above already
+        # ran on the full ``diff``). ``bound_deep_diff`` is infallible and runs
+        # after the full diff is persisted, so the disk copy is never bounded.
+        bounded_diff, bound_info = bound_deep_diff(diff)
+        if bound_info.truncated:
+            print_warning(
+                console,
+                f"Deep diff truncated: {bound_info.original_bytes} -> "
+                f"{bound_info.retained_bytes} bytes "
+                f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained)",
+            )
         ctx = FlowContext(
             config=config,
             work=work,
             registry=get_registry(),
             data={
                 "mode": mode,
-                "diff": diff,
+                "diff": bounded_diff,
                 # Issue #336 — fix-loop scope bound. The reviewed diff's file
                 # set threads through ctx.data so the fix gate can partition
                 # out-of-scope findings (Task 3) and the fix step can both
@@ -3695,6 +3710,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 # ``_diff_changed_files``; a missing key never crashes.
                 "changed_files": set(changed_files),
                 "diff_path": diff_path,
+                "diff_truncated": bound_info.truncated,
+                "diff_truncation": bound_info,
                 "tier": tier,
                 "dd": dd,
                 "stacks": stacks,
