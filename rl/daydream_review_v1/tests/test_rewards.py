@@ -104,11 +104,11 @@ def test_review_state_guard_rejects_base_state() -> None:
         test_command="true",
         protected_test_paths=["tests/"],
     )
-    base_trace = vf.Trace(task=vf.TraceTask(type="DaydreamReviewTask", data=data))
+    base_trace = vf.Trace(task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data))
     with pytest.raises(TypeError):
         _review_state(base_trace)
     good_trace = vf.Trace(
-        task=vf.TraceTask(type="DaydreamReviewTask", data=data),
+        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
         state=DaydreamReviewState(),
     )
     assert _review_state(good_trace).run_dir is None
