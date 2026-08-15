@@ -26,7 +26,7 @@ from daydream_review_v1.backends import (
     BackendStrategy,
     PiStrategy,
 )
-from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed, seal_archived_run
 from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
 
 
@@ -173,4 +173,16 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # failure and belongs to the retry budget, not to the gradient.
         if result.exit_code != 0 and await daydream_completed(runtime, self.config.archive_root):
             trace.stop("daydream_completed_nonzero")
+        # Produce the integrity seal over the archived run dir now that the
+        # agent's write window has closed: the reward verifies the staged copy
+        # against this seal before trusting any value, so an attempted tamper
+        # with the archived artifacts zeroes the reward instead of recording
+        # honest telemetry. The candidate diff is the rollout's own committed
+        # diff against the baked head (b"" when it cannot be re-derived).
+        await seal_archived_run(
+            runtime,
+            self.config.archive_root,
+            repo=self.config.repo_path,
+            head_sha=data.head_sha,
+        )
         return result

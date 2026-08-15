@@ -31,7 +31,7 @@ from daydream.training.reward import score_trajectory
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
-from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir, verify_seal
 
 logger = logging.getLogger(__name__)
 
@@ -201,8 +201,9 @@ async def _protected_test_paths_unchanged(
     sources, runner config, package config — so a rollout could otherwise earn
     an honest green non-regression reading by rewriting it into a trivial suite;
     the demoted ``suite_non_regression`` metric must never record a gutted
-    suite as honest telemetry. The baked head SHA is the trustworthy baseline: the image build proved the suite green at exactly that
-    commit before any agent touched the tree.
+    suite as honest telemetry. The baked head SHA is the trustworthy baseline:
+    the image build proved the suite green at exactly that commit before any
+    agent touched the tree.
 
     Fail-closed by design, with every ambiguity reading as "changed". The probe
     pathspecs are the declared paths plus ``ORACLE_IGNORE_PATHSPECS``: the repo's
@@ -394,6 +395,11 @@ class DaydreamReviewState(vf.State):
     """
 
     run_dir: Path | None = None
+    seal_ok: bool | None = None
+    """Whether the staged run dir's supervisor seal verified; ``None`` = no seal.
+
+    ``False`` means a seal existed but did not verify — a tamper — and both the
+    intrinsic reward and the non-regression metric must score zero."""
 
 
 def _review_state(trace: vf.Trace) -> DaydreamReviewState:
@@ -427,6 +433,13 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     never a reward: a green suite proves the tree did not regress, not that the
     reported defect was repaired, so it earns no training signal of its own.
 
+    ``intrinsic_composite`` consumes only sealed artifacts: the supervisor seals
+    the archived run dir (with the candidate diff) after the agent's write
+    window, and :meth:`DaydreamReviewTask.score` verifies that seal against the
+    single staged host copy before any value is trusted. A tampered archive
+    zeroes the only remaining reward and never records honest non-regression
+    telemetry.
+
     Important: ``verifier_verdicts`` exist only when the fix gate was accepted
     (``deep/recommendation-verdicts.json`` is written at
     ``daydream/deep/orchestrator.py:1213-1229``). A review-only rollout therefore
@@ -459,8 +472,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
 
         The single run-dir fetch happens here, at the entrypoint; the consumers
         read the staged snapshot off ``state.run_dir`` and never re-enter the
-        runtime. With no runtime the base class simply skips the
-        runtime-dependent signals, and there is nothing to stage.
+        runtime. The supervisor-produced ``seal.json`` rides in the fetch, so the
+        staged copy is verified against the seal before any reward trusts it; a
+        tampered archive zeroes the only remaining reward. With no runtime the
+        base class simply skips the runtime-dependent signals, and there is
+        nothing to stage.
         """
         if runtime is None:
             await super().score(trace, None)
@@ -473,6 +489,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             # task-scoring boundary rather than escaping as a raw OSError.
             async with boundary(vf.TaskError, f"task {type(self).__name__} scoring"):
                 state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+                # Seal verification is host-side over the staged copy; a seal
+                # failure is a tamper signal (explicit zero), never a crash.
+                state.seal_ok = verify_seal(state.run_dir) if state.run_dir is not None else None
+            if state.seal_ok is not None:
+                trace.record_metric("seal_verified", float(state.seal_ok))
             try:
                 await super().score(trace, runtime)
             finally:
@@ -481,7 +502,13 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     @vf.reward(weight=1.0)
     async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
         """daydream's own trajectory composite over the archived run."""
-        run_dir = _review_state(trace).run_dir
+        state = _review_state(trace)
+        # The staged copy must verify against the supervisor's seal before any
+        # value is trusted: a tampered archive zeroes the only remaining reward.
+        if state.seal_ok is False:
+            trace.info["reward_breakdown"] = {"error": "seal verification failed"}
+            return 0.0
+        run_dir = state.run_dir
         if run_dir is None:
             trace.info["reward_breakdown"] = {"error": "no archived run dir"}
             return 0.0
@@ -523,6 +550,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         for analysis.
         """
         repo = _repo_path(trace)
+        if _review_state(trace).seal_ok is False:
+            # The archived run cannot be trusted: the oracle is unverifiable, so
+            # the tampered result is never recorded as honest non-regression.
+            trace.record_metric("test_oracle_unchanged", 0.0)
+            return {"suite_non_regression": 0.0}
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
             trace.record_metric("fixes_applied", 0.0)
             # There is no re-run to compare against on this path, but a rollout

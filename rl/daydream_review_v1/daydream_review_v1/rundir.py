@@ -3,7 +3,10 @@
 Scoring runs while the runtime is still up (a ``@vf.reward`` with a required
 ``runtime`` parameter — verifiers 0.2.1 ``task.py:269-277``), so the reward reads
 daydream's own artifacts straight off the sandbox filesystem and replays them
-through the training pipeline's scorer on the host.
+through the training pipeline's scorer on the host. The supervisor seals the
+archived run dir (with the candidate diff) after the agent's write window, and
+the reward verifies that seal against the staged copy before trusting any
+value — a tampered archive must zero the reward, never record honest telemetry.
 
 Only the handful of small files the scorer actually reads are copied. The full
 archive bundle carries per-fork trajectories and diffs that can run to megabytes;
@@ -18,10 +21,16 @@ from pathlib import Path
 
 import verifiers.v1 as vf
 
+from daydream_review_v1.verifier import SealResult, seal_bytes, verify
+
 #: Fixed members of the archived run dir the reward path reads. Every one is
 #: optional: a review-only rollout has no verdicts, a green run has no
 #: fix-failures. ``deep/stack-*-records.json`` is collected separately by glob —
 #: its names depend on which stacks the router detected.
+#:
+#: ``seal.json`` is the supervisor-produced integrity seal over the other
+#: members plus the candidate diff; it rides in the fetch so the reward can
+#: verify the staged copy against it.
 #:
 #: ``trajectory.json`` and any per-fork ``trajectories/*.json`` are deliberately
 #: NOT listed here: they carry untrusted, model-directed operational text from
@@ -37,6 +46,7 @@ RUN_DIR_FILES: tuple[str, ...] = (
     "deep/merged-items.json",
     "deep/test-verdict.json",
     "deep/fix-failures.json",
+    "seal.json",
 )
 
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
@@ -102,6 +112,76 @@ async def fetch_run_dir(
         target.write_bytes(data)
         copied += 1
     return dest if copied else None
+
+
+def verify_seal(run_dir: Path) -> bool | None:
+    """Verify the staged run dir's supervisor-produced seal.
+
+    Args:
+        run_dir: The staged host copy of the archived run dir (``fetch_run_dir``
+            output), including ``seal.json`` when the supervisor sealed the run.
+
+    Returns:
+        ``True`` when the seal verifies against the staged members and the
+        candidate diff it carries; ``False`` when a seal exists but is missing,
+        malformed, or mismatched (a tamper must zero the reward, not crash
+        scoring); ``None`` when no seal was produced (legacy/unsealed runs keep
+        their pre-seal scoring — the harness seals every completed production
+        run, so this is the test-only path). Never raises.
+    """
+    seal_path = run_dir / "seal.json"
+    if not seal_path.is_file():
+        return None
+    try:
+        seal = SealResult.model_validate_json(seal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    # The seal covers the RUN_DIR_FILES members that exist; seal.json itself is
+    # the seal record and is never hashed into itself.
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
+    ]
+    return verify(seal, present, candidate_diff=seal.candidate_diff)
+
+
+async def seal_archived_run(
+    runtime: vf.Runtime,
+    archive_root: str = DEFAULT_ARCHIVE_ROOT,
+    *,
+    repo: str,
+    head_sha: str,
+) -> bool:
+    """Seal the archived run dir + the candidate diff; write ``seal.json`` into the sandbox.
+
+    The supervisor (harness) runs this after the launch returns, so the seal is
+    produced outside the agent's write window and the reward can verify the
+    staged copy against it. The candidate diff is the rollout's own committed
+    diff against the baked head (``b""`` when the runner cannot produce one).
+
+    Returns:
+        ``True`` when a seal was written; ``False`` when there is no run dir to
+        seal or sealing failed. Never raises: a missing seal must not crash the
+        rollout — but note that an unsealed completed run is then scored with
+        no ``seal_verified`` metric and no tamper protection.
+    """
+    session_dir = await _session_dir(runtime, archive_root)
+    if session_dir is None:
+        return False
+    try:
+        artifacts: dict[str, bytes] = {}
+        for rel in await _present_files(runtime, session_dir):
+            # The seal covers the RUN_DIR_FILES members the reward reads; the
+            # stack-record glob members are staged but are not reward inputs.
+            if rel not in RUN_DIR_FILES or rel == "seal.json":
+                continue
+            artifacts[rel] = await runtime.read(f"{session_dir}/{rel}")
+        diff_result = await runtime.run(["git", "-C", repo, "diff", head_sha, "HEAD"], {})
+        candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
+        seal = seal_bytes(artifacts, candidate_diff)
+        await runtime.write(f"{session_dir}/seal.json", seal.model_dump_json().encode())
+        return True
+    except Exception:
+        return False
 
 
 async def daydream_completed(

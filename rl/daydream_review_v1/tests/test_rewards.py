@@ -1161,3 +1161,56 @@ async def test_reward_breakdown_carries_dual_version_stamps(
     breakdown = trace.info["reward_breakdown"]
     assert breakdown["reward_version"] == ROLLOUT_REWARD_VERSION
     assert breakdown["intrinsic_reward_version"] == REWARD_VERSION
+
+
+async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A tampered sealed artifact makes the only reward zero and non-regression dishonest."""
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    # Harness produced the seal; the agent then rewrote an archived artifact.
+    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.verifier import seal_artifacts
+
+    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()]
+    seal = seal_artifacts(present, candidate_diff=b"candidate-diff")
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+    (run_dir / "deep" / "merged-items.json").write_text(
+        json.dumps({"items": []}), encoding="utf-8"
+    )  # tamper after sealing
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["seal_verified"] == 0.0
+    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0
+
+
+async def test_untampered_sealed_run_scores_normally(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """An intact seal leaves scoring unchanged."""
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.verifier import seal_artifacts
+
+    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()]
+    seal = seal_artifacts(present, candidate_diff=b"candidate-diff")
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["seal_verified"] == 1.0
+    assert trace.rewards["intrinsic_composite"] == (
+        score_trajectory(
+            assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
+        ).composite
+    )

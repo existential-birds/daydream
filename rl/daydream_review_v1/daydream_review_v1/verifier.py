@@ -31,14 +31,18 @@ class SealResult:
 
     ``artifact_digests`` maps each artifact's path relative to the common parent
     of the sealed paths (posix form) to its sha256 hex digest; the algorithm is
-    pinned as ``"sha256"`` so a verify can never silently downgrade. Serialized
-    to JSON by the supervisor (:meth:`model_dump_json`) and parsed back at
+    pinned as ``"sha256"`` so a verify can never silently downgrade.
+    ``candidate_diff`` carries the raw diff bytes so the verifying side can
+    re-check them against the recorded digest without re-entering the sandbox
+    (the supervisor records the diff into the seal record). Serialized to JSON
+    by the supervisor (:meth:`model_dump_json`) and parsed back at
     verification time (:meth:`model_validate_json`).
     """
 
     algorithm: Literal["sha256"] = _ALGORITHM
     artifact_digests: dict[str, str] = field(default_factory=dict)
     candidate_diff_digest: str = ""
+    candidate_diff: bytes = b""
 
     def model_dump_json(self) -> str:
         """Serialize the seal to a JSON string (deterministic key order)."""
@@ -47,6 +51,7 @@ class SealResult:
                 "algorithm": self.algorithm,
                 "artifact_digests": self.artifact_digests,
                 "candidate_diff_digest": self.candidate_diff_digest,
+                "candidate_diff": self.candidate_diff.decode("utf-8"),
             },
             sort_keys=True,
         )
@@ -78,7 +83,15 @@ class SealResult:
         diff = data.get("candidate_diff_digest")
         if not isinstance(diff, str):
             raise ValueError("seal.json candidate_diff_digest must be a string")
-        return cls(algorithm=algorithm, artifact_digests=digests, candidate_diff_digest=diff)
+        raw_diff = data.get("candidate_diff")
+        if not isinstance(raw_diff, str):
+            raise ValueError("seal.json candidate_diff must be a string")
+        return cls(
+            algorithm=algorithm,
+            artifact_digests=digests,
+            candidate_diff_digest=diff,
+            candidate_diff=raw_diff.encode("utf-8"),
+        )
 
 
 def _relative_keys(paths: list[Path]) -> dict[str, Path]:
@@ -98,6 +111,9 @@ def _relative_keys(paths: list[Path]) -> dict[str, Path]:
 def seal_artifacts(paths: list[Path], candidate_diff: bytes) -> SealResult:
     """Seal *paths* (sha256 of each artifact's raw bytes) plus *candidate_diff*.
 
+    The raw diff is carried in the seal record so the verifying side can re-check
+    it against ``candidate_diff_digest`` without re-entering the sandbox.
+
     Raises:
         OSError: If an artifact cannot be read. Sealing is the supervisor's job
             over a known-good staged copy, so a missing artifact here is a
@@ -110,6 +126,22 @@ def seal_artifacts(paths: list[Path], candidate_diff: bytes) -> SealResult:
         algorithm=_ALGORITHM,
         artifact_digests=digests,
         candidate_diff_digest=hashlib.sha256(candidate_diff).hexdigest(),
+        candidate_diff=candidate_diff,
+    )
+
+
+def seal_bytes(artifacts: dict[str, bytes], candidate_diff: bytes) -> SealResult:
+    """Seal artifacts given as ``{relative posix path: raw bytes}`` plus *candidate_diff*.
+
+    The sandbox-side twin of :func:`seal_artifacts`: the supervisor reads the
+    archived run-dir members as bytes out of the runtime and seals them without
+    staging a host copy first.
+    """
+    return SealResult(
+        algorithm=_ALGORITHM,
+        artifact_digests={rel: hashlib.sha256(data).hexdigest() for rel, data in artifacts.items()},
+        candidate_diff_digest=hashlib.sha256(candidate_diff).hexdigest(),
+        candidate_diff=candidate_diff,
     )
 
 
