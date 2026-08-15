@@ -152,8 +152,6 @@ In the same area, switch to the **Variables** tab → **New repository variable*
 - `DAYDREAM_BOT_HANDLE` — the mention handle the command workflow matches,
   **without** the `@` (e.g. `daydream-review`, so `@daydream-review review`
   triggers it).
-- _Optional:_ `DAYDREAM_AUTO_REVIEW` — set to `false` to disable auto-review on
-  PR open; the `@<bot> review` command keeps working.
 
 ### 6. Add the three workflow files
 
@@ -180,12 +178,21 @@ roles, trigger matrix, and security model are documented in that directory's
 > setup` always lands the three-file split, so this variant is browser/manual
 > only.
 
-### 7. Confirm
+### 7. Confirm and approve a review
 
-Open a pull request in the repo. With auto-review on, the bot reviews it and
-posts inline comments as `<your-app>[bot]`; otherwise comment `@<bot> review`.
+Open a pull request in the repo, then have a trusted maintainer (an OWNER,
+MEMBER, or COLLABORATOR) comment `@<bot> review`. The command workflow records
+the PR's current head SHA as the approved target and starts the unprivileged
+review workflow. Findings are posted as `<your-app>[bot]`.
+
+The approval is bound to that exact commit. If a commit is pushed after the
+comment, the review fails loudly before checkout rather than running with model
+credentials against code that was never approved. Comment `@<bot> review`
+again to approve and review the new head.
+
 If you have a terminal available, run the `--verify` command shown at the top of
-this guide to audit the install component-by-component.
+this guide to audit the install component-by-component, including that the
+installed workflows exactly match the packaged approval-gated versions.
 
 ---
 
