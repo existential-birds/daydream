@@ -273,6 +273,7 @@ class StubBackend:
             "model": self.model,
             "continuation": continuation,
             "max_turns": max_turns,
+            "read_only": read_only,
         }
         self.calls.append(call)
         if self._shared is not None:
