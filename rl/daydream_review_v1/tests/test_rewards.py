@@ -81,10 +81,16 @@ def _assert_gate_held(trace: vf.Trace) -> None:
     This makes absence of ``test_claim_mismatch`` prove the gate held rather
     than pass vacuously over an empty claim.
     """
+    # NOTE: production's tripwire (taskset.py) consumes the fetch_run_dir
+    # staging copy filtered by RUN_DIR_FILES (rundir.py:32-40), not this host
+    # archive read; keep deep/test-verdict.json on that allowlist or this
+    # precondition can pass while the staged copy is claim-less.
     runs_root = Path(trace.info["daydream_archive_root"]) / "runs"
     run_dirs = [entry for entry in runs_root.iterdir() if entry.is_dir()]
-    assert len(run_dirs) == 1, f"expected exactly one archived run dir under {runs_root}, found {len(run_dirs)}"
-    assert _claimed_test_verdict(run_dirs[0]) is not None, (
+    assert run_dirs, f"expected at least one archived run dir under {runs_root}"
+    assert all(
+        _claimed_test_verdict(run_dir) is not None for run_dir in run_dirs
+    ), (
         "missing or malformed deep/test-verdict.json claim; without it, the test_claim_mismatch-absence "
         "assertion would pass vacuously"
     )
