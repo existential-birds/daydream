@@ -22,6 +22,7 @@ from daydream.backends import (
 )
 from daydream.backends.osprey import (
     OspreyBackend,
+    OspreyError,
     OspreyTerminalError,
     OspreyUnsupportedOption,
 )
@@ -142,6 +143,7 @@ def test_factory_builds_verified_osprey_jsonl_command() -> None:
 @pytest.mark.asyncio
 async def test_translates_text_thinking_tool_identity_metrics_and_result() -> None:
     lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
         {"event": "thinking_delta", "content": "checking"},
         {"event": "text_delta", "content": "done"},
         {
@@ -203,7 +205,7 @@ async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
             "provider": "openai-compatible",
             "model": "custom-model",
             "duration_ms": 0,
-            "thinking_tokens": 0,
+            "thinking_tokens": 3,
             "tool_calls": 0,
             "cost_usd": "0.125",
         },
@@ -215,11 +217,36 @@ async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
 
     assert metrics.prompt_tokens == 12
     assert metrics.completion_tokens == 7
+    assert metrics.reasoning_tokens == 3
     assert metrics.cached_tokens is None
     assert metrics.cost_usd == pytest.approx(0.125)
     assert result.structured_output == {"ok": True}
     assert result.continuation is not None
     assert result.continuation.data["session_id"] == "s-137"
+    assert result.continuation.data == {
+        "session_id": "s-137",
+        "provider": "openai-compatible",
+        "model": "custom-model",
+        "outcome": "completed",
+        "exit_code": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_unreported_usage_permits_omitted_optional_telemetry() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": False,
+        },
+    )
+
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+    assert [event.message_id for event in events if isinstance(event, TurnEndEvent)] == ["t-1"]
+    assert not any(isinstance(event, MetricsEvent) for event in events)
 
 
 @pytest.mark.asyncio
@@ -300,6 +327,21 @@ async def test_output_schema_is_temp_file_forwarded_and_cleaned(tmp_path: Path) 
     assert not schema_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_path: Path) -> None:
+    schema_path = tmp_path / "schema.json"
+    schema_path.touch()
+    handle = MagicMock()
+    handle.name = str(schema_path)
+    with (
+        patch("daydream.backends.osprey.tempfile.NamedTemporaryFile", return_value=handle),
+        patch("daydream.backends.osprey.json.dump", side_effect=TypeError("not serializable")),
+        pytest.raises(TypeError, match="not serializable"),
+    ):
+        await _collect(OspreyBackend(osprey_binary="fake"), [], output_schema={"type": object})
+    assert not schema_path.exists()
+
+
 def test_unsupported_policy_and_tool_search_options_fail_closed() -> None:
     with pytest.raises(OspreyUnsupportedOption, match="interactive approver"):
         OspreyBackend(approval="on-request").build_command("prompt")
@@ -316,6 +358,107 @@ async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None
     with pytest.raises(OspreyTerminalError, match="budget_expired") as exc_info:
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
     assert exc_info.value.outcome == "budget_expired"
+
+
+@pytest.mark.asyncio
+async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process_failure() -> None:
+    lines, _ = _stream()
+    lines[-1]["outcome"] = "budget_expired"
+    with pytest.raises(OspreyError, match="return code 1") as exc_info:
+        await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1)
+    assert exc_info.value.category == "PROCESS_EXIT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events, message",
+    [
+        (
+            [{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}],
+            "active turn",
+        ),
+        (
+            [
+                {
+                    "event": "tool_call",
+                    "tool_call_id": "c-1",
+                    "tool_name": "tool_search",
+                    "arguments": {},
+                }
+            ],
+            "pending tool calls",
+        ),
+    ],
+)
+async def test_successful_session_end_requires_a_quiescent_stream(
+    events: list[dict[str, object]], message: str
+) -> None:
+    lines, _ = _stream(*events)
+
+    with pytest.raises(OspreyError, match=message):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+async def test_terminal_exit_code_must_match_process_status() -> None:
+    lines, _ = _stream()
+    lines[-1]["exit_code"] = 1
+
+    with pytest.raises(OspreyError, match="exit_code"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+async def test_negative_thinking_tokens_are_rejected() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": True,
+            "duration_ms": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "thinking_tokens": -1,
+        },
+    )
+
+    with pytest.raises(OspreyError, match="thinking_tokens"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events, message",
+    [
+        (
+            [
+                {
+                    "event": "turn_end",
+                    "turn_id": "t-1",
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "usage_reported": False,
+                    "duration_ms": 0,
+                }
+            ],
+            "turn_end without turn_start",
+        ),
+        (
+            [
+                {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+                {"event": "turn_start", "turn_id": "t-2", "timestamp": "now"},
+            ],
+            "turn_start before prior turn_end",
+        ),
+    ],
+)
+async def test_invalid_turn_event_order_fails_closed(
+    events: list[dict[str, object]], message: str
+) -> None:
+    lines, _ = _stream(*events)
+    with pytest.raises(Exception, match=message):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
 
 @pytest.mark.asyncio

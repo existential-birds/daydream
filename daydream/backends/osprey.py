@@ -16,6 +16,7 @@ import os
 import re
 import tempfile
 from collections.abc import AsyncGenerator, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -180,6 +181,51 @@ def _bounded_diagnostics(lines: Iterable[str]) -> str:
     return "\n".join(cleaned)
 
 
+@dataclass(frozen=True)
+class _OspreyCommandOptions:
+    """Per-invocation inputs to the verified Osprey argv surface."""
+
+    prompt: str
+    output_schema_path: str | Path | None
+    continuation: ContinuationToken | None
+    max_turns: int | None
+    read_only: bool
+    persist_session: bool
+    tool_search_mode: str | None
+
+
+@dataclass
+class _OspreyProtocolState:
+    """Ordering and correlation state owned by one Osprey JSONL stream."""
+
+    active_turn_id: str | None = None
+    pending_tool_calls: set[str] = field(default_factory=set)
+
+    def start_turn(self, turn_id: str) -> None:
+        if self.active_turn_id is not None:
+            raise OspreyProtocolError("turn_start before prior turn_end")
+        self.active_turn_id = turn_id
+
+    def end_turn(self, turn_id: str) -> None:
+        if self.active_turn_id is None:
+            raise OspreyProtocolError("turn_end without turn_start")
+        if turn_id != self.active_turn_id:
+            raise OspreyProtocolError(
+                f"turn_end {turn_id!r} does not match active turn {self.active_turn_id!r}"
+            )
+        self.active_turn_id = None
+
+    def start_tool_call(self, call_id: str) -> None:
+        if call_id in self.pending_tool_calls:
+            raise OspreyProtocolError(f"duplicate pending tool_call_id {call_id!r}")
+        self.pending_tool_calls.add(call_id)
+
+    def finish_tool_call(self, call_id: str) -> None:
+        # Preserve unmatched results: the trajectory recorder has an explicit
+        # bucket for them. Matching calls are retired.
+        self.pending_tool_calls.discard(call_id)
+
+
 class OspreyBackend:
     """Translate ``osprey agent --events-jsonl`` into daydream events."""
 
@@ -301,7 +347,27 @@ class OspreyBackend:
         persist_session: bool = True,
         tool_search_mode: str | None = None,
     ) -> list[str]:
+        return self._build_command(
+            _OspreyCommandOptions(
+                prompt=prompt,
+                output_schema_path=output_schema_path,
+                continuation=continuation,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+                tool_search_mode=tool_search_mode,
+            )
+        )
+
+    def _build_command(self, options: _OspreyCommandOptions) -> list[str]:
         """Build only flags verified against the current Osprey CLI source."""
+        prompt = options.prompt
+        output_schema_path = options.output_schema_path
+        continuation = options.continuation
+        max_turns = options.max_turns
+        read_only = options.read_only
+        persist_session = options.persist_session
+        tool_search_mode = options.tool_search_mode
         selected_tool_search = (
             tool_search_mode if tool_search_mode is not None else self.tool_search_mode
         )
@@ -420,42 +486,20 @@ class OspreyBackend:
         handle = tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".json", prefix="daydream-osprey-schema-", delete=False
         )
+        completed = False
         try:
             json.dump(schema, handle, separators=(",", ":"))
             handle.write("\n")
+            completed = True
             return handle.name
         finally:
-            handle.close()
-
-    @staticmethod
-    def _record_identity(
-        *,
-        session_id: str,
-        model: str,
-        provider: str,
-        outcome: str | None = None,
-        exit_code: int | None = None,
-        turn_durations_ms: list[int] | None = None,
-    ) -> None:
-        # Recording is deliberately best-effort, matching the existing
-        # trajectory boundary: a recorder problem must not change execution.
-        try:
-            from daydream.trajectory import get_current_recorder
-
-            recorder = get_current_recorder()
-            record_identity = getattr(recorder, "record_backend_identity", None)
-            if callable(record_identity):
-                record_identity(
-                    backend="osprey",
-                    model=model,
-                    provider=provider,
-                    session_id=session_id,
-                    outcome=outcome,
-                    exit_code=exit_code,
-                    turn_durations_ms=turn_durations_ms,
-                )
-        except Exception:  # noqa: BLE001 - telemetry must never mask the run
-            logger.warning("failed to record Osprey identity", exc_info=True)
+            try:
+                handle.close()
+            finally:
+                if not completed:
+                    # delete=False lets Osprey reopen this path, so remove the file
+                    # ourselves if serialization or writing does not complete.
+                    Path(handle.name).unlink(missing_ok=True)
 
     async def execute(
         self,
@@ -493,6 +537,7 @@ class OspreyBackend:
         terminal_exit_code: int | None = None
         terminal_structured_output: Any = None
         turn_text_emitted = False
+        protocol_state = _OspreyProtocolState()
 
         try:
             command = self.build_command(
@@ -563,11 +608,6 @@ class OspreyBackend:
                     session_model = _required_string(event, "model")
                     provider = _required_string(event, "provider")
                     saw_session_start = True
-                    self._record_identity(
-                        session_id=session_id,
-                        model=session_model,
-                        provider=provider,
-                    )
                     continue
                 if saw_session_end:
                     raise OspreyProtocolError("JSONL event appeared after session_end")
@@ -583,14 +623,6 @@ class OspreyBackend:
                     terminal_exit_code = exit_code
                     terminal_structured_output = event.get("structured_output")
                     saw_session_end = True
-                    self._record_identity(
-                        session_id=session_id,
-                        model=session_model or self.model,
-                        provider=provider or "unknown",
-                        outcome=outcome,
-                        exit_code=exit_code,
-                        turn_durations_ms=turn_durations_ms,
-                    )
                     final_cost = _parse_cost(event.get("total_cost_usd"), event_name=event_name)
                     if final_cost is not None and not saw_metric_cost:
                         total_cost = final_cost
@@ -615,6 +647,7 @@ class OspreyBackend:
                     arguments = event.get("arguments")
                     if not isinstance(arguments, dict):
                         raise OspreyProtocolError("tool_call requires object arguments")
+                    protocol_state.start_tool_call(call_id)
                     yield ToolStartEvent(call_id, tool_name, arguments)
                 elif event_name == "tool_result":
                     call_id = _required_string(event, "tool_call_id")
@@ -626,29 +659,39 @@ class OspreyBackend:
                     if not isinstance(content, str):
                         raise OspreyProtocolError("tool_result requires string content")
                     _required_int(event, "duration_ms")
+                    protocol_state.finish_tool_call(call_id)
                     yield ToolResultEvent(call_id, content, status == "error")
                 elif event_name == "tool_update":
                     _required_string(event, "tool_call_id")
                     if not isinstance(event.get("content"), str):
                         raise OspreyProtocolError("tool_update requires string content")
                 elif event_name == "turn_start":
-                    _required_string(event, "turn_id")
+                    turn_id = _required_string(event, "turn_id")
                     _required_string(event, "timestamp")
+                    protocol_state.start_turn(turn_id)
                     turn_text_emitted = False
                 elif event_name == "turn_end":
                     turn_id = _required_string(event, "turn_id")
-                    _required_int(event, "prompt_tokens")
-                    _required_int(event, "completion_tokens")
+                    protocol_state.end_turn(turn_id)
                     usage_reported = event.get("usage_reported")
                     if not isinstance(usage_reported, bool):
                         raise OspreyProtocolError("turn_end requires boolean usage_reported")
-                    duration = _required_int(event, "duration_ms")
+                    duration = (
+                        _required_int(event, "duration_ms")
+                        if usage_reported
+                        else _optional_int(event, "duration_ms")
+                    )
                     if duration is not None:
                         turn_durations_ms.append(duration)
                     if usage_reported:
                         prompt_tokens = _required_int(event, "prompt_tokens")
                         completion_tokens = _required_int(event, "completion_tokens")
                         cached_tokens = _optional_int(event, "cached_tokens")
+                        reasoning_tokens = _optional_int(event, "thinking_tokens")
+                        if reasoning_tokens is not None and reasoning_tokens < 0:
+                            raise OspreyProtocolError(
+                                "turn_end thinking_tokens must be non-negative"
+                            )
                         cost = _parse_cost(event.get("cost_usd"), event_name=event_name)
                         turn_model = event.get("model")
                         if turn_model is not None and not isinstance(turn_model, str):
@@ -662,6 +705,7 @@ class OspreyBackend:
                             completion_tokens=completion_tokens,
                             cached_tokens=cached_tokens,
                             cost_usd=cost,
+                            reasoning_tokens=reasoning_tokens,
                             model_name=turn_model or session_model,
                         )
                     yield TurnEndEvent(message_id=turn_id)
@@ -704,9 +748,17 @@ class OspreyBackend:
                 raise OspreyProtocolError("Osprey produced no session_start event")
             if not saw_session_end:
                 raise OspreyProtocolError("Osprey stream ended without session_end")
+            if terminal_exit_code is not None and terminal_exit_code != returncode:
+                raise OspreyProtocolError(
+                    "session_end exit_code does not match subprocess return code"
+                )
             if terminal_outcome not in _SUCCESS_OUTCOMES:
                 detail = failed_message or f"exit_code={terminal_exit_code!r}"
                 raise OspreyTerminalError(terminal_outcome or "unknown", detail)
+            if protocol_state.active_turn_id is not None:
+                raise OspreyProtocolError("successful session_end has an active turn")
+            if protocol_state.pending_tool_calls:
+                raise OspreyProtocolError("successful session_end has pending tool calls")
             if total_cost is not None and not saw_metric_cost:
                 yield CostEvent(
                     cost_usd=total_cost,
