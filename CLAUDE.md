@@ -132,7 +132,7 @@ recorder are backend-agnostic.
   backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
   a real fix away rather than trimming it.
 - `run_agent` retries any `retryable` backend error with exponential backoff, **20 attempts**, all backends
-  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto, stalled stream,
+  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto,
   non-transport logic error. A stall fires only on the *absence* of output, never on slow output.
 
 ### Config and per-phase model overrides
