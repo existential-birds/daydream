@@ -1027,6 +1027,40 @@ class _SecondaryEditBackend(_StubBackend):
             self._secondary.write_text(self._secondary.read_text() + self._secondary_edit)
 
 
+class _NewFileSecondaryEditBackend(_StubBackend):
+    """Fix stub that ALSO creates a NEW untracked *.py file outside the diff.
+
+    The fix pass may create files outside the reviewed diff (e.g. a new
+    module). Such a file survives the post-fix residual net (only TRACKED
+    edits are reverted) and lands in the gate's ``changed_after_fix``
+    candidate set -- but it was never in the pre-fix snapshot, which is scoped
+    to the reviewed ``*.py`` set (#457). This is the missing-baseline shape
+    the gate must flag explicitly.
+    """
+
+    def __init__(self, target: Path, new_file: Path, content: str) -> None:
+        super().__init__(target)
+        self._new_file = new_file
+        self._content = content
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+        if prompt.lower().startswith(("fix this issue", "fix these")):
+            self._new_file.write_text(self._content)
+
+
 class _ScopeCreepBackend(_StubBackend):
     """Fix stub that ALSO edits a tracked file OUTSIDE the reviewed diff (#336).
 
@@ -1663,6 +1697,76 @@ async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
     assert len(calls) >= 2, f"expected pre-fix + post-fix captures, got {calls}"
     assert calls[0] == {"api.py"}, f"pre-fix capture must be scoped to reviewed .py, got {calls[0]}"
     assert calls[1] == {"api.py"}, f"post-fix capture must be scoped to reviewed .py, got {calls[1]}"
+
+
+async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/#457): an out-of-diff *.py created by the fix pass is flagged.
+
+    The pre-fix snapshot is scoped to the reviewed ``*.py`` set (#457), while
+    the post-fix candidate set unions ``changed_after_fix`` (#329/Finding 6). A
+    ``*.py`` file the fix pass creates OUTSIDE the reviewed diff (it survives
+    the residual net, which reverts only TRACKED edits) therefore has no
+    before baseline. The old gate recorded ``delta=None`` with only the
+    absolute fallback, so a delta regression in such a secondary file was
+    invisible. The gate now records it explicitly flagged with a
+    missing-baseline reason and surfaces a warning -- still fail-open (exit 0).
+    """
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "gate_missing_baseline")
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _NewFileSecondaryEditBackend(
+        target, target / "new_module.py", "def extra():\n    return 1\n"
+    )
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            file_config=DaydreamFileConfig(
+                quality_gate_erosion_absolute=100.0,
+                quality_gate_verbosity_absolute=100.0,
+            ),
+        )
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(target)
+    assert gate["enabled"] is True
+    per_file = gate["rounds"][0]["per_file"]
+    entry = per_file["new_module.py"]
+    # Absolute fallbacks are raised out of the way (100.0): only the explicit
+    # missing-baseline flag can mark this file -- the old undefined-delta path
+    # would have left it unflagged and invisible.
+    assert entry["erosion_before"] is None
+    assert entry["erosion_after"] is not None
+    assert entry["erosion_delta"] is None
+    assert entry["flagged"] is True
+    assert "baseline" in entry["reason"]
+    assert any("new_module.py" in w for w in warnings), (
+        "a missing-baseline file must be named in a warning, never silently pass"
+    )
+    # The reviewed file stays covered and clean.
+    assert per_file["api.py"]["flagged"] is False
 
 
 async def test_fix_quality_gate_clamps_invalid_thresholds(

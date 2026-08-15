@@ -2458,9 +2458,13 @@ async def _evaluate_quality_gate(
     clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
     (keyed by the flow's loop iteration when present, else the next sequence
     number), so a resume or loop preserves the per-round trend. Flagged files
-    are surfaced as warnings with their before/after numbers. The post-fix
-    sync tree-walk runs off the event loop so parallel fix fan-out is never
-    blocked by the analyzer (#329 / CodeRabbit Finding D).
+    are surfaced as warnings with their before/after numbers. A candidate the
+    pre-fix snapshot did not cover -- the snapshot is scoped to the reviewed
+    ``*.py`` set (#457), so an out-of-diff secondary edit the fix pass made has
+    no baseline -- is recorded as flagged with a missing-baseline reason: an
+    unverifiable edit must not read as a clean pass. The post-fix sync
+    tree-walk runs off the event loop so parallel fix fan-out is never blocked
+    by the analyzer (#329 / CodeRabbit Finding D).
     """
     session_id = _current_session_id()
     try:
@@ -2551,6 +2555,31 @@ async def _evaluate_quality_gate(
                     "reason": "file missing from post-fix analyzer output (unparseable?)",
                 }
                 continue
+            # Issue #329 / #457: the pre-fix snapshot is scoped to the reviewed
+            # diff's ``*.py`` set, so a candidate the fix pass edited that was
+            # NOT in the reviewed diff -- a secondary edit that survived the
+            # residual net, e.g. a newly-created untracked ``*.py`` -- has no
+            # before baseline. A missing baseline must not read as a clean
+            # pass: the delta is unknowable, so record the file explicitly
+            # flagged with its reason instead of silently falling into the
+            # absolute-only fallback, which can miss the exact delta regression
+            # #329 added changed_after_fix for. Still fail-open: never raises,
+            # never stops the run.
+            if before_entry is None and after_entry is not None:
+                per_file[rel] = {
+                    "erosion_before": None,
+                    "erosion_after": after_entry.get("erosion"),
+                    "erosion_delta": None,
+                    "verbosity_before": None,
+                    "verbosity_after": after_entry.get("verbosity"),
+                    "verbosity_delta": None,
+                    "flagged": True,
+                    "reason": (
+                        "missing pre-fix baseline: file edited by the fix pass but not "
+                        "covered by the pre-fix quality snapshot"
+                    ),
+                }
+                continue
             erosion_before = before_entry.get("erosion") if before_entry is not None else None
             erosion_after = after_entry.get("erosion") if after_entry is not None else None
             verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
@@ -2594,7 +2623,10 @@ async def _evaluate_quality_gate(
             lines = []
             for rel in flagged:
                 entry = per_file[rel]
-                if entry.get("unparseable"):
+                # Unparseable and missing-baseline entries carry a ``reason``
+                # naming the failure; surface it instead of before/after
+                # numbers that would read like a normal regression.
+                if entry.get("reason"):
                     lines.append(f"  - {rel}: {entry['reason']}")
                 else:
                     lines.append(
@@ -2855,6 +2887,12 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # Fail-open: if enumeration raises, candidates stay ``None`` and the gate
     # persists an explicit ``unavailable`` verdict rather than gating on a
     # partial candidate set.
+    #
+    # The PRE-FIX snapshot, by contrast, is scoped to the reviewed ``*.py``
+    # set only (#457), so a candidate that survived the residual net outside
+    # the reviewed diff (e.g. a newly-created untracked ``*.py``) has no
+    # before baseline; ``_evaluate_quality_gate`` records those explicitly as
+    # flagged missing-baseline entries rather than computing an undefined delta.
     quality_candidates: set[str] | None
     if quality_gate_enabled:
         try:
