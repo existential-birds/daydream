@@ -27,7 +27,7 @@ from daydream.benchmark.corpus import harvested_corpus
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
 
@@ -156,6 +156,7 @@ class GoldenComment(BaseModel):
     Used only for the non-summed ``golden_overlap`` metric — never a reward.
     """
 
+    model_config = ConfigDict(extra="forbid")
     comment: str
     path: str | None = None
     line: int | None = None
@@ -339,6 +340,7 @@ class DaydreamReviewConfig(vf.TasksetConfig):
 
 
 class _ManifestEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     clone_url: str
     image: str
     test_command: str
