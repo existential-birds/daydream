@@ -120,7 +120,9 @@ class _SpecialistMockBackend:
         max_turns=None,
         read_only=False,
     ) -> AsyncIterator[AgentEvent]:
-        self.execute_calls.append({"prompt": prompt, "schema": output_schema, "agents": agents})
+        self.execute_calls.append(
+            {"prompt": prompt, "schema": output_schema, "agents": agents, "read_only": read_only}
+        )
         result: dict[str, Any] = {}
         if output_schema == PATTERN_SCANNER_SCHEMA:
             result = self._results.get("pattern_scanner", {})
@@ -182,6 +184,8 @@ def test_single_tier_dependency_tracer_only(tmp_path):
 
     assert len(backend.execute_calls) == 1
     assert backend.execute_calls[0]["schema"] == DEPENDENCY_TRACER_SCHEMA
+    assert backend.execute_calls
+    assert all(call["read_only"] is True for call in backend.execute_calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
 
@@ -197,6 +201,8 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
     assert len(schemas) >= 1  # All are "object" type
+    assert backend.execute_calls
+    assert all(call["read_only"] is True for call in backend.execute_calls)
     # No agents= passed and no raw diff leaked into specialist prompts.
     for call in backend.execute_calls:
         assert call["agents"] is None

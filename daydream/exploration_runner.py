@@ -245,6 +245,7 @@ async def pre_scan(
                 structured, _, _ = await run_agent(
                     backend, repo_root, prompt, output_schema=schema, max_turns=specialist_max_turns,
                     phase=DaydreamPhase.EXPLORATION,
+                    read_only=True,
                     wall_budget_s=DEFAULT_WALL_BUDGET_S,
                     tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                 )
