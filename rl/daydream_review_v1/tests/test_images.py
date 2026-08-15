@@ -203,6 +203,14 @@ def test_base_dockerfile_pins_immutable_versions_and_checksums(
             ),
             id="node",
         ),
+        pytest.param(
+            (
+                "pi-coding-agent-${PI_VERSION}.tgz",  # pi package tarball download
+                "sha256sum -c -",                     # verify
+                "npm install -g",                     # install from verified tarball
+            ),
+            id="pi",
+        ),
     ],
 )
 def test_base_dockerfile_verifies_downloads_before_use(marker_chain: tuple[str, ...]) -> None:
