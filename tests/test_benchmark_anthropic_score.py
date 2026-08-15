@@ -589,3 +589,47 @@ async def test_direct_scoring_filters_extraction_and_dedup_to_selected_urls(tmp_
     # Selected-only scoring.
     assert scores.scored_pr_count == 1
     assert scores.total_tp == 1
+
+
+class FailFastAnthropicJson:
+    """Like FakeAnthropicJson but with real I/O-style awaits so pending semaphore
+    jobs stay cancellable; tracks how many calls actually started."""
+
+    def __init__(self, responses, fail_index=None):
+        self._responses = list(responses)
+        self._fail_index = fail_index
+        self._next = 0
+        self.started = 0
+
+    async def complete_json(self, *, system, user, max_tokens):
+        idx = self._next
+        self._next += 1
+        self.started += 1
+        if self._fail_index is not None and idx == self._fail_index:
+            await asyncio.sleep(0.001)
+            raise RuntimeError("permanent 5xx")
+        await asyncio.sleep(0.02)
+        return self._responses[idx]
+
+
+@pytest.mark.asyncio
+async def test_direct_extraction_fails_fast_and_cancels_pending(tmp_path):
+    """Extraction is fail-fast: a permanent failure aborts and cancels pending
+    jobs so no further paid calls start after the abort (nothing is written)."""
+    urls = [f"https://x/pull/{i}" for i in range(1, 13)]  # 12 URLs
+    reviews_by_url = {url: [f"review for {url}"] for url in urls}
+    seed_parallel_benchmark_data(tmp_path, tool="daydream", reviews_by_url=reviews_by_url)
+
+    responses = [{"issues": [f"ok {i}"]} for i in range(12)]
+    client = FailFastAnthropicJson(responses, fail_index=5)  # 6th job fails
+
+    with pytest.raises(RuntimeError):
+        await run_anthropic_extraction(
+            tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client
+        )
+
+    # A permanent failure must not schedule every remaining paid call.
+    assert client.started < len(urls), f"fail-fast broken: started {client.started}/{len(urls)}"
+    # Nothing is persisted after an abort.
+    cand = model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "candidates.json"
+    assert not cand.exists(), "fail-fast abort must not write candidates.json"
