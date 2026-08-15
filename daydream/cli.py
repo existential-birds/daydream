@@ -45,6 +45,7 @@ from daydream.agent import (
 )
 from daydream.benchmark.cli import _handle_bench_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run, run_feedback
 from daydream.trajectory import get_signal_recorder
 from daydream.ui import (
@@ -1803,6 +1804,22 @@ def _handle_list_reanchor(config: RunConfig) -> int:
     return 0
 
 
+def _shutdown_and_exit(console, title: str, message: str) -> None:
+    """Finish the shutdown panel, print ``title``/``message``, and exit 1.
+
+    Shared by :func:`main`'s error handlers so the panel-finish sequence
+    (``get_shutdown_panel`` -> ``finish`` -> ``set_shutdown_panel(None)`` ->
+    ``console.print`` -> ``print_error`` -> ``sys.exit(1)``) lives in one place.
+    """
+    panel = get_shutdown_panel()
+    if panel is not None:
+        panel.finish()
+        set_shutdown_panel(None)
+    console.print()
+    print_error(console, title, message)
+    sys.exit(1)
+
+
 def main() -> None:
     """Run the CLI entry point.
 
@@ -1910,14 +1927,22 @@ def main() -> None:
         console.print()
         print_error(console, "Wrong Branch", str(exc))
         sys.exit(1)
+    except UnconfinedFindingError as e:
+        # Defense-in-depth fallback for the fix preflight confinement rejection
+        # (the primary path routes it through ``_step_fix``'s recovery; this
+        # renders actionably if it ever escapes). Matched by type, not by
+        # message, so a ValueError from elsewhere is never misattributed to an
+        # unconfined finding; any other ValueError falls through to the generic
+        # handler below. The message must not cite the fix_failures artifact:
+        # that file is written only by ``_step_fix``'s recovery path, so when
+        # the exception escapes to here, no artifact exists.
+        _shutdown_and_exit(
+            console,
+            "Unconfined Finding",
+            f"{e}. Check the finding's file ref.",
+        )
     except Exception as e:
-        panel = get_shutdown_panel()
-        if panel is not None:
-            panel.finish()
-            set_shutdown_panel(None)
-        console.print()
-        print_error(console, "Fatal Error", str(e))
-        sys.exit(1)
+        _shutdown_and_exit(console, "Fatal Error", str(e))
 
 
 if __name__ == "__main__":
