@@ -1376,6 +1376,27 @@ def changed_files_against(
     return names
 
 
+def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
+    """Return repo-relative paths that differ between two refs' trees.
+
+    Strict counterpart to :func:`diff_name_only` (which soft-fails to an empty
+    list) for post-commit tree checks: ``git diff --name-only <from_ref>
+    <to_ref>`` over the two commit trees. Raises :class:`GitError` when the
+    diff cannot be computed, so callers can distinguish "no differences" from
+    "unknown" (e.g. when verifying that a commit agent did not broaden a
+    commit beyond the pre-staged set).
+
+    Returns:
+        List of repo-relative path strings (unique, as emitted by git).
+    """
+    proc = _run_git(repo, ["diff", "--name-only", from_ref, to_ref], timeout=10)
+    if proc.returncode != 0:
+        raise GitError(
+            f"git diff --name-only {from_ref} {to_ref} failed in {repo}: {proc.stderr.strip()}"
+        )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def list_untracked(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of untracked, non-ignored files.
 
@@ -1842,6 +1863,26 @@ def checkout_branch(repo: Path, name: str) -> None:
         raise GitError(f"git checkout {name} failed in {repo}: {proc.stderr.strip()}")
 
 
+def stage_paths(repo: Path, paths: list[Path]) -> None:
+    """Stage exactly *paths* into the index — never ``-A`` / ``--all``.
+
+    Runs ``git add <paths…>`` so only the named files enter the index; any
+    other working-tree changes (including pre-existing untracked files) stay
+    unstaged.
+
+    Args:
+        paths: Repo-relative paths to stage. Must be non-empty.
+
+    Raises:
+        GitError: If *paths* is empty, or the ``git add`` call fails.
+    """
+    if not paths:
+        raise GitError("stage_paths requires at least one path")
+    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
+    if add.returncode != 0:
+        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+
+
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     """Stage only *paths* and commit them with *message*.
 
@@ -1856,11 +1897,8 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
         GitError: If *paths* is empty, or the ``git add`` / ``git commit`` call
             fails.
     """
-    if not paths:
-        raise GitError("commit_paths requires at least one path")
-    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
-    if add.returncode != 0:
-        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+    # Empty-path guard lives in stage_paths (identical GitError).
+    stage_paths(repo, paths)
     # git commit fails "Author identity unknown" with no user.email/user.name
     # (common in fresh CI). Inject fallback values via -c only when none is set.
     identity_ok = (

@@ -722,6 +722,18 @@ def test_commit_paths_commits_only_named_paths(repo_with_origin: Path) -> None:
     assert "untouched.txt" in _git(repo_with_origin, "status", "--porcelain")
 
 
+def test_stage_paths_stages_only_named_paths(repo_with_origin: Path) -> None:
+    """stage_paths stages exactly the named files into the index — never -A."""
+    git_ops.create_branch(repo_with_origin, "daydream/stage")
+    (repo_with_origin / "a.txt").write_text("a\n")
+    (repo_with_origin / "b.txt").write_text("b\n")
+    git_ops.stage_paths(repo_with_origin, [Path("a.txt")])
+    staged = _git(repo_with_origin, "diff", "--cached", "--name-only").split()
+    assert staged == ["a.txt"]
+    # b.txt remains unstaged + untracked.
+    assert "b.txt" in _git(repo_with_origin, "status", "--porcelain")
+
+
 def test_push_branch_failure_raises_git_error(git_repo: Path) -> None:
     """push_branch propagates a push failure (no ``origin`` remote) as GitError."""
     git_ops.create_branch(git_repo, "daydream/no-remote")

@@ -20,7 +20,7 @@ import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -2658,6 +2658,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_snapshot_captured = False
     else:
         pre_fix_snapshot_captured = True
+    # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
+    # _do_commit can exclude user scratch files from the daydream commit instead
+    # of sweeping them in via the commit agent's ``git add --all``.
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is
     # the base and HEAD is unused, so skip the rev-parse. Captured now
@@ -2874,11 +2878,35 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     return None
 
 
-async def _step_commit(ctx: FlowContext) -> None:
+async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
+    """Await a commit/push phase, mapping failure to a clean Stop(1).
+
+    Shared by _step_commit and _step_commit_push so the try/except ->
+    print_error("Commit/Push Failed") -> Stop(1) guard lives in one place.
+    The phase coroutine is created by the caller but only awaited here, so a
+    synchronous GitError from staging still surfaces inside the guard.
+    """
+    try:
+        await coro
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return Stop(1)
+    return None
+
+
+async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Commit-and-push the applied fixes."""
     # phase_commit_push runs as part of the fix/commit cycle — reuse
     # the fix backend (no separate "commit" phase identifier).
-    await phase_commit_push(ctx.backend_for("fix"), ctx.work)
+    # stage_paths can raise GitError synchronously before the agent turn;
+    # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
+    # an unhandled traceback terminating the deep run.
+    return await _commit_push_or_stop(
+        phase_commit_push(
+            ctx.backend_for("fix"), ctx.work,
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+        )
+    )
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -2943,8 +2971,17 @@ async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
 
 async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     """Apply a fix per feedback item; abort before commit when all fail."""
+    from daydream import git_ops
+
     feedback_items = ctx.data["feedback_items"]
     fix_backend = ctx.backend_for("fix")
+
+    # Issue #543: snapshot the pre-fix untracked set so the feedback commit step
+    # can exclude user scratch files from the daydream commit. list_untracked
+    # soft-fails to [] on GitError, so set(...) is already the fail-open empty
+    # snapshot (deterministic stage = all untracked), mirroring _step_fix.
+    pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
 
     # Fix sequentially to avoid concurrent access to one mutable backend.
     results: list[FixResult] = []
@@ -2977,14 +3014,13 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
 async def _step_commit_push(ctx: FlowContext) -> Stop | None:
     """Commit and push the applied fixes (feedback mode)."""
     results: list[FixResult] = ctx.data["results"]
-    try:
-        await phase_commit_push_auto(
-            ctx.backend_for("review"), ctx.work, items=[item for item, _ok, _err in results if _ok],
+    return await _commit_push_or_stop(
+        phase_commit_push_auto(
+            ctx.backend_for("review"), ctx.work,
+            items=[item for item, _ok, _err in results if _ok],
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return Stop(1)
-    return None
+    )
 
 
 async def _step_respond_feedback(ctx: FlowContext) -> Stop:
