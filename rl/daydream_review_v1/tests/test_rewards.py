@@ -197,6 +197,18 @@ _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@
 
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
+# A gutted suite that PASSES if run: a vulnerable impl that executes the
+# tampered oracle gets exit 0 -> reward 1.0. The gate must return 0.0 instead.
+_TAMPER_PASSING = (
+    "import unittest\n\n"
+    "class TestCalc(unittest.TestCase):\n"
+    "    def test_placeholder(self) -> None:\n"
+    "        pass\n"
+)
+
+# Overwriting the tracked tests/__init__.py to skip discovery: suite still exits 0.
+_TAMPER_SKIPALL = 'import unittest\nraise unittest.SkipTest("gutted")\n'
+
 
 def test_rundir_golden_user_messages_are_inert(rundir_golden: Path) -> None:
     """Defensive regression guard only: every user-authored step in the
@@ -342,6 +354,7 @@ async def test_fix_tests_pass_green(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
 async def test_fix_tests_pass_red(
@@ -357,6 +370,73 @@ async def test_fix_tests_pass_red(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("edit", "tamper_rel", "tamper_content"),
+    [
+        # test-source-tamper: overwrite a tracked test with a passing suite
+        (None, "tests/test_calc.py", _TAMPER_PASSING),
+        # test-package-config: overwrite tracked tests/__init__.py to skip discovery
+        (None, "tests/__init__.py", _TAMPER_SKIPALL),
+        # untracked oracle file: a real fix (calc.py) plus a NEW non-ignored
+        # tests/pytest.ini — ls-files --others must catch it
+        (_CALC_FIXED, "tests/pytest.ini", "[pytest]\n"),
+    ],
+    ids=["test-source-tamper", "test-package-config-tamper", "untracked-oracle-file"],
+)
+async def test_fix_tests_pass_rejects_protected_test_path_changes(
+    edit: str | None,
+    tamper_rel: str,
+    tamper_content: str,
+    tmp_path: Path,
+    runtime,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A changed test oracle earns a literal zero, never the w_tests reward.
+
+    Every tamper row is deliberately green-if-run: a vulnerable impl that
+    executes the tampered oracle gets exit 0 -> reward 1.0. The gate must
+    return 0.0 without running test_command, so the claim-mismatch tripwire
+    never fires either.
+    """
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=edit)
+    (repo / tamper_rel).write_text(tamper_content, encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    # test_command must NOT have run, so the claim-mismatch tripwire never fires.
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_fails_closed_on_git_error(
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """A Git error in the oracle comparison must read as 'changed' (zero reward)."""
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    # The uncommitted calc.py fix makes _fixes_applied return True via the
+    # dirty-tree check (no head_sha resolution); the gate then diff's an
+    # unresolvable baked SHA -> exit 128 -> fail closed.
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
 
 
 @pytest.mark.parametrize(
@@ -611,6 +691,7 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
 async def test_committed_daydream_artifacts_not_a_fix(

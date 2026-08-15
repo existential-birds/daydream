@@ -143,6 +143,46 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     return diff.exit_code == 1
 
 
+async def _protected_test_paths_unchanged(
+    runtime: vf.Runtime, repo: str, head_sha: str, protected_test_paths: list[str]
+) -> bool:
+    """Whether the declared test-oracle paths still match the baked head.
+
+    The oracle is the repository's own mutable test infrastructure — test
+    sources, runner config, package config — so a rollout could otherwise earn
+    ``w_tests`` by rewriting it into a trivial suite. The baked head SHA is the
+    trustworthy baseline: the image build proved the suite green at exactly that
+    commit before any agent touched the tree.
+
+    Fail-closed by design, with every ambiguity reading as "changed":
+
+    - ``git diff --quiet <head_sha> -- <paths>`` compares the baked head against
+      the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
+      tampering, the exact attack). Exit 0 means no tracked difference
+      (committed, staged, unstaged, deleted, or renamed); any other exit — a
+      tracked diff (1) or a Git error such as 128 for an unresolvable baked SHA —
+      means the oracle changed.
+    - When the diff is clean, ``git ls-files --others --exclude-standard --
+      <paths>`` catches a non-ignored untracked file under a protected path
+      (e.g. a new ``pytest.ini`` or ``conftest.py``): any listing or error
+      means the oracle changed.
+
+    There is deliberately no case that defaults to pass on an error — an
+    unverifiable oracle never earns the test reward.
+    """
+    diff = await runtime.run(
+        ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *protected_test_paths],
+        {},
+    )
+    if diff.exit_code != 0:
+        return False
+    untracked = await runtime.run(
+        ["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "--", *protected_test_paths],
+        {},
+    )
+    return untracked.exit_code == 0 and not untracked.stdout.strip()
+
+
 def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
     """daydream's own ``deep/test-verdict.json`` claim, or ``None`` if absent."""
     if run_dir is None:
@@ -324,6 +364,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         the same commit before any agent touched it (D6). A rollout that applied
         no fix is not evidence either way, so it takes ``no_fix_reward`` rather
         than a free 1.0 for leaving the tree alone.
+
+        The declared ``protected_test_paths`` oracle must still match the baked
+        head before ``test_command`` is trusted: any oracle change (tracked,
+        untracked, or a Git error) returns a literal ``0.0`` without running the
+        repository's mutable ``test_command``, so a rollout can never pay itself
+        the test reward by gutting its own suite.
         """
         repo = _repo_path(trace)
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
@@ -337,6 +383,17 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             return self.config.no_fix_reward
 
         trace.record_metric("fixes_applied", 1.0)
+        # Security boundary: the test oracle must match the baked head before the
+        # repository's own mutable test_command is trusted. A changed oracle
+        # (committed/staged/unstaged/deleted/renamed, an untracked protected
+        # file, or a Git error) earns a literal zero WITHOUT running test_command.
+        unchanged = await _protected_test_paths_unchanged(
+            runtime, repo, self.data.head_sha, self.data.protected_test_paths
+        )
+        trace.record_metric("test_oracle_unchanged", float(unchanged))
+        if not unchanged:
+            return 0.0
+
         result = await runtime.run(
             ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
         )
