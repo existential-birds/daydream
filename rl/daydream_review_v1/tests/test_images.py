@@ -74,9 +74,9 @@ REFERENCE_SLUG = "pallets/itsdangerous"
             [
                 "--red",
                 "--corpus",
-                str(PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"),
+                str(REFERENCE_CORPUS),
                 "--only",
-                "pallets/itsdangerous",
+                REFERENCE_SLUG,
             ],
             "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
             id="non-fixture-only",
@@ -543,3 +543,13 @@ def test_build_emits_canonical_argv_for_all_call_sites(
         "--corpus", str(REFERENCE_CORPUS),
     ]
     assert "_build_reference" not in vars(sys.modules[__name__])
+
+
+def test_corpus_and_slug_literals_single_source() -> None:
+    """F2: corpus path and reference slug each resolve through one named constant."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    corpus = "corpus-" + "reference"          # built to avoid self-matching
+    slug = "pallets/" + "itsdangerous"        # built to avoid self-matching
+    assert src.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
+    assert src.count(slug) == 3, "slug literal must be REFERENCE_SLUG + the 2 manifest markers"
+    assert "REFERENCE_CORPUS" in src and "REFERENCE_SLUG" in src
