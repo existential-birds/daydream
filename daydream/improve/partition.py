@@ -62,7 +62,12 @@ class PartitionGroup:
 
 @dataclass(frozen=True)
 class PartitionStackOmission:
-    """One partition pass omitted from a stack-specific audit group."""
+    """One partition pass omitted from a stack-specific audit group.
+
+    Attributes:
+        partition: The partition whose pass was dropped.
+        stack: The stack-specific group the pass was omitted from.
+    """
 
     partition: Partition
     stack: str
