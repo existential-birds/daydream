@@ -362,6 +362,19 @@ _GENERIC_STEMS = frozenset(
 # Reverse-edge grep is a best-effort seed, not an exhaustive index. A
 # legitimately widely-imported module can match hundreds of files; cap the
 # seed so no single module can blow the downstream prompt's context window.
+def _is_generic_or_invalid_stem(stem: str) -> bool:
+    """Return True if *stem* should be skipped by the reverse-import lookup.
+
+    Skips empty stems, stems in :data:`_GENERIC_STEMS`, and stems containing
+    characters (NUL, CR, LF) that cannot be expressed in a grep patterns file.
+    """
+    if not stem or stem in _GENERIC_STEMS:
+        return True
+    if "\x00" in stem or "\r" in stem or "\n" in stem:
+        return True
+    return False
+
+
 _MAX_IMPORTERS = 40
 
 # Restrict the reverse-edge grep to source files. A doc, plan, or config file
@@ -384,9 +397,7 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
     seen_stems: set[str] = set()
     for path in modified_paths:
         stem = Path(path).stem
-        if not stem or stem in _GENERIC_STEMS:
-            continue
-        if "\x00" in stem or "\r" in stem or "\n" in stem:
+        if _is_generic_or_invalid_stem(stem):
             continue
         if stem in seen_stems:
             continue
@@ -409,9 +420,7 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
             bucket.append(path)
     for path in modified_paths:
         stem = Path(path).stem
-        if not stem or stem in _GENERIC_STEMS:
-            continue
-        if "\x00" in stem or "\r" in stem or "\n" in stem:
+        if _is_generic_or_invalid_stem(stem):
             continue
         lookup[path] = [p for p in by_stem.get(stem, ()) if p != path][:_MAX_IMPORTERS]
     return lookup

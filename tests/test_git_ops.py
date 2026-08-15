@@ -503,6 +503,37 @@ def test_grep_fixed_matches_returns_path_pattern_pairs(tmp_path: Path) -> None:
     assert set(matches) == {("widget_user.py", "widget"), ("gadget_user.ts", "gadget")}
 
 
+def test_grep_fixed_matches_raises_on_nonzero_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """grep_fixed_matches raises GitError when git exits with a non-zero,
+    non-1 exit code."""
+    repo = _make_repo_with_main(tmp_path)
+    # Craft a subprocess.run return with exit code 2 (generic git error).
+    # _run_git passes the CompletedProcess through directly.
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            args=["git"], returncode=2,
+            stdout=b"", stderr=b"fatal: unknown option",
+        )
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    with pytest.raises(GitError, match="git grep -F -o -z -f failed"):
+        git_ops.grep_fixed_matches(repo, ("widget",))
+
+
+def test_grep_fixed_matches_raises_on_malformed_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """grep_fixed_matches raises GitError when a NUL-separated record is
+    malformed (no NUL separator, empty path, or empty pattern)."""
+    repo = _make_repo_with_main(tmp_path)
+    # A line without a NUL separator produces parts with len != 2.
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            args=["git"], returncode=0,
+            stdout=b"file.py\n", stderr=b"",
+        )
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    with pytest.raises(GitError, match="malformed record"):
+        git_ops.grep_fixed_matches(repo, ("widget",))
+
+
 def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.status_porcelain(repo) == ""

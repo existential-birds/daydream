@@ -1188,8 +1188,10 @@ def grep_fixed_matches(
             file is searched.
 
     Returns:
-        Deduplicated-matches list of ``(path, matched_pattern)`` — a whole-word
-        match of the same pattern in the same file is reported once. Empty
+        List of ``(path, matched_pattern)`` pairs parsed from ``git grep``
+        output — the same pattern may appear multiple times for the same file
+        when it matches on separate lines. Only the input patterns are
+        deduplicated. Empty
         when there are no matches or no usable patterns.
 
     Raises:
