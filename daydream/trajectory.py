@@ -62,7 +62,7 @@ _INITIAL_TOTALS: dict[str, Any] = {"prompt": 0, "completion": 0, "cached": 0, "c
 # model id arrives via MetricsEvent / CostEvent. Runner stamps the recorder
 # with one of these (or empty) at init since the real model id isn't known
 # until the first agent turn streams back.
-_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", ""})
+_GENERIC_MODEL_LABELS: frozenset[str] = frozenset({"claude", "codex", "osprey", ""})
 
 
 def _reasoning_extra(reasoning_tokens: int | None) -> dict[str, Any] | None:
@@ -964,6 +964,8 @@ class TrajectoryRecorder:
         target_dir: Repo/target directory; recorded into Trajectory.extra.
         agent_model_name: Active model name; stamped into Agent and every
             agent Step's model_name.
+        agent_extra: Provider-neutral runtime identity metadata populated by
+            a backend after its provider-owned session starts.
         redactor: No-op in Phase 2 (D-12); Phase 4 fills in rule list.
         session_id: UUID4 for this run, supplied by the caller (CORE-07).
         steps: Sequential Steps from every Invocation, step_id 1..N.
@@ -979,6 +981,10 @@ class TrajectoryRecorder:
     target_dir: Path
     agent_model_name: str
     session_id: str
+    # Provider/runtime identity is populated by backends once their first
+    # provider-owned session event arrives.  It stays backend-neutral here so
+    # the recorder does not need to know about Osprey (or any future driver).
+    agent_extra: dict[str, Any] = field(default_factory=dict)
     redactor: Redactor = field(default_factory=Redactor)
     steps: list[Step] = field(default_factory=list)
     parent: TrajectoryRecorder | None = None
@@ -1216,6 +1222,39 @@ class TrajectoryRecorder:
         if candidate and (self.agent_model_name or "") in _GENERIC_MODEL_LABELS:
             self.agent_model_name = candidate
 
+    def record_backend_identity(
+        self,
+        *,
+        backend: str,
+        model: str,
+        provider: str,
+        session_id: str,
+        outcome: str | None = None,
+        exit_code: int | None = None,
+        turn_durations_ms: list[int] | None = None,
+    ) -> None:
+        """Record provider-owned identity/outcome without inventing ATIF fields.
+
+        The existing ATIF model has ``Agent.extra`` but no provider/session
+        fields of its own.  This generic seam keeps those values available to
+        consumers while preserving the top-level daydream run ``session_id``.
+        Values are redacted before they enter the trajectory.
+        """
+        self._upgrade_model_name(model)
+        metadata: dict[str, Any] = {
+            "backend": backend,
+            "model": model,
+            "provider": provider,
+            "session_id": session_id,
+        }
+        if outcome is not None:
+            metadata["outcome"] = outcome
+        if exit_code is not None:
+            metadata["exit_code"] = exit_code
+        if turn_durations_ms:
+            metadata["turn_durations_ms"] = list(turn_durations_ms)
+        self.agent_extra.update(redact_value(metadata))
+
     def _accumulate_metrics(
         self,
         *,
@@ -1433,7 +1472,12 @@ class TrajectoryRecorder:
             schema_version="ATIF-v1.7",
             session_id=self.session_id,
             trajectory_id=trajectory_id,
-            agent=Agent(name="daydream", version=version, model_name=self.agent_model_name),
+            agent=Agent(
+                name="daydream",
+                version=version,
+                model_name=self.agent_model_name,
+                extra=dict(self.agent_extra) or None,
+            ),
             steps=list(steps),
             final_metrics=final_metrics,
             extra=extra,
@@ -1535,6 +1579,7 @@ class _ForkCM:
             run_flow=self._parent.run_flow,
             target_dir=self._parent.target_dir,
             agent_model_name=self._parent.agent_model_name,
+            agent_extra=dict(self._parent.agent_extra),
             redactor=self._parent.redactor,
             session_id=self._parent.session_id,
             pr_number=self._parent.pr_number,

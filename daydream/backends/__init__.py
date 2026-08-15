@@ -378,12 +378,17 @@ def effective_fanout_concurrency(workflow_ceiling: int, backend: object) -> int:
 
 
 def create_backend(
-    name: str, model: str | None = None, *, cwd: Path | None = None, reasoning_effort: str | None = None
+    name: str,
+    model: str | None = None,
+    *,
+    cwd: Path | None = None,
+    reasoning_effort: str | None = None,
+    osprey_binary: str | None = None,
 ) -> Backend:
     """Create a backend by name.
 
     Args:
-        name: Backend name ("claude", "codex", or "pi").
+        name: Backend name ("claude", "codex", "pi", or "osprey").
         model: Optional model override. Claude and Codex apply their built-in
             defaults here. Pi receives ``None`` unchanged so its own configured
             default can win before Pi's GLM fallback is selected.
@@ -411,10 +416,19 @@ def create_backend(
     if name == "pi":
         from daydream.backends.pi import PiBackend
         return PiBackend(model=model, cwd=cwd, reasoning_effort=reasoning_effort)
-    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', or 'pi'.")
+    if name == "osprey":
+        from daydream.backends.osprey import OspreyBackend
+        return OspreyBackend(
+            model=model,
+            cwd=cwd,
+            reasoning_effort=reasoning_effort,
+            osprey_binary=osprey_binary,
+        )
+    raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
 from daydream.backends.claude import ClaudeBackend, MaxTurnsError  # noqa: E402
+from daydream.backends.osprey import OspreyBackend  # noqa: E402
 from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
@@ -426,6 +440,7 @@ __all__ = [
     "CostEvent",
     "MaxTurnsError",
     "MetricsEvent",
+    "OspreyBackend",
     "PiBackend",
     "ResultEvent",
     "TextEvent",
