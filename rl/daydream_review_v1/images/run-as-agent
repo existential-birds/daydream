@@ -1,0 +1,11 @@
+#!/bin/sh
+# Root-owned privilege-drop seam: verify we are root, then exec the args as the
+# non-root agent identity. This is the single place a launch can leave root —
+# every daydream process and backend CLI subprocess it spawns inherits the
+# agent uid, so no rollout process can write the root-owned sealed surfaces.
+set -eu
+if [ "$(id -u)" != "0" ]; then
+    echo "run-as-agent: must be run as root" >&2
+    exit 1
+fi
+exec setpriv --no-new-privs --reuid=agent --regid=agent --clear-groups "$@"

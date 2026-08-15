@@ -2,8 +2,15 @@
 
 A [verifiers](https://github.com/PrimeIntellect-ai/verifiers) **v1 environment**:
 one rollout is one headless daydream deep review→fix→test run inside a sandbox,
-scored on two axes — daydream's own intrinsic trajectory composite, and a
-deterministic re-run of the repository's test suite against the fixed tree.
+scored on a single reward axis — daydream's own intrinsic trajectory composite.
+The post-change suite result is recorded as the ``suite_non_regression`` metric
+(a green suite proves the tree did not regress, not that the reported defect was
+repaired, so it earns no training signal of its own). Scoring consumes only
+sealed artifacts: the supervisor seals the archived run dir after the agent's
+write window, the reward verifies the seal against the staged copy before
+trusting any value, and the suite re-run executes against a separate
+root-owned read-only checkout under a distinct non-root verifier identity —
+never the agent-mutable tree.
 
 Standalone uv project on purpose: verifiers pulls ~100 packages and must never
 enter daydream's lockfile. `daydream` is a path dependency (`../..`, editable) so
@@ -29,8 +36,8 @@ Taskset.load()          harvested corpus + images/manifest.toml, C5-enforced
        every model turn ↴
   → interception server (host) → the policy endpoint
   → Task.score()        while the sandbox is still live
-       intrinsic_composite  archived run dir → score_trajectory()
-       fix_tests_pass       re-run the repo's own suite, exit code
+       intrinsic_composite  sealed archived run dir → score_trajectory()
+       suite_non_regression  metric: re-run the repo suite in a read-only checkout
 ```
 
 Nothing clones at rollout time and no rollout carries credentials: the repository
@@ -68,7 +75,7 @@ So `codex` (Responses) and `claude` (Anthropic Messages) work for an **eval**
 against a hosted provider and cannot be used for a **training run** at these
 pins. `pi` speaks Chat Completions end to end. It is also the backend proven on a
 real model: 79 captured turns, 3 findings, a fix applied and committed,
-`fix_tests_pass` 1.0 from a genuine in-sandbox suite re-run.
+`suite_non_regression` 1.0 from a genuine in-sandbox suite re-run.
 
 Measure a baseline under the **same backend you will train under**. The agent
 scaffold is part of what the number describes; comparing a codex-scaffold
@@ -101,7 +108,7 @@ baseline against a pi-scaffold trained run moves two variables at once.
      clean and the environment survives into the image.
    - `test_command` invokes the environment produced by that locked setup (e.g.
      `/opt/repo-venv/bin/python -m pytest -q`), so the green-baseline gate and
-     the rollout's `fix_tests_pass` re-run both exercise the locked dependencies.
+     the rollout's `suite_non_regression` re-run both exercise the locked dependencies.
 
    An unavailable or stale lock is an **image-build failure** — never permission
    to **fall back to unconstrained pip**.
@@ -113,10 +120,10 @@ baseline against a pi-scaffold trained run moves two variables at once.
    Coverage must include the test sources **and every runner-config file
    `test_command` can load** — including absent filenames whose later creation
    could alter collection (e.g. `conftest.py`, `pytest.ini`, `pyproject.toml`,
-   `setup.cfg`, `tox.ini`). At scoring time `fix_tests_pass` compares these
-   paths against the image's baked head SHA, fail-closed: a changed or
-   unverifiable oracle earns **zero test reward** and the repository's mutable
-   `test_command` is not executed. That covers any tracked difference, any
+   `setup.cfg`, `tox.ini`). At scoring time `suite_non_regression` compares
+   these paths against the image's baked head SHA, fail-closed: a changed or
+   unverifiable oracle records **zero non-regression telemetry** and the
+   repository's mutable `test_command` is not executed. That covers any tracked difference, any
    non-ignored untracked file under a protected path or an untracked root
    `sitecustomize.py` (imported at startup by every `python` run, so one that
    `sys.exit(0)`s makes a suite that never ran look green), a
@@ -126,7 +133,7 @@ baseline against a pi-scaffold trained run moves two variables at once.
 
 3. **Build the images.** The last layer runs the repository's own suite at the
    head commit; a red baseline fails the build and produces nothing, because
-   `fix_tests_pass` would otherwise be rewarding noise.
+   `suite_non_regression` would otherwise be measuring noise.
 
    ```bash
    uv run python images/build_images.py --corpus ./corpus-train
@@ -186,5 +193,14 @@ eval-docker; the explicit `--client.base-url` is in `configs/eval-stub.toml`
   archive-time eval pass; without it the axis is silently null.
 - **`golden_overlap` is a crude localisation proxy**, not a reward. It feeds
   #91's rubric design and is deliberately never summed.
+- **Scoring trusts only sealed state.** The supervisor seals the archived run
+  dir (with the candidate diff) after the launch returns; the reward verifies
+  the seal against its single staged copy before any value is trusted, and a
+  tampered archive zeroes `intrinsic_composite` and records
+  `suite_non_regression` 0.0 — never honest telemetry. The container launches
+  daydream through the root-owned `run-as-agent` wrapper (setpriv down to the
+  non-root `agent` user), so no backend CLI subprocess can write the sealed
+  surfaces, and the suite re-run runs under a distinct non-root `verifier`
+  identity against a root-owned read-only checkout.
 - **Rollout cost is real.** A deep run is minutes and dollars. The task caps the
   harness at 5400s; daydream bounds each phase at 1800s of its own.

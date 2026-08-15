@@ -46,7 +46,7 @@ _IDENTITY = {
 # NON-ignored file (daydream/git_ops.py:842 -> list_untracked, which passes
 # --exclude-standard). Without this file, stray .pyc bytecode written during the
 # review would land in recommended.patch and make an empty fix look like a real
-# one — the exact signal fix_tests_pass gates on.
+# one — the exact signal suite_non_regression gates on.
 _GITIGNORE = """__pycache__/
 *.py[cod]
 .daydream/

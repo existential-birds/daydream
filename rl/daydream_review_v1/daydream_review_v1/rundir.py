@@ -3,7 +3,10 @@
 Scoring runs while the runtime is still up (a ``@vf.reward`` with a required
 ``runtime`` parameter — verifiers 0.2.1 ``task.py:269-277``), so the reward reads
 daydream's own artifacts straight off the sandbox filesystem and replays them
-through the training pipeline's scorer on the host.
+through the training pipeline's scorer on the host. The supervisor seals the
+archived run dir (with the candidate diff) after the agent's write window, and
+the reward verifies that seal against the staged copy before trusting any
+value — a tampered archive must zero the reward, never record honest telemetry.
 
 Only the handful of small files the scorer actually reads are copied. The full
 archive bundle carries per-fork trajectories and diffs that can run to megabytes;
@@ -18,10 +21,16 @@ from pathlib import Path
 
 import verifiers.v1 as vf
 
+from daydream_review_v1.verifier import SealResult, seal_bytes, verify
+
 #: Fixed members of the archived run dir the reward path reads. Every one is
 #: optional: a review-only rollout has no verdicts, a green run has no
 #: fix-failures. ``deep/stack-*-records.json`` is collected separately by glob —
 #: its names depend on which stacks the router detected.
+#:
+#: ``seal.json`` is the supervisor-produced integrity seal over the other
+#: members plus the candidate diff; it rides in the fetch so the reward can
+#: verify the staged copy against it.
 #:
 #: ``trajectory.json`` and any per-fork ``trajectories/*.json`` are deliberately
 #: NOT listed here: they carry untrusted, model-directed operational text from
@@ -37,9 +46,21 @@ RUN_DIR_FILES: tuple[str, ...] = (
     "deep/merged-items.json",
     "deep/test-verdict.json",
     "deep/fix-failures.json",
+    "seal.json",
 )
 
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
+
+
+def _candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
+    """Argv for re-deriving the rollout's committed diff against the baked head.
+
+    The candidate diff is the load-bearing contract the seal binds and the
+    verifier re-applies, so it must be derived identically everywhere it is
+    needed (seal production, seal verification, and the verify-checkout
+    construction). Single-sourcing the command keeps those sites from drifting.
+    """
+    return ["git", "-C", repo, "diff", head_sha, "HEAD"]
 
 
 async def _session_dir(runtime: vf.Runtime, archive_root: str) -> str | None:
@@ -102,6 +123,153 @@ async def fetch_run_dir(
         target.write_bytes(data)
         copied += 1
     return dest if copied else None
+
+
+async def verify_seal(
+    run_dir: Path,
+    runtime: vf.Runtime,
+    repo: str,
+    head_sha: str,
+    *,
+    seal_expected: bool = False,
+) -> bool | None:
+    """Verify the staged run dir's supervisor-produced seal.
+
+    Args:
+        run_dir: The staged host copy of the archived run dir (``fetch_run_dir``
+            output), including ``seal.json`` when the supervisor sealed the run.
+        runtime: The live rollout runtime. The candidate diff is re-derived
+            from the sandbox through it at scoring time, so the seal binds the
+            diff the verifier checkout will actually apply.
+        repo: The repository under review inside the sandbox.
+        head_sha: The baked head SHA the rollout diffed against.
+        seal_expected: Whether the harness claims to have sealed the run. A run
+            the harness sealed whose ``seal.json`` is missing at scoring time
+            is a vanished seal — a tamper, never a legacy unsealed run — so it
+            must fail closed rather than score at full trust.
+
+    Returns:
+        ``True`` when the seal verifies against the staged members and the diff
+        re-derived from the sandbox; ``False`` when a seal exists but is
+        missing, malformed, or mismatched (a tamper must zero the reward, not
+        crash scoring) — including a vanished seal on a run the harness claims
+        to have sealed (*seal_expected*), and a diff that cannot be re-derived
+        (a git failure must fail closed, never hash as the empty diff); ``None``
+        when no seal was produced and none was expected (legacy/unsealed runs
+        keep their pre-seal scoring — the harness seals every completed
+        production run, so this is the test-only path). Never raises.
+    """
+    seal_path = run_dir / "seal.json"
+    if not seal_path.is_file():
+        # A missing seal is the legacy path only when none was expected. The
+        # harness claimed to seal this run, so a vanished seal.json is an
+        # internal contradiction that must read as a tamper, never as an
+        # unsealed run at full trust.
+        return False if seal_expected else None
+    try:
+        seal = SealResult.model_validate_json(seal_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    # The seal covers the RUN_DIR_FILES members that exist plus the
+    # deep/stack-*-records.json glob members — both are reward inputs (the
+    # stack records feed the intrinsic scorer's format gate). seal.json itself
+    # is the seal record and is never hashed into itself.
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
+    ]
+    present += sorted(run_dir.glob("deep/stack-*-records.json"))
+    # Re-derive the candidate diff from the sandbox exactly as the seal
+    # producer did (and as the verifier checkout will apply it): the seal's
+    # embedded copy is an audit record, never the verification input, so a
+    # committed diff rewritten after sealing fails the digest check.
+    try:
+        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
+    except Exception:
+        return False
+    if diff_result.exit_code != 0:
+        # The diff cannot be re-derived, so there is nothing to verify against.
+        # Hashing b"" here would let a git failure at BOTH seal and scoring
+        # time pass as a matching empty diff (seal_verified 1.0 on a run whose
+        # diff was never re-derived); a failed re-derivation must fail closed
+        # like any other unverifiable seal.
+        return False
+    return verify(seal, present, candidate_diff=diff_result.stdout.encode())
+
+
+async def seal_archived_run(
+    runtime: vf.Runtime,
+    archive_root: str = DEFAULT_ARCHIVE_ROOT,
+    *,
+    repo: str,
+    head_sha: str,
+) -> bool:
+    """Seal the archived run dir + the candidate diff; write ``seal.json`` into the sandbox.
+
+    The supervisor (harness) runs this after the launch returns, so the seal is
+    produced outside the agent's write window and the reward can verify the
+    staged copy against it. The candidate diff is the rollout's own committed
+    diff against the baked head (``b""`` when the runner cannot produce one).
+
+    Returns:
+        ``True`` when a seal was written (and, under docker, the run dir
+        hardened root-owned read-only); ``False`` when there is no run dir to
+        seal or sealing failed. Never raises: a missing seal must not crash the
+        rollout. A sealing failure on a real run dir is fail-closed: the dir is
+        marked with an unvalidatable ``seal.json`` so scoring reads a failed
+        seal (``seal_verified`` 0.0, zero reward) rather than an unsealed run
+        at full trust.
+    """
+    session_dir = await _session_dir(runtime, archive_root)
+    if session_dir is None:
+        return False
+    try:
+        artifacts: dict[str, bytes] = {}
+        # _present_files already restricts the listing to the reward inputs
+        # (RUN_DIR_FILES members that exist + the deep/stack-*-records.json
+        # glob members), so only the self-exclusion of seal.json is needed
+        # here.
+        for rel in await _present_files(runtime, session_dir):
+            if rel == "seal.json":
+                continue
+            artifacts[rel] = await runtime.read(f"{session_dir}/{rel}")
+        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
+        candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
+        seal = seal_bytes(artifacts, candidate_diff)
+        await runtime.write(f"{session_dir}/seal.json", seal.model_dump_json().encode())
+        # base.Dockerfile documents that the supervisor re-chowns the sealed run
+        # dir root-owned read-only at seal time — the mechanism that makes the
+        # sealed artifacts agent-inaccessible once the agent's write window has
+        # closed. The docker runtime execs as the container root, so the chown
+        # lands there; the local subprocess path has no root boundary (it runs
+        # as the host user, sharing the agent's uid), so there is nothing to
+        # re-chown on that path. A failed hardening is a sealing failure: a
+        # seal over still-agent-writable bytes would not be worth trusting.
+        if runtime.type == "docker":
+            hardened = await runtime.run(
+                [
+                    "sh",
+                    "-c",
+                    f"chown -R root:root {shlex.quote(session_dir)} "
+                    f"&& chmod -R a-w {shlex.quote(session_dir)}",
+                ],
+                {},
+            )
+            if hardened.exit_code != 0:
+                raise RuntimeError(
+                    "could not re-chown the sealed run dir root-owned read-only: "
+                    f"{hardened.stderr.strip() or 'chown/chmod failed'}"
+                )
+        return True
+    except Exception:
+        # Fail closed: a run whose seal could not be produced must score as a
+        # failed seal (verify_seal -> False -> zero reward), never as an
+        # unsealed full-trust run. Overwrite seal.json with an unvalidatable
+        # marker; if even that write fails, the harness records the failure.
+        try:
+            await runtime.write(f"{session_dir}/seal.json", b'{"seal_failed": true}')
+        except Exception:
+            pass
+        return False
 
 
 async def daydream_completed(

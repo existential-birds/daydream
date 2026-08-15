@@ -3,10 +3,10 @@
 # (daydream_review_v1/taskset.py:383) — one image is one reviewable commit.
 #
 # The final layer re-runs the repository's own test suite at that commit. A red
-# suite MUST fail the build: fix_tests_pass rewards a rollout for turning a red
-# suite green, so a baseline that was already red turns that reward into noise
-# and the run is unusable as a gradient. Better to lose the image than to ship a
-# task whose reward means nothing.
+# suite MUST fail the build: suite_non_regression rewards a rollout for turning
+# a red suite green, so a baseline that was already red turns that reward into
+# noise and the run is unusable as a gradient. Better to lose the image than to
+# ship a task whose reward means nothing.
 
 # BASE_IMAGE is supplied as a build-arg by images/build_images.py and must be an
 # immutable identity (daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 hex>).

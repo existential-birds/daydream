@@ -13,6 +13,7 @@ rollout agent is one config key: ``backend``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import verifiers.v1 as vf
@@ -26,8 +27,10 @@ from daydream_review_v1.backends import (
     BackendStrategy,
     PiStrategy,
 )
-from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed, seal_archived_run
 from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
+
+logger = logging.getLogger(__name__)
 
 
 class DaydreamReviewHarnessConfig(vf.HarnessConfig):
@@ -89,6 +92,11 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         """Fail fast with remediation text; the image bakes everything else (D6)."""
         strategy = self.strategy
         binaries = ("daydream", *strategy.required_binaries)
+        if runtime.type == "docker":
+            # The image's root-owned run-as-agent wrapper is the single
+            # privilege-drop seam; a wrapper-less image must fail here, not
+            # opaquely at docker exec.
+            binaries = (*binaries, "run-as-agent")
         checks = " && ".join(f"command -v {binary} >/dev/null" for binary in binaries)
         result = await runtime.run(
             ["sh", "-c", f"{checks} && test -d {self.config.repo_path}"], self.config.resolved_env
@@ -137,6 +145,28 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             *self.config.extra_args,
             self.config.repo_path,
         ]
+        if runtime.type == "docker":
+            # The repo image clones the checkout as root (repo.Dockerfile), so
+            # hand the workspace — and the in-container origin mirror the deep
+            # flow pushes its fix to — to the agent identity before the
+            # privilege drop. Otherwise every deep-flow write (.daydream/,
+            # worktrees, fix edits, git add/commit, push) EACCESes as the
+            # agent uid and the rollout dies before any model turn.
+            handoff = await runtime.run(
+                ["chown", "-R", "agent:agent", self.config.repo_path, "/srv/mirror.git"], env
+            )
+            if handoff.exit_code != 0:
+                raise RuntimeError(
+                    "could not hand the checkout to the agent identity: "
+                    f"{handoff.stdout}{handoff.stderr}"
+                )
+            # Container launches drop from the container default user (root) to
+            # the non-root agent identity through the image's root-owned
+            # run-as-agent wrapper, so every daydream process and backend CLI
+            # subprocess it spawns runs as the agent uid — never root, and never
+            # able to write the sealed surfaces. The local subprocess smoke path
+            # has no wrapper (there is no root boundary to cross).
+            argv = ["run-as-agent", *argv]
         result = await runtime.run_program(argv, env)
 
         # A deep run always talks to a model. Zero captured turns means the CLI
@@ -168,9 +198,36 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # deep flow stops non-zero when the suite is still red after the fix pass
         # (orchestrator.py:1389). Setting a stop condition makes the framework
         # return quietly instead of raising HarnessError (harness.py:99-118), so the
-        # rollout SCORES — a red suite is exactly the signal fix_tests_pass wants.
+        # rollout SCORES — a red suite is exactly the signal suite_non_regression wants.
         # A non-zero exit with no artifacts is left to raise: that is infrastructure
         # failure and belongs to the retry budget, not to the gradient.
         if result.exit_code != 0 and await daydream_completed(runtime, self.config.archive_root):
             trace.stop("daydream_completed_nonzero")
+        # Produce the integrity seal over the archived run dir now that the
+        # agent's write window has closed: the reward verifies the staged copy
+        # against this seal before trusting any value, so an attempted tamper
+        # with the archived artifacts zeroes the reward instead of recording
+        # honest telemetry. The candidate diff is the rollout's own committed
+        # diff against the baked head (b"" when it cannot be re-derived).
+        sealed = await seal_archived_run(
+            runtime,
+            self.config.archive_root,
+            repo=self.config.repo_path,
+            head_sha=data.head_sha,
+        )
+        # A seal-production failure must never be silent or fail-open:
+        # seal_archived_run overwrites seal.json with an unvalidatable marker
+        # (verify_seal -> False -> zero reward), and the trace records the
+        # outcome so an operator can distinguish "sealed and verified" from
+        # "sealing failed, zero protection" — a completed run with no valid
+        # seal is never scored at full trust as if the protection existed.
+        trace.info["daydream_seal_ok"] = sealed
+        if not sealed:
+            logger.warning(
+                "seal_archived_run failed for %s (repo=%s, head=%s): the rollout "
+                "will score seal_verified 0.0 and zero intrinsic reward",
+                self.config.archive_root,
+                self.config.repo_path,
+                data.head_sha,
+            )
         return result

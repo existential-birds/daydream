@@ -31,11 +31,19 @@ from daydream.training.reward import score_trajectory
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
-from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
+from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir, verify_seal
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REPO_PATH = "/work/repo"
+
+#: The aggregate rollout reward contract version, distinct from the intrinsic
+#: scorer's ``REWARD_VERSION`` (``daydream/training/reward.py``, unchanged and
+#: the intrinsic parity pin). ``reward_breakdown`` stamps both: ``reward_version``
+#: is this rollout contract, and ``intrinsic_reward_version`` is the offline
+#: scorer it was evaluated against. Archives scored before this boundary was
+#: introduced carry only the intrinsic version and need no migration tag.
+ROLLOUT_REWARD_VERSION = "2026.08.15-1"
 
 
 def _archive_root(trace: vf.Trace) -> str:
@@ -94,7 +102,8 @@ ORACLE_IGNORE_PATHSPECS = ["sitecustomize.py", ":(glob)**/.gitignore"]
 #: every untracked file under a protected path — including the ``__pycache__/``
 #: and ``*.py[cod]`` files a green suite itself drops while importing the test
 #: modules. Without this explicit exclusion a genuinely fixed tree would trip
-#: the probe on its own legitimate test runs and be withheld ``w_tests``. The
+#: the probe on its own legitimate test runs and be withheld a green
+#: non-regression reading. The
 #: benign exclusions are baked into the probe rather than delegated to the
 #: repo's ignore rules, whose decisions this gate deliberately no longer trusts.
 ORACLE_BENIGN_PATHSPECS = [":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[cod]"]
@@ -128,16 +137,17 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     own ``.daydream/`` directory inside the repository under review. On any
     repository that does not gitignore that directory — which is every repository
     except our own fixture — the patch is non-empty after a rollout that changed
-    nothing, and the still-green baseline would hand out a free ``w_tests``.
+    nothing, and the still-green baseline would hand out a free green
+    non-regression reading.
 
     Deliberately biased toward false negatives: a fix consisting ONLY of new,
-    never-committed files reads as "no fix" and scores ``no_fix_reward``. That
+    never-committed files reads as "no fix" (``suite_non_regression`` 0.0). That
     direction costs a gradient; the other direction corrupts one.
 
     A clean tree at a moved HEAD counts as a fix only when the *committed
     contents differ* from the snapshot. HEAD advancing on its own — e.g. an
     `--allow-empty` commit that leaves the tree byte-identical — is not a fix
-    and scores ``no_fix_reward``. Either way the decision is read from the
+    and scores ``suite_non_regression`` 0.0. Either way the decision is read from the
     tracked tree, never from daydream's own ``.daydream/`` directory.
     """
     dirty = await runtime.run(
@@ -189,9 +199,11 @@ async def _protected_test_paths_unchanged(
 
     The oracle is the repository's own mutable test infrastructure — test
     sources, runner config, package config — so a rollout could otherwise earn
-    ``w_tests`` by rewriting it into a trivial suite. The baked head SHA is the
-    trustworthy baseline: the image build proved the suite green at exactly that
-    commit before any agent touched the tree.
+    an honest green non-regression reading by rewriting it into a trivial suite;
+    the demoted ``suite_non_regression`` metric must never record a gutted
+    suite as honest telemetry. The baked head SHA is the trustworthy baseline:
+    the image build proved the suite green at exactly that commit before any
+    agent touched the tree.
 
     Fail-closed by design, with every ambiguity reading as "changed". The probe
     pathspecs are the declared paths plus ``ORACLE_IGNORE_PATHSPECS``: the repo's
@@ -240,7 +252,7 @@ async def _protected_test_paths_unchanged(
       oracle changed.
 
     There is deliberately no case that defaults to pass on an error — an
-    unverifiable oracle never earns the test reward.
+    unverifiable oracle never records an honest non-regression value.
     """
     oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
 
@@ -323,6 +335,49 @@ def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
         return None
     return bool(verdict["passed"])
 
+
+async def _verifier_identity_available(runtime: vf.Runtime) -> bool:
+    """Whether the sandbox carries the distinct read-only verifier identity.
+
+    The container image provides ``setpriv`` and a non-root ``verifier`` user;
+    the local subprocess smoke path has neither, so it keeps the pre-identity
+    re-run shape against the staged repo.
+    """
+    result = await runtime.run(
+        ["sh", "-c", "command -v setpriv >/dev/null 2>&1 && id verifier >/dev/null 2>&1"], {}
+    )
+    return result.exit_code == 0
+
+
+async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str) -> str | None:
+    """Build a separate root-owned read-only checkout with only the candidate diff applied.
+
+    The manifest ``test_command`` must never run against the agent-mutable tree.
+    This clones the current tree, detaches at the baked head, applies the
+    candidate product diff (the rollout's own committed diff against
+    ``head_sha``), and makes the result root-owned and read-only — the reward
+    re-runs the suite there under the distinct non-root verifier identity.
+
+    Returns:
+        The checkout path, or ``None`` when construction failed. A checkout the
+        verifier cannot trust is an explicit zero, never a fallback to the
+        mutable tree.
+    """
+    verify_dir = f"{repo}-verify"
+    script = (
+        f"rm -rf {shlex.quote(verify_dir)} && "
+        f"git clone -q {shlex.quote(repo)} {shlex.quote(verify_dir)} && "
+        f"git -C {shlex.quote(verify_dir)} checkout -q --detach {shlex.quote(head_sha)} && "
+        f"git -C {shlex.quote(repo)} diff {shlex.quote(head_sha)} HEAD "
+        f"| git -C {shlex.quote(verify_dir)} apply - && "
+        f"chown -R root:root {shlex.quote(verify_dir)} && "
+        f"chmod -R a-w {shlex.quote(verify_dir)}"
+    )
+    result = await runtime.run(["sh", "-c", script], {})
+    if result.exit_code != 0:
+        return None
+    return verify_dir
+
 #: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
 #: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
 #: full re-run of the repository's test suite.
@@ -370,8 +425,6 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
     """Reward weights, overridable as ``--taskset.task.*``."""
 
     w_composite: float = 1.0
-    w_tests: float = 1.0
-    no_fix_reward: float = 0.0
 
 
 class DaydreamReviewState(vf.State):
@@ -385,6 +438,11 @@ class DaydreamReviewState(vf.State):
     """
 
     run_dir: Path | None = None
+    seal_ok: bool | None = None
+    """Whether the staged run dir's supervisor seal verified; ``None`` = no seal.
+
+    ``False`` means a seal existed but did not verify — a tamper — and both the
+    intrinsic reward and the non-regression metric must score zero."""
 
 
 def _review_state(trace: vf.Trace) -> DaydreamReviewState:
@@ -403,18 +461,29 @@ def _review_state(trace: vf.Trace) -> DaydreamReviewState:
 
 
 class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, DaydreamReviewTaskConfig]):
-    """Two reward axes: daydream's own intrinsic composite, and the test suite.
+    """One reward axis: daydream's own intrinsic composite; the suite is telemetry.
 
     ``intrinsic_composite`` replays the archived run through
     :func:`daydream.training.reward.score_trajectory` — the exact scorer the
     offline training pipeline uses, imported rather than reimplemented, so an
     online reward and an offline label can never disagree about the same run.
 
-    ``fix_tests_pass`` is the ground truth the intrinsic composite cannot supply:
-    the repository's own suite, re-run inside the still-live sandbox. daydream's
-    own test verdict is a regex over agent prose
+    ``suite_non_regression`` is the ground truth the intrinsic composite cannot
+    supply: the repository's own suite, re-run inside the sandbox against a
+    separate root-owned read-only checkout with only the candidate product diff
+    applied (never the agent-mutable tree).
+    daydream's own test verdict is a regex over agent prose
     (``daydream/agent.py:252-300``), so it is recorded as a claim and compared
-    against the re-run — never trusted as reward.
+    against the re-run — never trusted as reward. The suite result is a metric,
+    never a reward: a green suite proves the tree did not regress, not that the
+    reported defect was repaired, so it earns no training signal of its own.
+
+    ``intrinsic_composite`` consumes only sealed artifacts: the supervisor seals
+    the archived run dir (with the candidate diff) after the agent's write
+    window, and :meth:`DaydreamReviewTask.score` verifies that seal against the
+    single staged host copy before any value is trusted. A tampered archive
+    zeroes the only remaining reward and never records honest non-regression
+    telemetry.
 
     Important: ``verifier_verdicts`` exist only when the fix gate was accepted
     (``deep/recommendation-verdicts.json`` is written at
@@ -448,8 +517,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
 
         The single run-dir fetch happens here, at the entrypoint; the consumers
         read the staged snapshot off ``state.run_dir`` and never re-enter the
-        runtime. With no runtime the base class simply skips the
-        runtime-dependent signals, and there is nothing to stage.
+        runtime. The supervisor-produced ``seal.json`` rides in the fetch, so the
+        staged copy is verified against the seal before any reward trusts it; a
+        tampered archive zeroes the only remaining reward. With no runtime the
+        base class simply skips the runtime-dependent signals, and there is
+        nothing to stage.
         """
         if runtime is None:
             await super().score(trace, None)
@@ -462,6 +534,30 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             # task-scoring boundary rather than escaping as a raw OSError.
             async with boundary(vf.TaskError, f"task {type(self).__name__} scoring"):
                 state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+                # Seal verification is host-side over the staged copy; a seal
+                # failure is a tamper signal (explicit zero), never a crash.
+                # The candidate diff is re-derived from the sandbox here so the
+                # seal binds the diff the verifier checkout will actually apply.
+                if state.run_dir is not None:
+                    if trace.info.get("daydream_seal_ok") is False:
+                        # The harness could not produce a seal at all; score the
+                        # run as a failed seal, never as an unsealed full-trust
+                        # run (rundir.seal_archived_run also writes a fail-closed
+                        # marker; this covers even a marker-write failure).
+                        state.seal_ok = False
+                    else:
+                        state.seal_ok = await verify_seal(
+                            state.run_dir,
+                            runtime,
+                            _repo_path(trace),
+                            self.data.head_sha,
+                            # The harness claims to have sealed this run: a
+                            # seal that did not survive to scoring is a vanished
+                            # seal (tamper), never the legacy unsealed path.
+                            seal_expected=trace.info.get("daydream_seal_ok") is True,
+                        )
+            if state.seal_ok is not None:
+                trace.record_metric("seal_verified", float(state.seal_ok))
             try:
                 await super().score(trace, runtime)
             finally:
@@ -470,7 +566,13 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     @vf.reward(weight=1.0)
     async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
         """daydream's own trajectory composite over the archived run."""
-        run_dir = _review_state(trace).run_dir
+        state = _review_state(trace)
+        # The staged copy must verify against the supervisor's seal before any
+        # value is trusted: a tampered archive zeroes the only remaining reward.
+        if state.seal_ok is False:
+            trace.info["reward_breakdown"] = {"error": "seal verification failed"}
+            return 0.0
+        run_dir = state.run_dir
         if run_dir is None:
             trace.info["reward_breakdown"] = {"error": "no archived run dir"}
             return 0.0
@@ -483,29 +585,40 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             "length_penalty": breakdown.length_penalty,
             "composite": breakdown.composite,
             "axes_present": breakdown.axes_present,
-            "reward_version": breakdown.reward_version,
+            "reward_version": ROLLOUT_REWARD_VERSION,
+            "intrinsic_reward_version": breakdown.reward_version,
         }
         return self.config.w_composite * (breakdown.composite or 0.0)
 
-    @vf.reward(weight=1.0)
-    async def fix_tests_pass(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
-        """Re-run the repository's pinned suite against the fixed tree.
+    @vf.metric
+    async def suite_non_regression(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
+        """Re-run the repository's pinned suite against the fixed tree; telemetry, never a reward.
 
         Deterministic because the image build proved the same command green at
         the same commit before any agent touched it (D6). A rollout that applied
-        no fix is not evidence either way, so it takes ``no_fix_reward`` rather
-        than a free 1.0 for leaving the tree alone.
+        no fix is not evidence either way, so it records ``suite_non_regression``
+        0.0 rather than a free 1.0 for leaving the tree alone.
 
         The declared ``protected_test_paths`` oracle must still match the baked
         head before ``test_command`` is trusted: any oracle change — a tracked
         difference, an untracked file under a protected path or a root
         ``sitecustomize.py``, a ``skip-worktree``/``assume-unchanged`` flag, an
         ignore-rule change (``.gitignore`` files or ``.git/info/exclude``), or a
-        Git error — returns a literal ``0.0`` without running the repository's
-        mutable ``test_command``, so a rollout can never pay itself the test
-        reward by gutting its own suite.
+        Git error — records a literal ``0.0`` without running the repository's
+        mutable ``test_command``, so a gutted suite is never recorded as an
+        honest non-regression value.
+
+        The suite result is deliberately NOT a reward: a rollout that starts
+        from an already-green commit and makes only an unrelated or test-only
+        edit earns no suite-derived credit. The value stays in ``trace.metrics``
+        for analysis.
         """
         repo = _repo_path(trace)
+        if _review_state(trace).seal_ok is False:
+            # The archived run cannot be trusted: the oracle is unverifiable, so
+            # the tampered result is never recorded as honest non-regression.
+            trace.record_metric("test_oracle_unchanged", 0.0)
+            return {"suite_non_regression": 0.0}
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
             trace.record_metric("fixes_applied", 0.0)
             # There is no re-run to compare against on this path, but a rollout
@@ -514,36 +627,58 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             claimed = _claimed_test_verdict(_review_state(trace).run_dir)
             if claimed is not None:
                 trace.record_metric("test_claim_passed_without_fix", float(claimed))
-            return self.config.no_fix_reward
+            return {"suite_non_regression": 0.0}
 
         trace.record_metric("fixes_applied", 1.0)
         # Security boundary: the test oracle must match the baked head before the
         # repository's own mutable test_command is trusted. A changed oracle
         # (committed/staged/unstaged/deleted/renamed, an untracked protected
         # file or root sitecustomize.py, a skip-worktree/assume-unchanged flag,
-        # an ignore-rule change, or a Git error) earns a literal zero WITHOUT
+        # an ignore-rule change, or a Git error) records a literal zero WITHOUT
         # running test_command.
         unchanged = await _protected_test_paths_unchanged(
             runtime, repo, self.data.head_sha, self.data.protected_test_paths
         )
         trace.record_metric("test_oracle_unchanged", float(unchanged))
         if not unchanged:
-            return 0.0
+            return {"suite_non_regression": 0.0}
 
-        result = await runtime.run(
-            ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
-        )
+        result = await self._run_test_command(runtime, repo)
         passed = result.exit_code == 0
 
         # Reward-hack tripwire: daydream's own prose-derived verdict versus what
-        # the suite actually does. Recorded here rather than as a @vf.metric
+        # the suite actually does. Recorded here (inside this metric handler,
+        # which performs the re-run) rather than as a separate @vf.metric,
         # because metrics run BEFORE rewards (verifiers task.py:299-306), so a
-        # metric cannot see this re-run without paying for a second one.
+        # standalone metric could not see this re-run without paying for a
+        # second one.
         claimed = _claimed_test_verdict(_review_state(trace).run_dir)
         if claimed is not None:
             trace.record_metric("test_claim_mismatch", float(claimed != passed))
 
-        return self.config.w_tests * float(passed)
+        return {"suite_non_regression": float(passed)}
+
+    async def _run_test_command(self, runtime: vf.Runtime, repo: str) -> vf.ProgramResult:
+        """Run the manifest ``test_command`` against a trustworthy tree.
+
+        In the container the re-run executes against a separate root-owned
+        read-only checkout with only the candidate product diff applied, under a
+        distinct non-root verifier identity (``setpriv``) — never against the
+        agent-mutable ``/work/repo``. A checkout the verifier cannot trust is an
+        explicit non-zero result, never a fallback to the mutable tree. On the
+        local subprocess smoke path (no ``setpriv``/``verifier`` identity) the
+        re-run keeps the pre-identity shape against the staged repo.
+        """
+        if not await _verifier_identity_available(runtime):
+            return await runtime.run(
+                ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
+            )
+        verify_dir = await _prepare_verify_checkout(runtime, repo, self.data.head_sha)
+        if verify_dir is None:
+            return vf.ProgramResult(exit_code=1, stdout="", stderr="verify checkout construction failed")
+        command = f"cd {shlex.quote(verify_dir)} && {self.data.test_command}"
+        runner = f"setpriv --no-new-privs --reuid=verifier --regid=verifier --clear-groups sh -c {shlex.quote(command)}"
+        return await runtime.run(["sh", "-c", runner], {})
 
     @vf.metric
     async def review_shape(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
@@ -681,7 +816,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
         if not config.use_images:
             logger.warning(
                 "use_images is off: tasks carry no image, so nothing guarantees a green baseline "
-                "and fix_tests_pass is not deterministic. This is the local smoke path only."
+                "and suite_non_regression is not deterministic. This is the local smoke path only."
             )
 
         source = harvested_corpus(config.corpus_dir)

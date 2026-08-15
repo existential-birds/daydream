@@ -2,8 +2,8 @@
 #
 # Each task runs in its own container built from the per-PR image the manifest
 # names, so the repository is already checked out at the head SHA and its suite
-# is already proven green there — which is what makes fix_tests_pass a verdict
-# rather than noise.
+# is already proven green there — which is what makes the suite_non_regression
+# metric a signal rather than noise.
 #
 #   uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
 #   uv run eval @ configs/eval-docker.toml --client.base-url <your endpoint>
