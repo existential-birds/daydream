@@ -52,6 +52,17 @@ RUN_DIR_FILES: tuple[str, ...] = (
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 
 
+def _candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
+    """Argv for re-deriving the rollout's committed diff against the baked head.
+
+    The candidate diff is the load-bearing contract the seal binds and the
+    verifier re-applies, so it must be derived identically everywhere it is
+    needed (seal production, seal verification, and the verify-checkout
+    construction). Single-sourcing the command keeps those sites from drifting.
+    """
+    return ["git", "-C", repo, "diff", head_sha, "HEAD"]
+
+
 async def _session_dir(runtime: vf.Runtime, archive_root: str) -> str | None:
     """Absolute path of the rollout's single archived run dir, or ``None``.
 
@@ -172,7 +183,7 @@ async def verify_seal(
     # embedded copy is an audit record, never the verification input, so a
     # committed diff rewritten after sealing fails the digest check.
     try:
-        diff_result = await runtime.run(["git", "-C", repo, "diff", head_sha, "HEAD"], {})
+        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
     except Exception:
         return False
     if diff_result.exit_code != 0:
@@ -213,19 +224,15 @@ async def seal_archived_run(
         return False
     try:
         artifacts: dict[str, bytes] = {}
+        # _present_files already restricts the listing to the reward inputs
+        # (RUN_DIR_FILES members that exist + the deep/stack-*-records.json
+        # glob members), so only the self-exclusion of seal.json is needed
+        # here.
         for rel in await _present_files(runtime, session_dir):
-            # The seal covers every reward input: the RUN_DIR_FILES members the
-            # reward reads AND the deep/stack-*-records.json glob members, which
-            # feed the intrinsic scorer's format gate. seal.json is the seal
-            # record itself.
             if rel == "seal.json":
                 continue
-            if rel not in RUN_DIR_FILES and not (
-                rel.startswith("deep/stack-") and rel.endswith("-records.json")
-            ):
-                continue
             artifacts[rel] = await runtime.read(f"{session_dir}/{rel}")
-        diff_result = await runtime.run(["git", "-C", repo, "diff", head_sha, "HEAD"], {})
+        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
         candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
         seal = seal_bytes(artifacts, candidate_diff)
         await runtime.write(f"{session_dir}/seal.json", seal.model_dump_json().encode())
