@@ -249,12 +249,15 @@ def test_template_renders_excluded_tools_and_per_row_scored_counts() -> None:
     assert "j.excluded_tools" in note
     assert "j.required_pr_count" in note
     assert "ex.scored_pr_count" in note
-    assert "of" in note and "PRs" in note
+    # positive behavioral asserts: the rendered exclusion sentence and its per-tool
+    # scored-of-required count expression must appear, not just the identifiers
+    assert "Excluded from the ranked field (no present leaf on the anchor):" in note
+    assert "`${esc(ex.display)} (${ex.scored_pr_count} of ${j.required_pr_count} PRs)`" in note
     assert "renderJudgeDependent" in template and "renderJudgeNote();" in template
 
     lb = template.split("function makeLB(", 1)[1].split("function renderLeaderboards(){", 1)[0]
-    assert "r.n_prs" in lb
-    assert "PRs" in lb
+    assert '<td class="num" style="color:var(--dim)">${r.n_prs}</td>' in lb
+    assert '<th class="num">PRs</th>' in lb
 
 
 def test_template_foot_cites_excluded_tools_when_any_judge_dropped_them() -> None:
@@ -968,6 +971,14 @@ def test_report_anchor_falls_back_to_retained_judge_with_strict_smaller_dd_subse
     # (smaller) daydream coverage, not the skipped judge's larger 2-PR set.
     assert report["meta"]["subset_pr_count"] == 1
     assert report["meta"]["subset_prs"] == [PR_URL]
+
+    # The judge disclosure denominators trace to the SAME re-pointed anchor: the
+    # pre-fallback larger subset must not leak into required_pr_count (which would
+    # render "of 2" while meta.subset_pr_count reports a 1-PR anchor).
+    retained = report["judges"][0]
+    assert retained["required_pr_count"] == 1
+    assert retained["daydream_pr_count"] == 1
+    assert retained["excluded_tools"] == []
 
     # Slice evidence is keyed off the fallback anchor's OWN (smaller) daydream subset.
     lang = next(sl for sl in report["slices"] if sl["title"] == "Language")

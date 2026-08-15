@@ -273,13 +273,14 @@ let STATE={judge:DATA.judges[0]?DATA.judges[0].id:null};
 function curJudge(){return DATA.judges.find(j=>j.id===STATE.judge)||DATA.judges[0];}
 const DDTOOL=DATA.meta.daydream_tool;
 function anchorJudge(){return DATA.judges.find(j=>j.id===DATA.meta.anchor_judge);}
+function daydreamCoverage(j){return `${j.daydream_pr_count} of ${DATA.meta.subset_pr_count} PRs scored`;}
 
 function renderJudgeBtns(){
   const host=$("#judgebtns");host.innerHTML="";
   DATA.judges.forEach(j=>{
     const b=document.createElement("button");
     b.className="judgebtn"+(j.id===STATE.judge?" on":"");
-    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored · ${j.field.length} field</span>`;
+    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${daydreamCoverage(j)} · ${j.field.length} field</span>`;
     b.onclick=()=>{STATE.judge=j.id;renderJudgeBtns();renderJudgeDependent();};
     host.appendChild(b);
   });
@@ -305,7 +306,7 @@ function renderJudgeNote(){
   const j=curJudge();
   const base=j.has_daydream
     ? `Selected judge ${esc(j.display)} scored daydream on ${j.daydream_pr_count} PRs; the compared field runs on the ${j.subset_pr_count}-PR complete cohort where every ranked tool has a present leaf.`
-    : `Selected judge ${esc(j.display)} has ${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs scored — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
+    : `Selected judge ${esc(j.display)} has ${daydreamCoverage(j)} — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
   const excl=(j.excluded_tools||[]).map(ex=>`${esc(ex.display)} (${ex.scored_pr_count} of ${j.required_pr_count} PRs)`).join(", ");
   $("#judgenote").innerHTML=excl?`${base} Excluded from the ranked field (no present leaf on the anchor): ${excl}.`:`${base}`;
 }
@@ -315,7 +316,7 @@ function renderKPIs(){
   const j=curJudge();$("#kpi-judgetag").textContent="· "+j.display;
   const host=$("#kpis");host.innerHTML="";
   if(!j.has_daydream||!j.daydream){
-    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored under ${esc(j.display)}</div>
+    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">${daydreamCoverage(j)} under ${esc(j.display)}</div>
       The ${j.field.length}-tool SaaS field below is computed on its complete ${j.subset_pr_count}-PR cohort within the daydream anchor set. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
     return;
   }
@@ -419,7 +420,7 @@ function renderLeaderboards(){
 function renderFP(){
   const j=curJudge();
   if(!j.has_daydream||!j.daydream){
-    $("#fp-sub").textContent=`${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs scored under this judge — the over-flagging view fills in once it is re-judged.`;
+    $("#fp-sub").textContent=`${daydreamCoverage(j)} under this judge — the over-flagging view fills in once it is re-judged.`;
     $("#fp-stack").innerHTML='<div class="placeholder">no daydream FP/TP under '+esc(j.display)+'</div>';
     $("#fp-ratio").innerHTML="";return;
   }
@@ -473,8 +474,8 @@ function renderJudgeSens(){
         <div style="margin-top:12px;font-size:11px;color:var(--dim)">tp ${d.tp} · fp ${d.fp} · fn ${d.fn} · ${d.n_prs} PRs</div>`;
     } else {
       card.innerHTML=`<div class="ct"><span class="dot" style="background:var(--amber);box-shadow:0 0 9px var(--amber)"></span>${esc(j.display)}</div>
-        <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored</div>
-        <div style="font-size:11px">daydream has scored ${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
+        <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">${daydreamCoverage(j)}</div>
+        <div style="font-size:11px">daydream has ${daydreamCoverage(j)} under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
     }
     grid.appendChild(card);
   });
@@ -614,9 +615,8 @@ function renderImprovements(){
 function renderFoot(){
   const m=DATA.meta;
   const exJudges=DATA.judges.filter(j=>j.excluded_tools&&j.excluded_tools.length);
-  const exNames=[...new Set(exJudges.flatMap(j=>j.excluded_tools.map(e=>e.display)))];
   const exclLine=exJudges.length
-    ? ` ${exJudges.length} judge(s) excluded SaaS tools with no present leaf in the daydream anchor: ${esc(exNames.join(", "))}.`
+    ? ` ${exJudges.map(j=>`${esc(j.display)} excluded ${j.excluded_tools.map(e=>esc(e.display)).join(", ")} (no present leaf on the anchor)`).join("; ")}.`
     : "";
   $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${esc(m.metric_def)}. The daydream anchor set contains ${m.subset_pr_count} scored PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Each judge panel intersects that anchor with the PRs having a present leaf for every ranked row, and every row in a panel is recomputed on that panel's complete cohort — no rank compares different PR counts. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${esc(m.excluded_tool)}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${esc(DATA.economy.price_model)} price card (${esc(m.price_source)}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied.${exclLine} <br><br>
   <b>SOURCES.</b> aggregates: ${esc(m.generated_from)} (auto-discovered ${DATA.judges.length} judge panels + ${DATA.skipped_judges.length} skipped). labels: results/pr_labels.json. tokens/wall: .daydream-bench/trajectories/*.json. tool names/colors: analysis/benchmark_dashboard.json. Generated by bench/benchmark-report/build.py — re-run against any corpus, judge, or price card.`;
