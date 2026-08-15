@@ -24,6 +24,9 @@ def test_help_all_shows_advanced(capsys):
     assert "--findings-out" in out and "--pr-number" in out
     assert "--precision" in out  # #232: reachable from --help-all
     assert "--approve-on-clean" in out  # #343: reachable from --help-all
+    assert "--log" in out                # #438: --log is an advanced flag
+    assert "redacted agent events" in out   # #438: exact phrase
+    assert "raw agent events" not in out    # #438: raw wording removed
 
 
 def test_advanced_flags_still_parse():

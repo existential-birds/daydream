@@ -13,6 +13,8 @@ tests.test_agent_recorder_integration (the single canonical definition).
 
 from __future__ import annotations
 
+import copy
+import json
 from io import StringIO
 
 from rich.console import Console
@@ -21,12 +23,42 @@ from daydream.agent import run_agent
 from daydream.backends import (
     ResultEvent,
     TextEvent,
+    ThinkingEvent,
+    ToolResultEvent,
+    ToolStartEvent,
 )
 from daydream.trajectory import DaydreamPhase
 from tests.test_agent_recorder_integration import MockBackend
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
+
+
+def test_redact_log_value_recurses_without_mutating() -> None:
+    """_redact_log_value redacts string keys AND values recursively, in fresh
+    containers, and never mutates its argument."""
+    from daydream.agent import _redact_log_value
+
+    sentinel = "ghp_" + "x" * 16
+    payload = {
+        "token": sentinel,
+        sentinel: "key-that-is-a-secret",
+        "nested": {"path": f"/Users/{sentinel}"},
+        "items": [sentinel, 42, None],
+        "flag": True,
+        1: "non-string-key",
+    }
+    original = copy.deepcopy(payload)
+    out = _redact_log_value(payload)
+
+    assert payload == original                    # argument never mutated
+    assert out is not payload                     # fresh top-level container
+    assert out["nested"] is not payload["nested"]  # fresh nested container
+    assert sentinel not in json.dumps(out)        # redacted in values AND keys
+    assert "[REDACTED" in json.dumps(out)         # a marker replaced it
+    assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
+    assert out["flag"] is True
+    assert out[1] == "non-string-key"             # non-string keys untouched
 
 
 async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):
@@ -52,23 +84,52 @@ async def test_plain_text_still_renders(monkeypatch, tmp_path):
     assert "narration here" in rec.export_text()
 
 
-async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys):
-    """Under --log, the structured result must still be captured, not just printed.
-
-    Regression: the log-mode print and the structured-result capture were an
-    if/elif, so --log dropped every structured result (run_agent returned "").
-    Downstream this emptied exploration conventions/dependencies and review
-    findings across the deep pipeline.
-    """
+async def test_log_mode_emission_redacts_sentinels_on_agent_path(
+    monkeypatch, tmp_path, capsys
+):
+    """Real-path sentinel-absence check at the agent boundary (no phases.py
+    prints): every --log event type is emitted redacted — markers present, raw
+    sentinel absent — while the returned structured result stays raw."""
+    sentinel = "ghp_" + "x" * 16
+    payload = {"status": "complete", "token": sentinel}
+    backend = MockBackend(
+        [
+            TextEvent(text=f"token={sentinel}"),
+            ThinkingEvent(text=f"thinking about {sentinel}"),
+            ToolStartEvent(id="t", name="bash", input={"command": f"echo {sentinel}"}),
+            ToolResultEvent(id="t", output=f"token={sentinel}", is_error=False),
+            ResultEvent(structured_output=payload, continuation=None),
+        ]
+    )
     monkeypatch.setattr("daydream.agent._state.log_mode", True)
-    backend = MockBackend([ResultEvent(structured_output=PAYLOAD, continuation=None)])
     result, _, _ = await run_agent(
         backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
     )
-    assert result == PAYLOAD  # captured, not discarded
+    assert result == payload          # returned object is raw/unchanged
     out = capsys.readouterr().out
-    assert "[result]" in out  # log-mode print is additive, still happens
-    assert "OpenAPI First" in out  # the serialized payload, not just the marker
+    assert "[REDACTED_API_KEY]" in out  # markers present
+    assert sentinel not in out          # no raw leak through the agent's log-mode emission
+
+
+async def test_log_mode_captures_structured_output(monkeypatch, tmp_path, capsys):
+    """Under --log, the structured result is still captured, NOT just printed —
+    and the printed projection is redacted while the returned object stays raw."""
+    sentinel = "ghp_" + "x" * 16
+    payload = {
+        "conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}],
+        "token": sentinel,
+        "nested": {"path": f"/Users/{sentinel}"},
+    }
+    monkeypatch.setattr("daydream.agent._state.log_mode", True)
+    backend = MockBackend([ResultEvent(structured_output=payload, continuation=None)])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW, output_schema={"type": "object"}
+    )
+    assert result == payload        # captured AND returned raw (never redacted)
+    out = capsys.readouterr().out
+    assert "[result]" in out        # log-mode print is additive, still happens
+    assert sentinel not in out      # the stdout projection is redacted
+    assert "OpenAPI First" in out   # benign content still serialized
 
 
 async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch, tmp_path):

@@ -14,6 +14,7 @@ import collections
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -22,6 +23,7 @@ from typing import TYPE_CHECKING
 from daydream.agent import console
 from daydream.backends.pi import STREAM_DROP_SIGNATURES
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
+from daydream.trajectory import redact_text
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
@@ -58,6 +60,14 @@ _ERROR_CONTEXT_MARKERS = (
     "backend execution error",
     "fatal error",
 )
+
+#: PEM private-key block anchors, mirroring trajectory._PEM_KEY_PATTERN's
+#: ``-----BEGIN (?:RSA )?PRIVATE KEY-----`` spec. Only blocks whose anchors match
+#: that spec are buffered for whole-block redaction: ENCRYPTED/OPENSSH/EC/DSA
+#: headers are not matched by the pattern, so buffering them here would present
+#: them as handled and then forward the raw key to on_line and the failure tail.
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END (?:RSA )?PRIVATE KEY-----")
 
 
 def _is_transient(stdout: str) -> bool:
@@ -130,8 +140,11 @@ def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> tuple[
             f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
         ) from exc
     # daydream prints its errors to stdout (Rich console), so a stderr-only
-    # message is frequently empty; surface both streams' tails.
-    tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
+    # message is frequently empty; surface both streams' tails. Redact the
+    # COMPLETE combined string before the tail slice — a PEM block or credential
+    # straddling the cut must be caught before the slice, not truncated into an
+    # unmatchable fragment.
+    tail = redact_text(f"{result.stdout or ''}\n{result.stderr or ''}".strip())[-_STDERR_TAIL:]
     return result.returncode, tail
 
 
@@ -149,6 +162,20 @@ def _run_streamed(
     """
     tail: collections.deque[str] = collections.deque(maxlen=40)
     lines: queue.Queue[str | None] = queue.Queue()
+    # A PEM block spans multiple lines; redacting each line alone never presents
+    # the BEGIN/END anchors to _PEM_KEY_PATTERN (re.DOTALL) together, so the
+    # base64 body would leak to on_line and the failure tail. Hold lines from a
+    # BEGIN marker until its END marker, then redact the whole block at once —
+    # the streamed analogue of the captured path's redact-the-complete-string
+    # invariant. Buffering is anchored to _PEM_KEY_PATTERN's spec: a block that
+    # pattern cannot match must not be treated as handled.
+    pem_buffer: list[str] = []
+
+    def _emit(line: str) -> None:
+        redacted = redact_text(line)
+        on_line(redacted)
+        tail.append(redacted)
+
     with subprocess.Popen(  # noqa: S603 - args are harness-controlled, not user input
         cmd,  # noqa: S607 - daydream is a trusted command
         stdout=subprocess.PIPE,
@@ -176,8 +203,21 @@ def _run_streamed(
                 ) from None
             if line is None:
                 break
-            on_line(line)
-            tail.append(line)
+            if _PEM_BEGIN_RE.search(line) and not _PEM_END_RE.search(line):
+                pem_buffer.append(line)
+            elif pem_buffer:
+                pem_buffer.append(line)
+                if _PEM_END_RE.search(line):
+                    _emit("".join(pem_buffer))
+                    pem_buffer.clear()
+            else:
+                _emit(line)
+        if pem_buffer:  # stream ended mid-block: no END anchor was seen, so
+            # _PEM_KEY_PATTERN cannot match the fragment; redact the held lines
+            # individually so the BEGIN-only fragment and its body never reach
+            # on_line or the failure tail raw.
+            for held in pem_buffer:
+                _emit(held)
         returncode = proc.wait()
     return returncode, "\n".join(tail)
 
@@ -209,14 +249,16 @@ def run_daydream_review(
             variable (never argv) when set.
         on_line: When set, the review runs via ``subprocess.Popen`` and each output
             line (stdout+stderr merged) is forwarded to this callback live instead of
-            being captured silently. When ``None`` (default), the quiet
-            ``subprocess.run`` capture path is used unchanged.
+            being captured silently. Each line is redacted (via ``redact_text``) before
+            the callback. When ``None`` (default), the quiet ``subprocess.run`` capture
+            path is used unchanged.
 
     Returns:
         Path to the canonical ``merged-items.json`` findings artifact.
 
     Raises:
-        DaydreamRunError: If the daydream process exits non-zero (includes a stderr tail).
+        DaydreamRunError: If the daydream process exits non-zero (includes a stderr tail,
+            redacted).
         DaydreamArtifactError: If the run succeeds but the artifact is absent.
     """
     cmd = [
