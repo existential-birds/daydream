@@ -473,6 +473,20 @@ def _recorder_backend_names(
     return RecorderBackendNames(backend=backend, fix=fix, test=test)
 
 
+def _default_backend_name(config: RunConfig) -> str:
+    """Resolve the phase-agnostic general default backend.
+
+    Order (highest first): global ``config.backend`` (``--backend``),
+    file-config global, then the terminal ``"claude"`` fallback. Deliberately
+    phase-agnostic: it must never consult any ``{phase}_backend`` attribute, so
+    a ``review_backend`` override can never surface here — the archive's
+    general ``backend`` field and the orchestrator's "Default backend" line
+    record the true general default, not a per-phase override.
+    """
+    file_config = _file_config_or_empty(config)
+    return config.backend or file_config.backend or "claude"
+
+
 def _resolved_model(config: RunConfig, phase: str) -> str | None:
     """Resolve the model for ``phase`` across all precedence tiers.
 

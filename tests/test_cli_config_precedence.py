@@ -16,6 +16,7 @@ from daydream.backends.codex import CodexBackend
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import (
     RunConfig,
+    _default_backend_name,
     _resolve_backend,
     _resolved_backend_name,
     _resolved_model,
@@ -194,6 +195,24 @@ def test_pi_native_model_is_not_replaced_by_glm_fallback(tmp_path: Path) -> None
 
     cfg.model = "custom-model"
     assert _resolved_model(cfg, "review") == "custom-model"
+
+
+def test_default_backend_is_phase_agnostic(tmp_path: Path) -> None:
+    """#647: the general default backend ignores per-phase review overrides."""
+    empty = DaydreamFileConfig()
+    # A review override must never leak into the general default.
+    cfg = RunConfig(target=str(tmp_path), backend="claude", review_backend="codex", file_config=empty)
+    assert _default_backend_name(cfg) == "claude"
+    # Global CLI --backend is the source when set.
+    cfg.backend = "codex"
+    assert _default_backend_name(cfg) == "codex"
+    # File-config global when no CLI backend.
+    cfg.backend = None
+    cfg.file_config = DaydreamFileConfig(backend="file-backend")
+    assert _default_backend_name(cfg) == "file-backend"
+    # Terminal fallback with no config.
+    cfg.file_config = empty
+    assert _default_backend_name(cfg) == "claude"
 
 
 def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
