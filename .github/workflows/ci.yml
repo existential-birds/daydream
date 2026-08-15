@@ -48,3 +48,48 @@ jobs:
 
       - name: Run tests
         run: uv run pytest -n auto
+
+  rl-check:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    defaults:
+      run:
+        working-directory: rl/daydream_review_v1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: rl/daydream_review_v1/uv.lock
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      # Reads the freshly checked-out committed standalone uv.lock BEFORE `uv sync`
+      # can heal it. A stale standalone lock (a change bumped the standalone
+      # pyproject.toml but forgot `uv lock`) must fail here, not be silently healed.
+      - name: Verify standalone uv.lock is in sync
+        run: uv lock --check
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint with ruff
+        run: uv run ruff check .
+
+      - name: Type check with mypy
+        run: uv run mypy daydream_review_v1 tests
+
+      # The full documented standalone gate (rl/daydream_review_v1/README.md:17-21),
+      # including the two `slow` Docker-baseline image tests. The runner's daemon
+      # must be usable so they PASS rather than skip (Task 0 spike); the live
+      # actionlint `docker run` step in the `check` job proves this runner runs
+      # containers. No selection flags: the full suite is the gate.
+      - name: Run tests
+        run: uv run pytest
