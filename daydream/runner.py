@@ -487,6 +487,22 @@ def _default_backend_name(config: RunConfig) -> str:
     return config.backend or file_config.backend or "claude"
 
 
+def _resolved_review_backend_name(config: RunConfig) -> str | None:
+    """Resolve the review-specific backend override, or ``None`` when unset.
+
+    Returns the override only when a review-specific source is configured
+    (CLI ``review_backend``, then file-config review phase); ``None`` when no
+    override exists — the archive must distinguish "review used the general
+    backend" from "review was explicitly overridden", so this is never coerced
+    to a fallback string. The file-config review phase is consulted directly
+    rather than through :func:`_resolved_backend_name` because a CLI global
+    ``config.backend`` outranks the file phase there and would mask a
+    configured override.
+    """
+    file_config = _file_config_or_empty(config)
+    return config.review_backend or file_config.phase_backend("review")
+
+
 def _resolved_model(config: RunConfig, phase: str) -> str | None:
     """Resolve the model for ``phase`` across all precedence tiers.
 

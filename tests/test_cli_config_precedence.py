@@ -21,6 +21,7 @@ from daydream.runner import (
     _resolved_backend_name,
     _resolved_model,
     _resolved_reasoning_effort,
+    _resolved_review_backend_name,
 )
 
 
@@ -213,6 +214,25 @@ def test_default_backend_is_phase_agnostic(tmp_path: Path) -> None:
     # Terminal fallback with no config.
     cfg.file_config = empty
     assert _default_backend_name(cfg) == "claude"
+
+
+def test_review_backend_override_is_none_when_unset(tmp_path: Path) -> None:
+    """#647: review_backend is None unless a review-specific override is set."""
+    empty = DaydreamFileConfig()
+    # No override anywhere -> None (not the general backend).
+    bare = RunConfig(target=str(tmp_path), backend="claude", review_backend=None, file_config=empty)
+    assert _resolved_review_backend_name(bare) is None
+    # CLI review_backend override.
+    cfg = RunConfig(target=str(tmp_path), backend="claude", review_backend="codex", file_config=empty)
+    assert _resolved_review_backend_name(cfg) == "codex"
+    # File-config review-phase override.
+    fc = DaydreamFileConfig(phases={"review": {"backend": "file-codex"}})
+    cfg2 = RunConfig(target=str(tmp_path), backend="claude", review_backend=None, file_config=fc)
+    assert _resolved_review_backend_name(cfg2) == "file-codex"
+    # File-config global only (no review override) -> still None.
+    fc_global = DaydreamFileConfig(backend="codex")
+    cfg3 = RunConfig(target=str(tmp_path), backend=None, review_backend=None, file_config=fc_global)
+    assert _resolved_review_backend_name(cfg3) is None
 
 
 def test_trajectory_hub_repo_flag_reaches_runconfig(tmp_path: Path) -> None:
