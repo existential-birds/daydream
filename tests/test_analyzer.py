@@ -940,6 +940,82 @@ def test_quality_verbosity_flags_clones_across_files(tmp_path: Path):
     assert result["verbosity"] > 0
 
 
+def test_quality_candidate_scope_parses_only_candidates_and_indexes_workspace_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate mode parses only candidates but indexes peer raw text for clones."""
+    from daydream.eval import analyzer as analyzer_mod
+
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def a():\n" + block,
+            "peer.py": "def b():\n" + block,  # clone source, NOT a candidate
+            "other.py": "def c():\n    return 3\n",  # neither candidate nor peer source
+        },
+    )
+    real_parse = analyzer_mod._parse_python_file
+
+    def _guard(path: Path):
+        assert path.name != "peer.py", "peer.py must never be parsed in candidate mode"
+        return real_parse(path)
+
+    monkeypatch.setattr(analyzer_mod, "_parse_python_file", _guard)
+
+    result = analyze_quality(ws / ".daydream", candidate_paths={"app.py"})
+
+    assert result["scoped_files"] == 1
+    assert set(result["per_file"]) == {"app.py"}
+    assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed as text
+    assert result["erosion"] is not None
+
+
+def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path) -> None:
+    """candidate_paths=None is byte-identical to the default whole-workspace call."""
+    ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},
+    )
+    default = analyze_quality(ws / ".daydream")
+    explicit_none = analyze_quality(ws / ".daydream", candidate_paths=None)
+    assert explicit_none == default
+
+
+def test_quality_candidate_empty_set_returns_empty_without_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicitly empty candidate set reports zero files without walking the workspace."""
+    from daydream.eval import analyzer as analyzer_mod
+
+    ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n"})
+
+    def _boom(_workspace: Path):
+        raise AssertionError("workspace must not be enumerated for an empty candidate set")
+
+    monkeypatch.setattr(analyzer_mod, "_scoped_python_files", _boom)
+    result = analyze_quality(ws / ".daydream", candidate_paths=set())
+
+    assert result["scoped_files"] == 0
+    assert result["per_file"] == {}
+    assert result["erosion"] is None
+    assert result["verbosity"] is None
+
+
+def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
+    """A candidate that fails the generated-file eligibility rule is not reported."""
+    ws = _quality_workspace(
+        tmp_path,
+        {
+            "app.py": "def a():\n    return 1\n",
+            "schema_generated.py": "def x():\n    return 1\n",  # *_generated.py glob excludes it
+        },
+    )
+    result = analyze_quality(ws / ".daydream", candidate_paths={"schema_generated.py", "app.py"})
+    assert result["scoped_files"] == 1
+    assert set(result["per_file"]) == {"app.py"}
+
+
 def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path):
     """A block present in only one file flags neither file."""
     ws = _quality_workspace(
