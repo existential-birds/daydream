@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Collection
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -133,7 +134,17 @@ async def run_openai_scoring(
                 f"{OPENAI_JUDGE_API_KEY_ENV} is not set; cannot run OpenAI-compatible scoring."
             )
         base_url = _resolve_openai_base_url(api_key, os.environ.get(OPENAI_JUDGE_BASE_URL_ENV))
-        client = OpenAIJsonCompleter(api_key=api_key, model=judge_model, base_url=base_url)
+        async with AsyncExitStack() as stack:
+            http = await stack.enter_async_context(httpx.AsyncClient())
+            client = OpenAIJsonCompleter(api_key=api_key, model=judge_model, base_url=base_url, http=http)
+            return await run_direct_scoring(
+                benchmark_repo,
+                judge_model,
+                golden_urls=golden_urls,
+                tool=tool,
+                client=client,
+                judge_route="openai-compatible",
+            )
 
     return await run_direct_scoring(
         benchmark_repo,

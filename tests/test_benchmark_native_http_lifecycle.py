@@ -108,6 +108,13 @@ async def test_one_client_serves_concurrent_judges(provider, tmp_path):
 
     client = TrackingAsyncClient.instances[0]
     assert len(TrackingAsyncClient.instances) == 1
-    judge_systems = [p[1].get("system", "") for p in client.posts if "code review evaluator" in p[1].get("system", "")]
+    def _extract_system(payload):
+        s = payload.get("system", "")
+        if not s:
+            msgs = payload.get("messages", [])
+            if msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
+                s = msgs[0].get("content", "")
+        return s
+    judge_systems = [_extract_system(p[1]) for p in client.posts if "code review evaluator" in _extract_system(p[1])]
     assert len(judge_systems) == 2, "1 golden x 2 extracted candidates -> 2 concurrent judge posts on one client"
     assert client.closed is True
