@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import io
 import sys
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from daydream.backends import (
     AgentEvent,
+    ContinuationToken,
     CostEvent,
     MetricsEvent,
     ResultEvent,
@@ -268,18 +270,24 @@ class _CredentialSummarizerBackend:
     def __init__(self, body: str) -> None:
         self._body = body
 
-    async def execute(
+    def execute(
         self,
-        cwd,
-        prompt,
-        output_schema=None,
-        continuation=None,
-        agents=None,
-        max_turns=None,
-        read_only=False,
-    ):
-        yield TextEvent(text="")
-        yield ResultEvent(structured_output={"handoff_prompt": self._body}, continuation=None)
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        async def _gen() -> AsyncGenerator[AgentEvent, None]:
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={"handoff_prompt": self._body}, continuation=None
+            )
+
+        return _gen()
 
     async def cancel(self) -> None:
         pass
@@ -297,7 +305,8 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     raw token to stdout. The console-level _LogRedactingConsole boundary is the
     mechanism (RD-1); this proves it on the real handoff path."""
     from daydream.agent import set_log_mode
-    from daydream.phases import _emit_failure_handoff, console as phases_console
+    from daydream.phases import _emit_failure_handoff
+    from daydream.phases import console as phases_console
 
     # False-pass trap: the module console phases.py binds MUST be the redacting
     # console, otherwise a passing test would mean nothing.

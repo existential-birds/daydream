@@ -2,6 +2,7 @@
 """Tests for phase functions with backend abstraction."""
 
 import json
+from collections.abc import AsyncGenerator
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -279,7 +280,8 @@ class _StagedCommitBackend(StubBackend):
         agents: Any = None,
         max_turns: Any = None,
         read_only: bool = False,
-    ):
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
         if prompt.startswith("The daydream changes are already staged"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
