@@ -30,6 +30,8 @@ from daydream_review_v1.taskset import (
     DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
+    _archive_root,
+    _claimed_test_verdict,
     _review_state,
 )
 
@@ -75,11 +77,33 @@ def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> 
 def _assert_gate_held(trace: vf.Trace) -> None:
     """A test-oracle change must earn a literal zero, never the w_tests reward.
 
-    The staged ``deep/test-verdict.json`` claim (passed=True) makes the tripwire
-    load-bearing: any execution of test_command records ``test_claim_mismatch``,
-    so its absence proves the gate held rather than passing vacuously over an
-    empty archive.
+    The helper reconstructs the archived run dir and enforces that its
+    ``deep/test-verdict.json`` claim is parseable before checking the tripwire.
+    This makes absence of ``test_claim_mismatch`` prove the gate held rather
+    than pass vacuously over an empty claim.
+
+    NOTE: the ``all(...)`` precondition below is deliberately stricter than
+    production's ``rundir._session_dir`` attribution rule, which returns
+    ``None`` — attributing no claim, so the tripwire never fires — whenever
+    more than one run dir exists under the archive root. This helper instead
+    demands a parseable claim in EVERY run dir (test-side defense in depth), so
+    a test that stages multiple run dirs must keep each one claim-bearing or
+    the tripwire-absence assertion fails loudly by design.
     """
+    # NOTE: production's tripwire (taskset.py) consumes the fetch_run_dir
+    # staging copy filtered by RUN_DIR_FILES (rundir.py:32-40), not this host
+    # archive read; keep deep/test-verdict.json on that allowlist or this
+    # precondition can pass while the staged copy is claim-less.
+    runs_root = Path(_archive_root(trace)) / "runs"
+    assert runs_root.is_dir(), f"expected archive runs dir under {runs_root}"
+    run_dirs = [entry for entry in runs_root.iterdir() if entry.is_dir()]
+    assert run_dirs, f"expected at least one archived run dir under {runs_root}"
+    assert all(
+        _claimed_test_verdict(run_dir) is not None for run_dir in run_dirs
+    ), (
+        "missing or malformed deep/test-verdict.json claim; without it, the test_claim_mismatch-absence "
+        "assertion would pass vacuously"
+    )
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 0.0
     assert trace.rewards["fix_tests_pass"] == 0.0
@@ -510,6 +534,40 @@ async def test_fix_tests_pass_rejects_protected_test_path_changes(
     _assert_gate_held(trace)
 
 
+async def _score_fail_closed(
+    tmp_path: Path,
+    runtime,
+    archive_root: Path,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+    *,
+    unlink_claim: bool = False,
+) -> vf.Trace:
+    """Stage a single run dir and score it down the fail-closed git-error path.
+
+    Shared skeleton of the oracle-gate tests: stage -> task -> dirty-fixed repo
+    -> unresolvable baked SHA override -> score. ``unlink_claim`` deletes the
+    archived ``deep/test-verdict.json`` before scoring, staging the negative
+    control: production records no ``test_claim_mismatch`` (behavior unchanged)
+    while ``_assert_gate_held``'s claim precondition must fail loudly.
+    """
+    run_dir = _stage_run(archive_root, rundir_golden)
+    if unlink_claim:
+        (run_dir / "deep" / "test-verdict.json").unlink()
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    # The uncommitted calc.py fix makes _fixes_applied return True via the
+    # dirty-tree check (no head_sha resolution); the gate then diff's an
+    # unresolvable baked SHA -> exit 128 -> fail closed.
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    return trace
+
+
 async def test_oracle_gate_fails_closed_on_git_error(
     tmp_path: Path,
     runtime,
@@ -525,18 +583,73 @@ async def test_oracle_gate_fails_closed_on_git_error(
     returned 0.0 without running the suite.
     """
     archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
+    trace = await _score_fail_closed(
+        tmp_path, runtime, archive_root, rundir_golden, corpus_mini_dir, fixture_manifest_path
+    )
+
+    _assert_gate_held(trace)
+
+
+async def test_assert_gate_held_raises_when_claim_absent(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A claim-less staged run must not let the gate oracle pass vacuously.
+
+    Production behavior is unchanged: no claim -> no test_claim_mismatch recorded.
+    But _assert_gate_held must now fail loudly on that shape, because without
+    the claim its test_claim_mismatch-absence assertion proves nothing.
+    """
+    archive_root = tmp_path / "archive"
+    trace = await _score_fail_closed(
+        tmp_path,
+        runtime,
+        archive_root,
+        rundir_golden,
+        corpus_mini_dir,
+        fixture_manifest_path,
+        unlink_claim=True,
+    )
+
+    assert "test_claim_mismatch" not in trace.metrics
+    with pytest.raises(AssertionError):
+        _assert_gate_held(trace)
+
+
+async def test_gate_held_raises_when_a_second_run_dir_is_claim_less(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """The claim precondition covers EVERY archived run dir, not just one.
+
+    Production's ``rundir._session_dir`` attributes nothing when more than one
+    run dir exists (the archive is not this rollout's alone), so the tripwire
+    never fires in that shape — ``_assert_gate_held``'s ``all(...)`` claim
+    precondition is what stops a claim-less second run dir from passing
+    vacuously. A two-dir archive with one claim deleted must fail loudly.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden, session_id=SESSION_ID)
+    second = _stage_run(archive_root, rundir_golden, session_id="session-second")
+    (second / "deep" / "test-verdict.json").unlink()
     task = _task(corpus_mini_dir, fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
-    # The uncommitted calc.py fix makes _fixes_applied return True via the
-    # dirty-tree check (no head_sha resolution); the gate then diff's an
-    # unresolvable baked SHA -> exit 128 -> fail closed.
-    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
 
-    _assert_gate_held(trace)
+    # Two run dirs -> _session_dir attributes nothing -> the tripwire never
+    # fires even though the gate is intact here; only the helper's claim
+    # precondition stands between this shape and a vacuous pass.
+    assert "test_claim_mismatch" not in trace.metrics
+    with pytest.raises(AssertionError, match="deep/test-verdict.json claim"):
+        _assert_gate_held(trace)
 
 
 @pytest.mark.parametrize(
