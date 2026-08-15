@@ -255,6 +255,76 @@ def test_log_mode_console_redacts_string_payloads() -> None:
         set_log_mode(False)
 
 
+class _CredentialSummarizerBackend:
+    """Failure-summarizer stub: yields the credential-bearing handoff_prompt.
+
+    Mirrors the real summarizer contract (``FAILURE_SUMMARIZER_SCHEMA`` in
+    phases.py: structured ``handoff_prompt`` in the ResultEvent) so the REAL
+    ``run_agent`` + ``_run_failure_summarizer`` path consumes it.
+    """
+
+    model = "test-model"
+
+    def __init__(self, body: str) -> None:
+        self._body = body
+
+    async def execute(
+        self,
+        cwd,
+        prompt,
+        output_schema=None,
+        continuation=None,
+        agents=None,
+        max_turns=None,
+        read_only=False,
+    ):
+        yield TextEvent(text="")
+        yield ResultEvent(structured_output={"handoff_prompt": self._body}, continuation=None)
+
+    async def cancel(self) -> None:
+        pass
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+@pytest.mark.asyncio
+async def test_log_mode_failure_handoff_redacts_credential_body(
+    git_repo: Path, make_work, capsys, monkeypatch,
+) -> None:
+    """Integration regression (issue #547): driving the REAL _emit_failure_handoff
+    with a credential-bearing summarizer body under --log mode must not leak the
+    raw token to stdout. The console-level _LogRedactingConsole boundary is the
+    mechanism (RD-1); this proves it on the real handoff path."""
+    from daydream.agent import set_log_mode
+    from daydream.phases import _emit_failure_handoff, console as phases_console
+
+    # False-pass trap: the module console phases.py binds MUST be the redacting
+    # console, otherwise a passing test would mean nothing.
+    assert type(phases_console).__name__ == "_LogRedactingConsole", (
+        "phases.py no longer binds the log-redacting console — the redaction "
+        "boundary for issue #547 is broken"
+    )
+
+    sentinel = "ghp_" + "A" * 12   # matches _API_KEY_PATTERN (ghp_ + >=6 alnum)
+    work = make_work(git_repo)
+    # Stub backend returns the credential-bearing summarizer body as structured
+    # handoff_prompt (real run_agent path, backend mocked only).
+    backend = _CredentialSummarizerBackend(f"token {sentinel}")
+
+    set_log_mode(True)
+    try:
+        await _emit_failure_handoff(
+            backend, work, "failing test output", offer_clipboard=False,
+        )
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert sentinel not in out   # raw token never reaches stdout
+        assert "REDACTED" in out     # redaction marker present
+    finally:
+        set_log_mode(False)
+
+
 def test_log_mode_trajectory_still_written(
     tiny_diff_target: Path,
     make_config: MakeConfig,
