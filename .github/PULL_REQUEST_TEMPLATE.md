@@ -34,9 +34,8 @@
 
 <!-- Verify before requesting review. -->
 
-- [ ] Tests pass locally (`uv run pytest`)
-- [ ] Linting passes (`uv run ruff check`)
-- [ ] Type checking passes (`uv run mypy daydream`)
+- [ ] Repository checks pass locally (`make check`)
+- [ ] Actionlint passes for workflow YAML changes (if applicable): `docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7 -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml`
 - [ ] Documentation updated (if applicable)
 
 ## Additional Context
