@@ -1510,10 +1510,11 @@ def analyze_quality(
     default) preserves the whole-workspace behavior above. An explicitly empty
     set returns a zero-count empty report without enumerating the workspace.
 
-    A candidate is still checked for cross-file clone duplication against the
-    raw text of every scoped peer (whether or not that peer is parsed), so a
-    candidate's verbosity verdict still reflects clones in any peer file —
-    candidate-scoped reporting does not weaken verdict meaning.
+    A candidate is still checked for cross-file clone duplication against every
+    scoped peer, so a candidate's verbosity verdict still reflects clones in any
+    peer file — candidate-scoped reporting does not weaken verdict meaning. A
+    peer that fails to parse is excluded from the clone index (Finding #1 holds
+    in candidate mode too), so malformed source never flags a valid candidate.
 
     Returns:
         ``{erosion, verbosity, per_file, calibration, scoped_files}``.
@@ -1560,8 +1561,15 @@ def analyze_quality(
     file_lines: list[tuple[Path, list[str]]] = []
     for path, _rel, raw_lines in scoped_files:
         if candidate_path_set is not None and path not in candidate_path_set:
-            # Non-candidate peer: index raw text only, never parsed.
-            file_lines.append((path, raw_lines))
+            # Non-candidate peer: index it only if it parses, so a malformed
+            # peer never enters the clone index and cannot flag a valid
+            # candidate (Finding #1 holds in candidate mode too). The parsed
+            # lines are byte-identical to the raw lines for a valid file, so
+            # indexing is unchanged for well-formed peers.
+            peer = _parse_python_file(path)
+            if peer is None:
+                continue
+            file_lines.append((path, peer[1]))
             continue
         result = _parse_python_file(path)
         if result is None:

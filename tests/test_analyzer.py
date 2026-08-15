@@ -940,12 +940,10 @@ def test_quality_verbosity_flags_clones_across_files(tmp_path: Path):
     assert result["verbosity"] > 0
 
 
-def test_quality_candidate_scope_parses_only_candidates_and_indexes_workspace_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+def test_quality_candidate_scope_indexes_valid_peers_for_clones(
+    tmp_path: Path,
 ) -> None:
-    """Candidate mode parses only candidates but indexes peer raw text for clones."""
-    from daydream.eval import analyzer as analyzer_mod
-
+    """Candidate mode indexes valid peer text for cross-file clone attribution."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     ws = _quality_workspace(
         tmp_path,
@@ -955,19 +953,12 @@ def test_quality_candidate_scope_parses_only_candidates_and_indexes_workspace_te
             "other.py": "def c():\n    return 3\n",  # neither candidate nor peer source
         },
     )
-    real_parse = analyzer_mod._parse_python_file
-
-    def _guard(path: Path):
-        assert path.name != "peer.py", "peer.py must never be parsed in candidate mode"
-        return real_parse(path)
-
-    monkeypatch.setattr(analyzer_mod, "_parse_python_file", _guard)
 
     result = analyze_quality(ws / ".daydream", candidate_paths={"app.py"})
 
     assert result["scoped_files"] == 1
     assert set(result["per_file"]) == {"app.py"}
-    assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed as text
+    assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed
     assert result["erosion"] is not None
 
 
@@ -1176,6 +1167,31 @@ def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_pat
 
     assert dirty["scoped_files"] == 2
     assert list(dirty["per_file"]) == ["app.py"]
+    assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
+    assert clean["verbosity"] == dirty["verbosity"]
+
+
+def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones(
+    tmp_path: Path,
+) -> None:
+    """Finding #1 holds in candidate mode: a malformed peer never flags a valid candidate.
+
+    Candidate mode indexes scoped peers as clone sources, but a peer that fails to
+    parse must be excluded from the cross-file clone index so its garbage lines
+    cannot inflate a valid candidate's verbosity (regression #457 round 2).
+    """
+    block = "    if x > 1:\n        return 1\n    return 0\n"
+    clean_ws = _quality_workspace(tmp_path, {"app.py": "def a():\n" + block}, name="clean")
+    dirty_ws = _quality_workspace(
+        tmp_path,
+        {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block},
+        name="dirty",
+    )
+
+    clean = analyze_quality(clean_ws / ".daydream", candidate_paths={"app.py"})
+    dirty = analyze_quality(dirty_ws / ".daydream", candidate_paths={"app.py"})
+
+    assert set(dirty["per_file"]) == {"app.py"}
     assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
     assert clean["verbosity"] == dirty["verbosity"]
 
