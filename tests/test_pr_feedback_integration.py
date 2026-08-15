@@ -9,10 +9,11 @@ the seam used by the deep-orchestrator exemplar in ``test_deep_orchestrator.py``
 
 The mock backend dispatches on prompt content to behave like the skill agents
 would: it writes ``.review-output.md``, returns parsed issues, applies a REAL
-edit to ``api.py``, runs REAL ``git add``/``git commit``, and records the
-respond-pr-feedback invocation. Assertions are on observable outcomes only:
-exit code, the marker written into the real file, a new git commit carrying the
-Daydream trailer, and the recorded respond invocation carrying the right pr/bot.
+edit to ``api.py``, commits the index ``_do_commit`` pre-staged (REAL
+``git commit``, no re-staging), and records the respond-pr-feedback invocation.
+Assertions are on observable outcomes only: exit code, the marker written into
+the real file, a new git commit carrying the Daydream trailer, and the recorded
+respond invocation carrying the right pr/bot.
 """
 
 from __future__ import annotations
@@ -102,11 +103,11 @@ class _PRFeedbackStubBackend:
 
         # Phase 4: commit -> run REAL git in cwd. Include the two Daydream
         # trailers so the prompt's amend path is not exercised (we assert on
-        # what the agent itself committed).
-        if "stage all changes and commit" in pl:
+        # what the agent itself committed). The index is pre-staged by
+        # _do_commit (deterministic staging, issue #543) — commit it as-is.
+        if "the daydream changes are already staged" in pl:
             run_id = self._extract_trailer(prompt, "Daydream-Run")
             version = self._extract_trailer(prompt, "Daydream-Version")
-            _git(cwd, "add", "-A")
             _git(
                 cwd,
                 "commit",
