@@ -370,18 +370,9 @@ def _open_recorder(
     # Per-phase fix/test resolutions are recorded only for flows that run those
     # phases: review-only (TTT) and improve flows stop before the fix cycle,
     # and feedback (PR) runs fix but never test, so their keys stay omitted.
-    review_phase = (
-        "per_stack_review"
-        if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT)
-        else "review"
+    backend_name, fix_backend_name, test_backend_name = _recorder_backend_names(
+        config, flow_kind,
     )
-    backend_name = _resolved_backend_name(config, review_phase)
-    fix_backend_name = _resolved_backend_name(config, "fix") if flow_kind not in (
-        DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE,
-    ) else ""
-    test_backend_name = _resolved_backend_name(config, "test") if flow_kind not in (
-        DaydreamRunFlow.TTT, DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE,
-    ) else ""
     return TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
@@ -423,6 +414,40 @@ def _resolved_backend_name(config: RunConfig, phase: str) -> str:
         or file_config.backend
         or "claude"
     )
+
+
+def _recorder_backend_names(
+    config: RunConfig, flow_kind: DaydreamRunFlow
+) -> tuple[str, str, str]:
+    """Resolve the backend identity ``(backend, fix, test)`` for the run recorder.
+
+    Shared by :func:`_open_recorder` and the archive manifest so the trajectory
+    and manifest never diverge on which backend produced the run. The
+    representative backend resolves through the phase that actually governs the
+    flow's review: deep-flow runs (DEEP/NORMAL/TTT) fan out on
+    ``per_stack_review``, while ``review`` only powers feedback-mode commit-push
+    and the PR-feedback banner. Per-phase fix/test are recorded only for flows
+    that run those phases (improve/TTT never run fix/test; PR runs fix but never
+    test), so a flow that skips a phase yields an empty name (the key is omitted
+    on serialization) rather than a misleading label.
+    """
+    review_phase = (
+        "per_stack_review"
+        if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT)
+        else "review"
+    )
+    backend = _resolved_backend_name(config, review_phase)
+    fix = (
+        _resolved_backend_name(config, "fix")
+        if flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE)
+        else ""
+    )
+    test = (
+        _resolved_backend_name(config, "test")
+        if flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE)
+        else ""
+    )
+    return backend, fix, test
 
 
 def _resolved_model(config: RunConfig, phase: str) -> str | None:
