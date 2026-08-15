@@ -1658,6 +1658,9 @@ async def test_phase_understand_intent_correction_then_confirm(
 
     assert backend.call_count == 2
     assert "login" in result.lower()
+    # NEW #579: every intent turn — initial analysis AND correction-loop rebuild —
+    # runs against the read-only backend profile (no repository mutation possible).
+    assert backend.read_only_calls == [True, True]
 
 
 @pytest.mark.asyncio

@@ -2957,6 +2957,7 @@ async def phase_understand_intent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            read_only=True,
         )
         if budget_reason is not None:
             raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
