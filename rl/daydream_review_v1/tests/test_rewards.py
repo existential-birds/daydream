@@ -23,8 +23,10 @@ from daydream.training.reward import score_trajectory
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
+    DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
+    _review_state,
 )
 
 SESSION_ID = "9b36227a-9f80-41e5-a419-5cfed5a34b5b"
@@ -58,10 +60,33 @@ def _task(corpus_mini_dir: Path, fixture_manifest_path: Path, *, pr_number: int 
 
 
 def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> vf.Trace:
-    trace: vf.Trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace: vf.Trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data), state=DaydreamReviewState()
+    )
     trace.info["daydream_archive_root"] = str(archive_root)
     trace.info["daydream_repo_path"] = str(repo_path)
     return trace
+
+
+def test_review_state_guard_rejects_base_state(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """Scoring state must be a DaydreamReviewState, never the base State.
+
+    Production traces carry a DaydreamReviewState automatically (the rollout
+    resolves the task's StateT through the MRO); test helpers that score must
+    pass one explicitly. A base State must fail loudly rather than silently
+    dereference a missing run_dir.
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    base_trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    with pytest.raises(TypeError):
+        _review_state(base_trace)
+    good_trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        state=DaydreamReviewState(),
+    )
+    assert _review_state(good_trace).run_dir is None
 
 
 def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID) -> Path:

@@ -203,7 +203,35 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
     no_fix_reward: float = 0.0
 
 
-class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTaskConfig]):
+class DaydreamReviewState(vf.State):
+    """Mutable per-rollout scoring state, living on the trace.
+
+    Production traces carry one automatically — the rollout resolves the task's
+    ``StateT`` through the MRO (``verifiers/v1/rollout.py:112-116``) — and the
+    overridden :meth:`DaydreamReviewTask.score` holds the single host-side
+    snapshot of the archived run dir here, so every reward/metric reads the
+    same copy instead of re-fetching one.
+    """
+
+    run_dir: Path | None = None
+
+
+def _review_state(trace: vf.Trace) -> DaydreamReviewState:
+    """The trace's scoring state, or a loud error for a base ``State``.
+
+    A test helper or consumer that scores without a ``DaydreamReviewState``
+    (e.g. by constructing a bare ``vf.Trace``) would otherwise silently
+    dereference a missing ``run_dir``. Fail loudly instead.
+    """
+    state = trace.state
+    if not isinstance(state, DaydreamReviewState):
+        raise TypeError(
+            f"scoring state must be a DaydreamReviewState, got {type(state).__name__}"
+        )
+    return state
+
+
+class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, DaydreamReviewTaskConfig]):
     """Two reward axes: daydream's own intrinsic composite, and the test suite.
 
     ``intrinsic_composite`` replays the archived run through
@@ -243,6 +271,26 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, vf.State, DaydreamReviewTas
     the reward regardless: reward climbing while ``n_findings`` falls is still
     the signal that the policy is learning to say nothing.
     """
+
+    async def score(self, trace: vf.Trace, runtime: vf.Runtime | None = None) -> None:
+        """Score *trace*, staging the archived run dir into the state exactly once.
+
+        The single :func:`fetch_run_dir` call per score happens here, at the
+        entrypoint; the consumers read the staged snapshot off ``state.run_dir``
+        and never re-enter the runtime. With no runtime the base class simply
+        skips the runtime-dependent signals, and there is nothing to stage.
+        """
+        if runtime is None:
+            await super().score(trace, None)
+            return
+        state = _review_state(trace)
+        with tempfile.TemporaryDirectory(prefix="daydream-rundir-") as staging:
+            state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+            try:
+                await super().score(trace, runtime)
+            finally:
+                state.run_dir = None
+
 
     @vf.reward(weight=1.0)
     async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
