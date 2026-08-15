@@ -41,6 +41,7 @@ from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
     FIXTURE_PR1_HEAD_SHA,
     FIXTURE_PR2_HEAD_SHA,
+    FIXTURE_SLUG,
     build_fixture_repo,
 )
 
@@ -239,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.red and args.base_only:
+        print("--red cannot be combined with --base-only", file=sys.stderr)
+        return 2
+
     if args.base_only:
         return _build_base()
 
@@ -248,6 +253,19 @@ def main(argv: list[str] | None = None) -> int:
         prs = [pr for pr in prs if _repo_slug(pr.clone_url) == args.only]
         if not prs:
             print(f"no PR in {args.corpus} belongs to {args.only}", file=sys.stderr)
+            return 2
+
+    if args.red:
+        fixture_selected = (
+            FIXTURE_SLUG in manifest
+            and manifest[FIXTURE_SLUG].clone_url == FIXTURE_CLONE_URL
+            and any(_repo_slug(pr.clone_url) == FIXTURE_SLUG for pr in prs)
+        )
+        if not fixture_selected:
+            print(
+                "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
+                file=sys.stderr,
+            )
             return 2
 
     if args.no_base:

@@ -2,10 +2,12 @@
 
 Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
 no Docker at all — they assert the build pins every remote input to an immutable
-version and verifies it for integrity before use. The two ``slow`` tests execute
-real Docker builds for the red and green baseline paths: a repo whose suite is
-red at the head commit must produce no image, while a green one builds and bakes
-the checkout.
+version and verifies it for integrity before use. A **fast** tier — no Docker
+required — rejects ``--red`` invocations that cannot select the fixture repo,
+ensuring the guard fires before any build side-effect. The two ``slow`` tests
+execute real Docker builds for the red and green baseline paths: the red path
+plants a failing assertion and the build must die (enforcement IS the build
+failing), while a green one builds and bakes the checkout.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import pytest
 from conftest import PROJECT_ROOT
 
 from daydream_review_v1.fixture import FIXTURE_SLUG
+from images import build_images
 
 DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
 
@@ -45,6 +48,42 @@ def _tags() -> set[str]:
         check=False,
     )
     return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
+
+
+@pytest.mark.parametrize(
+    "argv,expected_stderr",
+    [
+        pytest.param(
+            ["--red", "--base-only"],
+            "--red cannot be combined with --base-only",
+            id="base-only",
+        ),
+        pytest.param(
+            [
+                "--red",
+                "--corpus",
+                str(PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"),
+                "--only",
+                "pallets/itsdangerous",
+            ],
+            "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
+            id="non-fixture-only",
+        ),
+    ],
+)
+def test_red_rejects_invocations_without_fixture(
+    argv: list[str], expected_stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--red must fail fast (status 2) when no fixture PR is selected, before any build."""
+    monkeypatch.setattr(build_images, "_build_base", lambda: 0)
+    monkeypatch.setattr(build_images, "_stream", lambda *args, **kwargs: None)
+
+    status = build_images.main(argv)
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == f"{expected_stderr}\n"
 
 
 @pytest.mark.slow
