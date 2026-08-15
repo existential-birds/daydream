@@ -143,7 +143,9 @@ def test_command_workflows_dispatch_approved_head() -> None:
 
     assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
     assert '-f approved_head_sha="$HEAD_SHA"' in dispatch["run"]
+    assert '-f approved_at="$COMMENT_CREATED_AT"' in dispatch["run"]
     assert "PR_NUMBER" in dispatch["env"]
+    assert "COMMENT_CREATED_AT" in dispatch["env"]
     assert not any(
         _EVENT_INTERP.search(step.get("run", ""))
         for step in job_steps(wf, "dispatch")
@@ -160,8 +162,10 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
         if "gh workflow run daydream-review.yml" in step.get("run", "")
     )
     assert "approved_head_sha" in dispatch["run"]
+    assert "approved_at" in dispatch["run"]
     assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
     assert "PR_NUMBER" in dispatch["env"]
+    assert "COMMENT_CREATED_AT" in dispatch["env"]
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
 
@@ -172,6 +176,7 @@ def test_review_workflow_head_bound_gate() -> None:
     assert "pull_request" not in _wf_triggers(wf)
     inputs = _wf_triggers(wf)["workflow_dispatch"]["inputs"]
     assert "approved_head_sha" in inputs
+    assert "approved_at" in inputs
 
     steps = job_steps(wf, "analyze")
     verify = next(
@@ -179,6 +184,8 @@ def test_review_workflow_head_bound_gate() -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
+    assert "commit.committer.date" in verify["run"]
+    assert "APPROVED_AT" in verify["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
 
@@ -206,6 +213,7 @@ def test_template_review_workflow_head_bound_gate() -> None:
     assert "pull_request" not in _wf_triggers(wf)
     inputs = _wf_triggers(wf)["workflow_dispatch"]["inputs"]
     assert "approved_head_sha" in inputs
+    assert "approved_at" in inputs
 
     steps = job_steps(wf, "analyze")
     verify = next(
@@ -213,6 +221,8 @@ def test_template_review_workflow_head_bound_gate() -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
+    assert "commit.committer.date" in verify["run"]
+    assert "APPROVED_AT" in verify["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
 
@@ -221,6 +231,81 @@ def test_template_review_workflow_head_bound_gate() -> None:
     assert "APPROVED_HEAD_SHA" in review["env"]
     assert not any("auth.json" in step.get("run", "") for step in steps)
     assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+    ids=["template", "live"],
+)
+def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
+    """A failed analyze run must leave the PR number where the post workflow can
+    resolve it: on any failure the analyze job records ``failure.json`` and
+    uploads it as ``daydream-findings-failure``, so surface-analyze-failure can
+    comment on the PR even though the workflow_run event cannot identify a
+    workflow_dispatch run's PR (issue #336).
+    """
+    wf = load_workflow(wf_path)
+    steps = job_steps(wf, "analyze")
+
+    # The drift gate records the failure context (pr_number + the instructive
+    # message) before exiting, so the rejection can be surfaced on the PR.
+    verify = next(
+        step
+        for step in steps
+        if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
+    )
+    assert "failure.json" in verify["run"]
+    assert "message" in verify["run"]
+
+    # Any other failure still records the PR number via the job-level handler.
+    record = next(step for step in steps if step.get("name") == "Record failure context")
+    assert record.get("if", "") == "failure()"
+    assert "failure.json" in record["run"]
+
+    upload = next(step for step in steps if step.get("name") == "Upload failure context")
+    assert upload.get("if", "") == "failure()"
+    assert upload["uses"].startswith("actions/upload-artifact@")
+    assert upload["with"]["name"] == "daydream-findings-failure"
+    assert upload["with"]["path"] == "findings/failure.json"
+
+
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+    ids=["template", "live"],
+)
+def test_surface_analyze_failure_resolves_dispatch_run_pr(wf_path: Path) -> None:
+    """surface-analyze-failure must resolve the PR of a failed workflow_dispatch
+    run from the failure-context artifact (the event cannot identify it) and
+    post the recorded message on the PR; an unresolvable run keeps the
+    warn-and-continue guard (issue #336).
+    """
+    wf = load_workflow(wf_path)
+    job = wf["jobs"]["surface-analyze-failure"]
+    steps = job["steps"]
+
+    # GITHUB_TOKEN needs actions: read for the cross-run artifact download
+    # (the App token carries the comment write).
+    effective_perms = job.get("permissions", wf.get("permissions", {}))
+    assert effective_perms == {"actions": "read"}
+
+    download = next(step for step in steps if step.get("name") == "Download failure context")
+    assert download["uses"].startswith("actions/download-artifact@")
+    assert download["with"]["name"] == "daydream-findings-failure"
+    assert "run-id" in download["with"]
+    assert "github-token" in download["with"]
+    assert download.get("continue-on-error") is True
+
+    comment = next(step for step in steps if step.get("name") == "Comment on the PR")
+    run = comment["run"]
+    assert "findings/failure.json" in run
+    assert ".pr_number // empty" in run
+    assert ".message // empty" in run
+    guard = 'echo "no PR resolvable for the failed analyze run; skipping comment" >&2'
+    assert guard in run
+    assert "exit 0" in run
+    assert run.index(guard) < run.index("exit 0")
 
 
 def test_single_workflow_head_bound_gate() -> None:
@@ -232,8 +317,10 @@ def test_single_workflow_head_bound_gate() -> None:
 
     gate = wf["jobs"]["gate"]
     assert "approved_head_sha" in gate["outputs"]
+    assert "approved_at" in gate["outputs"]
     decide = next(step for step in gate["steps"] if step.get("name") == "Decide and resolve PR")
     assert "approved_head_sha" in decide.get("outputs", {}) or "head.sha" in decide.get("run", "")
+    assert "approved_at" in decide.get("outputs", {}) or "approved_at=" in decide.get("run", "")
 
     steps = wf["jobs"]["analyze"]["steps"]
     verify = next(
@@ -241,6 +328,8 @@ def test_single_workflow_head_bound_gate() -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
+    assert "commit.committer.date" in verify["run"]
+    assert "APPROVED_AT" in wf["jobs"]["analyze"]["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
     review = next(

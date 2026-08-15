@@ -198,7 +198,7 @@ def test_verify_healthy_install_passes_all_checks(
 
 
 def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
-    """A present but stale workflow fails the doctor byte comparison."""
+    """A present but stale workflow — one that lost the approval gate — fails the doctor."""
     from daydream.templates import workflow_template_files
     from tests.conftest import _commit, _git
 
@@ -207,7 +207,13 @@ def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin
     for template in workflow_template_files():
         content = template.read_text()
         if template.name == "daydream-review.yml":
-            content += "\n# stale installed copy\n"
+            # Pre-gate shape: auto-triggers on PR open instead of binding an
+            # approved head, re-opening the unapproved-review hole.
+            content = content.replace(
+                "on:\n  workflow_dispatch:",
+                "on:\n  pull_request:\n    types: [opened, ready_for_review]\n  workflow_dispatch:",
+                1,
+            )
         (workflows_dir / template.name).write_text(content)
     _git(repo_with_origin, "add", ".github/workflows")
     _commit(repo_with_origin, "add stale workflows")
@@ -218,6 +224,67 @@ def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin
     assert result.ok is False
     assert workflows_check.passed is False
     assert "daydream-review.yml" in workflows_check.detail
+
+
+def test_verify_accepts_customized_workflow_with_intact_gate(
+    fake_gh: FakeGh, repo_with_origin: Path
+) -> None:
+    """A divergent-but-gated workflow (e.g. a different backend) passes with a warning."""
+    fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
+    fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
+    from daydream.templates import workflow_template_files
+    from tests.conftest import _commit, _git
+
+    workflows_dir = repo_with_origin / ".github/workflows"
+    workflows_dir.mkdir(parents=True)
+    for template in workflow_template_files():
+        content = template.read_text()
+        if template.name == "daydream-review.yml":
+            # Backend-variant customization: the gate (approved_head_sha input,
+            # no pull_request trigger) is intact, credential/backend swapped.
+            content = content.replace("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        (workflows_dir / template.name).write_text(content)
+    _git(repo_with_origin, "add", ".github/workflows")
+    _commit(repo_with_origin, "add customized workflows")
+    _git(repo_with_origin, "push", "origin", "main")
+
+    result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
+    workflows_check = next(check for check in result.checks if check.name == "workflows")
+    assert result.ok is True
+    assert workflows_check.passed is True
+    assert "daydream-review.yml" in workflows_check.detail
+    assert "intentionally unsupported" in workflows_check.detail
+
+
+def test_land_workflows_warns_before_overwriting_customized_workflow(
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """land_workflows warns that customization is unsupported before replacing it."""
+    from daydream.templates import workflow_template_files
+    from tests.conftest import _commit, _git
+
+    workflows_dir = repo_with_origin / ".github/workflows"
+    workflows_dir.mkdir(parents=True)
+    for template in workflow_template_files():
+        content = template.read_text()
+        if template.name == "daydream-review.yml":
+            content = content.replace("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+        (workflows_dir / template.name).write_text(content)
+    _git(repo_with_origin, "add", ".github/workflows")
+    _commit(repo_with_origin, "add customized workflows")
+
+    warnings: list[str] = []
+    monkeypatch.setattr("daydream.bot_setup.print_warning", lambda console, msg: warnings.append(msg))
+    fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/5")
+    fake_gh.set_response("pr-list", value=[])
+
+    review_template = next(t for t in workflow_template_files() if t.name == "daydream-review.yml")
+    url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
+
+    assert url != bot_setup.WORKFLOWS_ALREADY_INSTALLED
+    assert any("daydream-review.yml" in w and "intentionally unsupported" in w for w in warnings)
+    # The customization was replaced by the packaged template on the branch.
+    assert (workflows_dir / "daydream-review.yml").read_text() == review_template.read_text()
 
 
 # --- Task 9: CLI `setup` verb + run_setup orchestrator ----------------------

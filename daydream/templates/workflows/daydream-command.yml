@@ -78,12 +78,17 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
         run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
 
+      # Dispatch binds the PR head (resolved at run time) plus the approving
+      # comment's creation time as the comment-time anchor: the review gate
+      # rejects any approved head whose commit postdates that comment, so a
+      # head pushed after the maintainer's approval is never reviewed.
       - name: Dispatch review workflow
         if: steps.match.outputs.matched == 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_CREATED_AT: ${{ github.event.comment.created_at }}
         run: |
           HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
           if [ -z "$HEAD_SHA" ]; then
@@ -92,4 +97,5 @@ jobs:
           fi
           gh workflow run daydream-review.yml --repo "$REPO" \
             -f pr_number="$PR_NUMBER" \
-            -f approved_head_sha="$HEAD_SHA"
+            -f approved_head_sha="$HEAD_SHA" \
+            -f approved_at="$COMMENT_CREATED_AT"

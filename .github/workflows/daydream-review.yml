@@ -24,6 +24,10 @@ on:
         description: PR head SHA approved by the maintainer
         required: true
         type: string
+      approved_at:
+        description: ISO-8601 creation time of the approving review comment
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -48,10 +52,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
           APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
+          APPROVED_AT: ${{ inputs.approved_at }}
         run: |
           LIVE_HEAD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)"
           if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
             echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
+            # Record the failure context before exiting so the post workflow's
+            # surface-analyze-failure job can comment on the PR — the
+            # workflow_run event cannot identify a workflow_dispatch run's PR.
+            mkdir -p findings
+            printf '{"pr_number": "%s", "message": "The PR head changed after approval. Comment the review command again to approve the new head"}' "$PR_NUMBER" > findings/failure.json
+            exit 1
+          fi
+          # The dispatch resolves the head at run time; the approving comment's
+          # creation time is the comment-time anchor. A head whose commit is
+          # newer than that comment was pushed after approval, so it is not
+          # reviewable without a fresh command.
+          HEAD_COMMIT_DATE="$(gh api "repos/$GITHUB_REPOSITORY/commits/$APPROVED_HEAD_SHA" --jq .commit.committer.date)"
+          if [ -z "$HEAD_COMMIT_DATE" ]; then
+            echo "Could not resolve the commit date for approved head $APPROVED_HEAD_SHA" >&2
+            exit 1
+          fi
+          if [ "$HEAD_COMMIT_DATE" \> "$APPROVED_AT" ]; then
+            echo "PR #$PR_NUMBER approved head commit ($HEAD_COMMIT_DATE) is newer than the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
             exit 1
           fi
 
@@ -109,6 +132,27 @@ jobs:
       - name: Clean up Codex auth
         if: always()
         run: rm -f "${CODEX_HOME:-$HOME/.codex}/auth.json"
+
+      # Any analyze failure (drift or otherwise) leaves the PR number where the
+      # post workflow can resolve it: the workflow_run event cannot identify a
+      # workflow_dispatch run's PR, so surface-analyze-failure reads it from
+      # this artifact instead of silently skipping the comment.
+      - name: Record failure context
+        if: failure()
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          mkdir -p findings
+          if [ ! -f findings/failure.json ]; then
+            printf '{"pr_number": "%s"}' "$PR_NUMBER" > findings/failure.json
+          fi
+
+      - name: Upload failure context
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daydream-findings-failure
+          path: findings/failure.json
 
       - name: Upload findings artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -36,7 +36,7 @@ download). The sections below document what these workflows *do* once installed.
 
 | Trigger | Path | Notes |
 |---|---|---|
-| `@<bot> review` PR comment | Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored; the current PR head is bound as the approved target |
+| `@<bot> review` PR comment | Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored; the PR head current at comment time is bound as the approved target |
 | New commit after approval | Review rejects head drift | Comment `@<bot> review` again to approve the new head |
 | Fork PRs | Same trusted-comment path | The review remains approval-gated and checks out only the approved head |
 

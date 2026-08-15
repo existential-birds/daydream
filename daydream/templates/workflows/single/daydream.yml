@@ -46,6 +46,7 @@ jobs:
       proceed: ${{ steps.decide.outputs.proceed }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
       approved_head_sha: ${{ steps.decide.outputs.approved_head_sha }}
+      approved_at: ${{ steps.decide.outputs.approved_at }}
     steps:
       - name: Match review command
         id: match
@@ -73,6 +74,17 @@ jobs:
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
           permission-pull-requests: write
 
+      # Acknowledge BEFORE resolving the head: a fallible `gh api` exit below
+      # would otherwise abort the job and silently skip the ack with no PR-side
+      # feedback, so the 👀 reaction is gated only on the command match.
+      - name: Acknowledge with eyes reaction
+        if: steps.match.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
+
       - name: Decide and resolve PR
         id: decide
         env:
@@ -80,6 +92,7 @@ jobs:
           REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           MATCHED: ${{ steps.match.outputs.matched }}
+          APPROVED_AT: ${{ github.event.comment.created_at }}
         run: |
           if [ "$MATCHED" != "true" ]; then
             echo "proceed=false" >> "$GITHUB_OUTPUT"
@@ -93,14 +106,7 @@ jobs:
           echo "proceed=true" >> "$GITHUB_OUTPUT"
           echo "pr_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "approved_head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Acknowledge with eyes reaction
-        if: steps.decide.outputs.proceed == 'true'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
+          echo "approved_at=${APPROVED_AT}" >> "$GITHUB_OUTPUT"
 
   # Runs the reviewer over the checked-out PR head. Touches untrusted PR code, so
   # it holds NO App credentials — ANTHROPIC_API_KEY is its only secret and the
@@ -115,6 +121,7 @@ jobs:
     env:
       PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
       APPROVED_HEAD_SHA: ${{ needs.gate.outputs.approved_head_sha }}
+      APPROVED_AT: ${{ needs.gate.outputs.approved_at }}
     steps:
       - name: Verify approved PR head and resolve base ref
         id: pr
@@ -125,6 +132,19 @@ jobs:
           LIVE_HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
           if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
             echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
+            exit 1
+          fi
+          # The gate resolves the head at run time; the approving comment's
+          # creation time is the comment-time anchor. A head whose commit is
+          # newer than that comment was pushed after approval, so it is not
+          # reviewable without a fresh command.
+          HEAD_COMMIT_DATE="$(gh api "repos/$REPO/commits/$APPROVED_HEAD_SHA" --jq .commit.committer.date)"
+          if [ -z "$HEAD_COMMIT_DATE" ]; then
+            echo "Could not resolve the commit date for approved head $APPROVED_HEAD_SHA" >&2
+            exit 1
+          fi
+          if [ "$HEAD_COMMIT_DATE" \> "$APPROVED_AT" ]; then
+            echo "PR #$PR_NUMBER approved head commit ($HEAD_COMMIT_DATE) is newer than the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
             exit 1
           fi
           BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq .baseRefName)"
