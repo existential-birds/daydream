@@ -1189,10 +1189,11 @@ def grep_fixed_matches(
 
     Returns:
         List of ``(path, matched_pattern)`` pairs parsed from ``git grep``
-        output — the same pattern may appear multiple times for the same file
-        when it matches on separate lines. Only the input patterns are
-        deduplicated. Empty
-        when there are no matches or no usable patterns.
+        output — one tuple per match occurrence, so the same pattern may
+        appear multiple times for the same file even when the matches share a
+        single line (``git grep -o`` emits a record per occurrence). Only the
+        input patterns are deduplicated. Empty when there are no matches or
+        no usable patterns.
 
     Raises:
         GitError: If ``git grep`` exits with an unexpected status or emits a

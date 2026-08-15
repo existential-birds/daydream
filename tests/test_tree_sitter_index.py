@@ -8,7 +8,11 @@ import pytest
 from conftest import _commit, _git, _make_repo_with_main
 
 from daydream import git_ops
-from daydream.tree_sitter_index import _MAX_IMPORTERS, detect_affected_files
+from daydream.tree_sitter_index import (
+    _MAX_IMPORTERS,
+    _is_generic_or_invalid_stem,
+    detect_affected_files,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -385,3 +389,21 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert len(gadget) == _MAX_IMPORTERS
     assert len(importers) == _MAX_IMPORTERS * 2
     assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
+
+
+@pytest.mark.parametrize(
+    "stem",
+    ["", "__init__", "mod", "index", "main", "app", "utils", "config", "tests", "conftest"],
+)
+def test_is_generic_or_invalid_stem_skips_empty_and_generic(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is True
+
+
+@pytest.mark.parametrize("stem", ["a\x00b", "a\rb", "a\nb"])
+def test_is_generic_or_invalid_stem_skips_nul_cr_lf(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is True
+
+
+@pytest.mark.parametrize("stem", ["widget", "gadget", "indexer", "app_store"])
+def test_is_generic_or_invalid_stem_accepts_specific_stems(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is False

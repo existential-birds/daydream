@@ -534,6 +534,69 @@ def test_grep_fixed_matches_raises_on_malformed_record(tmp_path: Path, monkeypat
         git_ops.grep_fixed_matches(repo, ("widget",))
 
 
+def test_grep_fixed_matches_empty_when_no_matches(tmp_path: Path) -> None:
+    """Exit code 1 ("no matches") is treated as success: an empty list."""
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "widget.py").write_text("widget\n")
+    _git(repo, "add", "widget.py")
+    _commit(repo, "add widget")
+    assert git_ops.grep_fixed_matches(repo, ("absent_pattern",)) == []
+
+
+def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Duplicate patterns are written once; empty/NUL/CR/LF patterns never
+    reach the patterns file handed to git."""
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "widget.py").write_text("widget\n")
+    _git(repo, "add", "widget.py")
+    _commit(repo, "add widget")
+
+    patterns_files: list[bytes] = []
+
+    def fake_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        argv = args[0] if args else []
+        for index, arg in enumerate(argv):
+            if arg == "-f" and index + 1 < len(argv):
+                patterns_files.append(Path(argv[index + 1]).read_bytes())
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", fake_run)
+    matches = git_ops.grep_fixed_matches(
+        repo,
+        ("widget", "widget", "", "gadget", "bad\x00pattern", "bad\rpattern", "bad\npattern"),
+        word=True,
+    )
+    assert matches == []
+    assert patterns_files == [b"widget\ngadget"]
+
+
+def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An all-unsuitable pattern set short-circuits with no git invocation."""
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "widget.py").write_text("widget\n")
+    _git(repo, "add", "widget.py")
+    _commit(repo, "add widget")
+
+    def no_git(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("git must not run when every pattern is unsuitable")
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", no_git)
+    assert git_ops.grep_fixed_matches(repo, ("", "a\x00b", "a\rb", "a\nb")) == []
+
+
+def test_grep_fixed_matches_default_word_false_matches_substrings(tmp_path: Path) -> None:
+    """The default word=False mode matches fixed substrings, not whole words."""
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "app.py").write_text("application\n")
+    _git(repo, "add", "app.py")
+    _commit(repo, "add app")
+    assert git_ops.grep_fixed_matches(repo, ("app",)) == [("app.py", "app")]
+
+
 def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.status_porcelain(repo) == ""
