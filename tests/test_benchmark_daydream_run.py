@@ -191,10 +191,11 @@ def test_strips_github_app_creds_from_review_env(tmp_path, monkeypatch):
 
 def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     lines: list[str] = []
+    sentinel = "ghp_" + "x" * 16
 
     class FakeProc:
         def __init__(self):
-            self.stdout = iter(["a\n", "boom\n"])
+            self.stdout = iter(["a\n", f"token={sentinel}\n"])
             self.returncode = 1
 
         def wait(self, timeout=None):
@@ -211,8 +212,35 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     checkout.mkdir()
     with pytest.raises(DaydreamRunError) as e:
         run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
-    assert lines == ["a\n", "boom\n"]  # streamed live
-    assert "boom" in str(e.value)  # tail retained in the error
+    assert lines == ["a\n", "token=[REDACTED_API_KEY]\n"]  # each callback line redacted
+    assert sentinel not in str(e.value)                     # retained tail is redacted
+    assert "[REDACTED_API_KEY]" in str(e.value)
+
+
+def test_captured_failure_redacts_before_tail_truncation(tmp_path, monkeypatch):
+    """A PEM block whose tail would be sliced off mid-block must still be fully
+    redacted before the _STDERR_TAIL cut — redact-after-slice would leave the
+    raw END line (BEGIN already cut away) leaking."""
+    monkeypatch.setattr("daydream.benchmark.daydream_run._STDERR_TAIL", 80)
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        + ("PRIVATEKEYMATERIAL" * 40)
+        + "\n-----END RSA PRIVATE KEY-----\n"
+    )
+    combined = "z" * 50 + pem  # the last-80 tail contains the END but not the BEGIN
+    monkeypatch.setattr(
+        "daydream.benchmark.daydream_run.subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout=combined, stderr=""),
+    )
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
+    tail = str(e.value)
+    assert "PRIVATEKEYMATERIAL" not in tail
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in tail
+    assert "-----END RSA PRIVATE KEY-----" not in tail
+    assert "[REDACTED_PEM_KEY]" in tail
 
 
 def test_streamed_timeout_kills_quiet_child_holding_stdout_open(tmp_path, monkeypatch):

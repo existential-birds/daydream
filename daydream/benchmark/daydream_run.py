@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from daydream.agent import console
 from daydream.backends.pi import STREAM_DROP_SIGNATURES
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
+from daydream.trajectory import redact_text
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
@@ -130,8 +131,11 @@ def _run_captured(cmd: list[str], env: dict[str, str], checkout: Path) -> tuple[
             f"daydream review timed out after {_DAYDREAM_TIMEOUT}s for {checkout}"
         ) from exc
     # daydream prints its errors to stdout (Rich console), so a stderr-only
-    # message is frequently empty; surface both streams' tails.
-    tail = f"{result.stdout or ''}\n{result.stderr or ''}".strip()[-_STDERR_TAIL:]
+    # message is frequently empty; surface both streams' tails. Redact the
+    # COMPLETE combined string before the tail slice — a PEM block or credential
+    # straddling the cut must be caught before the slice, not truncated into an
+    # unmatchable fragment.
+    tail = redact_text(f"{result.stdout or ''}\n{result.stderr or ''}".strip())[-_STDERR_TAIL:]
     return result.returncode, tail
 
 
@@ -176,8 +180,9 @@ def _run_streamed(
                 ) from None
             if line is None:
                 break
-            on_line(line)
-            tail.append(line)
+            redacted = redact_text(line)
+            on_line(redacted)
+            tail.append(redacted)
         returncode = proc.wait()
     return returncode, "\n".join(tail)
 
@@ -209,14 +214,16 @@ def run_daydream_review(
             variable (never argv) when set.
         on_line: When set, the review runs via ``subprocess.Popen`` and each output
             line (stdout+stderr merged) is forwarded to this callback live instead of
-            being captured silently. When ``None`` (default), the quiet
-            ``subprocess.run`` capture path is used unchanged.
+            being captured silently. Each line is redacted (via ``redact_text``) before
+            the callback. When ``None`` (default), the quiet ``subprocess.run`` capture
+            path is used unchanged.
 
     Returns:
         Path to the canonical ``merged-items.json`` findings artifact.
 
     Raises:
-        DaydreamRunError: If the daydream process exits non-zero (includes a stderr tail).
+        DaydreamRunError: If the daydream process exits non-zero (includes a stderr tail,
+            redacted).
         DaydreamArtifactError: If the run succeeds but the artifact is absent.
     """
     cmd = [
