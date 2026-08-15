@@ -224,6 +224,34 @@ def valid_directory_scope_lexical(value: str) -> bool:
     return bool(_DIRECTORY_SCOPE.fullmatch(value))
 
 
+def _strip_prefix(
+    parts: tuple[str, ...], base: tuple[str, ...]
+) -> tuple[str, ...] | None:
+    """Return ``parts`` with a leading ``base`` removed, else None."""
+    if parts[: len(base)] == base:
+        return parts[len(base) :]
+    return None
+
+
+def _walk_components(candidate: Path, parts: Sequence[str]) -> Path | None:
+    """Return ``candidate`` advanced through ``parts``, or None on a crossing.
+
+    Stops at the first component that does not exist (the containment check
+    below settles it). None when a component is a symlink or cannot be
+    inspected — both are treated as an escape.
+    """
+    for part in parts:
+        candidate /= part
+        try:
+            if candidate.is_symlink():
+                return None
+            if not candidate.exists():
+                break
+        except OSError:
+            return None
+    return candidate
+
+
 def path_is_confined(
     repo: Path,
     value: str,
@@ -267,22 +295,17 @@ def path_is_confined(
             # are adjudicated by the containment check below; walk only the
             # components at or below the repo root, exactly like the relative
             # form does.
-            base = PurePosixPath(repo).parts
-            if parts[: len(base)] == base:
-                parts = parts[len(base) :]
-            else:
-                resolved_base = PurePosixPath(str(root)).parts
-                if parts[: len(resolved_base)] == resolved_base:
-                    parts = parts[len(resolved_base) :]
-        for part in parts:
-            candidate /= part
-            try:
-                if candidate.is_symlink():
-                    return False
-                if not candidate.exists():
-                    break
-            except OSError:
-                return False
+            stripped = _strip_prefix(parts, PurePosixPath(repo).parts)
+            if stripped is None:
+                stripped = _strip_prefix(
+                    parts, PurePosixPath(str(root)).parts
+                )
+            if stripped is not None:
+                parts = stripped
+        walked = _walk_components(candidate, parts)
+        if walked is None:
+            return False
+        candidate = walked
     try:
         return candidate.resolve(strict=False).is_relative_to(root)
     except OSError:

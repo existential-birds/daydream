@@ -141,6 +141,50 @@ def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
     assert not path_is_confined(repo, abs_under)
 
 
+def test_path_is_confined_allow_absolute_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    """A symlinked ancestor of the repo must not reject the absolute spelling.
+
+    Regression pin for the macOS ``/tmp`` -> ``/private/tmp`` case: with
+    ``allow_absolute=True`` the ancestor-skip strips the repo-root prefix from
+    the walk, so an absolute value spelled through a symlinked ancestor of the
+    repo is accepted exactly like the identical relative spelling.
+    """
+    real = tmp_path / "real"
+    (real / "repo" / "improve").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    repo = alias / "repo"
+    abs_under = (repo / "improve").as_posix()
+    assert path_is_confined(repo, abs_under, allow_absolute=True)
+    # Baseline: the identical relative spelling is confined either way.
+    assert path_is_confined(repo, "improve")
+    # The resolved spelling of the same path is confined too.
+    assert path_is_confined(repo, (real / "repo" / "improve").as_posix(), allow_absolute=True)
+
+
+def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(
+    tmp_path: Path,
+) -> None:
+    """The ancestor-skip must not enable a symlink escape from containment.
+
+    Regression pin for the claim that skipping symlink tests on components
+    above the repo root cannot escape containment: a symlink at or below the
+    repo root that points outside the repo is still rejected even with
+    ``allow_absolute=True``.
+    """
+    repo = tmp_path / "repo"
+    (repo / "improve").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "improve" / "escape").symlink_to(outside, target_is_directory=True)
+    abs_escape = (repo / "improve" / "escape").as_posix()
+    assert not path_is_confined(repo, abs_escape, allow_absolute=True)
+    # A direct absolute path to the outside directory is rejected as well.
+    assert not path_is_confined(repo, outside.as_posix(), allow_absolute=True)
+
+
 def _iter_schema_patterns(schema: Any) -> Iterator[str]:
     """Yield the string value of every ``pattern`` key in a schema tree."""
     if isinstance(schema, dict):
