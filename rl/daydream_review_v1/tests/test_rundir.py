@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
 from daydream_review_v1.rundir import fetch_run_dir
+from tests.test_rewards import _stage_run
 
 #: The deterministic scoring projection fetch_run_dir must return for the golden
 #: run: the RUN_DIR_FILES allowlist members present in the fixture, plus the
@@ -43,9 +43,8 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
     through the run-dir collector.
     """
     archive = tmp_path / "archive"
-    staged = archive / "runs" / "session-1"
-    staged.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(rundir_golden, staged)
+    staged = _stage_run(archive, rundir_golden)
+    assert staged.name == "session-1"
 
     # The sole remaining untrusted trajectory shape in the fixture is staged.
     assert (staged / "trajectory.json").is_file()
