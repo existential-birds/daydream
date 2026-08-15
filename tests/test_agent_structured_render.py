@@ -160,3 +160,39 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch
     )
     assert result == payload  # the captured dict, NOT the stray [] scraped from prose
     assert isinstance(result, dict)  # the exact type the merge phase gate requires
+
+
+async def test_structured_fallback_validates_against_output_schema(
+    monkeypatch, tmp_path
+) -> None:
+    """Must-haves #4/#5: with output_schema set and structured output failing,
+    (a) valid-schema JSON is returned as structured output, and (b) invalid-
+    schema JSON falls through to the plain-text return."""
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    schema = {
+        "type": "object",
+        "required": ["file"],
+        "properties": {"file": {"type": "string"}},
+    }
+
+    # (a) valid-schema raw JSON -> returned as structured output
+    valid_backend = MockBackend([
+        TextEvent(text='{"file": "src/a.py"}'),
+        ResultEvent(structured_output=None, continuation=None),
+    ])
+    result, _, _ = await run_agent(
+        valid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
+    )
+    assert result == {"file": "src/a.py"}
+
+    # (b) invalid-schema raw JSON (missing required "file") -> plain-text fallthrough
+    invalid_backend = MockBackend([
+        TextEvent(text='{"line": 3}'),
+        ResultEvent(structured_output=None, continuation=None),
+    ])
+    result2, _, _ = await run_agent(
+        invalid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
+    )
+    assert result2 == '{"line": 3}'
+    assert isinstance(result2, str)

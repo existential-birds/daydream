@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from jsonschema import Draft202012Validator
 from rich.console import Console
 
 if TYPE_CHECKING:
@@ -58,7 +59,6 @@ _logger = logging.getLogger(__name__)
 
 class MissingSkillError(Exception):
     """Raised when a required skill is not available."""
-
     def __init__(self, skill_name: str):
         self.skill_name = skill_name
         super().__init__(f"Skill '{skill_name}' is not available")
@@ -393,6 +393,11 @@ def _summarize_output(output: str) -> str:
     # Take first non-empty line or first 200 chars
     first_line = redacted.strip().split("\n")[0]
     return first_line[:200]
+
+
+def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
+    """Return whether ``value`` validates against ``schema`` (shape + required)."""
+    return not any(Draft202012Validator(schema).iter_errors(value))
 
 
 def _redact_log_value(value: Any) -> Any:
@@ -821,8 +826,10 @@ async def run_agent(
         # Fallback: extract JSON from the raw text when structured output
         # failed. Uses robust extraction (handles prose-wrapped JSON and
         # markdown code fences — common with GLM and other OpenAI-compat models).
+        # The parsed result must also validate against the requested schema —
+        # an unvalidated fallback would be asymmetric with the success path.
         if raw.strip():
             parsed = extract_json(raw)
-            if parsed is not None:
+            if parsed is not None and _validates_schema(parsed, output_schema):
                 return parsed, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason
