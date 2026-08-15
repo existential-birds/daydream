@@ -2595,6 +2595,22 @@ async def _do_commit(
 
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
+    if preexisting_untracked is not None:
+        # Deterministic staging (issue #562/#543): the index already holds
+        # exactly the daydream changes, so the agent commits the pre-staged
+        # index only and must not re-stage anything.
+        staging_instruction = (
+            "The daydream changes are already staged. Review the staged diff "
+            "(git diff --cached) and commit using a conventional commit message. "
+            "Do NOT run git add or stage anything — the index is complete. "
+        )
+    else:
+        # Legacy path: no pre-run untracked snapshot — the agent stages and
+        # commits as before (the documented None contract).
+        staging_instruction = (
+            "Stage all changes and commit using a conventional commit message. "
+        )
+
     if items:
         summaries = "\n".join(
             f"- {it.get('file', 'unknown')}: {it.get('description', 'no description')}"
@@ -2608,8 +2624,7 @@ async def _do_commit(
         items_context = ""
 
     prompt = (
-        "The daydream changes are already staged. Review the staged diff "
-        "(git diff --cached) and commit using a conventional commit message. "
+        f"{staging_instruction}"
         "Review the diff to write a meaningful summary of what was fixed or changed. "
         "Use the format: <type>: <concise summary of changes>\n\n"
         f"{items_context}"
@@ -2665,6 +2680,24 @@ async def _do_commit(
             git_ops.amend_trailers(work.repo, missing, message=msg)
         except GitError as exc:
             print_warning(console, f"Failed to amend trailers: {exc}")
+
+    if preexisting_untracked is not None:
+        # Issue #562: prompt compliance alone is not enforcement — a commit
+        # agent that re-runs ``git add -A`` would sweep pre-existing untracked
+        # files into the commit. Verify the committed tree against the
+        # pre-staged set and surface any scope creep to the operator.
+        try:
+            committed = set(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
+        except GitError as exc:
+            print_warning(console, f"Could not verify committed tree: {exc}")
+        else:
+            extras = sorted(committed - set(stage))
+            if extras:
+                print_warning(
+                    console,
+                    "Commit contains files outside the pre-staged daydream set "
+                    f"(scope creep): {', '.join(extras)}",
+                )
 
     return True
 
@@ -2724,11 +2757,17 @@ async def phase_commit_push_auto(
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(
+    committed = await _do_commit(
         backend, work, push=True, items=items,
         preexisting_untracked=preexisting_untracked,
     )
-    print_success(console, "Commit and push complete")
+    # Only claim success when a commit was actually created: on the
+    # deterministic path a git failure makes changed_files soft-fail to an
+    # empty set, so _do_commit prints "Nothing to commit" and returns False —
+    # a success banner there would mislead the operator into believing the
+    # fixes were committed.
+    if committed:
+        print_success(console, "Commit and push complete")
 
 
 async def phase_respond_pr_feedback(

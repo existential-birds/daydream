@@ -2878,14 +2878,22 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     return None
 
 
-async def _step_commit(ctx: FlowContext) -> None:
+async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Commit-and-push the applied fixes."""
     # phase_commit_push runs as part of the fix/commit cycle — reuse
     # the fix backend (no separate "commit" phase identifier).
-    await phase_commit_push(
-        ctx.backend_for("fix"), ctx.work,
-        preexisting_untracked=ctx.data.get("pre_fix_untracked"),
-    )
+    # stage_paths can raise GitError synchronously before the agent turn;
+    # mirror _step_commit_push so that surfaces as a clean Stop(1) instead of
+    # an unhandled traceback terminating the deep run.
+    try:
+        await phase_commit_push(
+            ctx.backend_for("fix"), ctx.work,
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+        )
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return Stop(1)
+    return None
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -2956,12 +2964,10 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     fix_backend = ctx.backend_for("fix")
 
     # Issue #543: snapshot the pre-fix untracked set so the feedback commit step
-    # can exclude user scratch files from the daydream commit. Fail-open to an
-    # empty snapshot (deterministic stage = all untracked), mirroring _step_fix.
-    try:
-        pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
-    except git_ops.GitError:
-        pre_fix_untracked = set()
+    # can exclude user scratch files from the daydream commit. list_untracked
+    # soft-fails to [] on GitError, so set(...) is already the fail-open empty
+    # snapshot (deterministic stage = all untracked), mirroring _step_fix.
+    pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
     ctx.data["pre_fix_untracked"] = pre_fix_untracked
 
     # Fix sequentially to avoid concurrent access to one mutable backend.

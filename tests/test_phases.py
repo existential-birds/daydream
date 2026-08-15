@@ -318,7 +318,10 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     from daydream.phases import _do_commit
 
     work = make_work(git_repo)
-    (git_repo / "app.py").write_text("x = 1\n")            # daydream change
+    (git_repo / "app.py").write_text("x = 0\n")  # tracked baseline
+    git(git_repo, "add", "app.py")
+    git_commit(git_repo, "baseline app.py")
+    (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked modification)
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
     backend = _StagedCommitBackend(git_repo)
 

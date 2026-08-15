@@ -1355,6 +1355,27 @@ def changed_files_against(
     return names
 
 
+def diff_name_only_strict(repo: Path, from_ref: str, to_ref: str) -> list[str]:
+    """Return repo-relative paths that differ between two refs' trees.
+
+    Strict counterpart to :func:`diff_name_only` (which soft-fails to an empty
+    list) for post-commit tree checks: ``git diff --name-only <from_ref>
+    <to_ref>`` over the two commit trees. Raises :class:`GitError` when the
+    diff cannot be computed, so callers can distinguish "no differences" from
+    "unknown" (e.g. when verifying that a commit agent did not broaden a
+    commit beyond the pre-staged set).
+
+    Returns:
+        List of repo-relative path strings (unique, as emitted by git).
+    """
+    proc = _run_git(repo, ["diff", "--name-only", from_ref, to_ref], timeout=10)
+    if proc.returncode != 0:
+        raise GitError(
+            f"git diff --name-only {from_ref} {to_ref} failed in {repo}: {proc.stderr.strip()}"
+        )
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
 def list_untracked(repo: Path) -> list[str]:
     """Return repo-relative paths of untracked, non-ignored files.
 
@@ -1794,8 +1815,7 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
         GitError: If *paths* is empty, or the ``git add`` / ``git commit`` call
             fails.
     """
-    if not paths:
-        raise GitError("commit_paths requires at least one path")
+    # Empty-path guard lives in stage_paths (identical GitError).
     stage_paths(repo, paths)
     # git commit fails "Author identity unknown" with no user.email/user.name
     # (common in fresh CI). Inject fallback values via -c only when none is set.
