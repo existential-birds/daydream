@@ -4,7 +4,7 @@ Exports:
     preflight_judge_env: Verify the route-specific judge credential/config is present.
     resolve_judge_model: Resolve the judge model from --model or the MARTIAN_MODEL env.
     model_results_dir: Resolve the per-model results directory for a benchmark repo.
-    JUDGE_ERROR_RATIO_THRESHOLD: The ratio of judge errors to comparisons at or above which a scoring run is treated as invalid.
+    JUDGE_ERROR_RATIO_THRESHOLD: ratio of judge errors to comparisons at or above which a scoring run is invalid.
     run_scoring: Run the selected judge route and parse the resulting daydream precision/recall.
     parse_daydream_scores: Extract per-PR and aggregate daydream scores from evaluations.
     DaydreamScores: Aggregated daydream scoring result.
