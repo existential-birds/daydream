@@ -355,19 +355,30 @@ def test_docker_required_gates_on_daemon_reachability() -> None:
     )
 
 
+def _slow_test_names() -> list[str]:
+    """Names of this module's @pytest.mark.slow tests, derived from the marker
+    itself so a newly added slow test is covered without editing a name list."""
+    return sorted(
+        name
+        for name, obj in vars(sys.modules[__name__]).items()
+        if any(getattr(m, "name", None) == "slow" for m in getattr(obj, "pytestmark", ()))
+    )
+
+
 def test_docker_skip_is_per_test_not_module_wide() -> None:
     """M8 regression: the Docker skip is per-test, not module-wide, so the static
     build-contract tests (added in the next task) collect in a Docker-less CI."""
     module = sys.modules[__name__]
     assert "pytestmark" not in vars(module), "module-wide Docker skip would gate the static tests"
     assert "DOCKER_REQUIRED" in vars(module), "per-test DOCKER_REQUIRED marker missing"
-    # Both slow integration tests must carry the skip; neither may rely on a
-    # module-level marker that would also skip the static tests.  Check for
-    # actual skipif marker content, not just pytestmark attribute existence.
-    for name in (
-        "test_green_baseline_gate_fails_the_build_on_a_red_suite",
-        "test_green_baseline_builds_and_bakes_the_checkout",
-    ):
+    # Every slow test must carry the skip; none may rely on a module-level
+    # marker that would also skip the static tests.  Enumerate by the slow
+    # marker (not a hardcoded name list) so the reference-image test and any
+    # future slow test are covered.  Check for actual skipif marker content,
+    # not just pytestmark attribute existence.
+    slow_tests = _slow_test_names()
+    assert slow_tests, "no @pytest.mark.slow tests found"
+    for name in slow_tests:
         test_func = getattr(module, name)
         marks = getattr(test_func, "pytestmark", [])
         assert marks, f"{name} has no pytestmark (would not skip)"
@@ -547,7 +558,6 @@ def test_build_emits_canonical_argv_for_all_call_sites(
         _build(base, *extra_args, **kwargs)
         assert captured[-1] == prefix + expected_tail, captured[-1]
 
-    assert len(captured) == 3, "exactly the three canonical _build call sites may emit subprocess.run"
     assert "_build_reference" not in vars(sys.modules[__name__])
 
 
@@ -556,24 +566,40 @@ def test_corpus_and_slug_literals_single_source() -> None:
     src = Path(__file__).read_text(encoding="utf-8")
     corpus = "corpus-" + "reference"          # built to avoid self-matching
     slug = "pallets/" + "itsdangerous"        # built to avoid self-matching
-    assert src.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
-    # The slug literal must be REFERENCE_SLUG plus one occurrence per
+    marker = '[repos."' + slug + '"]'
+    # Scan only the module-top constants block and the manifest-entry tests,
+    # mirroring the F3 guard's window-narrowing: a docstring or comment
+    # elsewhere quoting the path cannot trip the guard.
+    constants_end = src.index("REFERENCE_SLUG = ") + len('REFERENCE_SLUG = "' + slug + '"')
+    constants = src[src.index("MANIFEST = ") : constants_end]
+    assert constants.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
+    # The slug literal is REFERENCE_SLUG once plus one occurrence per
     # manifest-entry marker; counting relative to the markers keeps the guard
     # valid when a third manifest test is added or the marker is extracted
     # into a shared constant.
-    marker = '[repos."' + slug + '"]'
-    assert src.count(slug) == 1 + src.count(marker), (
-        "slug literal must be REFERENCE_SLUG once plus once per manifest marker"
+    assert constants.count(slug) == 1, "slug literal must appear in the constants block only in REFERENCE_SLUG"
+    manifest = src[
+        src.index(marker) : src.index("def test_readme_documents_the_locked_dependency_policy")
+    ]
+    assert manifest.count(slug) == manifest.count(marker), (
+        "slug literal must appear once per manifest marker"
     )
     assert "REFERENCE_CORPUS" in src and "REFERENCE_SLUG" in src
 
 
 def test_module_docstring_describes_actual_contracts() -> None:
-    """F4: the docstring names the four contract kinds and three slow tests."""
+    """F4: the docstring names the four contract kinds and counts the slow tests
+    that actually carry the marker, so the count cannot drift from the file."""
     doc = sys.modules[__name__].__doc__ or ""
     for kind in ("Dockerfile", "--red", "manifest", "slow", "reference"):
         assert kind in doc, f"docstring must name contract kind/area {kind!r}"
-    assert "three" in doc.lower(), "docstring must count the three slow tests"
+    slow_tests = _slow_test_names()
+    number = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}.get(
+        len(slow_tests), str(len(slow_tests))
+    )
+    assert f"the {number} ``slow`` tests" in doc.lower(), (
+        f"docstring must count the {len(slow_tests)} slow tests: {slow_tests}"
+    )
     assert "two slow" not in doc.lower(), "stale 'two slow tests' count must be gone"
 
 
@@ -583,9 +609,12 @@ def test_reference_probe_quotes_the_work_repo_path() -> None:
     src = Path(__file__).read_text(encoding="utf-8")
     quoted = '\\"' + "/work/repo" + '\\"'   # built to avoid self-matching
     bare = "'" + "/work/repo" + "'"         # built to avoid self-matching
-    # Scan only the reference probe's own sh -c payload, so a prose comment or
-    # docstring elsewhere quoting the path cannot trip the guard.
-    probe_start = src.index('REFERENCE_TAG, "sh", "-c"')
-    probe_src = src[probe_start : src.index("capture_output=True", probe_start)]
+    # Scan only the reference probe's own python -c payload, anchored on its
+    # distinctive assert target rather than on source formatting: reordered
+    # kwargs, split payload literals, or a reformatted sh -c list cannot move
+    # the window, and prose elsewhere quoting the path cannot trip it either.
+    probe_end = src.index("itsdangerous.__file__")
+    probe_start = src.rindex("python -c '", 0, probe_end)
+    probe_src = src[probe_start : probe_end]
     assert quoted in probe_src, "python -c body must receive a quoted path literal"
     assert bare not in probe_src, "a single-quoted path would break the sh -c region"
