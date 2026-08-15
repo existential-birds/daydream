@@ -4,6 +4,7 @@ Exports:
     preflight_judge_env: Verify the route-specific judge credential/config is present.
     resolve_judge_model: Resolve the judge model from --model or the MARTIAN_MODEL env.
     model_results_dir: Resolve the per-model results directory for a benchmark repo.
+    JUDGE_ERROR_RATIO_THRESHOLD: ratio of judge errors to comparisons at or above which a scoring run is invalid.
     run_scoring: Run the selected judge route and parse the resulting daydream precision/recall.
     parse_daydream_scores: Extract per-PR and aggregate daydream scores from evaluations.
     DaydreamScores: Aggregated daydream scoring result.
@@ -53,7 +54,7 @@ _STDERR_TAIL = 4000
 #: credential, a model id the gateway does not recognize, a wrong base URL,
 #: timeouts); the real per-call message is surfaced in the raised error rather
 #: than guessed. Above this ratio the scores are noise, not a real zero.
-_JUDGE_ERROR_RATIO_THRESHOLD = 0.5
+JUDGE_ERROR_RATIO_THRESHOLD = 0.5
 
 #: Maximum wall-clock seconds to wait for each benchmark step subprocess.
 #: Step 3 calls an external judge API and can be slow; 30 minutes is generous.
@@ -78,7 +79,7 @@ class JudgeFailedError(Exception):
     The withmartian step3 records each failed judge LLM call as an error (storing
     the verbatim message in the leaf's ``errors`` list) and still exits 0, emitting
     an `evaluations.json` whose tp/fp/fn collapse to a clean-looking zero. This is
-    raised when the error ratio crosses `_JUDGE_ERROR_RATIO_THRESHOLD`, so a
+    raised when the error ratio crosses `JUDGE_ERROR_RATIO_THRESHOLD`, so a
     wholesale-failed judge surfaces loudly instead of as a genuine zero — and the
     message reports the actual recorded judge error, not a guessed cause.
     """
@@ -254,7 +255,7 @@ def parse_daydream_scores(
 
     Raises:
         JudgeFailedError: If the judge errored on at least
-            `_JUDGE_ERROR_RATIO_THRESHOLD` of all attempted comparisons — the
+            `JUDGE_ERROR_RATIO_THRESHOLD` of all attempted comparisons — the
             scores are then noise, not a real zero (see `JudgeFailedError`).
     """
     per_pr: dict[str, dict[str, Any]] = {}
@@ -285,7 +286,7 @@ def parse_daydream_scores(
         # attempted comparison count is the product (matches step3's task grid).
         total_comparisons += int(leaf.get("total_candidates", 0)) * int(leaf.get("total_golden", 0))
 
-    if total_comparisons and total_errors / total_comparisons >= _JUDGE_ERROR_RATIO_THRESHOLD:
+    if total_comparisons and total_errors / total_comparisons >= JUDGE_ERROR_RATIO_THRESHOLD:
         ratio = total_errors / total_comparisons
         if judge_errors:
             cause = f"The judge reported: {_summarize_judge_errors(judge_errors)}."
