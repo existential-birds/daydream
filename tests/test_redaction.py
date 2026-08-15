@@ -584,3 +584,45 @@ def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -
     args = out.tool_calls[0].arguments
     assert args[non_secret_key] == "opaque-test-only-sentinel"
     assert "[REDACTED_CREDENTIAL]" not in json.dumps(args)
+
+
+# ---- Structured key-value text + auth headers (issue #455, Task 2) ----
+
+
+@pytest.mark.parametrize("text", [
+    '{"credentials": {"apiKey": "opaque-test-only-sentinel"}}',
+    "{'client_secret': 'opaque-test-only-sentinel'}",
+    "apiKey: opaque-test-only-sentinel",
+    "client-secret = opaque-test-only-sentinel",
+])
+def test_redactor_scrubs_sensitive_key_value_text_formats(text: str) -> None:
+    """The same leak is caught in JSON, Python-repr, YAML-like, and assignment text."""
+    out = Redactor().redact_step(_user_step(text))
+    assert isinstance(out.message, str)
+    assert "opaque-test-only-sentinel" not in out.message
+    assert "[REDACTED_CREDENTIAL]" in out.message
+
+
+@pytest.mark.parametrize(("header", "value", "scheme"), [
+    ("Authorization", "opaque-test-only-sentinel", None),
+    ("authorization", "Bearer opaque-test-only-sentinel", "Bearer"),
+    ("Proxy-Authorization", "opaque-test-only-sentinel", None),
+    ("X-Api-Key", "opaque-test-only-sentinel", None),
+    ("X-Auth-Token", "opaque-test-only-sentinel", None),
+    ("Cookie", "session=opaque-test-only-sentinel", None),
+    ("Set-Cookie", "opaque-test-only-sentinel", None),
+])
+def test_redactor_scrubs_authorization_header_values(
+    header: str, value: str, scheme: str | None,
+) -> None:
+    """Auth header values are redacted case-insensitively; name + scheme preserved;
+    nothing past end of line consumed."""
+    line = f"{header}: {value}\nnext line stays"
+    out = Redactor().redact_step(_user_step(line))
+    assert isinstance(out.message, str)
+    assert "opaque-test-only-sentinel" not in out.message
+    assert "[REDACTED_CREDENTIAL]" in out.message
+    assert f"{header}: " in out.message
+    assert "next line stays" in out.message
+    if scheme is not None:
+        assert f"{header}: {scheme} " in out.message

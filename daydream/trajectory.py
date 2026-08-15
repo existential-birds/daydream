@@ -104,10 +104,15 @@ def _merge_metrics(existing: "Metrics", incoming: "Metrics") -> "Metrics":
         "extra": merged_extra,
     })
 
-# Redaction patterns (REDA-01..04). Order in _REDACTION_RULES matters: URL-credential
-# before bare API-key (so the captured credential isn't re-matched), PEM before env-var
-# (so `VAR=<PEM>` collapses whole instead of leaking the key body), env-var before bare
-# API-key (so `OPENAI_API_KEY=sk-1234` keeps its name per D-03).
+# Redaction patterns (REDA-01..04). Redaction composes three stages in order:
+# (1) auth-header + auth-scheme rules (Redactor._redact_structured_text) so a
+# shaped value under a header (e.g. `Authorization: Bearer sk-1234`) is consumed
+# whole and never double-marked; (2) the flat rules below — URL-credential before
+# bare API-key (so the captured credential isn't re-matched), PEM before env-var
+# (so `VAR=<PEM>` collapses whole instead of leaking the key body), env-var before
+# bare API-key (so `OPENAI_API_KEY=sk-1234` keeps its name per D-03); (3) structured
+# key-value redaction (_redact_structured_key_values), which skips existing
+# [REDACTED_*] markers so earlier stages' output is never clobbered.
 _URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)([^:@/\s]+):([^@/\s]+)@")
 _API_KEY_PATTERN = re.compile(
     r"\b(?:sk-[A-Za-z0-9_\-]{6,}|ghp_[A-Za-z0-9]{6,}|ghs_[A-Za-z0-9]{6,}|xoxb-[A-Za-z0-9\-]{6,}|AKIA[A-Z0-9]{16})\b"
@@ -335,6 +340,60 @@ def _is_sensitive_key(key: str) -> bool:
     return any(segment in _SENSITIVE_KEY_SUFFIXES for segment in normalized.split("_"))
 
 
+# Auth-header redaction (issue #455): case-insensitive, line-anchored. The
+# value capture is line-bounded (no DOTALL) so nothing past the end of the
+# line is ever consumed. Runs BEFORE the flat rules so a shaped value under
+# a header is consumed whole here and never double-marked downstream.
+_AUTHORIZATION_HEADER_PATTERN = re.compile(
+    r"^(Authorization|Proxy-Authorization|X-Api-Key|X-Auth-Token|Cookie|Set-Cookie):[^\S\n\r]*([^\n\r]+)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Optional auth scheme prefix on a header value: keep the scheme + whitespace,
+# replace only the trailing opaque token.
+_AUTH_SCHEME_PATTERN = re.compile(r"^(Basic|Bearer|Token)\s+(\S+)")
+# Structured key<: or =>value pairs in free text (JSON, Python-repr, YAML,
+# assignment). The key may be wrapped in single or double quotes; values are
+# single/double-quoted or a bare token. A value that starts with a structural
+# open-brace does not match (the pair is skipped so the scan continues to
+# inner keys). A negative lookahead prevents re-matching a value that is
+# immediately followed by a [REDACTED_*] marker (existing env-var/API-key/
+# header redactions must not be clobbered).
+_STRUCTURED_KEY_VALUE_PATTERN = re.compile(
+    r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
+    r"(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'\[\]{}()]++))"
+    r"(?![^\S\n\r]*\[REDACTED)",
+)
+
+
+def _redact_structured_key_values(text: str) -> str:
+    """Redact values of sensitive-key assignments in free text (fail-closed).
+
+    Finds ``key<: or =>value`` pairs in JSON, Python-repr, YAML-like, and
+    assignment text. For each pair whose key ``_is_sensitive_key``, replace
+    the value token with ``_REDACTED_CREDENTIAL``. Existing ``[REDACTED_*]``
+    markers and empty values are never re-matched. Any exception degrades to
+    ``"[REDACTION_FAILED]"``.
+    """
+    try:
+
+        def _replace(match: re.Match[str]) -> str:
+            key = match.group(2)
+            if not _is_sensitive_key(key):
+                return match.group(0)
+            value = (
+                match.group(4)
+                if match.group(4) is not None
+                else (match.group(5) if match.group(5) is not None else match.group(6))
+            )
+            if value is None or value == "" or "[REDACTED" in value:
+                return match.group(0)
+            return f"{key}{match.group(3)}{_REDACTED_CREDENTIAL}"
+
+        return _STRUCTURED_KEY_VALUE_PATTERN.sub(_replace, text)
+    except Exception:  # noqa: BLE001 - fail closed at every host boundary
+        return "[REDACTION_FAILED]"
+
+
 class Redactor:
     """Regex-driven redactor (REDA-01..06).
 
@@ -359,13 +418,28 @@ class Redactor:
     def _redact_structured_text(self, s: str) -> str:
         """Redact structured free-text surfaces (fail-closed).
 
-        Task 1 delegates to the module :func:`redact_text` (preserving the
-        existing flat coverage); the auth-header and structured key-value
-        stages land in Task 2. Any exception in any stage degrades the whole
-        field to ``"[REDACTION_FAILED]"`` — never raw pass-through.
+        Composes, in order: (1) auth-header + auth-scheme rules so a shaped
+        value under a header (``Authorization: Bearer sk-1234``) is consumed
+        whole and never double-marked; (2) the flat ``_REDACTION_RULES`` via
+        :func:`redact_text`; (3) structured key-value redaction
+        (``_redact_structured_key_values``), which skips existing
+        ``[REDACTED_*]`` markers so earlier stages' output is never clobbered.
+        Any exception in any stage degrades the whole field to
+        ``"[REDACTION_FAILED]"`` — never raw pass-through.
         """
         try:
-            return redact_text(s)
+
+            def _redact_header_value(match: re.Match[str]) -> str:
+                name = match.group(1)
+                value = match.group(2)
+                scheme_match = _AUTH_SCHEME_PATTERN.match(value)
+                if scheme_match is not None:
+                    return f"{name}: {scheme_match.group(1)} {_REDACTED_CREDENTIAL}"
+                return f"{name}: {_REDACTED_CREDENTIAL}"
+
+            s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
+            s = self._redact_text(s)
+            return _redact_structured_key_values(s)
         except Exception:  # noqa: BLE001 - fail closed at every host boundary
             return "[REDACTION_FAILED]"
 
@@ -432,7 +506,7 @@ class Redactor:
             new_content: Any = r.content
             if isinstance(r.content, str):
                 try:
-                    new_content = self._redact_text(r.content)
+                    new_content = self._redact_structured_text(r.content)
                 except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                     new_content = "[REDACTION_FAILED]"
             elif isinstance(r.content, list):
