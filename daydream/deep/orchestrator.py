@@ -2658,6 +2658,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_snapshot_captured = False
     else:
         pre_fix_snapshot_captured = True
+    # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
+    # _do_commit can exclude user scratch files from the daydream commit instead
+    # of sweeping them in via the commit agent's ``git add --all``.
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is
     # the base and HEAD is unused, so skip the rev-parse. Captured now
@@ -2878,7 +2882,10 @@ async def _step_commit(ctx: FlowContext) -> None:
     """Commit-and-push the applied fixes."""
     # phase_commit_push runs as part of the fix/commit cycle — reuse
     # the fix backend (no separate "commit" phase identifier).
-    await phase_commit_push(ctx.backend_for("fix"), ctx.work)
+    await phase_commit_push(
+        ctx.backend_for("fix"), ctx.work,
+        preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+    )
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -2943,8 +2950,19 @@ async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
 
 async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     """Apply a fix per feedback item; abort before commit when all fail."""
+    from daydream import git_ops
+
     feedback_items = ctx.data["feedback_items"]
     fix_backend = ctx.backend_for("fix")
+
+    # Issue #543: snapshot the pre-fix untracked set so the feedback commit step
+    # can exclude user scratch files from the daydream commit. Fail-open to an
+    # empty snapshot (deterministic stage = all untracked), mirroring _step_fix.
+    try:
+        pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
+    except git_ops.GitError:
+        pre_fix_untracked = set()
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
 
     # Fix sequentially to avoid concurrent access to one mutable backend.
     results: list[FixResult] = []
@@ -2979,7 +2997,9 @@ async def _step_commit_push(ctx: FlowContext) -> Stop | None:
     results: list[FixResult] = ctx.data["results"]
     try:
         await phase_commit_push_auto(
-            ctx.backend_for("review"), ctx.work, items=[item for item, _ok, _err in results if _ok],
+            ctx.backend_for("review"), ctx.work,
+            items=[item for item, _ok, _err in results if _ok],
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
     except Exception as e:
         print_error(console, "Commit/Push Failed", str(e))

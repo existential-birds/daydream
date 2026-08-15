@@ -53,10 +53,11 @@ class _ArchiveCaptureBackend(StubBackend):
         max_turns=None,
         read_only=False,
     ):
-        if prompt.startswith("Stage all changes and commit"):
+        if prompt.startswith("The daydream changes are already staged"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            git(cwd, "add", "--all")
+            # The index is pre-staged by _do_commit (deterministic staging,
+            # issue #543) — commit it as-is, never `git add --all`.
             git(
                 cwd,
                 "commit",
@@ -197,6 +198,35 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     recommended = (run_dir / "recommended.patch").read_text()
     assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
     assert "notes.txt" not in recommended              # pre-existing file excluded
+
+
+async def test_deep_archive_commit_excludes_preexisting_untracked_files(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    """A pre-existing untracked file (before the run) is absent from the daydream
+    commit's tree; a fix-created untracked file is present (issue #543)."""
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(
+        multi_stack_target, monkeypatch, real_internal_phases=True
+    )
+    stub.fix_edit_line = "# daydream recommended change\n"
+    stub.fix_new_generated = "migrations/0002_add_x.sql"  # fix-created, untracked
+    (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    # The pushed branch's HEAD tree excludes notes.txt but includes the fix-created
+    # file (the stub pushes the current branch, so query that ref on the remote).
+    branch = git(multi_stack_target, "branch", "--show-current")
+    committed = git(remote, "ls-tree", "-r", "--name-only", branch).splitlines()
+    assert "migrations/0002_add_x.sql" in committed
+    assert "notes.txt" not in committed
+    # notes.txt still untracked in the working tree.
+    assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
 
 
 async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
