@@ -303,9 +303,11 @@ function renderLead(){
 }
 function renderJudgeNote(){
   const j=curJudge();
-  $("#judgenote").textContent=j.has_daydream
-    ? `Selected judge ${j.display} scored daydream on ${j.daydream_pr_count} PRs; the compared field runs on the ${j.subset_pr_count}-PR complete cohort where every ranked tool has a present leaf.`
-    : `Selected judge ${j.display} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
+  const base=j.has_daydream
+    ? `Selected judge ${esc(j.display)} scored daydream on ${j.daydream_pr_count} PRs; the compared field runs on the ${j.subset_pr_count}-PR complete cohort where every ranked tool has a present leaf.`
+    : `Selected judge ${esc(j.display)} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
+  const excl=(j.excluded_tools||[]).map(ex=>`${esc(ex.display)} (${ex.scored_pr_count} of ${j.required_pr_count} PRs)`).join(", ");
+  $("#judgenote").innerHTML=excl?`${base} Excluded from the ranked field (no present leaf on the anchor): ${excl}.`:`${base}`;
 }
 
 function rankClass(r,n){if(!r)return"";if(r<=Math.ceil(n*0.34))return"good";return"";}
@@ -400,10 +402,11 @@ function makeLB(j,axis,title){
     const realrank=rows.indexOf(r)+1;
     body+=`<tr class="${isdd?'dd':''}"><td class="num" style="color:var(--steel)">${realrank}</td>
       <td><span class="toolname"><span class="cdot" style="background:${esc(r.color)}"></span>${esc(r.display)}${r.invalid?' <span class="invalid">⚠ERR</span>':''}</span></td>
+      <td class="num" style="color:var(--dim)">${r.n_prs}</td>
       <td class="num" style="font-weight:${isdd?700:400};color:${isdd?'var(--orange-soft)':'var(--ink)'}">${pct(r[axis])}</td></tr>`;
   });
   card.innerHTML=`<div class="ct"><span class="dot"></span>${title}</div>
-    <table class="lb"><thead><tr><th class="num">#</th><th>tool</th><th class="num">${axis}</th></tr></thead><tbody>${body}</tbody></table>`;
+    <table class="lb"><thead><tr><th class="num">#</th><th>tool</th><th class="num">PRs</th><th class="num">${axis}</th></tr></thead><tbody>${body}</tbody></table>`;
   return card;
 }
 function renderLeaderboards(){

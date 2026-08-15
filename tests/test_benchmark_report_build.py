@@ -240,6 +240,23 @@ def test_template_guards_zero_findings_before_ratio_rendering() -> None:
     assert fp_body.index("if(totalFindings===0){") < fp_body.index("d.fp/totalFindings")
 
 
+def test_template_renders_excluded_tools_and_per_row_scored_counts() -> None:
+    """The judge note renders each excluded tool with its scored-of-required count,
+    and each leaderboard row shows the PR count it was actually scored on."""
+    template = TEMPLATE_HTML.read_text()
+
+    note = template.split("function renderJudgeNote(){", 1)[1].split("function renderKPIs(){", 1)[0]
+    assert "j.excluded_tools" in note
+    assert "j.required_pr_count" in note
+    assert "ex.scored_pr_count" in note
+    assert "of" in note and "PRs" in note
+    assert "renderJudgeDependent" in template and "renderJudgeNote();" in template
+
+    lb = template.split("function makeLB(", 1)[1].split("function renderLeaderboards(){", 1)[0]
+    assert "r.n_prs" in lb
+    assert "PRs" in lb
+
+
 def test_price_card_comes_from_shared_pricing_table(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
