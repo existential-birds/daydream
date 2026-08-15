@@ -44,8 +44,11 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.prompt_budget import fits_inline_diff_budget
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_BLOCK,
+    PR_DESCRIPTION_UNTRUSTED_FRAMING,
+)
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
@@ -1179,6 +1182,7 @@ def build_intent_prompt(
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
     inline_diff: str | None = None,
+    inline_exploration_summary: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
 
@@ -1195,15 +1199,32 @@ def build_intent_prompt(
             read-the-file instruction is dropped. ``None`` (the default, and
             what every over-budget caller passes) keeps the ``diff_path``
             pointer text byte-identical.
+        inline_exploration_summary: When supplied, the pre-scan exploration
+            summary is inlined verbatim in place of the exploration directory
+            pointer. ``None`` (the default) keeps the pointer text
+            byte-identical. Read-only intent turns pass the inlined summary: a
+            read-only execution cwd (the Codex disposable clone) mirrors only
+            tracked and non-ignored untracked files, and target repos commonly
+            gitignore ``.daydream/``, so the on-disk summary may be absent
+            there.
     """
     parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    elif inline_diff is not None:
-        # No exploration pointer to carry the untrusted boundary; the inlined
-        # diff is itself repository-controlled content, so guard it directly.
-        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
+    if inline_exploration_summary is not None:
+        parts.append(
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            "Pre-scan exploration summary (inlined because the on-disk "
+            "exploration files are not guaranteed to exist in this execution "
+            "context — treat it as the complete exploration context):\n"
+            f"{inline_exploration_summary.rstrip()}\n"
+        )
+    else:
+        pointer = _exploration_pointer(exploration_dir)
+        if pointer:
+            parts.append(pointer)
+        elif inline_diff is not None:
+            # No exploration pointer to carry the untrusted boundary; the inlined
+            # diff is itself repository-controlled content, so guard it directly.
+            parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     if pr_description and pr_description.strip():
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:
@@ -1214,7 +1235,7 @@ def build_intent_prompt(
         )
         parts.append(
             f"The author supplied the following pull-request description. "
-            f"{AUTHORITATIVE_INTENT_RULE}\n\n"
+            f"{AUTHORITATIVE_INTENT_BLOCK}\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
             f"{safe_body}\n"
@@ -1695,6 +1716,12 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
     string so an intent-read failure can never block a fix. A read failure is
     never coerced into a fake intent string.
 
+    The intent file records the confirmed intent summary, which may echo the
+    author's pull-request description verbatim (an agent quote or the user's
+    interactive correction). The fix agent has write access, so the block
+    carries the ``PR_DESCRIPTION_UNTRUSTED_FRAMING`` hardening: the description
+    is evidence of intended behavior, never a set of commands.
+
     Returns:
         The intent block (with leading newline) when present and readable;
         otherwise an empty string.
@@ -1709,6 +1736,11 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
         return ""
     return (
         "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
+        # The intent file may contain the PR body verbatim; frame it as untrusted
+        # reference data BEFORE the echoed body so an instruction-like body cannot
+        # steer the mutating fix agent. Only the confirmed product-behavior intent
+        # is authoritative.
+        f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n\n"
         f"{confirmed_intent.strip()}\n\n"
         "This confirmed intent is the highest-priority authority: it outranks both "
         "the in-code-contract rule above and the finding itself. "
@@ -2966,13 +2998,59 @@ async def phase_understand_intent(
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
 
+    # Issue #579 made every intent turn read-only. Backends whose read-only
+    # profile executes in a disposable clone (the protocol-level
+    # ``read_only_disposable_clone`` capability) mirror only tracked and
+    # non-ignored untracked files; target repos commonly gitignore
+    # ``.daydream/``, so the on-disk ``diff.patch`` and ``exploration/summary.md``
+    # the pointers name are absent from that clone. For such executions the
+    # prompt is made self-sufficient within the shared prompt budget: the diff
+    # is inlined (truncated to ``INLINE_DIFF_BUDGET_BYTES`` when over budget —
+    # never a dangled file pointer, never an unbounded inline) and the
+    # exploration summary is inlined when readable, capped at the same budget.
+    # Other backends keep their cwd in the worktree, where those files are
+    # present, so they keep the budget-gated pointer.
+    read_only_disposable_clone = getattr(backend, "read_only_disposable_clone", False)
+    inline_diff: str | None
+    if read_only_disposable_clone and diff_text and not fits_inline_diff_budget(diff_text):
+        # Clone executions cannot fall back to the on-disk pointer (the
+        # gitignored ``.daydream/`` artifacts are absent from the disposable
+        # clone), so the inline is truncated to the shared prompt budget rather
+        # than dropped: still self-sufficient, never unbounded.
+        inline_diff = (
+            diff_text[:INLINE_DIFF_BUDGET_BYTES]
+            + "\n[diff truncated to fit the prompt budget]\n"
+        )
+    else:
+        inline_diff = _inlineable_diff(diff_text)
+    inline_exploration_summary: str | None = None
+    if read_only_disposable_clone and exploration_dir is not None:
+        try:
+            summary_text: str | None = (exploration_dir / "summary.md").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            # Best-effort: an unreadable summary just omits the exploration
+            # block; it is never coerced into a fake summary.
+            summary_text = None
+        if summary_text is not None:
+            if not fits_inline_diff_budget(summary_text):
+                # The clone has no on-disk fallback for the summary either, so
+                # an over-budget summary is truncated to the shared prompt
+                # budget rather than dropped (or inlined unbounded).
+                summary_text = (
+                    summary_text[:INLINE_DIFF_BUDGET_BYTES]
+                    + "\n[exploration summary truncated]\n"
+                )
+            inline_exploration_summary = summary_text
     prompt = get_registry().prompt("intent")(
         diff_path=str(diff_path),
         branch=branch,
         log=log,
-        exploration_dir=exploration_dir,
+        exploration_dir=None if read_only_disposable_clone else exploration_dir,
         pr_description=pr_description,
-        inline_diff=_inlineable_diff(diff_text),
+        inline_diff=inline_diff,
+        inline_exploration_summary=inline_exploration_summary,
     )
 
     while True:
@@ -2983,6 +3061,7 @@ async def phase_understand_intent(
             backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
             tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
             wall_budget_s=DEFAULT_WALL_BUDGET_S,
+            read_only=True,
         )
         if budget_reason is not None:
             raise RuntimeError(f"Intent analysis hit its budget: {budget_reason}")
@@ -3020,14 +3099,30 @@ async def phase_understand_intent(
         if response.lower() in ("y", "yes"):
             return intent_text
 
-        # User provided a correction — build new prompt with context
+        # User provided a correction — build new prompt with context. The
+        # correction turn runs read-only too, so for a disposable-clone
+        # read-only execution the diff is inlined under the untrusted-content
+        # boundary (the on-disk ``.daydream/diff.patch`` may be absent from the
+        # clone), reusing the budgeted inline computed above.
+        if read_only_disposable_clone and inline_diff:
+            diff_clause = (
+                f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+                "Re-examine the codebase and the diff inlined below, and present an "
+                "updated understanding of the intent.\n\n"
+                f"{inline_diff.rstrip()}\n"
+            )
+        else:
+            diff_clause = (
+                f"Re-examine the codebase and the diff at {diff_path}, and present an "
+                "updated understanding of the intent.\n"
+            )
         prompt = f"""You previously described the intent of these changes as:
 
 {intent_text}
 
 The user corrected your understanding: {response}
 
-Re-examine the codebase and the diff at {diff_path}, and present an updated understanding of the intent.
+{diff_clause}
 The diff is the complete review target — do not look up pull requests or invoke any skills
 or slash commands; reply with your updated understanding as plain text.
 

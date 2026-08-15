@@ -699,8 +699,13 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
 @pytest.mark.parametrize("name", ["per-stack", "structural", "generic-fallback", "arbiter", "merge"])
 def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     """#279: the precedence rule appears only when a fresh PR body was ingested."""
+    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
+
     assert AUTHORITATIVE_INTENT_RULE not in _build_gated(name, tmp_path, intent_authoritative=False)
     assert AUTHORITATIVE_INTENT_RULE in _build_gated(name, tmp_path, intent_authoritative=True)
+    # NEW #579: the untrusted framing rides with the rule — same gating.
+    assert PR_DESCRIPTION_UNTRUSTED_FRAMING not in _build_gated(name, tmp_path, intent_authoritative=False)
+    assert PR_DESCRIPTION_UNTRUSTED_FRAMING in _build_gated(name, tmp_path, intent_authoritative=True)
 
 
 def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: Path) -> None:
@@ -836,6 +841,7 @@ def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
     """The authoritative-intent upgrade survives include_alternatives=False."""
     from daydream.deep.prompts import build_per_stack_prompt
+    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
 
     p = _paths(tmp_path)
     without = build_per_stack_prompt(
@@ -845,6 +851,7 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
     assert "alternatives.json" not in without
     assert "author's stated intent from the pull-request description" in without
     assert AUTHORITATIVE_INTENT_RULE in without
+    assert PR_DESCRIPTION_UNTRUSTED_FRAMING in without  # NEW #579
 
 
 def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:

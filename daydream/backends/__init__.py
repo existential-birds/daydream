@@ -278,6 +278,14 @@ class Backend(Protocol):
     produces verbose reasoning). When absent, the caller falls back to False via
     ``getattr(backend, "concise_fix_prompts", False)``.
 
+    Optional extension: backends may expose ``read_only_disposable_clone: bool``
+    to indicate the backend runs against a disposable read-only checkout (Codex).
+    Such backends get over-budget diffs inlined truncated to the inline budget
+    and exploration summaries inlined instead of file pointers, and their
+    correction-loop rebuilds are framed with the untrusted-content boundary.
+    When absent, the caller falls back to False via
+    ``getattr(backend, "read_only_disposable_clone", False)``.
+
     Optional extension: backends may expose ``reasoning_effort``, the per-phase
     reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
     and applied through the driver's native knob (Claude
