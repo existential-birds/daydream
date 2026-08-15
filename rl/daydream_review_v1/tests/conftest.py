@@ -76,7 +76,14 @@ def fixture_manifest_path() -> Path:
 
 @pytest.fixture(scope="session")
 def rundir_golden() -> Path:
-    """An archived run dir from a real local daydream run against the fixture repo."""
+    """An archived run dir from a real local daydream run against the fixture repo.
+
+    UNTRUSTED, model-directed test-only data: the retained root
+    ``trajectory.json`` carries operational text captured during the run. It is
+    never a model-input source — the scoring projection excludes it at the
+    ``fetch_run_dir`` boundary (see
+    tests/test_rundir.py::test_fetch_run_dir_excludes_fixture_trajectories).
+    """
     return PROJECT_ROOT / "tests" / "fixtures" / "rundir-golden"
 
 
