@@ -24,6 +24,7 @@ from daydream.training.reward import score_trajectory
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
+    DaydreamReviewData,
     DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
@@ -83,9 +84,7 @@ def _assert_gate_held(trace: vf.Trace) -> None:
     assert "test_claim_mismatch" not in trace.metrics
 
 
-def test_review_state_guard_rejects_base_state(
-    corpus_mini_dir: Path, fixture_manifest_path: Path
-) -> None:
+def test_review_state_guard_rejects_base_state() -> None:
     """Scoring state must be a DaydreamReviewState, never the base State.
 
     Production traces carry a DaydreamReviewState automatically (the rollout
@@ -93,12 +92,23 @@ def test_review_state_guard_rejects_base_state(
     pass one explicitly. A base State must fail loudly rather than silently
     dereference a missing run_dir.
     """
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    base_trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    data = DaydreamReviewData(
+        idx=0,
+        name="org/repo#1",
+        prompt="Deep-review PR #1 of org/repo @ 111111111111",
+        repo_slug="org/repo",
+        clone_url="https://example.com/repo.git",
+        pr_number=1,
+        base_sha="0" * 40,
+        head_sha="1" * 40,
+        test_command="true",
+        protected_test_paths=["tests/"],
+    )
+    base_trace = vf.Trace(task=vf.TraceTask(type="DaydreamReviewTask", data=data))
     with pytest.raises(TypeError):
         _review_state(base_trace)
     good_trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        task=vf.TraceTask(type="DaydreamReviewTask", data=data),
         state=DaydreamReviewState(),
     )
     assert _review_state(good_trace).run_dir is None
