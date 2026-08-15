@@ -21,6 +21,7 @@ from daydream_review_v1.fixture import (
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
     DaydreamReviewTaskset,
+    GoldenComment,
     load_manifest,
 )
 
@@ -261,6 +262,21 @@ def test_load_manifest_rejects_unknown_key(tmp_path: Path) -> None:
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
     assert ("extra_forbidden", ("setp_cmds",)) in [
+        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
+
+
+def test_golden_comment_rejects_unknown_key() -> None:
+    """A misspelled/extra key in benchmark_data.json must not be silently dropped.
+
+    GoldenComment parses user-supplied corpus data (harvested upstream review
+    comments). Rejecting unknown keys mirrors the extra="forbid" guard on
+    _ManifestEntry so schema drift in the corpus fails loudly instead of being
+    silently ignored.
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        GoldenComment(comment="looks good", typo_field="nope")
+    assert ("extra_forbidden", ("typo_field",)) in [
         (err["type"], err["loc"]) for err in excinfo.value.errors()
     ]
 
