@@ -51,6 +51,16 @@ PATH_ACCEPTS = [
     ".github/workflows/ci.yml",
     "foo.bar",
     "foo..bar",
+    # issues #572/#573: legal filenames the over-tight grammar rejected
+    "foo bar.py",
+    "Café.md",
+    "file#1.py",
+    "a%file.txt",
+    "(x).py",
+    "a&b.py",
+    "~/.bashrc",
+    "./foo.py",
+    "space name.py",
 ]
 
 MULTI_DOT_PATHS = [
@@ -67,6 +77,10 @@ PATH_REJECTS = [
     "a//b",
     "$()",
     "${x}",
+    "a$b",     # $ excluded entirely (shell-expansion risk)
+    "x`y",     # backtick excluded (shell metachar)
+    ".",       # bare current dir is not a valid file path
+    "./",      # bare ./ is not a valid file path
 ]
 
 
@@ -95,10 +109,14 @@ def test_directory_scope_schema_rejects(value: str) -> None:
 
 
 def test_file_path_empty_and_length_bounds() -> None:
+    # empty always rejected
     assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("")
-    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(
-        "a" * 513
-    )
+    # 4096 (PATH_MAX) is the cap: accepted up to and including, rejected beyond
+    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4097)
+    # the lexical gate must agree with the schema at the same cap
+    assert valid_repository_file_path("a" * 4096)
+    assert not valid_repository_file_path("a" * 4097)
 
 
 def test_working_directory_accepts_cwd() -> None:

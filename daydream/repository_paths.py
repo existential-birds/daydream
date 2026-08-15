@@ -15,24 +15,27 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+_SEG_NONDOT = r"[\w #%~!&()+\-@]"               # non-dot segment char, no $/backtick
+_SEG_CHAR   = r"[\w .#%~!&()+\-@]"              # segment char incl. dot
 _PATH_SEGMENT = (
-    r"(?:[A-Za-z0-9_+@$-][A-Za-z0-9._+@$-]*|"
-    r"\.[A-Za-z0-9_+@$-][A-Za-z0-9._+@$-]*|"
-    r"\.\.[A-Za-z0-9._+@$-]+)"
-)
-REPOSITORY_FILE_PATH_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*$"
-DIRECTORY_SCOPE_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?$"
+    rf"(?:{_SEG_NONDOT}{_SEG_CHAR}*"
+    rf"|\.{_SEG_NONDOT}{_SEG_CHAR}*"            # single leading dot + non-dot body (.foo)
+    rf"|\.\.[\w .#%~!&()+\-@.]+)")            # two leading dots + >=1 char (..cache, ...)
+REPOSITORY_FILE_PATH_PATTERN = rf"^(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*$"
+DIRECTORY_SCOPE_PATTERN      = rf"^(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?$"
+
+REPOSITORY_FILE_PATH_MAX_LENGTH = 4096
 
 REPOSITORY_FILE_PATH_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "maxLength": 512,
+    "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
     "pattern": REPOSITORY_FILE_PATH_PATTERN,
 }
 DIRECTORY_SCOPE_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "maxLength": 512,
+    "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
     "pattern": DIRECTORY_SCOPE_PATTERN,
 }
 
@@ -42,12 +45,16 @@ _DIRECTORY_SCOPE = re.compile(DIRECTORY_SCOPE_PATTERN)
 
 def valid_repository_file_path(value: str) -> bool:
     """Return whether ``value`` has the safe repository-file grammar."""
-    return bool(_REPOSITORY_FILE_PATH.fullmatch(value))
+    return len(value) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
+        _REPOSITORY_FILE_PATH.fullmatch(value)
+    )
 
 
 def valid_directory_scope_lexical(value: str) -> bool:
     """Return whether ``value`` is a safe file-or-directory scope."""
-    return bool(_DIRECTORY_SCOPE.fullmatch(value))
+    return len(value) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
+        _DIRECTORY_SCOPE.fullmatch(value)
+    )
 
 
 def _strip_prefix(
