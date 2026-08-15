@@ -1878,6 +1878,10 @@ class _ForkCM:
             session_id=self._parent.session_id,
             pr_number=self._parent.pr_number,
             pr_repo=self._parent.pr_repo,
+            backend_name=self._parent.backend_name,
+            review_backend_name=self._parent.review_backend_name,
+            fix_backend_name=self._parent.fix_backend_name,
+            test_backend_name=self._parent.test_backend_name,
         )
         child.parent = self._parent
         child.descriptor = self._descriptor

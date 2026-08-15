@@ -1427,3 +1427,30 @@ async def test_build_trajectory_omits_backend_when_unset(tmp_path: Path) -> None
     assert "review_backend" not in extra
     assert "fix_backend" not in extra
     assert "test_backend" not in extra
+
+
+async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
+    parent = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="test",
+        backend_name="codex",
+        review_backend_name="codex",
+        fix_backend_name="pi",
+        test_backend_name="codex",
+    )
+    async with parent:
+        async with parent.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="parent"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+        async with parent.fork("deep") as child:
+            async with child.invocation(phase=DaydreamPhase.DEEP) as cinv:
+                cinv.observe(TextEvent(text="child"))
+                cinv.observe(ResultEvent(structured_output=None, continuation=None))
+    child_extra = read_trajectory(child.path)["extra"]
+    assert child_extra["backend"] == "codex"
+    assert child_extra["review_backend"] == "codex"
+    assert child_extra["fix_backend"] == "pi"
+    assert child_extra["test_backend"] == "codex"
