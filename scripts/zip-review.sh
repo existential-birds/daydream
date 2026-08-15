@@ -36,7 +36,13 @@ LATEST_RUN="$(ls -dt "$RUNS_DIR"/*/ | head -1)"
 LATEST_RUN="${LATEST_RUN%/}"
 RUN_ID="$(basename "$LATEST_RUN")"
 
-echo "Latest run: $RUN_ID ($(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LATEST_RUN"))"
+# Portable mtime: GNU stat -c, BSD stat -f fallback.
+if stat -c '%y' "$LATEST_RUN" >/dev/null 2>&1; then
+  RUN_TIME="$(stat -c '%y' "$LATEST_RUN" | cut -d. -f1)"
+else
+  RUN_TIME="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LATEST_RUN")"
+fi
+echo "Latest run: $RUN_ID ($RUN_TIME)"
 
 # Derive a zip filename from branch name or run ID
 if [ -z "$BRANCH_NAME" ]; then
