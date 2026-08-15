@@ -55,6 +55,7 @@ def _tags() -> set[str]:
 
 
 MANIFEST = PROJECT_ROOT / "images" / "manifest.toml"
+README = PROJECT_ROOT / "README.md"
 REFERENCE_IMAGE = "daydream-rl/itsdangerous"
 REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
 REFERENCE_CORPUS = PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"
@@ -306,6 +307,23 @@ def test_fixture_manifest_entry_stays_dependency_free() -> None:
     head = text[: text.index('[repos."pallets/itsdangerous"]')]
     assert 'setup_cmds = []' in head
     assert 'test_command = "python -m unittest discover -q"' in head
+
+
+def test_readme_documents_the_locked_dependency_policy() -> None:
+    """The 'Adding a repository' section states the four mandatory setup rules."""
+    text = README.read_text(encoding="utf-8")
+    section = text[text.index("## Adding a repository") :]
+    for marker in (
+        "committed at the head SHA",            # rule 1: lockfile committed at baked head
+        "rejects lock drift",                   # rule 2: no silent drift
+        "uv sync --locked",                     # rule 2: the concrete mode
+        "outside `/work/repo`",                 # rule 3: external environment
+        "UV_PROJECT_ENVIRONMENT=/opt/repo-venv",  # rule 3: the concrete env
+        "/opt/repo-venv/bin/python -m pytest -q",  # rule 4: locked test command
+        "image-build failure",                  # no-fallback statement
+        "fall back to unconstrained pip",       # no-fallback statement
+    ):
+        assert marker in section, f"README '## Adding a repository' must state {marker!r}"
 
 
 @pytest.mark.slow

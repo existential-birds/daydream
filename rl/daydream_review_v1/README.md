@@ -89,6 +89,23 @@ baseline against a pi-scaffold trained run moves two variables at once.
    repository name with NO tag — the tag is the task's 12-char head SHA, so one
    image is exactly one PR snapshot.
 
+   Every repository with a non-empty `setup_cmds` must satisfy four rules:
+
+   - The dependency lockfile is **committed at the head SHA** baked into the
+     image, so the image installs exactly the dependency set that commit pins.
+   - The package manager runs in a mode that **rejects lock drift** (e.g.
+     `uv sync --locked`): a lock that is missing or no longer matches fails the
+     build rather than silently resolving a different dependency set.
+   - The generated dependency environment lives **outside `/work/repo`** (e.g.
+     `UV_PROJECT_ENVIRONMENT=/opt/repo-venv`), so the baked checkout stays
+     clean and the environment survives into the image.
+   - `test_command` invokes the environment produced by that locked setup (e.g.
+     `/opt/repo-venv/bin/python -m pytest -q`), so the green-baseline gate and
+     the rollout's `fix_tests_pass` re-run both exercise the locked dependencies.
+
+   An unavailable or stale lock is an **image-build failure** — never permission
+   to **fall back to unconstrained pip**.
+
 3. **Build the images.** The last layer runs the repository's own suite at the
    head commit; a red baseline fails the build and produces nothing, because
    `fix_tests_pass` would otherwise be rewarding noise.
