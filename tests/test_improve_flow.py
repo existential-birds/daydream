@@ -3059,6 +3059,35 @@ def test_stamp_finding_rejects_evidence_crossing_a_symlink(
 
     assert stamped is None
 
+def test_stamp_finding_attributes_dot_slash_evidence_to_partition_and_service(
+    tmp_path: Path,
+) -> None:
+    """``./``-prefixed evidence (legal since the grammar relaxed) must still be
+    attributed to its partition and service, not silently dropped."""
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend" / "app.py").write_text("x = 1\n")
+
+    partition = Partition(
+        name="frontend",
+        root="frontend",
+        source="directory",
+        service=None,
+        files=("frontend/app.py",),
+    )
+    service = Service(name="frontend", root=Path("frontend"), source="config")
+
+    stamped = _stamp_finding(
+        {"evidence": ["./frontend/app.py:1"]},
+        "correctness",
+        [service],
+        [partition],
+        repo=tmp_path,
+    )
+
+    assert stamped is not None
+    assert stamped["partition"] == "frontend"
+    assert stamped["services"] == ["frontend"]
+
 
 @pytest.mark.anyio
 async def test_improve_pi_calls_are_ephemeral(

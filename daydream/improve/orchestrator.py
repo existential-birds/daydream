@@ -764,7 +764,11 @@ def _evidence_paths(
         end_line = int(match.group(3) or start_line)
         if start_line < 1 or end_line < start_line or end_line > line_count:
             return None
-        paths.append(path)
+        # A leading ``./`` is a legal spelling since the grammar relaxed, but
+        # partition/service attribution matches against git-derived roots
+        # (never ``./``-prefixed). Normalize so newly-legal ``./x`` evidence is
+        # not silently dropped from attribution.
+        paths.append(path[2:] if path.startswith("./") else path)
     return paths
 
 
