@@ -2,9 +2,9 @@
 
 `daydream.yml` is an **optional** alternative to the three-file split
 (`daydream-review.yml` + `daydream-command.yml` + `daydream-post.yml`) in the
-parent directory. It does exactly the same thing — auto-review same-repo PRs on
-open, review on demand via `@<bot> review`, post findings as your App bot — in a
-single workflow file.
+parent directory. It does exactly the same thing — review on demand via `@<bot> review`
+after a trusted comment approves the current head, then post findings as your
+App bot — in a single workflow file.
 
 Pick this variant if you want a smaller install and an App that does **not** need
 the `Actions: read & write` permission.

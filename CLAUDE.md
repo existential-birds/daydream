@@ -215,7 +215,7 @@ Full contract: `docs/extensions.md`.
 | Variable | Scope | Purpose |
 |----------|-------|---------|
 | `DAYDREAM_APP_ID` / `DAYDREAM_APP_PRIVATE_KEY` | GitHub App | Bot identity (PEM **content**, not a path) |
-| `DAYDREAM_BOT_HANDLE` / `DAYDREAM_AUTO_REVIEW` | Actions | Mention handle (no `@`); `false` disables auto-review |
+| `DAYDREAM_BOT_HANDLE` | Actions | Mention handle (no `@`) used by the `@<bot> review` command |
 | `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
 | `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; one of the two operator sources (the other is the CLI `--trajectory-hub-repo` flag). The target checkout's file config is ignored for this |
