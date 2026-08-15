@@ -685,24 +685,32 @@ async def run_bounded(
     """
     semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
 
-    async def _bounded(call: Callable[[], Awaitable[Any]]) -> Any:
-        async with semaphore:
-            return await call()
+    async def _bounded(meta: Any, call: Callable[[], Awaitable[Any]]) -> tuple[Any, Any]:
+        # The slot is held until the run loop has delivered the result to ``handle``.
+        # Releasing at call-completion would let a finished-but-unhandled success
+        # admit a waiting job in the window before a failure is observed, so a
+        # fail-fast abort could still start extra paid calls under load.
+        await semaphore.acquire()
+        try:
+            result: Any = await call()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            result = exc
+        return meta, result
 
-    tasks = [asyncio.create_task(_bounded(call)) for _, call in jobs]
-    metas = [meta for meta, _ in jobs]
-    task_index = {task: i for i, task in enumerate(tasks)}
+    tasks = [asyncio.create_task(_bounded(meta, call)) for meta, call in jobs]
     pending = set(tasks)
     try:
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                index = task_index[task]
-                try:
-                    result = task.result()
-                except BaseException as exc:
-                    result = exc
-                handle(metas[index], result)
+            # Failures first within one completion batch: a fail-fast abort must
+            # cancel the waiting jobs before a success below frees its slot.
+            batch = [(task, *task.result()) for task in done]
+            batch.sort(key=lambda item: 0 if isinstance(item[2], BaseException) else 1)
+            for _, meta, result in batch:
+                handle(meta, result)  # raising aborts: no slot is freed, pending jobs are cancelled
+                semaphore.release()
     except BaseException:
         for task in pending:
             task.cancel()
