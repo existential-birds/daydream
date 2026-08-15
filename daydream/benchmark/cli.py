@@ -124,7 +124,7 @@ def _build_bench_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reviewer-backend",
         type=str,
-        choices=["claude", "codex", "pi"],
+        choices=["claude", "codex", "pi", "osprey"],
         default=None,
         dest="reviewer_backend",
         help="Backend for the reviewer under test (default: daydream's built-in default)",
