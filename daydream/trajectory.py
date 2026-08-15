@@ -1286,6 +1286,15 @@ class TrajectoryRecorder:
         steps: Sequential Steps from every Invocation, step_id 1..N.
         pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
         pr_repo: GitHub repo (``owner/repo``) if reviewing a PR. Stored in trajectory extra.
+        backend_name: Resolved backend kind (claude/codex/pi/osprey) for the run,
+            resolved via the review phase by ``_open_recorder``. Stored in
+            trajectory extra as ``backend`` when non-empty.
+        review_backend_name: Resolved backend kind for the review phase. Stored in
+            trajectory extra as ``review_backend`` when ``backend_name`` is set.
+        fix_backend_name: Resolved backend kind for the fix phase. Stored in
+            trajectory extra as ``fix_backend`` when ``backend_name`` is set.
+        test_backend_name: Resolved backend kind for the test phase. Stored in
+            trajectory extra as ``test_backend`` when ``backend_name`` is set.
         _step_id_counter: Monotonic; never decreases (Pitfall 1).
         _final_totals: Running tally for FinalMetrics aggregation (MAP-07).
         _previous_token: ContextVar reset token; used by __aexit__ to restore.
@@ -1303,6 +1312,10 @@ class TrajectoryRecorder:
     explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
+    backend_name: str = ""
+    review_backend_name: str = ""
+    fix_backend_name: str = ""
+    test_backend_name: str = ""
     _step_id_counter: int = 0
     _final_totals: dict[str, Any] = field(default_factory=lambda: _INITIAL_TOTALS.copy())
     _folded_fork_totals: bool = False
@@ -1733,6 +1746,15 @@ class TrajectoryRecorder:
             extra=final_metrics_extra,
         )
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
+        if self.backend_name:
+            # Backend identity mirrors archive/manifest.py's record: a
+            # representative ``backend`` (resolved via the review phase) plus
+            # always-present per-phase keys. Empty ``backend_name`` (direct
+            # construction outside the factory) serializes no backend keys.
+            extra["backend"] = self.backend_name
+            extra["review_backend"] = self.review_backend_name
+            extra["fix_backend"] = self.fix_backend_name
+            extra["test_backend"] = self.test_backend_name
         if self.pr_number is not None:
             extra["pr_number"] = self.pr_number
         if self.pr_repo is not None:

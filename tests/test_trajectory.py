@@ -1384,3 +1384,46 @@ async def test_analyze_costs_total_comes_from_root_only(tmp_path: Path) -> None:
     assert len(by_agent) == 2
     assert any(a["cost_usd"] == pytest.approx(0.5) for a in costs["by_agent"])
     assert sum(a["cost_usd"] for a in costs["by_agent"]) == pytest.approx(costs["total_cost_usd"])
+
+
+async def test_build_trajectory_extra_records_backend_identity(tmp_path: Path) -> None:
+    recorder = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="test",
+        backend_name="codex",
+        review_backend_name="pi",
+        fix_backend_name="claude",
+        test_backend_name="osprey",
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="hello"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+    extra = read_trajectory(recorder.path)["extra"]
+    assert extra["backend"] == "codex"
+    assert extra["review_backend"] == "pi"
+    assert extra["fix_backend"] == "claude"
+    assert extra["test_backend"] == "osprey"
+    assert extra["target_dir"] == str(tmp_path)
+
+
+async def test_build_trajectory_omits_backend_when_unset(tmp_path: Path) -> None:
+    recorder = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.NORMAL,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="test",
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="hello"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+    extra = read_trajectory(recorder.path)["extra"]
+    assert "backend" not in extra
+    assert "review_backend" not in extra
+    assert "fix_backend" not in extra
+    assert "test_backend" not in extra
