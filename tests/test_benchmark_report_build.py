@@ -267,8 +267,12 @@ def test_template_foot_cites_excluded_tools_when_any_judge_dropped_them() -> Non
 
     foot = template.split("function renderFoot(){", 1)[1].split("function renderJudgeDependent(){", 1)[0]
     assert "excluded_tools" in foot
-    assert "DATA.judges" in foot
-    assert "excluded" in foot
+    # positive behavioral asserts: the exclusion sentence is gated on at least one
+    # judge dropping tools (exJudges.length) and renders the per-judge excluded-tool
+    # citation — not just the identifiers ("excluded"/"DATA.judges" both match the
+    # pre-existing METHODOLOGY/SOURCES text)
+    assert "const exclLine=exJudges.length" in foot
+    assert 'excluded ${j.excluded_tools.map(e=>esc(e.display)).join(", ")} (no present leaf on the anchor)' in foot
 
 
 def test_template_uses_numeric_daydream_coverage() -> None:
@@ -989,3 +993,118 @@ def test_report_anchor_falls_back_to_retained_judge_with_strict_smaller_dd_subse
     p1 = next(im for im in report["improvements"] if im["priority"] == 1)
     assert "z-retained" in p1["heading"]
     assert "a-skip-anchor" not in p1["body"]
+
+
+def test_report_drops_daydream_row_when_fallback_repoint_removes_its_leaves(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fallback divergence: the largest-subset judge is panel-skipped and the anchor
+    re-points to a retained judge whose daydream leaves are a strict subset. A second
+    retained judge that scored daydream ONLY on the skipped judge's extra PR keeps
+    has_daydream=True from the pre-fallback panel but has zero present leaves on the
+    final anchor. The disclosure must drop its daydream row/ranks so the rendered
+    panel never shows scored KPIs next to a "0 of N PRs scored" disclosure."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    saas5 = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    skip_anchor = {"saas-0": _leaf(tp=1, fp=0), "saas-1": _leaf(tp=1, fp=0)}
+    evals = {
+        # Largest daydream subset (2 PRs) but only 2 SaaS tools -> SaaS-coverage skip.
+        "a-skip-anchor": {
+            PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=1, fp=2, fn=1)},
+            SECOND_PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+        },
+        # Retained fallback anchor: daydream scored on ONLY the first PR (a strict
+        # subset of the skipped judge's 2-PR set), so the anchor re-points to PR 1.
+        "m-anchor": {
+            PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=4, fp=2, fn=0)},
+            SECOND_PR_URL: dict(saas5),
+        },
+        # Retained judge whose daydream leaf lives ONLY on the second PR: retained
+        # pre-fallback (has_daydream=True), daydream-less on the re-pointed anchor.
+        "z-divergent": {
+            PR_URL: dict(saas5),
+            SECOND_PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=1, fp=0, fn=0)},
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
+
+    assert [j["id"] for j in report["judges"]] == ["m-anchor", "z-divergent"]
+    assert [s["id"] for s in report["skipped_judges"]] == ["a-skip-anchor"]
+    assert report["meta"]["anchor_judge"] == "m-anchor"
+    assert report["meta"]["subset_pr_count"] == 1
+
+    by_id = {j["id"]: j for j in report["judges"]}
+    anchor = by_id["m-anchor"]
+    assert anchor["has_daydream"] is True
+    assert anchor["daydream_pr_count"] == 1
+    assert anchor["required_pr_count"] == 1
+
+    # The divergent judge's pre-fallback daydream leaf is not on the final anchor:
+    # the disclosure re-points its count to 0 and reconciles the panel (daydream row
+    # and ranks dropped) so nothing renders scored KPIs next to "0 of 1 PRs scored".
+    divergent = by_id["z-divergent"]
+    assert divergent["has_daydream"] is False
+    assert divergent["daydream"] is None
+    assert divergent["ranks"] == {}
+    assert divergent["daydream_pr_count"] == 0
+    assert divergent["required_pr_count"] == 1
+    # Panel-loop derivation internals never leak into the report data contract.
+    assert "raw_saas_tools" not in divergent and "saas_tools" not in divergent
+
+
+def test_disclose_judge_exclusions_rederives_only_when_anchor_repointed(
+    build_mod: ModuleType,
+) -> None:
+    """_disclose_judge_exclusions reuses the panel-retained membership/daydream count
+    when the anchor was not re-pointed and re-derives them against the final dd_subset
+    when it was — the excluded list can never drift from the panel loop's derivation,
+    and a retained judge left without daydream leaves on the final anchor has its
+    daydream row/ranks reconciled away."""
+    complete = {"tp": 1, "fp": 1, "fn": 1, "total_candidates": 1, "total_golden": 1}
+    dd = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
+    pr1 = {"daydream-owl-alpha": dd, "saas-a": complete, "saas-b": complete}
+    pr2 = {"daydream-owl-alpha": dd, "saas-a": complete,
+           "saas-b": {"skipped": True}, "saas-c": complete}
+    judges_raw = {
+        "j1": {"evals": {PR_URL: pr1, SECOND_PR_URL: pr2}},
+        "j2": {"evals": {SECOND_PR_URL: pr2}},  # daydream leaf only on the second PR
+    }
+    panel_retained = {
+        "raw_saas_tools": ["saas-a", "saas-b", "saas-c"],
+        "saas_tools": ["saas-a", "saas-b", "saas-c"],
+        "daydream_pr_count": 2,
+        "has_daydream": True,
+        "daydream": {"n_prs": 1, "tp": 1, "fp": 0, "fn": 0},
+        "ranks": {"f1": (1, 4)},
+    }
+
+    # Anchor NOT re-pointed: the retained panel-time values are reused as-is.
+    j = {"id": "j1", **panel_retained}
+    build_mod._disclose_judge_exclusions([j], judges_raw, {PR_URL, SECOND_PR_URL},
+                                         "daydream-owl-alpha", {}, False)
+    assert j["required_pr_count"] == 2
+    assert j["daydream_pr_count"] == 2
+    assert j["excluded_tools"] == []
+    assert "raw_saas_tools" not in j and "saas_tools" not in j
+
+    # Anchor re-pointed to {PR_URL}: saas-c's only present leaf was on the second PR,
+    # so the re-derived membership excludes it from the ranked-field disclosure.
+    j = {"id": "j1", **panel_retained}
+    build_mod._disclose_judge_exclusions([j], judges_raw, {PR_URL},
+                                         "daydream-owl-alpha", {}, True)
+    assert j["required_pr_count"] == 1
+    assert j["daydream_pr_count"] == 1
+    assert j["excluded_tools"] == [
+        {"tool": "saas-c", "display": "saas-c", "scored_pr_count": 0},
+    ]
+
+    # A judge whose only daydream leaf is off the re-pointed anchor is reconciled:
+    # has_daydream drops and the daydream row/ranks are cleared (0 of N scored).
+    j = {"id": "j2", **panel_retained}
+    build_mod._disclose_judge_exclusions([j], judges_raw, {PR_URL},
+                                         "daydream-owl-alpha", {}, True)
+    assert j["has_daydream"] is False
+    assert j["daydream"] is None
+    assert j["ranks"] == {}
+    assert j["daydream_pr_count"] == 0
+    assert j["required_pr_count"] == 1

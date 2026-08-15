@@ -350,6 +350,64 @@ def _build_improvements(
     return improvements
 
 
+def _disclose_judge_exclusions(
+    judges_out: list[dict],
+    judges_raw: dict[str, dict[str, Any]],
+    dd_subset: set[str],
+    dd_tool: str,
+    display_names: dict[str, str],
+    dd_subset_repointed: bool,
+) -> None:
+    """Disclose the report-wide daydream anchor per retained judge.
+
+    Sets required_pr_count / daydream_pr_count / excluded_tools on each judge in
+    ``judges_out``, measured against the FINAL ``dd_subset`` — the anchor the fallback
+    block may have re-pointed to a retained judge's smaller daydream set — so they
+    never contradict ``meta.subset_pr_count`` by reporting the skipped judge's larger
+    subset. Skipped judges never reach this pass, so the exclusion work is not done
+    for panels discarded by the panel guards.
+
+    Raw tool ids are subset-independent and hoisted from the panel loop onto the
+    judge dicts; the present-leaf membership and the daydream count are retained
+    panel-time values, re-derived against ``dd_subset`` only when the fallback
+    re-pointed it (``dd_subset_repointed``), so the disclosure can never diverge from
+    the panel loop's derivation.
+    """
+    for j in judges_out:
+        evals = judges_raw[j["id"]]["evals"]
+        if dd_subset_repointed:
+            saas_tools = [t for t in j["raw_saas_tools"]
+                          if bool(_complete_cohort(evals, [t], dd_subset))]
+            daydream_count = len(_complete_cohort(evals, [dd_tool], dd_subset))
+        else:
+            saas_tools = j["saas_tools"]
+            daydream_count = j["daydream_pr_count"]
+        saas_tools_set = set(saas_tools)
+        j["required_pr_count"] = len(dd_subset)
+        # daydream's own scored PR count (present leaves on the anchor), independent
+        # of the competitor-collapsed comparison cohort (subset_pr_count <= this).
+        j["daydream_pr_count"] = daydream_count
+        # SaaS tools considered for the panel but excluded from the ranked field: no
+        # present leaf on any anchor PR. Preserve raw_saas_tools' sorted order.
+        j["excluded_tools"] = [
+            {"tool": t, "display": display_names.get(t, t), "scored_pr_count": 0}
+            for t in j["raw_saas_tools"]
+            if t not in saas_tools_set
+        ]
+        # The panel loop computed has_daydream against the pre-fallback subset; when
+        # the fallback re-pointed dd_subset, a retained judge may hold a daydream leaf
+        # only on the skipped judge's larger subset. Reconcile the panel so its note
+        # and KPI row never contradict a "0 of N PRs scored" disclosure. (No-op when
+        # the subset is unchanged: has_daydream and the count trace to the same set.)
+        if daydream_count == 0 and j["has_daydream"]:
+            j["has_daydream"] = False
+            j["daydream"] = None
+            j["ranks"] = {}
+        # Panel-loop derivation internals, not part of the report data contract.
+        del j["raw_saas_tools"]
+        del j["saas_tools"]
+
+
 def build(args: argparse.Namespace) -> dict[str, Any]:
     results_root = Path(args.results_root).resolve()
     dd_tool = args.daydream_tool
@@ -451,6 +509,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "daydream": dd_agg,
             "ranks": ranks,
             "field": sorted(field, key=lambda r: r["f1"], reverse=True),
+            # Retained for the disclosure pass: raw tool ids are subset-independent
+            # (collected once, never re-collected per judge); saas_tools and the
+            # daydream count are the panel-time values, re-derived by the disclosure
+            # only when the anchor fallback re-points dd_subset.
+            "raw_saas_tools": raw_saas_tools,
+            "saas_tools": saas_tools,
+            "daydream_pr_count": len(daydream_prs),
         })
 
     if not judges_out:
@@ -464,6 +529,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     # ── daydream economy (judge-independent: token/cost/wall come from ATIF trajectories) ──
     anchor_judge = next((j for j in judges_out if j["id"] == anchor_judge_id), None)
+    # The disclosure pass re-derives the panel-time membership/daydream count only
+    # when the fallback re-points dd_subset below; otherwise the retained values
+    # still trace to the unchanged subset.
+    dd_subset_repointed = False
     if anchor_judge is None:
         # The largest-subset judge may be panel-skipped (fails the SaaS-coverage
         # gate or has no complete common PR cohort), so it never reaches judges_out.
@@ -473,6 +542,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         anchor_judge = next((j for j in judges_out if j.get("has_daydream")), None)
         if anchor_judge is not None:
             anchor_judge_id = anchor_judge["id"]
+            dd_subset_repointed = True
             # The fallback anchor's real daydream coverage may be a strict subset
             # of the (skipped) largest-subset judge's. Re-point dd_subset to it so
             # economy.n_prs, meta.subset_pr_count/subset_prs, anchor_evals, and the
@@ -493,32 +563,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     # ── judge disclosure denominators (measured against the final anchor) ──
     # required_pr_count / daydream_pr_count / excluded_tools disclose the report-wide
-    # daydream anchor per judge. Derive them only now, after the fallback block may
-    # have re-pointed dd_subset to the retained anchor's smaller daydream set, so they
-    # never contradict meta.subset_pr_count by reporting the skipped judge's larger
-    # subset. Skipped judges never reach this pass, so the exclusion work is not done
-    # for panels that get discarded by the guards above.
-    for j in judges_out:
-        evals = judges_raw[j["id"]]["evals"]
-        all_tools = set()
-        for t in evals.values():
-            all_tools.update(t.keys())
-        raw_saas_tools = sorted(t for t in all_tools if t != dd_tool)
-        # Tools with a present leaf on at least one anchor PR; hoisted once so the
-        # excluded list's membership test is a plain set lookup per tool.
-        saas_tools_set = {t for t in raw_saas_tools
-                          if bool(_complete_cohort(evals, [t], dd_subset))}
-        j["required_pr_count"] = len(dd_subset)
-        # daydream's own scored PR count (present leaves on the anchor), independent
-        # of the competitor-collapsed comparison cohort (subset_pr_count <= this).
-        j["daydream_pr_count"] = len(_complete_cohort(evals, [dd_tool], dd_subset))
-        # SaaS tools considered for the panel but excluded from the ranked field: no
-        # present leaf on any anchor PR. Preserve raw_saas_tools' sorted order.
-        j["excluded_tools"] = [
-            {"tool": t, "display": display_names.get(t, t), "scored_pr_count": 0}
-            for t in raw_saas_tools
-            if t not in saas_tools_set
-        ]
+    # daydream anchor per judge. This pass runs after the fallback block may have
+    # re-pointed dd_subset, so denominators trace to the final anchor — never the
+    # skipped judge's larger subset — and never contradict meta.subset_pr_count.
+    _disclose_judge_exclusions(judges_out, judges_raw, dd_subset, dd_tool,
+                               display_names, dd_subset_repointed)
 
     anchor_evals = judges_raw[anchor_judge_id]["evals"]
     per_pr_rows = []
