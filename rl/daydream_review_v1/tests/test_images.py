@@ -33,10 +33,10 @@ FIXTURE_IMAGE = "daydream-rl/fixture"
 BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
 
 
-def _build(base_image: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
+def _build(base_image: str, *args: str, slug: str = FIXTURE_SLUG) -> subprocess.CompletedProcess[str]:
+    """Build the repo image for ``slug`` (the fixture by default); ``base_image`` owns the base."""
     return subprocess.run(
-        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", base_image, *args],
+        ["uv", "run", "python", "images/build_images.py", "--only", slug, "--no-base", base_image, *args],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -59,19 +59,7 @@ README = PROJECT_ROOT / "README.md"
 REFERENCE_IMAGE = "daydream-rl/itsdangerous"
 REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
 REFERENCE_CORPUS = PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"
-
-
-def _build_reference(base_image: str) -> subprocess.CompletedProcess[str]:
-    """Build the reference repo image only; the ``base_image`` fixture owns the base."""
-    return subprocess.run(
-        [
-            "uv", "run", "python", "images/build_images.py",
-            "--only", "pallets/itsdangerous",
-            "--corpus", str(REFERENCE_CORPUS),
-            "--no-base", base_image,
-        ],
-        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
-    )
+REFERENCE_SLUG = "pallets/itsdangerous"
 
 
 @pytest.mark.parametrize(
@@ -330,7 +318,7 @@ def test_readme_documents_the_locked_dependency_policy() -> None:
 @DOCKER_REQUIRED
 def test_reference_image_builds_with_locked_dependencies(base_image: str) -> None:
     """The reference image builds only when the locked setup + green baseline succeed."""
-    result = _build_reference(base_image)
+    result = _build(base_image, "--corpus", str(REFERENCE_CORPUS), slug=REFERENCE_SLUG)
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined[-3000:]
     assert f"built {REFERENCE_TAG}" in result.stdout, combined[-3000:]
@@ -521,3 +509,37 @@ def test_base_dockerfile_does_not_pipe_downloads_into_shell_or_tar(forbidden_lit
     """M3/M4: no remote execution pipeline remains in the build contract."""
     text = BASE_DOCKERFILE.read_text(encoding="utf-8")
     assert forbidden_literal not in text, f"Dockerfile must not contain {forbidden_literal!r}"
+
+
+def test_build_emits_canonical_argv_for_all_call_sites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: _build is the single helper; slug defaults to the fixture, and the
+    reference build passes the reference slug + corpus through the same argv."""
+    captured: list[list[str]] = []
+
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    base = "daydream-rl/base:v1.2.3"
+
+    _build(base)
+    _build(base, "--red")
+    _build(base, "--corpus", str(REFERENCE_CORPUS), slug=REFERENCE_SLUG)
+
+    assert captured[0] == [
+        "uv", "run", "python", "images/build_images.py",
+        "--only", FIXTURE_SLUG, "--no-base", base,
+    ]
+    assert captured[1] == [
+        "uv", "run", "python", "images/build_images.py",
+        "--only", FIXTURE_SLUG, "--no-base", base, "--red",
+    ]
+    assert captured[2] == [
+        "uv", "run", "python", "images/build_images.py",
+        "--only", REFERENCE_SLUG, "--no-base", base,
+        "--corpus", str(REFERENCE_CORPUS),
+    ]
+    assert "_build_reference" not in vars(sys.modules[__name__])
