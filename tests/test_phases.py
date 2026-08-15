@@ -1460,6 +1460,26 @@ def test_feedback_schema_requires_confidence_and_rationale():
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
 
 
+def test_finding_file_schema_slots_use_repository_file_path_schema():
+    """Every model-facing finding schema constrains its file slot to the shared repository-path grammar."""
+    from daydream import phases
+    from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
+
+    # Directly-assigned slots reference the exact shared schema object.
+    feedback_file = phases.FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
+    alt_files_items = phases.ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["files"]["items"]
+    merged_file = phases.MERGED_ITEMS_SCHEMA["properties"]["items"]["items"]["properties"]["file"]
+    assert feedback_file is REPOSITORY_FILE_PATH_SCHEMA
+    assert alt_files_items is REPOSITORY_FILE_PATH_SCHEMA
+    assert merged_file is REPOSITORY_FILE_PATH_SCHEMA
+    # PER_STACK_RECORD_SCHEMA deep-copies FEEDBACK_SCHEMA, so its file slot is an
+    # equal copy (not the identical object) -- but it must carry the tightened
+    # grammar, not the loose `{"type":"string"}`.
+    per_stack_file = phases.PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
+    assert per_stack_file == REPOSITORY_FILE_PATH_SCHEMA
+    assert per_stack_file["pattern"]
+
+
 def test_alternative_review_schema_requires_confidence_and_rationale():
     from daydream.phases import ALTERNATIVE_REVIEW_SCHEMA
 

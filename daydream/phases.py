@@ -44,6 +44,12 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
+from daydream.improve.command_contract import (
+    REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
+)
+from daydream.improve.command_contract import (
+    path_is_confined,
+)
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
@@ -770,7 +776,7 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "integer"},
                     "description": {"type": "string"},
-                    "file": {"type": "string"},
+                    "file": _REPOSITORY_FILE_PATH_SCHEMA,
                     "line": {"type": "integer"},
                     "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
@@ -815,7 +821,7 @@ ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
                     "description": {"type": "string"},
                     "recommendation": {"type": "string"},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "files": {"type": "array", "items": {"type": "string"}},
+                    "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
                     "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
                     "evidence": {"type": "string"},
@@ -849,7 +855,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "integer"},
                     "description": {"type": "string"},
-                    "file": {"type": "string"},
+                    "file": _REPOSITORY_FILE_PATH_SCHEMA,
                     "line": {"type": "integer"},
                     "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
