@@ -851,6 +851,25 @@ async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, make_work,
     assert "assumes single-threaded" in prompt
 
 
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """A multi-item batch with any unconfined file reference rejects the whole batch."""
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    hostile = _unconfined_finding_file(tmp_path, path_kind)
+    items = [
+        {"id": 1, "description": "Escape A", "file": hostile, "line": 1},
+        {"id": 2, "description": "Escape B", "file": hostile, "line": 2},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+    assert backend.prompts == []
+
+
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""

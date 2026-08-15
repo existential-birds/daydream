@@ -1900,22 +1900,14 @@ async def phase_fix_batched(
         )
         return
 
-    # Items with no file cannot be meaningfully batched under a shared file
-    # header — "<no-file>" is not a real path.  Delegate each one individually
-    # to phase_fix (which already handles the unknown-file case correctly).
-    if not items[0].get("file"):
-        for item, item_num in zip(items, item_nums):
-            await phase_fix(
-                backend, work, item, item_num, total,
-                console_lock=console_lock, intent_path=intent_path,
-                changed_files=changed_files,
-            )
-        return
-
     count = len(items)
-    file_path = items[0].get("file") or "Unknown file"
-    resolved = work.repo / file_path if file_path != "Unknown file" else None
-    file_ref = str(resolved) if resolved is not None and resolved.is_file() else file_path
+    # Validate EVERY item's file reference before any progress output or prompt
+    # construction: a single unconfined (or missing/non-string) reference
+    # rejects the whole batch. All items target the same file, so the first
+    # item's canonical resolution is the group's.
+    file_ref = _resolve_finding_file_ref(work.repo, items[0].get("file"))
+    for item in items[1:]:
+        _resolve_finding_file_ref(work.repo, item.get("file"))
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
