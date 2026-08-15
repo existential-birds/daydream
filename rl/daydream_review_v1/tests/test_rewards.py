@@ -90,6 +90,30 @@ def test_review_state_guard_rejects_base_state(
     assert _review_state(good_trace).run_dir is None
 
 
+async def test_score_without_runtime_records_nothing(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """The offline replay path — ``score(trace, None)`` — completes and records nothing.
+
+    The verifiers replay CLI scores archived traces with no runtime; the base
+    then skips every runtime-dependent signal (all three handlers here require
+    ``runtime``) and this task stages no run dir. The trace deliberately carries
+    the base ``State`` — the load-bearing shape from the replay path — so
+    reaching ``_review_state`` would raise TypeError. Completing, with no
+    rewards/metrics recorded, is the proof the offline branch never touches the
+    state guard, the run-dir fetch, or the runtime.
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace.info["daydream_archive_root"] = "/does/not/exist"
+    trace.info["daydream_repo_path"] = "/does/not/exist"
+
+    await task.score(trace)  # runtime defaults to None — the offline replay path
+
+    assert trace.rewards == {}
+    assert trace.metrics == {}
+
+
 def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID) -> Path:
     """Copy an archived run dir to ``<archive_root>/runs/<session_id>``."""
     dest = archive_root / "runs" / session_id

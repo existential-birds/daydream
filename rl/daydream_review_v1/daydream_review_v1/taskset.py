@@ -28,6 +28,7 @@ from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
 from pydantic import BaseModel, ConfigDict
+from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
 
@@ -283,7 +284,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             return
         state = _review_state(trace)
         with tempfile.TemporaryDirectory(prefix="daydream-rundir-") as staging:
-            state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
+            # The run-dir fetch is scoring work: it runs inside the same
+            # TaskError boundary the base class draws around signal evaluation,
+            # so a fetch failure (e.g. a missing artifact) is attributed to the
+            # task-scoring boundary rather than escaping as a raw OSError.
+            async with boundary(vf.TaskError, f"task {type(self).__name__} scoring"):
+                state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
             try:
                 await super().score(trace, runtime)
             finally:
