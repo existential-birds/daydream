@@ -218,7 +218,7 @@ Full contract: `docs/extensions.md`.
 | `DAYDREAM_BOT_HANDLE` / `DAYDREAM_AUTO_REVIEW` | Actions | Mention handle (no `@`); `false` disables auto-review |
 | `DAYDREAM_EXT_DIR` | Extensions | Path to `daydream_ext` (overrides `import daydream_ext`) |
 | `DAYDREAM_GH_TIMEOUT_SECONDS` / `_RETRIES` | Git ops | `gh` CLI timeout and retry count |
-| `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; superseded by the CLI `--trajectory-hub-repo` flag, overrides the file config |
+| `DAYDREAM_TRAJECTORY_HUB_REPO` | Archive | Optional HuggingFace dataset repo to upload each run's bundle to; one of the two operator sources (the other is the CLI `--trajectory-hub-repo` flag). The target checkout's file config is ignored for this |
 | `PI_PROVIDER` / `PI_THINKING` | Pi | `--provider` / `--thinking`; `PI_THINKING` loses to a per-phase `reasoning_effort` |
 | `PI_API_KEY` | Pi | Copied into the child's provider-native var (e.g. `ZAI_API_KEY`), **never onto argv**; warns and ignores if the provider has no mapped var |
 | `DAYDREAM_PI_RETRY_ATTEMPTS` / `_BASE_DELAY_S` / `_MAX_DELAY_S` | Retry | Attempts default 20, all backends |
