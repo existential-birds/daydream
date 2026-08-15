@@ -451,6 +451,28 @@ async def test_fix_tests_pass_green(
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
+async def test_green_unrelated_edit_gets_no_suite_reward(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """Starting green and making an unrelated/test-only edit earns no suite credit."""
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # The baked head is already green; the agent only touches README (unrelated)
+    # and a test comment (test-only) — the suite stays green.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
+    (repo / "README.md").write_text("# changed\n", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    # Suite green is telemetry, never a reward axis.
+    assert set(trace.rewards) == {"intrinsic_composite"}
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 1.0
+
+
 async def test_fix_tests_pass_red(
     tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
@@ -1095,6 +1117,7 @@ async def test_reward_version_is_pinned(
     intrinsic scorer it was evaluated against (``intrinsic_reward_version``).
     """
     from daydream.training.reward import REWARD_VERSION
+
     from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
 
     assert REWARD_VERSION == "2026.05.28-2", (
@@ -1122,6 +1145,7 @@ async def test_reward_breakdown_carries_dual_version_stamps(
 ) -> None:
     """The rollout reward contract and the intrinsic scorer version are two stamps."""
     from daydream.training.reward import REWARD_VERSION
+
     from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
 
     assert REWARD_VERSION == "2026.05.28-2"  # intrinsic parity pin (unchanged)
