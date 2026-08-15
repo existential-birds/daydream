@@ -499,45 +499,83 @@ async def _evaluate_review(
 
     for index, result in enumerate(results):
         gi, ci = task_meta[index]
+        golden_comment = golden[gi]["comment"]
         if isinstance(result, BaseException):
-            errors.append({"golden": golden[gi]["comment"], "candidate": candidates[ci], "error": str(result)})
+            errors.append({"golden": golden_comment, "candidate": candidates[ci], "error": str(result)})
             continue
 
         if result.match:
             positives.append((-result.confidence, index, gi, ci, result))
 
     # One-to-one assignment: each candidate (with its dedup siblings) satisfies at most one golden.
+    # A plain greedy pass can strand a golden whose candidate groups were all taken by earlier,
+    # higher-confidence matches even when a feasible two-TP assignment exists, so the assignment
+    # is built as a maximum-cardinality matching via alternating-path augmentation.
     positives.sort(key=lambda item: (item[0], item[1]))
-    used_groups: set[frozenset[int]] = set()
+    group_of_candidate: dict[int, frozenset[int]] = {
+        ci: frozenset({ci} | sibling_map.get(ci, set())) for ci in range(len(candidates))
+    }
+    golden_edges: list[list[tuple[int, JudgeVerdict]]] = [[] for _ in golden]
     for _negated_confidence, _index, gi, ci, result in positives:
-        if golden_matches[gi] is not None:
+        golden_edges[gi].append((ci, result))
+
+    # Contested candidates go to the golden with the strongest match; ties stay in golden-index
+    # order (stable sort), keeping the assignment deterministic.
+    golden_order = sorted(
+        range(len(golden)),
+        key=lambda gi: golden_edges[gi][0][1].confidence if golden_edges[gi] else -1.0,
+        reverse=True,
+    )
+
+    group_holder: dict[frozenset[int], int] = {}
+
+    def _try_assign(gi: int, seen_groups: set[frozenset[int]], visited_goldens: set[int]) -> bool:
+        """Match ``gi`` to a free candidate group, displacing other goldens along an
+        alternating path when needed. True if a (re)assignment was made."""
+        if gi in visited_goldens:
+            return False
+        visited_goldens.add(gi)
+        for ci, result in golden_edges[gi]:
+            group = group_of_candidate[ci]
+            if group in seen_groups:
+                continue
+            seen_groups.add(group)
+            holder = group_holder.get(group)
+            if holder is None or _try_assign(holder, seen_groups, visited_goldens):
+                group_holder[group] = gi
+                golden_matches[gi] = (ci, result)
+                return True
+        return False
+
+    for gi in golden_order:
+        _try_assign(gi, set(), set())
+
+    for gi, match in enumerate(golden_matches):
+        if match is None:
             continue
-        siblings = sibling_map.get(ci, set())
-        group = frozenset({ci} | siblings)
-        if group in used_groups:
-            continue
-        used_groups.add(group)
-        golden_matches[gi] = (ci, result)
+        ci, _verdict = match
         candidate_matched[ci] = True
-        for sibling in siblings:
+        for sibling in sibling_map.get(ci, set()):
             candidate_matched[sibling] = True
 
     true_positives = []
     false_negatives = []
     for gi, match in enumerate(golden_matches):
+        golden_comment = golden[gi]["comment"]
+        severity = golden[gi].get("severity")
         if match is not None:
             ci, verdict = match
             true_positives.append(
                 {
-                    "golden_comment": golden[gi]["comment"],
-                    "severity": golden[gi].get("severity"),
+                    "golden_comment": golden_comment,
+                    "severity": severity,
                     "matched_candidate": candidates[ci],
                     "confidence": verdict.confidence,
                     "reasoning": verdict.reasoning,
                 }
             )
         else:
-            false_negatives.append({"golden_comment": golden[gi]["comment"], "severity": golden[gi].get("severity")})
+            false_negatives.append({"golden_comment": golden_comment, "severity": severity})
 
     false_positives = [{"candidate": candidates[ci]} for ci, matched in enumerate(candidate_matched) if not matched]
     total_candidates = len(candidates)

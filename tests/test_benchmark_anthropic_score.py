@@ -302,6 +302,67 @@ async def test_direct_judge_tracks_duplicate_text_occurrences_by_position(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_direct_judge_finds_two_tps_when_greedy_would_strand_one(tmp_path):
+    """A greedy one-to-one pass can strand a golden whose candidate group was taken by an
+    earlier high-confidence match even when a feasible two-TP assignment exists; the
+    maximum-cardinality matching must find both true positives."""
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "benchmark_data.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "golden_comments": [
+                        {"comment": "bug a", "severity": "medium"},
+                        {"comment": "bug b", "severity": "medium"},
+                    ],
+                    "reviews": [
+                        {
+                            "tool": "daydream",
+                            "repo_name": "repo",
+                            "pr_url": URL,
+                            "review_comments": [{"body": "the bug"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["fix c", "fix d"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=[[0], [1]])
+    # Greedy would take g1c0 (0.9) first, leaving g0 unmatched even though g0c0 + g1c1
+    # is a feasible two-TP assignment. Judge tasks run in (gi, ci) order: g0c0, g0c1, g1c0, g1c1.
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["fix c", "fix d"]},
+            {"groups": [[0], [1]]},
+            {"reasoning": "g0c0", "match": True, "confidence": 0.5},
+            {"reasoning": "g0c1", "match": False, "confidence": 0.0},
+            {"reasoning": "g1c0", "match": True, "confidence": 0.9},
+            {"reasoning": "g1c1", "match": True, "confidence": 0.5},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["bug a", "bug b"]
+    assert leaf["false_positives"] == []
+    assert leaf["false_negatives"] == []
+    assert (leaf["tp"], leaf["fp"], leaf["fn"]) == (2, 0, 0)
+    assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+    assert (scores.total_tp, scores.total_fp, scores.total_fn) == (2, 0, 0)
+
+
+@pytest.mark.asyncio
 async def test_direct_judge_precision_counts_dedup_siblings_once(tmp_path):
     """A dedup sibling group is one logical candidate: matching it must not leave
     its siblings inflating the precision denominator behind ``fp``'s back."""
