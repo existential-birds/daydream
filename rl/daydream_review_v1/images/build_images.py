@@ -263,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if not fixture_selected:
             print(
-                "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
+                "--red requires at least one selected fixture PR backed by " + FIXTURE_CLONE_URL,
                 file=sys.stderr,
             )
             return 2
