@@ -1193,6 +1193,10 @@ def build_intent_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    elif inline_diff is not None:
+        # No exploration pointer to carry the untrusted boundary; the inlined
+        # diff is itself repository-controlled content, so guard it directly.
+        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     if pr_description and pr_description.strip():
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:

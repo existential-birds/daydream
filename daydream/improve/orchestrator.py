@@ -208,6 +208,12 @@ def _build_recon_prompt(
         {root for group in groups for root in group.roots if root != "."}
     )
     root_list = ", ".join(f"`{root}`" for root in audited_roots)
+    # `exploration_summary` (ExplorationContext.to_prompt_section()) opens with
+    # the same boundary emitted below; strip it so the untrusted-content warning
+    # appears exactly once in the recon prompt.
+    summary_prefix = "# Exploration Context\n\n" + UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY + "\n\n"
+    if exploration_summary.startswith(summary_prefix):
+        exploration_summary = exploration_summary.removeprefix(summary_prefix)
     return f"""IMPROVE_RECON
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}

@@ -160,9 +160,10 @@ Instructions:
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+To inspect changes, Read or Grep any file listed in <affected_files> directly.
+If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
+to see exactly what changed. Do NOT dump the full diff — work file-by-file so
+your context stays small.
 
 {_schema_block(PATTERN_SCANNER_SCHEMA)}
 """
@@ -239,9 +240,10 @@ emit a Dependency record.
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+To inspect changes, Read or Grep any file listed in <affected_files> directly.
+If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
+to see exactly what changed. Do NOT dump the full diff — work file-by-file so
+your context stays small.
 
 {_schema_block(DEPENDENCY_TRACER_SCHEMA)}
 """
@@ -273,9 +275,10 @@ each test file you find.
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+To inspect changes, Read or Grep any file listed in <affected_files> directly.
+If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
+to see exactly what changed. Do NOT dump the full diff — work file-by-file so
+your context stays small.
 
 {_schema_block(TEST_MAPPER_SCHEMA)}
 """

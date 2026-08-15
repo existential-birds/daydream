@@ -17,6 +17,15 @@ from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+# Single rendering of the untrusted-content warning shared by the inline prompt
+# section and every persisted artifact, so the boundary text lives in one place.
+_BOUNDARY_BLOCKQUOTE = f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}"
+
+
+def _no_data_artifact(title: str) -> str:
+    """Markdown body for a persisted artifact when nothing was collected."""
+    return f"# {title}\n{_BOUNDARY_BLOCKQUOTE}\n\nNo data collected.\n"
+
 
 @dataclass
 class FileInfo:
@@ -132,7 +141,7 @@ class ExplorationContext:
 
         return (
             "# Exploration Context\n\n"
-            + UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+            + _BOUNDARY_BLOCKQUOTE
             + "\n\n"
             + "\n\n".join(sections)
             + "\n"
@@ -143,19 +152,17 @@ class ExplorationContext:
         exploration_dir.mkdir(parents=True, exist_ok=True)
 
         if self.affected_files:
-            lines = ["# Affected Files", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+            lines = ["# Affected Files", _BOUNDARY_BLOCKQUOTE, "",
                      "Files relevant to the current review, discovered by exploration.",
                      "| File | Role | Summary |", "|------|------|---------|"]
             for f in self.affected_files:
                 lines.append(f"| `{f.path}` | {f.role} | {f.summary} |")
             (exploration_dir / "affected_files.md").write_text("\n".join(lines) + "\n")
         else:
-            (exploration_dir / "affected_files.md").write_text(
-                f"# Affected Files\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
-            )
+            (exploration_dir / "affected_files.md").write_text(_no_data_artifact("Affected Files"))
 
         if self.conventions or self.guidelines:
-            lines = ["# Codebase Conventions", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+            lines = ["# Codebase Conventions", _BOUNDARY_BLOCKQUOTE, "",
                      "Conventions detected during pre-scan exploration."]
             if self.conventions:
                 lines.append("## Conventions")
@@ -172,23 +179,19 @@ class ExplorationContext:
                 lines.append("")
             (exploration_dir / "conventions.md").write_text("\n".join(lines))
         else:
-            (exploration_dir / "conventions.md").write_text(
-                f"# Codebase Conventions\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
-            )
+            (exploration_dir / "conventions.md").write_text(_no_data_artifact("Codebase Conventions"))
 
         if self.dependencies:
-            lines = ["# Dependencies", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+            lines = ["# Dependencies", _BOUNDARY_BLOCKQUOTE, "",
                      "Import and call relationships between files.",
                      "| Source | Relationship | Target |", "|--------|-------------|--------|"]
             for d in self.dependencies:
                 lines.append(f"| `{d.source}` | {d.relationship} | `{d.target}` |")
             (exploration_dir / "dependencies.md").write_text("\n".join(lines) + "\n")
         else:
-            (exploration_dir / "dependencies.md").write_text(
-                f"# Dependencies\n> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\nNo data collected.\n"
-            )
+            (exploration_dir / "dependencies.md").write_text(_no_data_artifact("Dependencies"))
 
-        summary_lines = ["# Exploration Summary", f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}", "",
+        summary_lines = ["# Exploration Summary", _BOUNDARY_BLOCKQUOTE, "",
                          "Pre-scan exploration results for the current review.",
                          "| File | Contents |", "|------|----------|"]
         if self.affected_files:
@@ -312,6 +315,10 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
 
 CACHE_KEY_FILENAME = "cache-key"
 
+# Bump when the artifact generator changes (e.g. a new boundary rendering) so
+# upgrades force regeneration instead of serving pre-upgrade artifacts on a key match.
+_CACHE_VERSION = 2
+
 
 def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str) -> str:
     """Content key identifying one exploration pre-scan result.
@@ -324,9 +331,11 @@ def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str)
 
     An exact key match is reused even with uncommitted worktree edits: the key
     intentionally excludes uncommitted edits because reuse is exact-match-only
-    on head SHA + diff + tier + depth.
+    on head SHA + diff + tier + depth. The generating code is versioned into the
+    key too, so an upgrade that changes artifact rendering (``_CACHE_VERSION``)
+    never serves stale pre-upgrade artifacts on an exact match.
     """
-    payload = f"{head_sha}\n{diff}\n{tier}\n{depth}"
+    payload = f"{_CACHE_VERSION}\n{head_sha}\n{diff}\n{tier}\n{depth}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

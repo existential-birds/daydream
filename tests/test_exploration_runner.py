@@ -44,6 +44,8 @@ def test_pattern_scanner_prompt_includes_guideline_files():
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in dynamic
     # Regression guard: raw diff text must never be embedded.
     assert "<diff>" not in dynamic
+    # git diff must be Bash-conditional -- read_only backends (Pi) have no Bash.
+    assert "If a Bash tool is available, you may also run `git diff" in dynamic
 
 
 def test_dependency_tracer_prompt_mentions_affected_files():
@@ -56,6 +58,7 @@ def test_dependency_tracer_prompt_mentions_affected_files():
     assert "```json" in prompt
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
+    assert "If a Bash tool is available, you may also run `git diff" in prompt
 
 
 def test_test_mapper_prompt_instructs_mapping():
@@ -68,6 +71,7 @@ def test_test_mapper_prompt_instructs_mapping():
     assert "```json" in prompt
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
+    assert "If a Bash tool is available, you may also run `git diff" in prompt
 
 
 def test_schemas_are_valid_objects():
@@ -184,7 +188,6 @@ def test_single_tier_dependency_tracer_only(tmp_path):
 
     assert len(backend.execute_calls) == 1
     assert backend.execute_calls[0]["schema"] == DEPENDENCY_TRACER_SCHEMA
-    assert backend.execute_calls
     assert all(call["read_only"] is True for call in backend.execute_calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
@@ -201,7 +204,6 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
     assert len(schemas) >= 1  # All are "object" type
-    assert backend.execute_calls
     assert all(call["read_only"] is True for call in backend.execute_calls)
     # No agents= passed and no raw diff leaked into specialist prompts.
     for call in backend.execute_calls:
