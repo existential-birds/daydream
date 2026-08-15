@@ -2647,6 +2647,41 @@ def _first_unconfined_finding(
     return None
 
 
+def _record_unconfined_finding_failure(
+    repo: Path,
+    items: list[dict[str, Any]],
+    exc: UnconfinedFindingError,
+) -> tuple[dict[str, str], str]:
+    """Record an unconfined-finding preflight rejection in ``fix_failures``.
+
+    ``phase_fix_parallel``'s confinement gate raises ``UnconfinedFindingError``
+    before dispatching any fix. This routes the rejection through the same
+    exception-failure recovery as a normal fix-group failure (patch capture,
+    fix_failures persistence, tree restore, generated-file reject, Stop(1))
+    instead of letting it escape to cli.py's generic handler.
+
+    The failure entry is keyed by the finding's STABLE id -- never the
+    unconfined path -- so the unsafe ref cannot become a grouping key or
+    restore argument. Returns the single-entry ``fix_failures`` dict along
+    with its key, so the caller can exclude the entry from path-based
+    tree-restore machinery: the id is not a repo-relative path, and the
+    preflight aborted before any dispatch, so no rollback is owed for it.
+    """
+    offender = _first_unconfined_finding(repo, items)
+    offender_id = offender.get("id") if offender else None
+    offender_file = offender.get("file") if offender else None
+    detail = f" (finding {offender_id}, file {offender_file!r})"
+    fix_key = str(offender_id) if offender_id is not None else "<unconfined-finding>"
+    fix_failures: dict[str, str] = {}
+    _record_fix_failure(fix_failures, fix_key, exc)
+    fix_failures[fix_key] += detail
+    print_warning(
+        console,
+        f"Fix preflight rejected an unconfined finding{detail}; no fixes applied.",
+    )
+    return fix_failures, fix_key
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
     from daydream import git_ops
@@ -2727,6 +2762,9 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # _resolve_changed_files (shared with the gate) so a missing key never
     # crashes and the gate and post-fix residual net agree on the allowed set.
     changed_files = _resolve_changed_files(ctx)
+    # Set when the preflight confinement gate aborts the fix pass; its
+    # id-keyed failure entry is excluded from path-based tree restore below.
+    unconfined_fix_key: str | None = None
     async with phase_scope(DaydreamPhase.FIX):
         try:
             fix_failures: dict[str, str] = await phase_fix_parallel(
@@ -2746,21 +2784,9 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             # Stop(1)) instead of letting it escape to cli.py's generic
             # handler. Only this exact type is caught so a ValueError from
             # elsewhere inside phase_fix_parallel (e.g. a parser) is never
-            # misattributed to an unconfined finding. The failure entry is
-            # keyed by the finding's STABLE id -- never the unconfined path --
-            # so the unsafe ref cannot become a grouping key or restore
-            # argument.
-            offender = _first_unconfined_finding(work.repo, items)
-            offender_id = offender.get("id") if offender else None
-            offender_file = offender.get("file") if offender else None
-            fix_failures = {}
-            fix_key = str(offender_id) if offender_id is not None else "<unconfined-finding>"
-            _record_fix_failure(fix_failures, fix_key, exc)
-            fix_failures[fix_key] += f" (finding {offender_id}, file {offender_file!r})"
-            print_warning(
-                console,
-                f"Fix preflight rejected an unconfined finding "
-                f"(finding {offender_id}, file {offender_file!r}); no fixes applied.",
+            # misattributed to an unconfined finding.
+            fix_failures, unconfined_fix_key = _record_unconfined_finding_failure(
+                work.repo, items, exc
             )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so
@@ -2791,11 +2817,14 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
 
     if exception_failures:
         # Only revert and abort for exception-failed groups; budget-exceeded
-        # groups' applied fixes are preserved and the run continues.
+        # groups' applied fixes are preserved and the run continues. The
+        # unconfined-finding entry (id-keyed, not a repo-relative path) is
+        # excluded: its preflight abort dispatched no fixes, and the id must
+        # never reach path-based restore machinery as a file path.
         _protect_tree_after_fix_failures(
             work,
             target_dir,
-            exception_failures,
+            {k: v for k, v in exception_failures.items() if k != unconfined_fix_key},
             snapshot=pre_fix_snapshot,
             snapshot_captured=pre_fix_snapshot_captured,
             pre_untracked=pre_fix_untracked,

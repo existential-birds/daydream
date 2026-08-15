@@ -1925,11 +1925,13 @@ def main() -> None:
         # renders actionably if it ever escapes). Matched by type, not by
         # message, so a ValueError from elsewhere is never misattributed to an
         # unconfined finding; any other ValueError falls through to the generic
-        # handler below.
+        # handler below. The message must not cite the fix_failures artifact:
+        # that file is written only by ``_step_fix``'s recovery path, so when
+        # the exception escapes to here, no artifact exists.
         _shutdown_and_exit(
             console,
             "Unconfined Finding",
-            f"{e} Check the run's fix_failures artifact and the finding's file ref.",
+            f"{e}. Check the finding's file ref.",
         )
     except Exception as e:
         _shutdown_and_exit(console, "Fatal Error", str(e))
