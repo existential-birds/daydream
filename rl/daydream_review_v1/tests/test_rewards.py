@@ -539,6 +539,34 @@ async def test_oracle_gate_fails_closed_on_git_error(
     _assert_gate_held(trace)
 
 
+async def test_assert_gate_held_raises_when_claim_absent(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A claim-less staged run must not let the gate oracle pass vacuously.
+
+    Production behavior is unchanged: no claim -> no test_claim_mismatch recorded.
+    But _assert_gate_held must now fail loudly on that shape, because without
+    the claim its test_claim_mismatch-absence assertion proves nothing.
+    """
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    (run_dir / "deep" / "test-verdict.json").unlink()
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert "test_claim_mismatch" not in trace.metrics
+    with pytest.raises(AssertionError):
+        _assert_gate_held(trace)
+
+
 @pytest.mark.parametrize(
     "flag",
     ["--skip-worktree", "--assume-unchanged"],
