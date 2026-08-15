@@ -1403,9 +1403,27 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
 
+    # Issue #644 — the sweep's block extraction must source the FULL on-disk
+    # diff (``ctx.data["diff_path"]``, always written full at gather) because
+    # the coverage file set above derives from the same full ``diff.patch``:
+    # a bounded in-memory ``ctx.data["diff"]`` would silently route a
+    # truncated-away file into ``skipped_small`` (block lookup -> None) and it
+    # would never be swept. A read error here propagates to the step's
+    # fail-open wrapper (the sweep must NEVER fail the run); it is not
+    # swallowed with a silent empty-diff fallback.
+    full_diff: str
+    diff_path = ctx.data.get("diff_path")
+    if diff_path is not None:
+        full_diff = diff_path.read_text(encoding="utf-8")
+    else:
+        # Defensive legacy fallback only (never the default): a ctx built
+        # without ``diff_path`` degrades to the in-memory diff rather than
+        # crashing the sweep.
+        full_diff = ctx.data["diff"]
+
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
-        ctx.data["diff"],
+        full_diff,
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
         max_files=_uncovered_sweep_max_files(config),
     )
@@ -1463,7 +1481,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             output_path = dd / f"uncovered-{n}-review.md"
             prompt = build_uncovered_sweep_prompt(
                 file=file,
-                hunks=diff_block_for_file(ctx.data["diff"], file) or "",
+                hunks=diff_block_for_file(full_diff, file) or "",
                 intent_path=ctx.data["intent_path"],
                 cwd=ctx.work.repo,
                 output_path=output_path,

@@ -6794,7 +6794,44 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     assert "line 50 of filler content" in patch  # a line far into big.py is present
 
 
-# --- Task 12b: each TTT step writes its own artifact -------------------------
+async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep extracts blocks from the FULL diff.patch, not the bounded
+    ctx.data['diff'], so sweep targets cannot diverge from the coverage set.
+
+    Discriminating: if the sweep used the bounded ctx.data['diff'], a file whose
+    block was truncated away would land in skipped_small (diff_block_for_file ->
+    None) instead of being swept.
+    """
+    import inspect
+
+    from daydream.deep.orchestrator import _run_uncovered_sweep
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target, uncovered_sweep=True) == 0
+
+    # The sweep's two block-extraction call sites must source their diff from
+    # the FULL on-disk patch (ctx.data['diff_path']), never the bounded
+    # ctx.data['diff']. Read the step body and assert each call's diff argument
+    # is a diff_path-derived variable, and that the bounded key is not the
+    # block source inside this function.
+    body = inspect.getsource(_run_uncovered_sweep)
+    func_src = body[body.index("def "):]
+    # The block source variable must be read from the full on-disk patch.
+    assert "diff_path" in func_src, "sweep must source blocks from diff_path (full diff.patch)"
+    # The bounded in-memory key must NOT be the diff argument to the two call sites.
+    # (It may still appear as a comment/other key; the guard is the block feed.)
+
+    def _call_slice(name: str) -> str:
+        start = func_src.index(name)
+        return func_src[start : func_src.index(")\n", start)]
+
+    sweep_call = _call_slice("filter_sweepable_files")
+    block_call = _call_slice("diff_block_for_file")
+    assert 'ctx.data["diff"]' not in sweep_call
+    assert 'ctx.data["diff"]' not in block_call
 
 
 async def test_intent_artifact_survives_wonder_failure(
