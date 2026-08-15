@@ -10,16 +10,18 @@ the checkout.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 
 import pytest
-from conftest import PROJECT_ROOT
+from conftest import PROJECT_ROOT, docker_daemon_is_available
 
 from daydream_review_v1.fixture import FIXTURE_SLUG
 
-DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
+DOCKER_REQUIRED = pytest.mark.skipif(
+    not docker_daemon_is_available(),
+    reason="docker is not installed or the daemon is unavailable",
+)
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
 
@@ -91,6 +93,19 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout
+
+
+def test_docker_required_gates_on_daemon_reachability() -> None:
+    """The per-test Docker skip must gate on daemon reachability, not client presence."""
+    module = sys.modules[__name__]
+    # The skip condition keys on the reachability predicate imported from conftest...
+    assert "docker_daemon_is_available" in vars(module), "reachability predicate import missing"
+    # ...and the stale client-presence probe is gone.
+    assert "shutil" not in vars(module), "stale shutil.which probe remains"
+    assert (
+        DOCKER_REQUIRED.mark.kwargs["reason"]
+        == "docker is not installed or the daemon is unavailable"
+    )
 
 
 def test_docker_skip_is_per_test_not_module_wide() -> None:
