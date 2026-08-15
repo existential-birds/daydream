@@ -347,52 +347,85 @@ def _is_sensitive_key(key: str) -> bool:
     return any(segment in _SENSITIVE_KEY_SUFFIXES for segment in normalized.split("_"))
 
 
-# Auth-header redaction (issue #455): case-insensitive, line-anchored. The
-# value capture is line-bounded (no DOTALL) so nothing past the end of the
-# line is ever consumed. Runs BEFORE the flat rules so a shaped value under
-# a header is consumed whole here and never double-marked downstream.
+# Auth-header redaction (issue #455): case-insensitive, matches mid-line as
+# well as line-start headers (curl -v / httpie output, YAML blocks, embedded
+# headers). A negative lookbehind keeps the match from firing inside a word
+# or a quoted JSON/YAML key; the value capture is a single token — with an
+# optional Basic|Bearer|Token scheme prefix — so nothing past the token, and
+# never past the end of the line, is ever consumed. A trailing lookahead
+# keeps prose like ``The authorization: feature is enabled now`` out of this
+# stage (the structured pair scan decides that case). Runs BEFORE the flat
+# rules so a shaped value under a header is consumed whole here and never
+# double-marked downstream.
 _AUTHORIZATION_HEADER_PATTERN = re.compile(
-    r"^(Authorization|Proxy-Authorization|X-Api-Key|X-Auth-Token|Cookie|Set-Cookie):[^\S\n\r]*([^\n\r]+)$",
-    re.IGNORECASE | re.MULTILINE,
+    r"(?<![A-Za-z0-9_\"'])(Authorization|Proxy-Authorization|X-Api-Key|X-Auth-Token|Cookie|Set-Cookie):"
+    r"[^\S\n\r]*(?:(Basic|Bearer|Token)[^\S\n\r]+)?([^\s,;\"']+)"
+    r"(?=[^\S\n\r]*[,}\]\r\n]|$)",
+    re.IGNORECASE,
 )
-# Optional auth scheme prefix on a header value: keep the scheme + whitespace,
-# replace only the trailing opaque token.
-_AUTH_SCHEME_PATTERN = re.compile(r"^(Basic|Bearer|Token)\s+(\S+)")
 # Structured key<: or =>value pairs in free text (JSON, Python-repr, YAML,
 # assignment). The key may be wrapped in single or double quotes; values are
-# single/double-quoted or a bare token, with backslash-escaped quotes honored
-# inside quoted values. A value that starts with a structural
-# open-brace does not match (the pair is skipped so the scan continues to
-# inner keys). A negative lookahead prevents re-matching a value that is
-# immediately followed by a [REDACTED_*] marker (existing env-var/API-key/
-# header redactions must not be clobbered).
+# single/double-quoted, a Bearer|Basic|Token scheme plus its opaque token, or
+# a bare token, with backslash-escaped quotes honored inside quoted values.
+# The bare-token class excludes the structural separators ',', ':' and '=' so
+# replacing a value never swallows the separator that follows it
+# ('{"token": null, "count": 3}' keeps its comma). A value that starts with
+# a structural open-brace does not match (the pair is skipped so the scan
+# continues to inner keys); block-style values are handled by the follow-up
+# _redact_structured_blocks pass. A negative lookahead prevents re-matching a
+# value that is immediately followed by a [REDACTED_*] marker (existing
+# env-var/API-key/header redactions must not be clobbered).
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
-    r"(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|([^\s\"'\[\]{}()]++))"
+    r"(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|(Basic|Bearer|Token)[^\S\n\r]+([^\s,;\"']+)|([^\s\"'\[\]{}():,=]++))"
     r"(?![^\S\n\r]*\[REDACTED)",
 )
 
 
-def _redact_structured_key_value(match: re.Match[str]) -> str:
+def _redact_structured_key_value(match: re.Match[str], text: str) -> str:
     """Replace one sensitive ``key<: or =>value`` pair (match->str transform).
 
-    Re-emits the key's quote wrapper (group 1) and the value's surrounding
-    quotes so JSON/Python-repr text stays structurally valid: the value token
-    becomes ``_REDACTED_CREDENTIAL``, never dropped. Existing ``[REDACTED_*]``
-    markers and empty values are never re-matched.
+    Re-emits the key's quote wrapper (group 1) and a single quote variable
+    around the value so JSON/Python-repr text stays structurally valid: the
+    value token becomes ``_REDACTED_CREDENTIAL``, never dropped. Bare-token
+    values are redacted only when the pair is an ``=`` assignment or the value
+    ends at a structural boundary, so prose like ``the token: is now
+    available`` is left intact. Existing ``[REDACTED_*]`` markers and empty
+    values are never re-matched.
     """
     key = match.group(2)
     if not _is_sensitive_key(key):
         return match.group(0)
-    value = match.group(4) or match.group(5) or match.group(6)
+    wrapped_key = f"{match.group(1)}{key}{match.group(1)}"
+    sep = match.group(3)
+    if match.group(6) is not None:
+        # Bearer|Basic|Token <opaque>: keep the scheme, replace the token.
+        token = match.group(7)
+        if token is None or token == "" or "[REDACTED" in token:
+            return match.group(0)
+        return f"{wrapped_key}{sep}{match.group(6)} {_REDACTED_CREDENTIAL}"
+    value = match.group(4) or match.group(5) or match.group(8)
     if value is None or value == "" or "[REDACTED" in value:
         return match.group(0)
-    wrapped_key = f"{match.group(1)}{key}{match.group(1)}"
-    if match.group(4) is not None:
-        return f'{wrapped_key}{match.group(3)}"{_REDACTED_CREDENTIAL}"'
-    if match.group(5) is not None:
-        return f"{wrapped_key}{match.group(3)}'{_REDACTED_CREDENTIAL}'"
-    return f"{wrapped_key}{match.group(3)}{_REDACTED_CREDENTIAL}"
+    if match.group(8) is not None and not _bare_value_redactable(sep, text, match.end()):
+        return match.group(0)
+    quote = '"' if (match.group(4) is not None or match.group(8) is not None) else "'"
+    return f"{wrapped_key}{sep}{quote}{_REDACTED_CREDENTIAL}{quote}"
+
+
+def _bare_value_redactable(sep: str, text: str, end: int) -> bool:
+    """Return True when a bare (unquoted) pair value should be redacted.
+
+    ``=`` assignments are structural by nature and always redact; a ``:``
+    value redacts only when it ends at a structural boundary — end of text,
+    end of line, or one of ``, } ]`` — so prose like ``the token: is now
+    available`` or ``The authorization: feature is enabled now`` survives
+    while YAML-ish ``token: abc, other: 1`` keeps both its redaction and its
+    separator.
+    """
+    if "=" in sep:
+        return True
+    return not text[end:] or re.match(r"[^\S\n\r]*[,}\]\r\n]", text[end:]) is not None
 
 
 def _redact_structured_key_values(text: str) -> str:
@@ -400,27 +433,146 @@ def _redact_structured_key_values(text: str) -> str:
 
     Finds ``key<: or =>value`` pairs in JSON, Python-repr, YAML-like, and
     assignment text. For each pair whose key ``_is_sensitive_key``, replace
-    the value token with ``_REDACTED_CREDENTIAL``. Existing ``[REDACTED_*]``
-    markers and empty values are never re-matched. Any exception degrades to
-    ``"[REDACTION_FAILED]"``.
+    the value token with ``_REDACTED_CREDENTIAL``; block-style values
+    (multi-line YAML, brace-wrapped JSON) are consumed wholesale by the
+    follow-up block pass. Existing ``[REDACTED_*]`` markers and empty values
+    are never re-matched. Any exception degrades to ``"[REDACTION_FAILED]"``.
     """
     try:
-        return _STRUCTURED_KEY_VALUE_PATTERN.sub(_redact_structured_key_value, text)
+        return _redact_structured_blocks(_redact_structured_pairs(text))
     except Exception:  # noqa: BLE001 - fail closed at every host boundary
         return "[REDACTION_FAILED]"
 
 
+def _redact_structured_pairs(text: str) -> str:
+    """Redact line-scoped ``key<: or =>value`` pairs, re-scanning every value.
+
+    A plain ``re.sub`` resumes after each consumed match, so a sensitive pair
+    nested inside a non-sensitive pair's value (``text: apiKey: opaque``,
+    ``config: token=opaque``, ``{\"description\": \"use token=opaque here\"}``)
+    would never be visited. The scan instead advances one character past any
+    pair whose key is not sensitive, so nested pairs inside its value are
+    still found and redacted.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        match = _STRUCTURED_KEY_VALUE_PATTERN.search(text, pos)
+        if match is None:
+            break
+        if _is_sensitive_key(match.group(2)):
+            out.append(text[pos:match.start()])
+            out.append(_redact_structured_key_value(match, text))
+            pos = match.end()
+        else:
+            out.append(text[pos:match.start() + 1])
+            pos = match.start() + 1
+    out.append(text[pos:])
+    return "".join(out)
+
+
+_BLOCK_VALUE_PATTERN = re.compile(
+    r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
+    r"(?=[\[{](?!REDACTED)|\n)"
+)
+
+
+def _redact_structured_blocks(text: str) -> str:
+    """Redact block-style values under sensitive keys (fail-closed).
+
+    Handles what the line-scoped pair scan cannot: block-style YAML
+    (``apiKey:\\n  nested: <opaque>``) and brace-wrapped JSON
+    (``\"apiKey\": {\\n  \"nested\": ...\\n}``) where the sensitive value
+    spans lines. Each matched block is replaced wholesale with a quoted
+    ``_REDACTED_CREDENTIAL`` marker so the output stays structurally valid.
+    """
+    try:
+        out: list[str] = []
+        pos = 0
+        while True:
+            match = _BLOCK_VALUE_PATTERN.search(text, pos)
+            if match is None:
+                break
+            key = match.group(2)
+            if not _is_sensitive_key(key):
+                out.append(text[pos:match.start() + 1])
+                pos = match.start() + 1
+                continue
+            block_end = _block_value_end(text, match.end())
+            if block_end == match.end():
+                # no indented block follows (empty value): skip and re-scan
+                out.append(text[pos:match.start() + 1])
+                pos = match.start() + 1
+                continue
+            out.append(text[pos:match.start()])
+            quote = match.group(1) or ""
+            out.append(f"{quote}{key}{quote}{match.group(3)}\"{_REDACTED_CREDENTIAL}\"")
+            pos = block_end
+        out.append(text[pos:])
+        return "".join(out)
+    except Exception:  # noqa: BLE001 - fail closed at every host boundary
+        return "[REDACTION_FAILED]"
+
+
+def _block_value_end(text: str, start: int) -> int:
+    """Return the index just past the block opened at *start*.
+
+    Brace/bracket blocks are consumed to their matching close (quote-aware);
+    an unbalanced opener consumes to the end of the text (fail-safe).
+    YAML-style blocks consume every following indented line, stopping at the
+    first line that outdents back to the key's level — or return *start*
+    unchanged when nothing is indented.
+    """
+    if start >= len(text):
+        return start
+    if text[start] in "[{":
+        opener = text[start]
+        closer = "}" if opener == "{" else "]"
+        depth = 0
+        quote: str | None = None
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if quote is not None:
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == quote:
+                    quote = None
+            elif ch in "\"'":
+                quote = ch
+            elif ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return i + 1
+            i += 1
+        return len(text)
+    # text[start] is the newline ending the key's line.
+    prev = start
+    i = start
+    while i <= len(text):
+        line_end = text.find("\n", i)
+        if line_end == -1:
+            line_end = len(text)
+        line = text[i:line_end]
+        if line and not line[0].isspace():
+            break
+        prev = line_end
+        i = line_end + 1
+    return prev
+
+
 def _redact_header_value(match: re.Match[str]) -> str:
-    """Replace one auth-header line's opaque credential (match->str transform).
+    """Replace one auth-header credential (match->str transform).
 
     Keeps the header name — and a ``Basic|Bearer|Token`` scheme when present —
-    replacing the trailing credential with ``_REDACTED_CREDENTIAL``.
+    replacing the trailing opaque token with ``_REDACTED_CREDENTIAL``.
     """
     name = match.group(1)
-    value = match.group(2)
-    scheme_match = _AUTH_SCHEME_PATTERN.match(value)
-    if scheme_match is not None:
-        return f"{name}: {scheme_match.group(1)} {_REDACTED_CREDENTIAL}"
+    if match.group(2) is not None:
+        return f"{name}: {match.group(2)} {_REDACTED_CREDENTIAL}"
     return f"{name}: {_REDACTED_CREDENTIAL}"
 
 
@@ -467,25 +619,11 @@ class Redactor:
             return None
         return redact_structured_text(value)
 
-    def _redact_value(self, value: Any, sensitive: bool = False) -> Any:
-        """Recursively redact *value*, key-aware, without mutating it.
-
-        Delegates to the canonical module-level :func:`redact_value` so the
-        trajectory path and log-mode payload redaction share one recursion
-        (issue #455): string leaves under a sensitive key (their own key, or
-        inherited from a sensitive ancestor container) become
-        ``_REDACTED_CREDENTIAL``, other string leaves run through
-        :func:`redact_structured_text`, and string dict keys are scrubbed via
-        :func:`redact_text`. Fresh containers are built at every level, so the
-        caller's object is never touched.
-        """
-        return redact_value(value, sensitive)
-
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Redact every value inside a ToolCall.arguments dict (native walk).
 
         Each value is walked recursively with key-aware sensitive-key
-        detection (``_redact_value``) so nested credentials under
+        detection (:func:`redact_value`) so nested credentials under
         lower/mixed/camel-case keys are replaced without a JSON round-trip;
         the output keeps its declared ``dict[str, Any]`` shape and preserves
         nested structure (CR-01). A failure on any one key degrades only that
@@ -494,7 +632,7 @@ class Redactor:
         out: dict[str, Any] = {}
         for key, val in arguments.items():
             try:
-                out[key] = self._redact_value(
+                out[key] = redact_value(
                     val, _is_sensitive_key(key) if isinstance(key, str) else False
                 )
             except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
