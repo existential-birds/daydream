@@ -71,6 +71,16 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The standalone suite's negative-gate tests git-commit into throwaway
+      # temp repos (e.g. the empty-commit fix-tracking cases). Runners carry no
+      # global identity, so without this the commits fail with "Author identity
+      # unknown". A fixed, neutral identity keeps those tests deterministic and
+      # identical on every runner.
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@daydream.invalid"
+          git config --global user.name "daydream CI"
+
       # Reads the freshly checked-out committed standalone uv.lock BEFORE `uv sync`
       # can heal it. A stale standalone lock (a change bumped the standalone
       # pyproject.toml but forgot `uv lock`) must fail here, not be silently healed.

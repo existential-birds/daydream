@@ -202,25 +202,40 @@ def build_repo_image(entry: _ManifestEntry, *, head_sha: str, base_sha: str, bas
         head = remap.get(head_sha, head_sha)
         base = remap.get(base_sha, base_sha)
         tag = f"{entry.image}:{head[:12]}"
-        _stream(
-            [
-                "docker",
-                "build",
-                "-f",
-                str(IMAGES_DIR / "repo.Dockerfile"),
-                "--build-arg",
-                f"BASE_IMAGE={base_image}",
-                "--build-arg",
-                f"HEAD_SHA={head}",
-                "--build-arg",
-                f"BASE_SHA={base}",
-                "--build-arg",
-                f"TEST_COMMAND={entry.test_command}",
-                "-t",
-                tag,
-                str(ctx),
-            ]
-        )
+        try:
+            _stream(
+                [
+                    "docker",
+                    "build",
+                    "-f",
+                    str(IMAGES_DIR / "repo.Dockerfile"),
+                    "--build-arg",
+                    f"BASE_IMAGE={base_image}",
+                    "--build-arg",
+                    f"HEAD_SHA={head}",
+                    "--build-arg",
+                    f"BASE_SHA={base}",
+                    "--build-arg",
+                    f"TEST_COMMAND={entry.test_command}",
+                    "-t",
+                    tag,
+                    str(ctx),
+                ]
+            )
+        except subprocess.CalledProcessError:
+            # The green-baseline gate tripped: the suite at the head commit was
+            # red, so the build died at the final test layer. Some docker
+            # daemons still leave the partially-built image tagged on failure;
+            # that dangling tag is exactly what test_images.py asserts must NOT
+            # exist for a red baseline. Remove it so the invariant holds
+            # regardless of the host's docker behavior, then re-raise.
+            subprocess.run(
+                ["docker", "rmi", tag],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            raise
     return tag
 
 
