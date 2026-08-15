@@ -51,6 +51,18 @@ class Manifest:
         review_backend: Per-phase backend override for review, if set.
         fix_backend: Per-phase backend override for fix, if set.
         test_backend: Per-phase backend override for test, if set.
+        per_stack_review_backend: Per-stack review tier backend for deep runs
+            (issue #646), resolved from the ``per_stack_review`` phase key —
+            the key that actually drives per-stack execution — kept distinct
+            from ``review_backend`` so "who reviewed" is never a misstatement.
+            ``None`` (and omitted from ``to_dict()``) for shallow/non-deep runs,
+            which have no per-stack fan-out.
+        per_stack_review_model: Per-stack review tier model for deep runs
+            (issue #646), resolved from the ``per_stack_review`` phase key. The
+            model is the load-bearing part of the identity: per-stack defaults
+            to Sonnet vs the ``review`` tier's Opus, which a pure backend name
+            cannot distinguish. ``None`` (and omitted from ``to_dict()``) for
+            shallow/non-deep runs.
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         source_path: Absolute path to the source repository at archive time.
@@ -126,6 +138,8 @@ class Manifest:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
+    per_stack_review_backend: str | None = None
+    per_stack_review_model: str | None = None
     review_only: bool = False
     deep: bool = False
     fix_failures: dict[str, str] | None = None
@@ -188,6 +202,10 @@ class Manifest:
                 **({"review_backend": self.review_backend} if self.review_backend else {}),
                 **({"fix_backend": self.fix_backend} if self.fix_backend else {}),
                 **({"test_backend": self.test_backend} if self.test_backend else {}),
+                **({"per_stack_review_backend": self.per_stack_review_backend}
+                  if self.per_stack_review_backend else {}),
+                **({"per_stack_review_model": self.per_stack_review_model}
+                  if self.per_stack_review_model else {}),
                 "review_only": self.review_only,
                 "deep": self.deep,
             },
@@ -273,12 +291,22 @@ def build_manifest(
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
-    from daydream.runner import _resolved_backend_name  # noqa: PLC0415 - deferred import avoids cycle
+    from daydream.runner import _resolved_backend_name, _resolved_model  # noqa: PLC0415 - deferred import avoids cycle
 
     # Resolve the effective backend through the full precedence chain so the manifest
     # records what was actually used (raw config.backend is None when set via file-config);
     # "review" is the representative phase the orchestrator also prints as the default.
     backend_used = _resolved_backend_name(config, "review")
+
+    # Per-stack reviewers (issue #646) execute on the "per_stack_review" phase key —
+    # NOT the "review" tier — so a deep archive records that tier's resolved backend
+    # and model from its own key. Per-stack fan-out does not exist outside deep mode,
+    # so shallow/non-deep runs leave both fields None (and to_dict() omits them).
+    per_stack_review_backend: str | None = None
+    per_stack_review_model: str | None = None
+    if not config.shallow:
+        per_stack_review_backend = _resolved_backend_name(config, "per_stack_review")
+        per_stack_review_model = _resolved_model(config, "per_stack_review")
 
     m = Manifest(
         session_id=recorder.session_id,
@@ -291,6 +319,8 @@ def build_manifest(
         review_backend=backend_used,
         fix_backend=_resolved_backend_name(config, "fix"),
         test_backend=_resolved_backend_name(config, "test"),
+        per_stack_review_backend=per_stack_review_backend,
+        per_stack_review_model=per_stack_review_model,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,

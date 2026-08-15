@@ -67,6 +67,7 @@ class _MockRecorder:
 class _MockConfig:
     skill: str | None = "python"
     backend: str = "claude"
+    model: str | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
@@ -194,6 +195,54 @@ def test_build_manifest_basic(tmp_path: Path):
     assert m.total_cached_tokens == 20
     assert m.repo_slug == "org/repo"
     assert m.head_sha == "a" * 40
+
+
+def test_build_manifest_deep_records_per_stack_review_tier(tmp_path: Path) -> None:
+    """Issue #646: a deep manifest records the per-stack tier, distinct from review."""
+    fc = DaydreamFileConfig(
+        model=None, backend=None,
+        phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}},
+    )
+    config = RunConfig(
+        target=str(tmp_path), backend=None, model=None,
+        file_config=fc, review_backend="claude", shallow=False,
+    )
+    m = build_manifest(
+        recorder=cast(TrajectoryRecorder, _MockRecorder()),
+        config=config, git_ctx=GitContext(),
+        status="complete", archive_path=tmp_path,
+    )
+    assert m.deep is True
+    assert m.per_stack_review_backend == "codex"     # per-stack tier resolved from its own key
+    assert m.per_stack_review_model == "gpt-psr"
+    assert m.review_backend == "claude"              # review tier unchanged, distinct
+    run = m.to_dict()["run"]
+    assert run["per_stack_review_backend"] == "codex"
+    assert run["per_stack_review_model"] == "gpt-psr"
+    assert run["review_backend"] == "claude"
+
+
+def test_build_manifest_shallow_omits_per_stack_review(tmp_path: Path) -> None:
+    """Issue #646: shallow/non-deep manifests are byte-for-byte unchanged."""
+    fc = DaydreamFileConfig(
+        model=None, backend=None,
+        phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}},
+    )
+    config = RunConfig(
+        target=str(tmp_path), backend=None, model=None,
+        file_config=fc, shallow=True,
+    )
+    m = build_manifest(
+        recorder=cast(TrajectoryRecorder, _MockRecorder()),
+        config=config, git_ctx=GitContext(),
+        status="complete", archive_path=tmp_path,
+    )
+    assert m.deep is False
+    assert m.per_stack_review_backend is None
+    assert m.per_stack_review_model is None
+    run = m.to_dict()["run"]
+    assert "per_stack_review_backend" not in run
+    assert "per_stack_review_model" not in run
 
 
 def test_manifest_to_dict_structure(tmp_path: Path):
