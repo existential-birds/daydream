@@ -490,7 +490,6 @@ async def _evaluate_review(
     results = await asyncio.gather(*tasks, return_exceptions=True)
     # Occurrences are tracked by their zero-based list position, not their text, so
     # equal-text comments at different positions stay structurally distinct.
-    golden_matches: list[tuple[int, JudgeVerdict] | None] = [None] * len(golden)
     candidate_matched: list[bool] = [False] * len(candidates)
     sibling_map = _build_sibling_map(len(candidates), dedup_groups)
     errors = []
@@ -519,36 +518,7 @@ async def _evaluate_review(
     for _negated_confidence, _index, gi, ci, result in positives:
         golden_edges[gi].append((ci, result))
 
-    # Contested candidates go to the golden with the strongest match; ties stay in golden-index
-    # order (stable sort), keeping the assignment deterministic.
-    golden_order = sorted(
-        range(len(golden)),
-        key=lambda gi: golden_edges[gi][0][1].confidence if golden_edges[gi] else -1.0,
-        reverse=True,
-    )
-
-    group_holder: dict[frozenset[int], int] = {}
-
-    def _try_assign(gi: int, seen_groups: set[frozenset[int]], visited_goldens: set[int]) -> bool:
-        """Match ``gi`` to a free candidate group, displacing other goldens along an
-        alternating path when needed. True if a (re)assignment was made."""
-        if gi in visited_goldens:
-            return False
-        visited_goldens.add(gi)
-        for ci, result in golden_edges[gi]:
-            group = group_of_candidate[ci]
-            if group in seen_groups:
-                continue
-            seen_groups.add(group)
-            holder = group_holder.get(group)
-            if holder is None or _try_assign(holder, seen_groups, visited_goldens):
-                group_holder[group] = gi
-                golden_matches[gi] = (ci, result)
-                return True
-        return False
-
-    for gi in golden_order:
-        _try_assign(gi, set(), set())
+    golden_matches = _assign_golden_matches(golden_edges, group_of_candidate)
 
     for gi, match in enumerate(golden_matches):
         if match is None:
@@ -600,6 +570,58 @@ async def _evaluate_review(
         "precision": precision,
         "recall": recall,
     }
+
+
+def _assign_golden_matches(
+    golden_edges: list[list[tuple[int, JudgeVerdict]]],
+    group_of_candidate: dict[int, frozenset[int]],
+) -> list[tuple[int, JudgeVerdict] | None]:
+    """Build a maximum-cardinality one-to-one assignment of goldens to candidate groups.
+
+    Each candidate — together with its dedup siblings (its group) — satisfies at most
+    one golden. A plain greedy pass can strand a golden whose candidate groups were all
+    taken by earlier, higher-confidence matches even when a feasible two-TP assignment
+    exists, so the assignment is grown via alternating-path augmentation (Kuhn's
+    algorithm): goldens are processed in order of their strongest match confidence, and
+    a displaced golden is re-matched to its next-best free edge. Cardinality is the
+    objective; the confidence ordering only shapes tie-breaking. Returns, per golden,
+    the assigned ``(candidate_index, verdict)`` or ``None``.
+    """
+    golden_matches: list[tuple[int, JudgeVerdict] | None] = [None] * len(golden_edges)
+    group_holder: dict[frozenset[int], int] = {}
+
+    # On the initial pass, contested candidates go to the golden with the strongest match;
+    # ties stay in golden-index order (stable sort), keeping the assignment deterministic.
+    # During augmentation a displaced golden re-matches to its next-best free edge, so the
+    # final holder of a contested group may not hold its strongest edge.
+    golden_order = sorted(
+        range(len(golden_edges)),
+        key=lambda gi: golden_edges[gi][0][1].confidence if golden_edges[gi] else -1.0,
+        reverse=True,
+    )
+
+    def _try_assign(gi: int, seen_groups: set[frozenset[int]], visited_goldens: set[int]) -> bool:
+        """Match ``gi`` to a free candidate group, displacing other goldens along an
+        alternating path when needed. True if a (re)assignment was made."""
+        if gi in visited_goldens:
+            return False
+        visited_goldens.add(gi)
+        for ci, result in golden_edges[gi]:
+            group = group_of_candidate[ci]
+            if group in seen_groups:
+                continue
+            seen_groups.add(group)
+            holder = group_holder.get(group)
+            if holder is None or _try_assign(holder, seen_groups, visited_goldens):
+                group_holder[group] = gi
+                golden_matches[gi] = (ci, result)
+                return True
+        return False
+
+    for gi in golden_order:
+        _try_assign(gi, set(), set())
+
+    return golden_matches
 
 
 async def _judge_limited(

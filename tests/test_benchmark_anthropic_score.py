@@ -209,7 +209,6 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
     [
         pytest.param(
             {
-                "name": "duplicate-goldens",
                 "golden_comments": [
                     {"comment": "same bug", "severity": "medium"},
                     {"comment": "same bug", "severity": "medium"},
@@ -235,7 +234,6 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
         ),
         pytest.param(
             {
-                "name": "duplicate-candidates",
                 "golden_comments": [{"comment": "the bug", "severity": "medium"}],
                 "issues": ["the bug", "the bug"],
                 "groups": [[0], [1]],
