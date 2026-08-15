@@ -24,7 +24,7 @@ claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models). [Osprey CLI](https://github.com/existential-birds/osprey) for `--backend osprey`.
+Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models). Osprey CLI for `--backend osprey`.
 
 ### Golden paths
 
