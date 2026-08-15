@@ -127,30 +127,22 @@ async def run_openai_scoring(
     stamp, so results land in the same `results/<model>/evaluations.json` shape
     as ``anthropic-direct``.
     """
-    if client is None:
-        api_key = os.environ.get(OPENAI_JUDGE_API_KEY_ENV)
-        if not api_key:
-            raise BenchmarkStepError(
-                f"{OPENAI_JUDGE_API_KEY_ENV} is not set; cannot run OpenAI-compatible scoring."
-            )
-        base_url = _resolve_openai_base_url(api_key, os.environ.get(OPENAI_JUDGE_BASE_URL_ENV))
-        async with AsyncExitStack() as stack:
+    async with AsyncExitStack() as stack:
+        if client is None:
+            api_key = os.environ.get(OPENAI_JUDGE_API_KEY_ENV)
+            if not api_key:
+                raise BenchmarkStepError(
+                    f"{OPENAI_JUDGE_API_KEY_ENV} is not set; cannot run OpenAI-compatible scoring."
+                )
+            base_url = _resolve_openai_base_url(api_key, os.environ.get(OPENAI_JUDGE_BASE_URL_ENV))
             http = await stack.enter_async_context(httpx.AsyncClient())
             client = OpenAIJsonCompleter(api_key=api_key, model=judge_model, base_url=base_url, http=http)
-            return await run_direct_scoring(
-                benchmark_repo,
-                judge_model,
-                golden_urls=golden_urls,
-                tool=tool,
-                client=client,
-                judge_route="openai-compatible",
-            )
 
-    return await run_direct_scoring(
-        benchmark_repo,
-        judge_model,
-        golden_urls=golden_urls,
-        tool=tool,
-        client=client,
-        judge_route="openai-compatible",
-    )
+        return await run_direct_scoring(
+            benchmark_repo,
+            judge_model,
+            golden_urls=golden_urls,
+            tool=tool,
+            client=client,
+            judge_route="openai-compatible",
+        )

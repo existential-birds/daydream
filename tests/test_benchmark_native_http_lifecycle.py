@@ -16,17 +16,27 @@ from daydream.benchmark.openai_score import OpenAIJsonCompleter, run_openai_scor
 from daydream.benchmark.score import (
     ANTHROPIC_JUDGE_API_KEY_ENV,
     OPENAI_JUDGE_API_KEY_ENV,
-    BenchmarkStepError,  # noqa: F401  # used in Task-4 close-on-failure test
+    BenchmarkStepError,
+    JudgeFailedError,
 )
 from tests.test_benchmark_anthropic_score import URL, FakeResponse, seed_benchmark_data
+
+
+def _extract_system(payload):
+    """System prompt: Anthropic puts it top-level; OpenAI puts it in messages[0].content."""
+    system = payload.get("system", "")
+    if not system:
+        messages = payload.get("messages", [])
+        if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+            system = messages[0].get("content", "")
+    return system
 
 
 class TrackingAsyncClient:
     """Drop-in httpx.AsyncClient that records construction/close and routes phase responses."""
 
     instances: list[TrackingAsyncClient] = []  # overridden/reset by the provider fixture before each test
-    envelope = lambda inner: {"content": [{"type": "text", "text": json.dumps(inner)}]}  # noqa: E731
-    fail_with = None  # optional exception to raise on the first post
+    fail_with = None  # optional exception to raise on judge posts (after extraction/dedup share the client)
 
     def __init__(self):
         self.posts = []
@@ -40,15 +50,10 @@ class TrackingAsyncClient:
         self.closed = True
 
     async def post(self, url, *, headers, json, timeout):
-        if TrackingAsyncClient.fail_with is not None:
+        system = _extract_system(json)
+        if TrackingAsyncClient.fail_with is not None and "code review evaluator" in system:
             raise TrackingAsyncClient.fail_with
         self.posts.append((url, json))
-        # Anthropic: system is a top-level key; OpenAI: system is in messages[0].content
-        system = json.get("system", "")
-        if not system:
-            messages = json.get("messages", [])
-            if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
-                system = messages[0].get("content", "")
         if "extract code review issues" in system:
             inner = {"issues": ["Bug one", "Bug two"]}
         elif "group duplicate code review comments" in system:
@@ -108,13 +113,6 @@ async def test_one_client_serves_concurrent_judges(provider, tmp_path):
 
     client = TrackingAsyncClient.instances[0]
     assert len(TrackingAsyncClient.instances) == 1
-    def _extract_system(payload):
-        s = payload.get("system", "")
-        if not s:
-            msgs = payload.get("messages", [])
-            if msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
-                s = msgs[0].get("content", "")
-        return s
     judge_systems = [_extract_system(p[1]) for p in client.posts if "code review evaluator" in _extract_system(p[1])]
     assert len(judge_systems) == 2, "1 golden x 2 extracted candidates -> 2 concurrent judge posts on one client"
     assert client.closed is True
@@ -126,7 +124,7 @@ async def test_default_invocation_closes_client_on_failure(provider, tmp_path):
     seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
     TrackingAsyncClient.fail_with = BenchmarkStepError("boom")
 
-    with pytest.raises(BenchmarkStepError):
+    with pytest.raises(JudgeFailedError):
         await entry(tmp_path, model, golden_urls=[URL], tool="daydream")
 
     assert len(TrackingAsyncClient.instances) == 1
