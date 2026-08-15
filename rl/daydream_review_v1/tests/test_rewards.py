@@ -558,6 +558,76 @@ async def test_oracle_gate_rejects_info_exclude_rule(
     assert "test_claim_mismatch" not in trace.metrics
 
 
+async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A core.excludesFile rule masking an untracked oracle file must fail closed.
+
+    ``git ls-files --exclude-standard`` honors the repo-local ``core.excludesFile``
+    set in the untracked ``.git/config`` — a file the gate never probes — so a
+    rollout could otherwise hide an untracked tests/pytest.ini behind it and pass
+    every probe. The untracked probe runs with ``-c core.excludesFile=``, which
+    also neutralizes the global excludes file (``$HOME/.config/git/ignore``), so
+    the file is listed and the oracle reads as changed.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    ignores = repo.parent / "excludes"
+    ignores.write_text("tests/pytest.ini\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.excludesFile", str(ignores)],
+        check=True,
+    )
+    (repo / "tests/pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A green suite's own bytecode under protected paths must not trip the gate.
+
+    The untracked probe lists every untracked file under a protected path (no
+    ``--exclude-standard``), so the ``__pycache__/`` and ``*.py[cod]`` files a
+    legitimate test run drops while importing ``tests/`` would otherwise read as
+    an oracle change and withhold ``w_tests`` from a genuinely fixed tree. Those
+    artifacts are excluded explicitly via ``ORACLE_BENIGN_PATHSPECS`` — never
+    loaded by the runner, so excluding them cannot hide a real oracle file.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    pycache = repo / "tests" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "test_calc.cpython-312.pyc").write_bytes(b"x")
+    (repo / "tests" / "test_calc.pyc").write_bytes(b"x")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
+    assert trace.rewards["fix_tests_pass"] == 1.0
+
+
 async def test_oracle_gate_rejects_root_sitecustomize(
     tmp_path: Path,
     runtime,

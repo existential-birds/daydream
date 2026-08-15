@@ -19,6 +19,7 @@ import logging
 import shlex
 import tempfile
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,34 @@ DAYDREAM_EXCLUDE = ":(exclude).daydream"
 #: ``sys.path``), so an untracked one that ``sys.exit(0)``s makes a suite that
 #: never ran look green.
 ORACLE_IGNORE_PATHSPECS = ["sitecustomize.py", ":(glob)**/.gitignore"]
+
+#: Pathspecs excluding the suite's own bytecode artifacts from the untracked
+#: probe. That probe deliberately runs ``git ls-files --others`` WITHOUT
+#: ``--exclude-standard`` (see ``_protected_test_paths_unchanged``), so it lists
+#: every untracked file under a protected path — including the ``__pycache__/``
+#: and ``*.py[cod]`` files a green suite itself drops while importing the test
+#: modules. Without this explicit exclusion a genuinely fixed tree would trip
+#: the probe on its own legitimate test runs and be withheld ``w_tests``. The
+#: benign exclusions are baked into the probe rather than delegated to the
+#: repo's ignore rules, whose decisions this gate deliberately no longer trusts.
+ORACLE_BENIGN_PATHSPECS = [":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[cod]"]
+
+
+async def _probe(
+    runtime: vf.Runtime,
+    argv: list[str],
+    changed: Callable[[vf.ProgramResult], bool],
+) -> bool:
+    """Run one oracle probe; return True iff the oracle is unchanged.
+
+    Every probe shares the same fail-closed run -> check shape: run one command
+    against the mutable tree and let the ``changed`` predicate decide — anything
+    it flags, including an unusual exit code, reads as an oracle change, never
+    as a pass. The predicate is the single place each probe's semantics live, so
+    the probe list in :func:`_protected_test_paths_unchanged` reads as a table
+    of ``(argv, changed-verdict)`` pairs.
+    """
+    return not changed(await runtime.run(argv, {}))
 
 
 async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
@@ -166,8 +195,9 @@ async def _protected_test_paths_unchanged(
 
     Fail-closed by design, with every ambiguity reading as "changed". The probe
     pathspecs are the declared paths plus ``ORACLE_IGNORE_PATHSPECS``: the repo's
-    own ignore files (which gate what the untracked probe sees) and the
-    interpreter-startup hook.
+    own ignore files and the interpreter-startup hook. The five probes share one
+    run -> fail-closed-check shape, expressed as a table of ``(argv, changed)``
+    pairs over :func:`_probe`.
 
     - ``git diff --quiet <head_sha> -- <paths>`` compares the baked head against
       the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
@@ -182,80 +212,105 @@ async def _protected_test_paths_unchanged(
       letter): git then reads the INDEX instead of the worktree, so the diff
       probe above would stay clean against a tampered tracked file with the
       flag set.
-    - ``git ls-files --others --exclude-standard -- <paths>`` catches a
-      non-ignored untracked file under a protected path (e.g. a new
-      ``pytest.ini`` or ``conftest.py``), an untracked root ``sitecustomize.py``
-      (imported at startup by every ``python`` ``test_command`` runs, so one
-      that ``sys.exit(0)``s makes a suite that never ran look green), or a new
-      untracked ``.gitignore`` (the ignore-rule attack): any listing or error
-      means the oracle changed.
-    - ``git ls-files --others --ignored ... -- ':(glob)**/.gitignore'`` catches
-      a ``.gitignore`` that ignores itself (e.g. a bare ``*``), which hides from
-      the listing above.
+    - ``git -c core.excludesFile= ls-files --others -- <paths>`` lists EVERY
+      untracked file under a protected path — e.g. a new ``pytest.ini`` or
+      ``conftest.py``, an untracked root ``sitecustomize.py`` (imported at
+      startup by every ``python`` ``test_command`` runs, so one that
+      ``sys.exit(0)``s makes a suite that never ran look green), or a new
+      untracked ``.gitignore`` (the ignore-rule attack). It deliberately does
+      NOT pass ``--exclude-standard``: a protected path the baked tree's own
+      ignore rules already cover would otherwise ship inert protection, and a
+      freshly planted ignore rule could hide the file. Listing everything makes
+      the baked tree's ignore decisions irrelevant to the probe; the suite's
+      own runtime byproducts (``__pycache__/`` and ``*.py[cod]``) are excluded
+      explicitly via ``ORACLE_BENIGN_PATHSPECS`` instead.
+    - The ``core.excludesFile=`` override above also neutralizes the two ignore
+      sources ``--exclude-standard`` would otherwise honor with no probe here to
+      vouch for them: the repo-local ``core.excludesFile`` set in ``.git/config``
+      and the global excludes file (default ``$HOME/.config/git/ignore``). Both
+      are agent-writable, so without this a rollout could mask an untracked
+      oracle file behind either and pass every probe. An empty value loads
+      neither — the default-path fallback only applies when the key is unset —
+      so the same override rides on the ``--ignored`` probe below.
+    - ``git -c core.excludesFile= ls-files --others --ignored ... --
+      ':(glob)**/.gitignore'`` catches a ``.gitignore`` that ignores itself
+      (e.g. a bare ``*``), which hides from the listing above.
     - ``cat .git/info/exclude`` verifies the rollout-controlled per-repo ignore
-      file: ``--exclude-standard`` reads it, so a rule written there can mask
-      untracked oracle files with zero tracked changes. A fresh clone's file is
-      comments-only; any real rule means the oracle changed.
+      file. A fresh clone's file is comments-only; any real rule means the
+      oracle changed.
 
     There is deliberately no case that defaults to pass on an error — an
     unverifiable oracle never earns the test reward.
     """
     oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
 
-    diff = await runtime.run(
-        ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *oracle_pathspecs],
-        {},
-    )
-    if diff.exit_code != 0:
-        return False
-    flags = await runtime.run(
-        ["git", "-C", repo, "ls-files", "-v", "--", *oracle_pathspecs],
-        {},
-    )
-    if flags.exit_code != 0 or any(
-        line[:1] == "S" or line[:1].islower() for line in flags.stdout.splitlines()
-    ):
-        return False
-    untracked = await runtime.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "--",
-            *oracle_pathspecs,
-        ],
-        {},
-    )
-    if untracked.exit_code != 0 or untracked.stdout.strip():
-        return False
-    ignored_ignores = await runtime.run(
-        [
-            "git",
-            "-C",
-            repo,
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--",
-            ":(glob)**/.gitignore",
-        ],
-        {},
-    )
-    if ignored_ignores.exit_code != 0 or ignored_ignores.stdout.strip():
-        return False
-    info_exclude = await runtime.run(
-        ["cat", f"{repo}/.git/info/exclude"],
-        {},
-    )
-    if info_exclude.exit_code != 0 or any(
-        line.strip() and not line.lstrip().startswith("#")
-        for line in info_exclude.stdout.splitlines()
-    ):
-        return False
+    def diff_changed(result: vf.ProgramResult) -> bool:
+        return result.exit_code != 0
+
+    def flags_changed(result: vf.ProgramResult) -> bool:
+        return result.exit_code != 0 or any(
+            line[:1] == "S" or line[:1].islower()
+            for line in result.stdout.splitlines()
+        )
+
+    def nonempty_changed(result: vf.ProgramResult) -> bool:
+        # Any listed file — or any probe error — means the oracle changed.
+        return result.exit_code != 0 or bool(result.stdout.strip())
+
+    def info_exclude_changed(result: vf.ProgramResult) -> bool:
+        return result.exit_code != 0 or any(
+            line.strip() and not line.lstrip().startswith("#")
+            for line in result.stdout.splitlines()
+        )
+
+    probes = [
+        (
+            ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *oracle_pathspecs],
+            diff_changed,
+        ),
+        (
+            ["git", "-C", repo, "ls-files", "-v", "--", *oracle_pathspecs],
+            flags_changed,
+        ),
+        (
+            [
+                "git",
+                "-C",
+                repo,
+                "-c",
+                "core.excludesFile=",
+                "ls-files",
+                "--others",
+                "--",
+                *oracle_pathspecs,
+                *ORACLE_BENIGN_PATHSPECS,
+            ],
+            nonempty_changed,
+        ),
+        (
+            [
+                "git",
+                "-C",
+                repo,
+                "-c",
+                "core.excludesFile=",
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--",
+                ":(glob)**/.gitignore",
+            ],
+            nonempty_changed,
+        ),
+        (
+            ["cat", f"{repo}/.git/info/exclude"],
+            info_exclude_changed,
+        ),
+    ]
+    for argv, changed in probes:
+        if not await _probe(runtime, argv, changed):
+            return False
     return True
 
 
