@@ -1902,6 +1902,25 @@ def main() -> None:
         console.print()
         print_error(console, "Wrong Branch", str(exc))
         sys.exit(1)
+    except ValueError as e:
+        if str(e) != "Finding file must be a confined repository-relative path":
+            # Not the fix-preflight confinement rejection: re-raise so the
+            # generic handler below still owns every other error class.
+            raise
+        # Defense-in-depth fallback for the fix preflight confinement rejection
+        # (the primary path routes it through ``_step_fix``'s recovery; this
+        # renders actionably if it ever escapes).
+        panel = get_shutdown_panel()
+        if panel is not None:
+            panel.finish()
+            set_shutdown_panel(None)
+        console.print()
+        print_error(
+            console,
+            "Unconfined Finding",
+            f"{e} Check the run's fix_failures artifact and the finding's file ref.",
+        )
+        sys.exit(1)
     except Exception as e:
         panel = get_shutdown_panel()
         if panel is not None:
