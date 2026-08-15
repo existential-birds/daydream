@@ -71,7 +71,7 @@ from daydream.ui import (
     print_success,
     prompt_user,
 )
-from daydream.workspace import WorkContext, open_workspace
+from daydream.workspace import WorkContext, open_audit_workspace, open_workspace
 
 if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
@@ -957,7 +957,15 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         )
         console.print()
 
-        return await run_flow(ctx.registry, "improve", ctx)
+        # Every improve advisory model turn (recon/audit/vet/plan-write) runs
+        # with a detached audit worktree as its cwd; the target worktree is
+        # never a model cwd. The audit worktree snapshots the target's
+        # committed + staged + unstaged tracked state, so any model commit
+        # lands only in its detached HEAD and can never touch the target's
+        # HEAD, named refs, or staged index.
+        async with open_audit_workspace(work.repo, run_id=work.run_id) as audit_repo:
+            ctx.data["audit_repo"] = audit_repo
+            return await run_flow(ctx.registry, "improve", ctx)
 
 
 async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:

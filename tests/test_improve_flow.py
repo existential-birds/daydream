@@ -2665,6 +2665,23 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
 
 
 @pytest.mark.anyio
+async def test_improve_run_leaves_no_stray_audit_worktree(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    install_improve_stub(monkeypatch, improve_monorepo_target)
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+    assert code == 0
+    # After a full improve run, no audit worktree remains linked to the target.
+    worktrees = subprocess.run(
+        ["git", "-C", str(improve_monorepo_target), "worktree", "list", "--porcelain"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert ".daydream/audit/" not in worktrees
+
+
+@pytest.mark.anyio
 async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
