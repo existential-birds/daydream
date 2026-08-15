@@ -16,6 +16,7 @@ Public builders:
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -317,6 +318,92 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
     if not fits_inline_diff_budget(result):
         return None
     return result
+
+
+@dataclass
+class DeepDiffBoundInfo:
+    """Truncation statistics for one ``bound_deep_diff`` call.
+
+    ``retained_bytes`` excludes the marker line; ``oversize_paths`` names the
+    files whose single block exceeded the cap and was kept whole (block
+    integrity outranks the soft byte bound).
+    """
+
+    truncated: bool
+    original_bytes: int = 0
+    retained_bytes: int = 0
+    total_blocks: int = 0
+    retained_blocks: int = 0
+    oversize_paths: list[str] = field(default_factory=list)
+    marker: str | None = None
+
+
+def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[str, DeepDiffBoundInfo]:
+    """Bound ``diff`` to ``budget`` bytes using whole ``diff --git``-block retention.
+
+    Issue #644: the deep-flow gather stores this bounded value in
+    ``ctx.data["diff"]`` so a pathological PR never feeds an oversized
+    in-memory diff into the prompt pipeline. Reuses the shared
+    ``_DIFF_BLOCK_SPLIT`` / ``_diff_block_path`` parse contract -- a retained
+    block is byte-identical to its source block and no block is ever split
+    mid-stream.
+
+    At/under ``budget`` the input is returned unchanged with no marker
+    (byte-for-byte identical to today, Must-have #4). Over ``budget`` whole
+    blocks are retained while ``retained_bytes + block_bytes <= budget``; a
+    single block that alone exceeds the cap is kept whole with its path
+    recorded in ``oversize_paths`` (block integrity outranks the soft bound;
+    the prompt-inline budget already keeps it out of an oversized prompt). The
+    returned value carries a leading ``# daydream: deep diff truncated:``
+    marker line only when truncated; ``retained_bytes`` excludes the marker.
+
+    Blocks that fail to resolve a path via ``_diff_block_path`` (the leading
+    empty split fragment, non-``diff --git`` elements) are skipped exactly as
+    ``_diff_changed_files`` / ``_diff_blocks_for_files`` do.
+
+    Returns:
+        ``(bounded_diff, DeepDiffBoundInfo)``.
+    """
+    original_bytes = len(diff.encode("utf-8"))
+    if original_bytes <= budget:
+        return diff, DeepDiffBoundInfo(truncated=False, original_bytes=original_bytes, marker=None)
+
+    retained: list[str] = []
+    retained_bytes = 0
+    total_blocks = 0
+    oversize_paths: list[str] = []
+    for block in _DIFF_BLOCK_SPLIT.split(diff):
+        if _diff_block_path(block) is None:
+            # Leading empty fragment / non-``diff --git`` element: never a block.
+            continue
+        total_blocks += 1
+        block_bytes = len(block.encode("utf-8"))
+        if retained_bytes + block_bytes <= budget:
+            retained.append(block)
+            retained_bytes += block_bytes
+        elif not retained:
+            # A single block larger than the cap is kept whole (block
+            # integrity outranks the soft byte bound); the prompt-inline
+            # budget keeps it out of an oversized prompt.
+            retained.append(block)
+            retained_bytes += block_bytes
+            oversize_paths.append(_diff_block_path(block) or "")
+        # else: block dropped whole; never split mid-stream.
+
+    marker = (
+        f"# daydream: deep diff truncated: {original_bytes} -> {retained_bytes} bytes "
+        f"({len(retained)}/{total_blocks} blocks retained)\n"
+    )
+    bounded = marker + "".join(retained)
+    return bounded, DeepDiffBoundInfo(
+        truncated=True,
+        original_bytes=original_bytes,
+        retained_bytes=retained_bytes,
+        total_blocks=total_blocks,
+        retained_blocks=len(retained),
+        oversize_paths=oversize_paths,
+        marker=marker,
+    )
 
 
 def _full_diff_pointer(diff_path: Path) -> str:
