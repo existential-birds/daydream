@@ -24,6 +24,7 @@ from daydream.training.reward import score_trajectory
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
+    DaydreamReviewData,
     DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
@@ -69,9 +70,21 @@ def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> 
     return trace
 
 
-def test_review_state_guard_rejects_base_state(
-    corpus_mini_dir: Path, fixture_manifest_path: Path
-) -> None:
+def _assert_gate_held(trace: vf.Trace) -> None:
+    """A test-oracle change must earn a literal zero, never the w_tests reward.
+
+    The staged ``deep/test-verdict.json`` claim (passed=True) makes the tripwire
+    load-bearing: any execution of test_command records ``test_claim_mismatch``,
+    so its absence proves the gate held rather than passing vacuously over an
+    empty archive.
+    """
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+def test_review_state_guard_rejects_base_state() -> None:
     """Scoring state must be a DaydreamReviewState, never the base State.
 
     Production traces carry a DaydreamReviewState automatically (the rollout
@@ -79,12 +92,23 @@ def test_review_state_guard_rejects_base_state(
     pass one explicitly. A base State must fail loudly rather than silently
     dereference a missing run_dir.
     """
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    base_trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    data = DaydreamReviewData(
+        idx=0,
+        name="org/repo#1",
+        prompt="Deep-review PR #1 of org/repo @ 111111111111",
+        repo_slug="org/repo",
+        clone_url="https://example.com/repo.git",
+        pr_number=1,
+        base_sha="0" * 40,
+        head_sha="1" * 40,
+        test_command="true",
+        protected_test_paths=["tests/"],
+    )
+    base_trace = vf.Trace(task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data))
     with pytest.raises(TypeError):
         _review_state(base_trace)
     good_trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
         state=DaydreamReviewState(),
     )
     assert _review_state(good_trace).run_dir is None
@@ -414,12 +438,7 @@ async def test_fix_tests_pass_rejects_protected_test_path_changes(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    # The staged claim (passed=True) means ANY test_command execution would
-    # record test_claim_mismatch; its absence proves the gate held.
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 async def test_oracle_gate_fails_closed_on_git_error(
@@ -448,10 +467,7 @@ async def test_oracle_gate_fails_closed_on_git_error(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 @pytest.mark.parametrize(
@@ -489,10 +505,7 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 async def test_oracle_gate_rejects_tracked_gitignore_edit(
@@ -521,10 +534,7 @@ async def test_oracle_gate_rejects_tracked_gitignore_edit(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 async def test_oracle_gate_rejects_info_exclude_rule(
@@ -552,10 +562,7 @@ async def test_oracle_gate_rejects_info_exclude_rule(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
@@ -589,10 +596,7 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
@@ -651,10 +655,7 @@ async def test_oracle_gate_rejects_root_sitecustomize(
 
     await task.score(trace, runtime)
 
-    assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
-    assert "test_claim_mismatch" not in trace.metrics
+    _assert_gate_held(trace)
 
 
 @pytest.mark.parametrize(
