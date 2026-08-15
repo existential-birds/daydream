@@ -309,6 +309,41 @@ def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
     ]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    ["", ":(exclude)tests", "tests/*", "tests/?", "tests/[x]"],
+    ids=["empty", "leading-colon-magic", "glob-star", "glob-question", "glob-bracket"],
+)
+def test_load_manifest_rejects_non_literal_protected_test_paths(
+    tmp_path: Path, entry: str
+) -> None:
+    """A protected_test_paths entry with git pathspec syntax is a load error.
+
+    The manifest promises LITERAL repository-relative paths, but the scoring gate
+    passes each entry to git as a bare pathspec, where ``*``/``?``/``[`` are glob
+    metacharacters and a leading ``:`` is pathspec magic. A glob-shaped entry that
+    matches nothing would read as a clean diff and an empty ls-files list, letting
+    test_command run against an unprotected oracle — so such entries must never
+    load, exactly like a missing or empty inventory.
+    """
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        '[repos."acme/widgets"]\n'
+        'clone_url = "https://github.com/acme/widgets"\n'
+        'image = "daydream-rl/widgets"\n'
+        'test_command = "pytest -q"\n'
+        "setup_cmds = []\n"
+        f"protected_test_paths = {json.dumps([entry])}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_manifest(manifest)
+    assert ("value_error", ("protected_test_paths",)) in [
+        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
+
+
 def test_golden_comment_rejects_unknown_key() -> None:
     """A misspelled/extra key in benchmark_data.json must not be silently dropped.
 

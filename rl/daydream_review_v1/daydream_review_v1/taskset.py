@@ -27,7 +27,7 @@ from daydream.benchmark.corpus import harvested_corpus
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
@@ -76,6 +76,16 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
 #: Shared by both dirty-tree and moved-HEAD probes so the exclusion set only
 #: drifts by intentional edit, never by one string falling out of sync.
 DAYDREAM_EXCLUDE = ":(exclude).daydream"
+
+#: Extra pathspecs the oracle probes treat as part of the oracle itself.
+#: ``git ls-files --exclude-standard`` honors ignore rules, so a rollout that
+#: edits the tracked ``.gitignore`` (or drops a new untracked one) can mask a
+#: tampered untracked oracle file from the probes — the ignore files are
+#: therefore probed too. ``sitecustomize.py`` is imported from the repository
+#: root by every ``python`` invocation ``test_command`` runs (cwd is on
+#: ``sys.path``), so an untracked one that ``sys.exit(0)``s makes a suite that
+#: never ran look green.
+ORACLE_IGNORE_PATHSPECS = ["sitecustomize.py", ":(glob)**/.gitignore"]
 
 
 async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
@@ -154,33 +164,99 @@ async def _protected_test_paths_unchanged(
     trustworthy baseline: the image build proved the suite green at exactly that
     commit before any agent touched the tree.
 
-    Fail-closed by design, with every ambiguity reading as "changed":
+    Fail-closed by design, with every ambiguity reading as "changed". The probe
+    pathspecs are the declared paths plus ``ORACLE_IGNORE_PATHSPECS``: the repo's
+    own ignore files (which gate what the untracked probe sees) and the
+    interpreter-startup hook.
 
     - ``git diff --quiet <head_sha> -- <paths>`` compares the baked head against
       the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
       tampering, the exact attack). Exit 0 means no tracked difference
       (committed, staged, unstaged, deleted, or renamed); any other exit — a
       tracked diff (1) or a Git error such as 128 for an unresolvable baked SHA —
+      means the oracle changed. A tracked ``.gitignore`` edit is itself a
+      tracked difference here: without it, the edit could mask a new untracked
+      oracle file from the untracked probe.
+    - ``git ls-files -v`` rejects any protected or ignore file carrying the
+      ``skip-worktree``/``assume-unchanged`` flag (tag ``S`` or a lowercase
+      letter): git then reads the INDEX instead of the worktree, so the diff
+      probe above would stay clean against a tampered tracked file with the
+      flag set.
+    - ``git ls-files --others --exclude-standard -- <paths>`` catches a
+      non-ignored untracked file under a protected path (e.g. a new
+      ``pytest.ini`` or ``conftest.py``), an untracked root ``sitecustomize.py``
+      (imported at startup by every ``python`` ``test_command`` runs, so one
+      that ``sys.exit(0)``s makes a suite that never ran look green), or a new
+      untracked ``.gitignore`` (the ignore-rule attack): any listing or error
       means the oracle changed.
-    - When the diff is clean, ``git ls-files --others --exclude-standard --
-      <paths>`` catches a non-ignored untracked file under a protected path
-      (e.g. a new ``pytest.ini`` or ``conftest.py``): any listing or error
-      means the oracle changed.
+    - ``git ls-files --others --ignored ... -- ':(glob)**/.gitignore'`` catches
+      a ``.gitignore`` that ignores itself (e.g. a bare ``*``), which hides from
+      the listing above.
+    - ``cat .git/info/exclude`` verifies the rollout-controlled per-repo ignore
+      file: ``--exclude-standard`` reads it, so a rule written there can mask
+      untracked oracle files with zero tracked changes. A fresh clone's file is
+      comments-only; any real rule means the oracle changed.
 
     There is deliberately no case that defaults to pass on an error — an
     unverifiable oracle never earns the test reward.
     """
+    oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
+
     diff = await runtime.run(
-        ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *protected_test_paths],
+        ["git", "-C", repo, "diff", "--quiet", head_sha, "--", *oracle_pathspecs],
         {},
     )
     if diff.exit_code != 0:
         return False
-    untracked = await runtime.run(
-        ["git", "-C", repo, "ls-files", "--others", "--exclude-standard", "--", *protected_test_paths],
+    flags = await runtime.run(
+        ["git", "-C", repo, "ls-files", "-v", "--", *oracle_pathspecs],
         {},
     )
-    return untracked.exit_code == 0 and not untracked.stdout.strip()
+    if flags.exit_code != 0 or any(
+        line[:1] == "S" or line[:1].islower() for line in flags.stdout.splitlines()
+    ):
+        return False
+    untracked = await runtime.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            *oracle_pathspecs,
+        ],
+        {},
+    )
+    if untracked.exit_code != 0 or untracked.stdout.strip():
+        return False
+    ignored_ignores = await runtime.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            ":(glob)**/.gitignore",
+        ],
+        {},
+    )
+    if ignored_ignores.exit_code != 0 or ignored_ignores.stdout.strip():
+        return False
+    info_exclude = await runtime.run(
+        ["cat", f"{repo}/.git/info/exclude"],
+        {},
+    )
+    if info_exclude.exit_code != 0 or any(
+        line.strip() and not line.lstrip().startswith("#")
+        for line in info_exclude.stdout.splitlines()
+    ):
+        return False
+    return True
 
 
 def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
@@ -366,10 +442,13 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         than a free 1.0 for leaving the tree alone.
 
         The declared ``protected_test_paths`` oracle must still match the baked
-        head before ``test_command`` is trusted: any oracle change (tracked,
-        untracked, or a Git error) returns a literal ``0.0`` without running the
-        repository's mutable ``test_command``, so a rollout can never pay itself
-        the test reward by gutting its own suite.
+        head before ``test_command`` is trusted: any oracle change — a tracked
+        difference, an untracked file under a protected path or a root
+        ``sitecustomize.py``, a ``skip-worktree``/``assume-unchanged`` flag, an
+        ignore-rule change (``.gitignore`` files or ``.git/info/exclude``), or a
+        Git error — returns a literal ``0.0`` without running the repository's
+        mutable ``test_command``, so a rollout can never pay itself the test
+        reward by gutting its own suite.
         """
         repo = _repo_path(trace)
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
@@ -386,7 +465,9 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         # Security boundary: the test oracle must match the baked head before the
         # repository's own mutable test_command is trusted. A changed oracle
         # (committed/staged/unstaged/deleted/renamed, an untracked protected
-        # file, or a Git error) earns a literal zero WITHOUT running test_command.
+        # file or root sitecustomize.py, a skip-worktree/assume-unchanged flag,
+        # an ignore-rule change, or a Git error) earns a literal zero WITHOUT
+        # running test_command.
         unchanged = await _protected_test_paths_unchanged(
             runtime, repo, self.data.head_sha, self.data.protected_test_paths
         )
@@ -463,6 +544,28 @@ class _ManifestEntry(BaseModel):
     test_command: str
     protected_test_paths: list[str] = Field(min_length=1)
     setup_cmds: list[str] = []
+
+    @field_validator("protected_test_paths")
+    @classmethod
+    def _require_literal_paths(cls, paths: list[str]) -> list[str]:
+        """Reject entries git would re-interpret instead of matching byte-for-byte.
+
+        The manifest promises LITERAL repository-relative paths, but the scoring
+        gate passes each entry to git as a bare pathspec (``_protected_test_paths_unchanged``),
+        where ``*``, ``?`` and ``[`` are glob metacharacters and a leading ``:``
+        is pathspec magic. A glob-shaped entry that matches nothing would read as
+        a clean diff and an empty ``ls-files`` list, letting ``test_command`` run
+        against an unprotected oracle — so such entries must fail the load rather
+        than ship a silently-inert protection.
+        """
+        for path in paths:
+            if not path or path[0] == ":" or any(ch in path for ch in "*?["):
+                raise ValueError(
+                    "protected_test_paths must be LITERAL repository-relative paths "
+                    "(nonempty, no leading ':', no '*', '?' or '['); got "
+                    f"{path!r}"
+                )
+        return paths
 
 
 def load_manifest(path: Path) -> dict[str, _ManifestEntry]:

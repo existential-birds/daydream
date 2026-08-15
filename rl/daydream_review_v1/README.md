@@ -115,9 +115,14 @@ baseline against a pi-scaffold trained run moves two variables at once.
    could alter collection (e.g. `conftest.py`, `pytest.ini`, `pyproject.toml`,
    `setup.cfg`, `tox.ini`). At scoring time `fix_tests_pass` compares these
    paths against the image's baked head SHA, fail-closed: a changed or
-   unverifiable oracle (any tracked difference, any non-ignored untracked file
-   under a protected path, or a Git error) earns **zero test reward** and the
-   repository's mutable `test_command` is not executed.
+   unverifiable oracle earns **zero test reward** and the repository's mutable
+   `test_command` is not executed. That covers any tracked difference, any
+   non-ignored untracked file under a protected path or an untracked root
+   `sitecustomize.py` (imported at startup by every `python` run, so one that
+   `sys.exit(0)`s makes a suite that never ran look green), a
+   `skip-worktree`/`assume-unchanged` flag on a protected file, any change to
+   the ignore rules the probes honor (tracked or new untracked `.gitignore`
+   files, or a rule written to `.git/info/exclude`), or a Git error.
 
 3. **Build the images.** The last layer runs the repository's own suite at the
    head commit; a red baseline fails the build and produces nothing, because
