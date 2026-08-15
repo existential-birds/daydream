@@ -15,6 +15,7 @@ from jsonschema import Draft202012Validator
 from daydream.repository_paths import (
     DIRECTORY_SCOPE_PATTERN,
     DIRECTORY_SCOPE_SCHEMA,
+    REPOSITORY_FILE_PATH_MAX_LENGTH,
     REPOSITORY_FILE_PATH_PATTERN,
     REPOSITORY_FILE_PATH_SCHEMA,
     canonicalize_directory_scope,
@@ -26,7 +27,7 @@ from daydream.repository_paths import (
 WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
-    "maxLength": 512,
+    "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
     "pattern": rf"^(?:\.|{REPOSITORY_FILE_PATH_PATTERN[1:-1]}|/{REPOSITORY_FILE_PATH_PATTERN[1:-1]})$",
 }
 LINE_ANCHOR_SCHEMA: dict[str, Any] = {

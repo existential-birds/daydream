@@ -131,6 +131,11 @@ def test_working_directory_accepts_cwd() -> None:
     # Absolute form still requires a non-empty segment after the slash.
     assert not regex.match("/")
     assert not regex.match("//double-slash")
+    # issues #572/#573: inherited grammar now accepts legal names; cap is 4096
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("Café.md")
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("./foo")
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
 
 
 @pytest.mark.parametrize("value", MULTI_DOT_PATHS)
