@@ -707,18 +707,24 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     # Every ceiling-skipped partition is named with its root and reason.
     assert "**frontend**" in section and "group-ceiling" in section
     assert "`frontend/`" in section
-    # A partially-audited partition is a distinct bullet naming both stacks.
+    # residue's only retained group (group-01) failed its docs audit, so the
+    # python stack is not counted as audited: the partition is reported as not
+    # audited, naming both the ceiling-omitted and the failed stacks.
     assert "**residue**" in section
-    assert "partially audited" in section
-    assert "audited: python" in section
-    assert "omitted: generic" in section
+    assert "not audited" in section
+    assert "omitted: generic, python" in section
+    assert "partially audited" not in section
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
     # The failed assignment resolves to its group's roots, not just a key.
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
     coverage = json.loads(
         improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text()
     )
-    assert {entry["reason"] for entry in coverage["not_audited"]} == {"group-ceiling"}
+    assert {entry["reason"] for entry in coverage["not_audited"]} == {
+        "group-ceiling",
+        "group-failed",
+    }
+    assert coverage["partially_audited"] == []
     assert coverage["groups"] and coverage["partitions"]
     assert [entry["status"] for entry in coverage["groups"]] == ["failed"]
     assert "docs:group-01" in coverage["failed_assignments"]
