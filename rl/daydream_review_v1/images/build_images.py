@@ -171,10 +171,14 @@ def _immutable_base_image(value: str) -> str | None:
     return None
 
 
-def build_base_image() -> list[str]:
-    """Build and tag the shared base image. Returns the tags applied."""
-    wheel = build_wheel(DIST_DIR)
-    tags = [base_tag(), BASE_LATEST]
+def _base_build_cmd(wheel: Path | str, tags: list[str], *, no_cache: bool = False) -> list[str]:
+    """Assemble the ``docker build`` argv for the base image.
+
+    Centralising the argv (rather than inlining it per call site) keeps the
+    throwaway warm-host build in ``test_images.py`` honest with the production
+    build path. ``no_cache`` defeats the layer cache (the warm-host test's whole
+    point); without it the layer cache applies as normal.
+    """
     cmd = [
         "docker",
         "build",
@@ -183,9 +187,19 @@ def build_base_image() -> list[str]:
         "--build-arg",
         f"DAYDREAM_WHEEL={wheel}",
     ]
+    if no_cache:
+        cmd.append("--no-cache")
     for tag in tags:
         cmd += ["-t", tag]
     cmd.append(str(IMAGES_DIR))
+    return cmd
+
+
+def build_base_image() -> list[str]:
+    """Build and tag the shared base image. Returns the tags applied."""
+    wheel = build_wheel(DIST_DIR)
+    tags = [base_tag(), BASE_LATEST]
+    cmd = _base_build_cmd(wheel, tags)
     _stream(cmd)
     return tags
 
