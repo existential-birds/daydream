@@ -130,6 +130,14 @@ def _files_block(affected_files: list[FileInfo]) -> str:
     return "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
 
 
+def _inspect_changes_block(diff_ref: str) -> str:
+    """Render the shared ``To inspect changes`` instruction block."""
+    return f"""To inspect changes, Read or Grep any file listed in <affected_files> directly.
+If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
+to see exactly what changed. Do NOT dump the full diff — work file-by-file so
+your context stays small."""
+
+
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
 def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run pattern-scanner prompt.
@@ -160,10 +168,7 @@ Instructions:
 {files_block}
 </affected_files>
 
-To inspect changes, Read or Grep any file listed in <affected_files> directly.
-If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
-to see exactly what changed. Do NOT dump the full diff — work file-by-file so
-your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(PATTERN_SCANNER_SCHEMA)}
 """
@@ -240,10 +245,7 @@ emit a Dependency record.
 {files_block}
 </affected_files>
 
-To inspect changes, Read or Grep any file listed in <affected_files> directly.
-If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
-to see exactly what changed. Do NOT dump the full diff — work file-by-file so
-your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(DEPENDENCY_TRACER_SCHEMA)}
 """
@@ -275,10 +277,7 @@ each test file you find.
 {files_block}
 </affected_files>
 
-To inspect changes, Read or Grep any file listed in <affected_files> directly.
-If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
-to see exactly what changed. Do NOT dump the full diff — work file-by-file so
-your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(TEST_MAPPER_SCHEMA)}
 """

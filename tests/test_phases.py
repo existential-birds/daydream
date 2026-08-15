@@ -3196,6 +3196,7 @@ def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
 
 def test_alternatives_prompt_inlines_small_diff() -> None:
     from daydream.phases import build_alternative_review_prompt
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     prompt = build_alternative_review_prompt(
         intent_summary="does a thing", diff_path=".daydream/diff.patch",
@@ -3204,6 +3205,9 @@ def test_alternatives_prompt_inlines_small_diff() -> None:
     assert "+++ b/x.py" in prompt
     assert "in the diff at .daydream/diff.patch" not in prompt
     assert "do NOT re-Read" in prompt
+    # No exploration pointer to carry the boundary; the inlined diff is
+    # repository-controlled content, so it must be guarded directly.
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
 
 
 def test_alternatives_prompt_pointer_when_diff_is_none() -> None:

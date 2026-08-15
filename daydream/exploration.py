@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 # section and every persisted artifact, so the boundary text lives in one place.
 _BOUNDARY_BLOCKQUOTE = f"> {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}"
 
+# Opening of to_prompt_section()'s canonical header: the section heading plus the
+# blockquote boundary. Exposed so consumers that strip the embedded boundary
+# (e.g. improve's recon prompt) share this rendering instead of re-deriving it.
+EXPLORATION_SECTION_PREFIX = f"# Exploration Context\n\n{_BOUNDARY_BLOCKQUOTE}\n\n"
+
 
 def _no_data_artifact(title: str) -> str:
     """Markdown body for a persisted artifact when nothing was collected."""
@@ -140,9 +145,7 @@ class ExplorationContext:
             return ""
 
         return (
-            "# Exploration Context\n\n"
-            + _BOUNDARY_BLOCKQUOTE
-            + "\n\n"
+            EXPLORATION_SECTION_PREFIX
             + "\n\n".join(sections)
             + "\n"
         )

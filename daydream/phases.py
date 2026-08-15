@@ -1259,6 +1259,10 @@ def build_alternative_review_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    elif inline_diff is not None:
+        # No exploration pointer to carry the untrusted boundary; the inlined
+        # diff is itself repository-controlled content, so guard it directly.
+        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     parts.append(_confidence_and_convention_instructions())
     if inline_diff is not None:
         diff_clause = (

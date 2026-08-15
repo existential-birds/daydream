@@ -25,6 +25,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.orchestrator import _diff_changed_files
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
+from daydream.exploration import EXPLORATION_SECTION_PREFIX
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
@@ -209,9 +210,10 @@ def _build_recon_prompt(
     )
     root_list = ", ".join(f"`{root}`" for root in audited_roots)
     # `exploration_summary` (ExplorationContext.to_prompt_section()) opens with
-    # the same boundary emitted below; strip it so the untrusted-content warning
-    # appears exactly once in the recon prompt.
-    summary_prefix = "# Exploration Context\n\n" + UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY + "\n\n"
+    # the same boundary emitted below (exploration.EXPLORATION_SECTION_PREFIX);
+    # strip it so the untrusted-content warning appears exactly once in the
+    # recon prompt.
+    summary_prefix = EXPLORATION_SECTION_PREFIX
     if exploration_summary.startswith(summary_prefix):
         exploration_summary = exploration_summary.removeprefix(summary_prefix)
     return f"""IMPROVE_RECON

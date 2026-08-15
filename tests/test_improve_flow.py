@@ -473,6 +473,9 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
 
     assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
     assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Existing repository scan:")
+    # The exploration summary embedded below the recon header already opened with
+    # the boundary; dedup must leave exactly one occurrence in the full prompt.
+    assert prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
     # Roots only: the recon prompt never inlines an individual tracked file.
     assert "apps/svc00/api.py" not in prompt
 
