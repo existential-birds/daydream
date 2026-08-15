@@ -62,12 +62,13 @@ _ERROR_CONTEXT_MARKERS = (
 )
 
 #: PEM private-key block anchors, mirroring trajectory._PEM_KEY_PATTERN's
-#: ``-----BEGIN (?:RSA )?PRIVATE KEY-----`` spec. Only blocks whose anchors match
-#: that spec are buffered for whole-block redaction: ENCRYPTED/OPENSSH/EC/DSA
-#: headers are not matched by the pattern, so buffering them here would present
-#: them as handled and then forward the raw key to on_line and the failure tail.
-_PEM_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----")
-_PEM_END_RE = re.compile(r"-----END (?:RSA )?PRIVATE KEY-----")
+#: six-variant spec (RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA). Only blocks
+#: whose anchors match that spec are buffered for whole-block redaction, so
+#: every variant the pattern can redact is held until its END anchor and
+#: redacted whole before reaching on_line or the failure tail. A block the
+#: pattern cannot match (e.g. CERTIFICATE) must not be treated as handled.
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----")
 
 
 def _is_transient(stdout: str) -> bool:
