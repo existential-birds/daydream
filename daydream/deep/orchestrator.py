@@ -20,7 +20,7 @@ import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -2878,22 +2878,35 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     return None
 
 
+async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
+    """Await a commit/push phase, mapping failure to a clean Stop(1).
+
+    Shared by _step_commit and _step_commit_push so the try/except ->
+    print_error("Commit/Push Failed") -> Stop(1) guard lives in one place.
+    The phase coroutine is created by the caller but only awaited here, so a
+    synchronous GitError from staging still surfaces inside the guard.
+    """
+    try:
+        await coro
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return Stop(1)
+    return None
+
+
 async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Commit-and-push the applied fixes."""
     # phase_commit_push runs as part of the fix/commit cycle — reuse
     # the fix backend (no separate "commit" phase identifier).
     # stage_paths can raise GitError synchronously before the agent turn;
-    # mirror _step_commit_push so that surfaces as a clean Stop(1) instead of
+    # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
     # an unhandled traceback terminating the deep run.
-    try:
-        await phase_commit_push(
+    return await _commit_push_or_stop(
+        phase_commit_push(
             ctx.backend_for("fix"), ctx.work,
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return Stop(1)
-    return None
+    )
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -3001,16 +3014,13 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
 async def _step_commit_push(ctx: FlowContext) -> Stop | None:
     """Commit and push the applied fixes (feedback mode)."""
     results: list[FixResult] = ctx.data["results"]
-    try:
-        await phase_commit_push_auto(
+    return await _commit_push_or_stop(
+        phase_commit_push_auto(
             ctx.backend_for("review"), ctx.work,
             items=[item for item, _ok, _err in results if _ok],
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return Stop(1)
-    return None
+    )
 
 
 async def _step_respond_feedback(ctx: FlowContext) -> Stop:

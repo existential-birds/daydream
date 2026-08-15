@@ -2537,6 +2537,80 @@ async def phase_test_and_heal(
             return False, retries_used, False
 
 
+def _stage_deterministic(
+    work: WorkContext, preexisting_untracked: set[str],
+) -> set[str] | None:
+    """Pre-stage exactly the daydream changes, excluding run artifacts.
+
+    Deterministic staging (issue #562/#543): everything changed from HEAD
+    minus the pre-run untracked snapshot is staged via ``stage_paths`` (never
+    ``git add --all``), so a user's pre-run scratch files can never be swept
+    into the daydream commit. Daydream's own mid-run artifacts under
+    ``.daydream/`` (recommended.patch, fix-failures, quality-gate/test
+    verdicts) are created after the snapshot and would otherwise be staged
+    and pushed alongside the fixes — they are run state, not user changes,
+    so they are excluded.
+
+    Returns:
+        The staged path set, or ``None`` when there is nothing to commit.
+
+    Raises:
+        GitError: If the changed-file enumeration or staging fails — the
+            strict enumerator must not silently degrade to an empty stage
+            (that would leave tracked fixes uncommitted behind a green
+            "Commit and push complete").
+    """
+    stage = set(
+        git_ops.changed_files_against(
+            work.repo, "HEAD", preexisting_untracked=preexisting_untracked,
+        )
+    )
+    stage = {
+        p for p in stage if p != ".daydream" and not p.startswith(".daydream/")
+    }
+    if not stage:
+        print_info(console, "Nothing to commit — no daydream changes")
+        return None
+    git_ops.stage_paths(work.repo, [Path(p) for p in sorted(stage)])
+    return stage
+
+
+def _verify_commit_scope(
+    work: WorkContext, sha_before: str, stage: set[str],
+) -> None:
+    """Verify the committed tree matches the pre-staged daydream set.
+
+    Issue #562: prompt compliance alone is not enforcement — a commit agent
+    that re-runs ``git add -A`` would sweep pre-existing untracked files into
+    the commit. Enforcement checks both directions:
+
+    - extras (committed beyond the pre-staged set) surfaces scope creep;
+    - missing (pre-staged files absent from the committed tree) surfaces an
+      under-commit, so a tracked fix dropped from the commit (e.g. by a
+      partial commit) is never hidden behind a green "Commit and push
+      complete".
+    """
+    try:
+        committed = set(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
+    except GitError as exc:
+        print_warning(console, f"Could not verify committed tree: {exc}")
+        return
+    extras = sorted(committed - stage)
+    if extras:
+        print_warning(
+            console,
+            "Commit contains files outside the pre-staged daydream set "
+            f"(scope creep): {', '.join(extras)}",
+        )
+    missing = sorted(stage - committed)
+    if missing:
+        print_warning(
+            console,
+            "Commit is missing pre-staged daydream files (under-commit): "
+            f"{', '.join(missing)}",
+        )
+
+
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -2587,11 +2661,9 @@ async def _do_commit(
             return False
 
     if preexisting_untracked is not None:
-        stage = git_ops.changed_files(work.repo, preexisting_untracked=preexisting_untracked)
-        if not stage:
-            print_info(console, "Nothing to commit — no daydream changes")
+        stage = _stage_deterministic(work, preexisting_untracked)
+        if stage is None:
             return False
-        git_ops.stage_paths(work.repo, [Path(p) for p in stage])
 
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
@@ -2681,23 +2753,11 @@ async def _do_commit(
         except GitError as exc:
             print_warning(console, f"Failed to amend trailers: {exc}")
 
-    if preexisting_untracked is not None:
-        # Issue #562: prompt compliance alone is not enforcement — a commit
-        # agent that re-runs ``git add -A`` would sweep pre-existing untracked
-        # files into the commit. Verify the committed tree against the
-        # pre-staged set and surface any scope creep to the operator.
-        try:
-            committed = set(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
-        except GitError as exc:
-            print_warning(console, f"Could not verify committed tree: {exc}")
-        else:
-            extras = sorted(committed - set(stage))
-            if extras:
-                print_warning(
-                    console,
-                    "Commit contains files outside the pre-staged daydream set "
-                    f"(scope creep): {', '.join(extras)}",
-                )
+    # stage is only ever set on the deterministic path (and non-None there,
+    # since _stage_deterministic returned early on an empty stage); the
+    # ``is not None`` narrow lets mypy prove the set type.
+    if preexisting_untracked is not None and stage is not None:
+        _verify_commit_scope(work, sha_before, stage)
 
     return True
 
@@ -2761,11 +2821,11 @@ async def phase_commit_push_auto(
         backend, work, push=True, items=items,
         preexisting_untracked=preexisting_untracked,
     )
-    # Only claim success when a commit was actually created: on the
-    # deterministic path a git failure makes changed_files soft-fail to an
-    # empty set, so _do_commit prints "Nothing to commit" and returns False —
-    # a success banner there would mislead the operator into believing the
-    # fixes were committed.
+    # Only claim success when a commit was actually created: the deterministic
+    # path uses the strict changed_files_against enumerator (a git failure
+    # surfaces as Stop(1), never an empty stage), so _do_commit returns False
+    # only for a genuinely empty daydream change set — a success banner on
+    # either would mislead the operator into believing the fixes were committed.
     if committed:
         print_success(console, "Commit and push complete")
 

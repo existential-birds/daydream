@@ -16,15 +16,13 @@ from __future__ import annotations
 
 import io
 import sys
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from daydream.backends import (
     AgentEvent,
-    ContinuationToken,
     CostEvent,
     MetricsEvent,
     ResultEvent,
@@ -257,43 +255,25 @@ def test_log_mode_console_redacts_string_payloads() -> None:
         set_log_mode(False)
 
 
-class _CredentialSummarizerBackend:
+class _CredentialSummarizerBackend(ScriptedBackend):
     """Failure-summarizer stub: yields the credential-bearing handoff_prompt.
 
     Mirrors the real summarizer contract (``FAILURE_SUMMARIZER_SCHEMA`` in
     phases.py: structured ``handoff_prompt`` in the ResultEvent) so the REAL
-    ``run_agent`` + ``_run_failure_summarizer`` path consumes it.
+    ``run_agent`` + ``_run_failure_summarizer`` path consumes it. Reuses
+    ``ScriptedBackend``'s shared four-member Backend surface; only the script
+    differs (one turn: blank text, then the credential-bearing ResultEvent).
     """
 
-    model = "test-model"
-
     def __init__(self, body: str) -> None:
-        self._body = body
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> AsyncGenerator[AgentEvent, None]:
-        async def _gen() -> AsyncGenerator[AgentEvent, None]:
-            yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={"handoff_prompt": self._body}, continuation=None
-            )
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        pass
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
+        super().__init__(
+            events=[
+                TextEvent(text=""),
+                ResultEvent(
+                    structured_output={"handoff_prompt": body}, continuation=None
+                ),
+            ]
+        )
 
 
 @pytest.mark.asyncio

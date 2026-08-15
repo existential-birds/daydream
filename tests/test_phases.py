@@ -308,6 +308,98 @@ class _StagedCommitBackend(StubBackend):
             yield event
 
 
+class _ReStageCommitBackend(StubBackend):
+    """Commit-agent stub that IGNORES the staging instruction and re-runs
+    ``git add -A`` — the issue #562 failure mode the post-commit verification
+    must surface. Sweeps a pre-existing untracked file into the commit that
+    ``_do_commit`` deliberately left out of the pre-staged index.
+    """
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        if prompt.startswith("The daydream changes are already staged"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            git(cwd, "add", "-A")
+            git(
+                cwd,
+                "commit",
+                "-m",
+                f"fix: apply daydream changes\n\n"
+                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
+            )
+            yield TextEvent(text="Committed the staged changes.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+class _PartialCommitBackend(StubBackend):
+    """Commit-agent stub that commits only a subset of the pre-staged index
+    (``git commit -- <one path>``), leaving the other staged fix uncommitted —
+    the under-commit direction the verification must surface.
+    """
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        if prompt.startswith("The daydream changes are already staged"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            # Partial commit: only app.py enters the committed tree; helper.py
+            # stays staged and must be surfaced as an under-commit.
+            git(
+                cwd,
+                "commit",
+                "-m",
+                f"fix: apply daydream changes\n\n"
+                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
+                "--",
+                "app.py",
+            )
+            yield TextEvent(text="Committed one path.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
 @pytest.mark.asyncio
 async def test_do_commit_excludes_preexisting_untracked_from_tree(
     git_repo: Path, make_work, capsys,
@@ -337,6 +429,101 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     assert "notes.txt" in git(git_repo, "status", "--porcelain")
     # Daydream-Run trailer still applied (existing flow preserved).
     assert "Daydream-Run:" in git(git_repo, "log", "-1", "--format=%B")
+
+
+@pytest.mark.asyncio
+async def test_do_commit_warns_on_scope_creep_beyond_prestaged_set(
+    git_repo: Path, make_work, capsys,
+) -> None:
+    """#562 enforcement is not prompt-only: a commit agent that re-runs
+    ``git add -A`` sweeps a pre-existing untracked file into the commit, and
+    the post-commit verification must warn — the committed tree exceeds the
+    pre-staged daydream set."""
+    from daydream.phases import _do_commit
+
+    work = make_work(git_repo)
+    (git_repo / "app.py").write_text("x = 0\n")            # tracked baseline
+    git(git_repo, "add", "app.py")
+    git_commit(git_repo, "baseline app.py")
+    (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked)
+    (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
+    backend = _ReStageCommitBackend(git_repo)
+
+    ok = await _do_commit(
+        backend, work, push=False, preexisting_untracked={"notes.txt"},
+    )
+    assert ok is True
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    assert "notes.txt" in committed  # the bad agent swept it in
+    out = capsys.readouterr().out
+    assert "scope creep" in out
+    assert "notes.txt" in out
+
+
+@pytest.mark.asyncio
+async def test_do_commit_warns_on_under_commit_missing_prestaged_files(
+    git_repo: Path, make_work, capsys,
+) -> None:
+    """A commit agent that commits only part of the pre-staged index drops the
+    remaining tracked fixes — the verification surfaces the under-commit
+    instead of reporting a clean pass."""
+    from daydream.phases import _do_commit
+
+    work = make_work(git_repo)
+    (git_repo / "app.py").write_text("x = 0\n")
+    (git_repo / "helper.py").write_text("h = 0\n")
+    git(git_repo, "add", "app.py", "helper.py")
+    git_commit(git_repo, "baseline")
+    (git_repo / "app.py").write_text("x = 1\n")    # daydream change
+    (git_repo / "helper.py").write_text("h = 1\n")  # daydream change
+    backend = _PartialCommitBackend(git_repo)
+
+    ok = await _do_commit(
+        backend, work, push=False, preexisting_untracked=set(),
+    )
+    assert ok is True
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    assert "helper.py" not in committed  # dropped by the partial commit
+    out = capsys.readouterr().out
+    assert "under-commit" in out
+    assert "helper.py" in out
+
+
+@pytest.mark.asyncio
+async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
+    git_repo: Path, make_work, capsys,
+) -> None:
+    """Daydream's own mid-run artifacts under .daydream/ (recommended.patch,
+    fix-failures.json, quality-gate verdicts) are excluded from the
+    deterministic stage: they must not land in the daydream commit and get
+    pushed even when the repo does not ignore .daydream/."""
+    from daydream.phases import _do_commit
+
+    work = make_work(git_repo)
+    (git_repo / "app.py").write_text("x = 0\n")
+    git(git_repo, "add", "app.py")
+    git_commit(git_repo, "baseline app.py")
+    (git_repo / "app.py").write_text("x = 1\n")  # daydream change (tracked)
+    # Mid-run artifacts created after the pre-run untracked snapshot.
+    dd = git_repo / ".daydream"
+    dd.mkdir()
+    (dd / "recommended.patch").write_text("--- a/app.py\n")
+    (dd / "fix-failures.json").write_text("[]\n")
+    (dd / "deep").mkdir(parents=True)
+    (dd / "deep" / "fix-quality-gate.json").write_text("{}\n")
+    backend = _StagedCommitBackend(git_repo)
+
+    ok = await _do_commit(
+        backend, work, push=False, preexisting_untracked=set(),
+    )
+    assert ok is True
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    assert not any(p.startswith(".daydream/") for p in committed), (
+        f"commit tree carries .daydream/ artifacts: {committed}"
+    )
 
 
 @pytest.mark.asyncio
