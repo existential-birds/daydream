@@ -13,11 +13,13 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 from conftest import PROJECT_ROOT
 
-from daydream_review_v1.fixture import FIXTURE_SLUG
+from daydream_review_v1.fixture import FIXTURE_SLUG, build_fixture_repo
 
 DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
 
@@ -51,7 +53,6 @@ def _tags() -> set[str]:
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
-    before = _tags()
     result = _build("--red")
     combined = result.stdout + result.stderr
 
@@ -62,9 +63,18 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
     assert "${TEST_COMMAND}" in combined, combined[-3000:]
     assert "FAILED (failures=1)" in combined, combined[-3000:]
 
-    # `--red` rewrites the head commit, so its snapshot tag is one that did not
-    # exist before; the gate must not have left it behind.
-    assert _tags() <= before, f"a tag was published for a red baseline: {_tags() - before}"
+    # `--red` rewrites the HEAD commit (PR #2) red; the earlier PR (#1) in the
+    # corpus stays green and legitimately produces an image. So the invariant is
+    # that the red head's own snapshot tag must not exist — not that no new tag
+    # appears at all (PR #1's image is expected). Compute the red head SHA the
+    # same way materialize_mirror does (build_fixture_repo(red=True)) and assert
+    # its image is absent.
+    with tempfile.TemporaryDirectory(prefix="daydream-rl-redhead-") as tmp:
+        red_head = build_fixture_repo(Path(tmp) / "repo", red=True).pr2_head_sha
+    red_tag = f"{FIXTURE_IMAGE}:{red_head[:12]}"
+    assert red_tag not in _tags(), (
+        f"a tag was published for the red baseline: {red_tag} (have {_tags()})"
+    )
 
 
 @pytest.mark.slow

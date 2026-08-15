@@ -70,11 +70,11 @@ def _manifest_row(run_dir: Path) -> dict[str, Any]:
     return {**manifest, **metrics}
 
 
-#: Git pathspec (shell-quoted) excluding daydream's own ``.daydream/`` artifacts
-#: from the fix signal. Shared by both dirty-tree and moved-HEAD probes so the
-#: exclusion set only drifts by intentional edit, never by one string falling
-#: out of sync.
-DAYDREAM_EXCLUDE = "':(exclude).daydream'"
+#: Git pathspec (passed as a bare argv element, never shell-interpolated)
+#: excluding daydream's own ``.daydream/`` artifacts from the fix signal.
+#: Shared by both dirty-tree and moved-HEAD probes so the exclusion set only
+#: drifts by intentional edit, never by one string falling out of sync.
+DAYDREAM_EXCLUDE = ":(exclude).daydream"
 
 
 async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
@@ -100,16 +100,20 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     and scores ``no_fix_reward``. Either way the decision is read from the
     tracked tree, never from daydream's own ``.daydream/`` directory.
     """
-    quoted = shlex.quote(repo)
     dirty = await runtime.run(
         [
-            "sh",
-            "-c",
-            f'cd {quoted} && test -n "$(git status --porcelain --untracked-files=no -- {DAYDREAM_EXCLUDE}")',
+            "git",
+            "-C",
+            repo,
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+            "--",
+            DAYDREAM_EXCLUDE,
         ],
         {},
     )
-    if dirty.exit_code == 0:
+    if dirty.exit_code == 0 and dirty.stdout.strip():
         return True
     # The deep flow commits and pushes once the suite is green, so a clean tree
     # at a moved HEAD is the successful-fix case, not the untouched one. But
@@ -123,9 +127,15 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     # never a fix signal.
     diff = await runtime.run(
         [
-            "sh",
-            "-c",
-            f"cd {quoted} && git diff --quiet {shlex.quote(head_sha)} HEAD -- {DAYDREAM_EXCLUDE}",
+            "git",
+            "-C",
+            repo,
+            "diff",
+            "--quiet",
+            head_sha,
+            "HEAD",
+            "--",
+            DAYDREAM_EXCLUDE,
         ],
         {},
     )
