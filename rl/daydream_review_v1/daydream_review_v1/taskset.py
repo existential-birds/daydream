@@ -27,7 +27,7 @@ from daydream.benchmark.corpus import harvested_corpus
 from daydream.training.exclusion import load_exclusion_list
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir
@@ -191,6 +191,7 @@ class DaydreamReviewData(vf.TaskData):
     head_sha: str
     base_ref: str | None = None
     test_command: str
+    protected_test_paths: list[str]
     golden_comments: list[GoldenComment] = []
 
 
@@ -403,6 +404,7 @@ class _ManifestEntry(BaseModel):
     clone_url: str
     image: str
     test_command: str
+    protected_test_paths: list[str] = Field(min_length=1)
     setup_cmds: list[str] = []
 
 
@@ -534,6 +536,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
                 head_sha=pr.head_sha,
                 base_ref=pr.base_ref,
                 test_command=entry.test_command,
+                protected_test_paths=entry.protected_test_paths,
                 golden_comments=golden.get(pr.golden_url, []),
             )
             tasks.append(DaydreamReviewTask(data, config.task))

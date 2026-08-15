@@ -12,12 +12,23 @@
 # `clone_url` is what `images/repo.Dockerfile` mirror-clones. The sentinel
 # `fixture://daydream-rl-fixture` tells `build_images.py` to materialize the
 # deterministic fixture repository from `daydream_review_v1.fixture` instead of cloning.
+#
+# `protected_test_paths` is the test oracle inventory: LITERAL repository-relative
+# files/directories that constitute the repo's test oracle. It is required and
+# nonempty (a missing or empty list is a manifest-load error). At scoring time
+# `fix_tests_pass` compares these paths against the baked head SHA, fail-closed:
+# any tracked difference (committed, staged, unstaged, deleted, renamed), any
+# non-ignored untracked file under a protected path, or any Git error means the
+# oracle changed and the rollout earns zero test reward without running
+# `test_command`. Cover every runner-config filename `test_command` can load,
+# including absent ones whose later creation could alter collection.
 
 [repos."existential-birds/daydream-rl-fixture"]
 clone_url = "fixture://daydream-rl-fixture"
 image = "daydream-rl/fixture"
 test_command = "python -m unittest discover -q"
 setup_cmds = []
+protected_test_paths = ["tests"]
 
 # Reference entry: real upstream history, proving the tooling on something other
 # than a synthetic repo. BSD-3-Clause, not on the C5 exclusion list, and its whole
@@ -37,3 +48,4 @@ clone_url = "https://github.com/pallets/itsdangerous.git"
 image = "daydream-rl/itsdangerous"
 test_command = "/opt/repo-venv/bin/python -m pytest -q"
 setup_cmds = ["UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/repo-venv uv sync --locked --no-default-groups --group tests"]
+protected_test_paths = ["tests", "conftest.py", ".pytest.ini", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"]
