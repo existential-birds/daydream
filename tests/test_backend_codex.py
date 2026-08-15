@@ -5,10 +5,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daydream import git_ops
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
@@ -27,6 +29,7 @@ from daydream.backends.codex import (
 )
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.git_helpers import git as _git
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -207,19 +210,271 @@ async def test_continuation_token_resumes():
 
 
 @pytest.mark.asyncio
-async def test_codex_read_only_uses_read_only_sandbox():
-    """read_only=True selects --sandbox read-only; danger-full-access absent."""
-    backend = CodexBackend(model="fixture-model")
+async def test_codex_read_only_uses_read_only_sandbox(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """read_only=True at a worktree runs in a disposable standalone clone:
+    read-only sandbox, isolated cwd != source, matching HEAD + staged patch,
+    feature-only files present, no origin, rebound prompt, cleaned up. The
+    copy loop mirrors worktree content — unstaged edits to tracked files and
+    untracked files — not just HEAD + staged index."""
+    _main, source = linked_worktree
+    parser = source / "services" / "taste" / "parser.go"
+    parser.write_text("package taste\n\n// caller staged\nfunc CallerStaged() {}\n")
+    _git(source, "add", "services/taste/parser.go")
+    # Unstaged edit to a tracked file + untracked file: both must be carried
+    # into the clone by the shutil.copy2 mirror loop.
+    lexer = source / "services" / "taste" / "lexer.go"
+    lexer.write_text("package taste\n\n// caller unstaged\nfunc CallerUnstaged() {}\n")
+    notes = source / "notes.md"
+    notes.write_text("untracked caller note\n")
+    source_head = git_ops.head_sha(source)
+    source_patch = git_ops.staged_patch(source)
+
+    captured: dict[str, Any] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
+    async def fake_exec(*args, **kwargs):
+        flat = list(args)
+        cd = flat[flat.index("--cd") + 1]
+        isolated = Path(cd)
+        captured["isolated"] = isolated
+        captured["head"] = git_ops.head_sha(isolated)
+        captured["patch"] = git_ops.staged_patch(isolated)
+        captured["has_parser"] = (isolated / "services" / "taste" / "parser.go").exists()
+        captured["lexer"] = (isolated / "services" / "taste" / "lexer.go").read_text()
+        captured["has_notes"] = (isolated / "notes.md").exists()
+        captured["notes"] = (isolated / "notes.md").read_text() if captured["has_notes"] else None
+        captured["remote"] = git_ops.remote_url(isolated)
+        captured["args"] = flat
+        return mock_proc
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        async for _ in CodexBackend(model="fixture-model").execute(
+            source, f"Audit repository at {source}", read_only=True,
+        ):
             pass
 
-        flat_args = list(mock_exec.call_args.args)
-        assert "read-only" in flat_args
-        assert "danger-full-access" not in flat_args
-        assert flat_args[flat_args.index("--sandbox") + 1] == "read-only"
+    flat = captured["args"]
+    assert flat[flat.index("--sandbox") + 1] == "read-only"
+    isolated = captured["isolated"]
+    assert isolated != source
+    assert captured["head"] == source_head
+    assert captured["patch"] == source_patch
+    assert captured["has_parser"] is True
+    # Mirror loop carries unstaged edits and untracked files into the clone.
+    assert captured["lexer"] == lexer.read_text()
+    assert captured["has_notes"] is True
+    assert captured["notes"] == notes.read_text()
+    assert captured["remote"] is None
+    # Prompt rebound: isolated path present, source path absent in stdin bytes.
+    written = mock_proc.stdin.write.call_args.args[0]
+    assert isinstance(written, bytes)
+    assert str(isolated).encode() in written
+    assert str(source).encode() not in written
+    # Temp dir removed after execute.
+    assert not isolated.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_isolation_failure_is_fail_closed(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation preparation failure raises CodexError and leaves source Git state untouched."""
+    _main, source = linked_worktree
+    (source / "services" / "taste" / "parser.go").write_text(
+        "package taste\n\n// staged\nfunc S() {}\n"
+    )
+    _git(source, "add", "services/taste/parser.go")
+    before_head = git_ops.head_sha(source)
+    before_patch = git_ops.staged_patch(source)
+
+    def boom(*args, **kwargs):
+        raise git_ops.GitError("isolation probe failure")
+
+    monkeypatch.setattr("daydream.backends.codex.git_ops.clone", boom)
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+            async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
+                pass
+
+    assert git_ops.head_sha(source) == before_head
+    assert git_ops.staged_patch(source) == before_patch
+
+
+def test_rebind_source_paths_preserves_sibling_paths():
+    """The prompt rebind is anchored at path boundaries (issues #1/#9): sibling
+    paths that merely share the source prefix survive, while sub-paths, the exact
+    path, and ``//``-doubled renderings all map onto the isolated checkout."""
+    from daydream.backends.codex import _rebind_source_paths
+
+    source = Path("/home/exedev/work")
+    execution = Path("/tmp/daydream-codex-read-only-abc/repo")
+
+    # Sibling paths sharing only the prefix are untouched — nothing is rebound.
+    siblings = f"never {source}-2 or {source}2 or {source}space or {source}.py"
+    out = _rebind_source_paths(siblings, source, execution)
+    assert f"{source}-2" in out
+    assert f"{source}2" in out
+    assert f"{source}space" in out
+    assert f"{source}.py" in out
+    assert str(execution) not in out
+
+    # The exact path and sub-paths are rebound; no standalone source path remains.
+    exact = f"Audit {source} and now {source}/sub/a then {source}/sub/b finally {source}"
+    out2 = _rebind_source_paths(exact, source, execution)
+    assert str(execution / "sub" / "a") in out2
+    assert str(execution / "sub" / "b") in out2
+    assert out2.startswith(f"Audit {execution}")
+    assert out2.endswith(f"finally {execution}")
+    assert str(source) not in out2
+
+    # //-doubled renderings are caught too.
+    doubled = f"Audit {source}//inner//file and {source}//two"
+    out3 = _rebind_source_paths(doubled, source, execution)
+    assert str(source) not in out3
+    assert str(execution) in out3
+    assert "/work//inner" not in out3
+
+
+def test_isolated_child_env_strips_redirect_vars(monkeypatch: pytest.MonkeyPatch):
+    """_isolated_child_env returns None when no isolation and strips the
+    repo-redirect env vars (PWD/$GIT_*) when running in the disposable clone."""
+    from daydream.backends.codex import _isolated_child_env
+
+    monkeypatch.setenv("PWD", "/home/exedev/work")
+    monkeypatch.setenv("OLDPWD", "/home/exedev")
+    monkeypatch.setenv("GIT_DIR", "/home/exedev/work/.git")
+    monkeypatch.setenv("HOME", "/home/exedev")
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    assert _isolated_child_env(Path("/home/exedev/work"), Path("/home/exedev/work")) is None
+
+    env = _isolated_child_env(Path("/home/exedev/work"), Path("/tmp/clone/repo"))
+    assert env is not None
+    assert "PWD" not in env
+    assert "OLDPWD" not in env
+    assert "GIT_DIR" not in env
+    # Non-redirect vars are preserved (isolation is path-hiding only).
+    assert env["HOME"] == "/home/exedev"
+    assert env["PATH"] == "/usr/bin"
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_resume_is_refused(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """A read-only session passed a codex resume token fails closed: the resumed
+    thread's stored cwd is the per-call clone, deleted when the turn ends."""
+    from daydream.backends import ContinuationToken
+
+    _main, source = linked_worktree
+    backend = CodexBackend(model="fixture-model")
+    token = ContinuationToken(backend="codex", data={"thread_id": "th_prev"})
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="cannot be resumed"):
+            async for _ in backend.execute(source, "Continue", continuation=token, read_only=True):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_parallel_calls_share_one_clone(
+    linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent read-only calls on one backend build a single disposable clone
+    (parallel fan-out must not clone the monorepo once per call) and remove it
+    only after the last holder's generator exits."""
+    from daydream.backends.codex import CodexBackend, _prepare_read_only_checkout
+
+    _main, source = linked_worktree
+    build_calls: list[Path] = []
+    real_prep = _prepare_read_only_checkout
+
+    def counting_prep(src: Path, destination: Path) -> Path:
+        build_calls.append(destination)
+        return real_prep(src, destination)
+
+    monkeypatch.setattr("daydream.backends.codex._prepare_read_only_checkout", counting_prep)
+    seen: list[str] = []
+    entered = asyncio.Event()
+
+    async def fake_exec(*args, **kwargs):
+        flat = list(args)
+        seen.append(flat[flat.index("--cd") + 1])
+        if not entered.is_set():
+            entered.set()
+            # Keep both subprocesses alive simultaneously so the second call
+            # reaches the checkout lock while the first still holds its ref.
+            await asyncio.sleep(0.2)
+        return make_mock_process_from_fixture("simple_text.jsonl")
+
+    backend = CodexBackend(model="fixture-model")
+
+    async def drive() -> None:
+        async for _ in backend.execute(source, f"Audit {source}", read_only=True):
+            pass
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        await asyncio.gather(drive(), drive())
+
+    assert len(build_calls) == 1, "the two concurrent calls must share one clone build"
+    assert len(seen) == 2
+    assert seen[0] == seen[1], "both calls ran inside the same shared clone"
+    # The shared clone is removed once the last holder exits.
+    assert not Path(seen[0]).exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_mirrors_symlinks_and_unstaged_deletions(
+    linked_worktree: tuple[Path, Path],
+) -> None:
+    """The mirror loop keeps symlinks as links (file, dir, and dangling targets)
+    and mirrors unstaged deletions, so the audit model sees the true worktree."""
+    _main, source = linked_worktree
+    taste = source / "services" / "taste"
+
+    target = taste / "real.go"
+    target.write_text("package taste\n")
+    (taste / "link.go").symlink_to("real.go")
+    _git(source, "add", "services/taste/real.go", "services/taste/link.go")
+    _git(source, "commit", "-m", "add symlink")
+
+    # Unstaged deletion of a tracked file.
+    (taste / "lexer.go").unlink()
+    # Untracked dangling symlink and an untracked symlink-to-directory.
+    (taste / "deadlink").symlink_to("no-such-target")
+    subdir = taste / "subdir"
+    subdir.mkdir()
+    (subdir / "inner.txt").write_text("i")
+    (taste / "dir-link").symlink_to(subdir)
+
+    captured: dict[str, Any] = {}
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    async def fake_exec(*args, **kwargs):
+        flat = list(args)
+        isolated = Path(flat[flat.index("--cd") + 1])
+        captured["isolated"] = isolated
+        captured["link"] = (isolated / "services/taste/link.go").is_symlink()
+        captured["link_target"] = str((isolated / "services/taste/link.go").readlink())
+        captured["deadlink"] = (isolated / "services/taste/deadlink").is_symlink()
+        captured["dir_link"] = (isolated / "services/taste/dir-link").is_symlink()
+        captured["doomed_present"] = (isolated / "services/taste/lexer.go").exists()
+        return mock_proc
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
+            pass
+
+    assert captured["link"] is True
+    assert captured["link_target"] == "real.go"
+    assert captured["deadlink"] is True
+    assert captured["dir_link"] is True
+    assert captured["doomed_present"] is False
+    assert not captured["isolated"].exists()
 
 
 @pytest.mark.asyncio
@@ -235,6 +490,32 @@ async def test_codex_default_uses_full_access_sandbox():
         flat_args = list(mock_exec.call_args.args)
         assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
         assert "read-only" not in flat_args
+        assert flat_args[flat_args.index("--cd") + 1] == "/tmp"
+
+
+@pytest.mark.asyncio
+async def test_codex_default_full_access_at_worktree_skips_isolation(
+    linked_worktree: tuple[Path, Path],
+) -> None:
+    """read_only=False (default) at a Git worktree root keeps the caller's cwd.
+
+    The disposable-clone isolation guard requires ``read_only=True``; with the
+    default sandbox, ``--cd`` must be the source path itself — not a clone —
+    so a regression that drops ``read_only`` from the guard is caught even
+    though the non-worktree test above cannot observe it.
+    """
+    _main, source = linked_worktree
+    backend = CodexBackend(model="fixture-model")
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(source, "p"):
+            pass
+
+        flat_args = list(mock_exec.call_args.args)
+        assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
+        assert "read-only" not in flat_args
+        assert flat_args[flat_args.index("--cd") + 1] == str(source)
 
 
 @pytest.mark.asyncio

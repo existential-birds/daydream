@@ -1,19 +1,70 @@
 # tests/test_read_only_enforcement.py
-"""Cross-backend gate: each backend selects its read-only profile under read_only.
+"""Cross-backend gate: each backend enforces its read-only profile under read_only.
 
-In-process proof that each backend, given ``read_only=True``, builds the
-profile it is supposed to. Claude's profile refuses mutation; Codex's
-``--sandbox read-only`` has an accepted residual where ``git commit`` still
-succeeds (worktree isolation, not this sandbox flag, is the defense for Codex).
-The *real* CLI/SDK denial equivalence is the standing proof of the Task 0 spike
-(`.beagle/concepts/handoff-accuracy-redesign/task0-spike-notes.md`); this gate
-fails the plan if either backend's profile construction regresses.
+Claude refuses mutation at the tool layer (PreToolUse guard). Codex combines
+its ``--sandbox read-only`` sandbox with a disposable standalone clone whenever
+the cwd is a Git worktree root: a ``git commit`` inside that cwd can advance
+only the disposable clone's refs and index — the caller's HEAD, staged index,
+refs, and remotes are physically unreachable and deleted with the clone at
+exit. The audit worktree remains, and Codex now additionally gets this hard
+disposable-clone boundary. The real committing-subprocess regression proves
+the caller's Git state survives a read-only Codex commit byte-for-byte; the
+Claude guard tests pin the tool-layer denial surface.
 """
 
+import os
+import sys
+import textwrap
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
+
+from tests.harness.git_helpers import git as _harness_git
+
+_COMMITTING_CODEX = textwrap.dedent(
+    """\
+    #!/usr/bin/env python3
+    import os, subprocess, sys
+    marker = os.environ["COMMIT_MARKER"]
+    # CodexBackend passes the workdir as --cd (the real `codex` binary chdirs
+    # internally); honor it so the fake runs inside the isolated checkout.
+    argv = sys.argv[1:]
+    cwd = argv[argv.index("--cd") + 1]
+    os.chdir(cwd)
+    # git_ops.clone does not inherit the source repo's local user.name/
+    # user.email, so pin a hermetic identity for the commit instead of
+    # depending on ambient global git config (absent on CI).
+    env = dict(os.environ)
+    env.setdefault("GIT_AUTHOR_NAME", "daydream-test")
+    env.setdefault("GIT_AUTHOR_EMAIL", "daydream-test@example.com")
+    env.setdefault("GIT_COMMITTER_NAME", "daydream-test")
+    env.setdefault("GIT_COMMITTER_EMAIL", "daydream-test@example.com")
+    before = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "isolated audit commit"], env=env, check=True)
+    after = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    remotes = subprocess.run(["git", "remote"], capture_output=True, text=True).stdout.strip()
+    with open(marker, "w") as fh:
+        fh.write(f"cwd={cwd}\\nbefore={before}\\nafter={after}\\nremotes={remotes}\\n")
+    sys.stdout.write('{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\\n')
+    """
+)
+
+
+def _install_committing_codex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: Path,
+) -> None:
+    """Put a real fake `codex` on $PATH that commits inside its cwd and records
+    cwd/before/after/remotes to *marker*. Shebang pinned to sys.executable."""
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "codex"
+    script.write_text(
+        _COMMITTING_CODEX.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1),
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("COMMIT_MARKER", str(marker))
 
 
 def test_claude_read_only_profile_refuses_mutation():
@@ -44,29 +95,41 @@ async def test_claude_read_only_guard_blocks_write_tool():
 
 
 @pytest.mark.asyncio
-async def test_codex_read_only_profile_selects_read_only_sandbox():
-    """Codex passes --sandbox read-only (never danger-full-access) under read_only.
-
-    This is the argv-selection contract test: read_only=True must select the
-    read-only sandbox. It does NOT assert ref-integrity -- ``--sandbox read-only``
-    has an accepted residual where ``git commit`` still succeeds; worktree
-    isolation (the audit worktree) is the defense, not this sandbox flag.
-    """
+async def test_codex_read_only_commit_cannot_change_source_head_or_index(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real fake Codex commits in its isolated cwd; the caller's linked-worktree
+    HEAD and cached index stay byte-for-byte identical."""
+    from daydream.agent import run_agent
     from daydream.backends.codex import CodexBackend
+    from daydream.trajectory import DaydreamPhase
 
-    backend = CodexBackend(model="gpt-x")
+    _main, source = linked_worktree
+    parser = source / "services" / "taste" / "parser.go"
+    parser.write_text("package taste\n\n// caller staged sentinel\nfunc S() {}\n")
+    _harness_git(source, "add", "services/taste/parser.go")
+    before_head = _harness_git(source, "rev-parse", "HEAD")
+    before_index = _harness_git(source, "diff", "--cached", "--binary")
 
-    captured: dict[str, object] = {}
+    marker = tmp_path / "marker.txt"
+    _install_committing_codex(tmp_path, monkeypatch, marker)
 
-    async def fake_exec(*args, **kwargs):
-        captured["args"] = args
-        raise RuntimeError("stop after argv capture")
+    await run_agent(
+        CodexBackend(model="test-model"),
+        source,
+        f"Audit {source}",
+        phase=DaydreamPhase.AUDIT,
+        read_only=True,
+        persist_session=False,
+    )
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
-        with pytest.raises(RuntimeError):
-            async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
-                pass
-
-    flat_args = list(captured["args"])  # type: ignore[arg-type]
-    assert "read-only" in flat_args
-    assert "danger-full-access" not in flat_args
+    record = dict(
+        line.split("=", 1) for line in marker.read_text().splitlines() if "=" in line
+    )
+    assert Path(record["cwd"]) != source
+    assert record["before"] != record["after"]  # the fake really committed
+    assert record["remotes"].strip() == ""  # no origin/source remote
+    # Caller Git state unchanged.
+    assert _harness_git(source, "rev-parse", "HEAD") == before_head
+    assert _harness_git(source, "diff", "--cached", "--binary") == before_index
+    assert not Path(record["cwd"]).exists()  # temp dir removed after run_agent

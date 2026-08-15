@@ -1288,6 +1288,27 @@ def status_porcelain(repo: Path) -> str:
     return proc.stdout
 
 
+def staged_patch(repo: Path) -> bytes:
+    """Return the staged index as a binary patch (``git diff --cached --binary``).
+
+    Byte-captured so binary content round-trips unchanged. The strict-query
+    counterpart of :func:`status_porcelain`: a non-zero exit raises
+    :class:`GitError` with the captured stderr text. Patch bytes are never
+    embedded in exception text.
+
+    Returns:
+        The staged patch as raw bytes. Empty bytes when nothing is staged.
+
+    Raises:
+        GitError: If ``git diff --cached --binary`` fails.
+    """
+    proc = _run_git(repo, ["diff", "--cached", "--binary"], timeout=30, capture_bytes=True)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+        raise GitError(f"git diff --cached --binary failed in {repo}: {stderr.strip()}")
+    return proc.stdout
+
+
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Return repo-relative paths of files changed in the working tree.
 
@@ -1355,18 +1376,31 @@ def changed_files_against(
     return names
 
 
-def list_untracked(repo: Path) -> list[str]:
+def list_untracked(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of untracked, non-ignored files.
 
     Soft-failure semantics mirror :func:`changed_files`: returns ``[]`` on any
     git error or non-zero exit. Used to snapshot the untracked set before a fix
     pass so newly-orphaned files created by a failed group can be detected.
+
+    Args:
+        strict: When True, a git error or non-zero exit raises
+            :class:`GitError` instead of soft-failing to ``[]`` — used by the
+            disposable read-only-checkout prep, whose error-propagation contract
+            needs a reliable enumeration (a silent ``[]`` would produce a clone
+            missing the untracked files).
     """
     try:
         proc = _run_git(repo, ["ls-files", "--others", "--exclude-standard"], timeout=10)
     except GitError:
+        if strict:
+            raise
         return []
     if proc.returncode != 0:
+        if strict:
+            raise GitError(
+                f"git ls-files --others --exclude-standard failed in {repo}: {proc.stderr.strip()}"
+            )
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
@@ -1387,7 +1421,7 @@ def _filter_preexisting_untracked(
     return [path for path in untracked if path not in preexisting_untracked]
 
 
-def ls_files(repo: Path) -> list[str]:
+def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of tracked files.
 
     Enumerates every file git knows about via ``git ls-files -z``, NUL-split
@@ -1401,12 +1435,21 @@ def ls_files(repo: Path) -> list[str]:
     "could not look" can catch it; best-effort callers wrap the call in
     ``try/except``.
 
+    Args:
+        strict: When True, a non-zero ``git`` exit also raises
+            :class:`GitError` (instead of returning ``[]``) — used by the
+            disposable read-only-checkout prep, whose error-propagation contract
+            needs a reliable enumeration.
+
     Returns:
         Repo-relative path strings in ``git ls-files`` output order. Empty
-        list on a non-zero exit.
+        list on a non-zero exit (unless *strict*).
     """
     proc = _run_git(repo, ["ls-files", "-z"], capture_bytes=True)
     if proc.returncode != 0:
+        if strict:
+            stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+            raise GitError(f"git ls-files failed in {repo}: {stderr.strip()}")
         return []
     stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
     return [
@@ -1476,6 +1519,45 @@ def fetch(repo: Path, remote: str = "origin") -> None:
     proc = _run_git(repo, ["fetch", remote], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
+
+
+def remove_remote(repo: Path, remote: str = "origin") -> None:
+    """Remove *remote* from *repo* (``git remote remove``).
+
+    Mutating wrapper — ``retries=0`` so a timed-out removal is never re-run.
+    Callers only invoke this on a fresh clone, which always has *remote*
+    configured, so no soft "no such remote" path is needed.
+
+    Raises:
+        GitError: If ``git remote remove`` fails.
+    """
+    proc = _run_git(repo, ["remote", "remove", remote], timeout=10, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git remote remove {remote} failed in {repo}: {proc.stderr.strip()}")
+
+
+def apply_staged_patch(repo: Path, patch: bytes) -> None:
+    """Apply a staged index patch to *repo*'s index (``git apply --cached --binary``).
+
+    Mutating wrapper — ``retries=0`` so a timed-out apply is never re-run.
+    The patch is written to a temp file (``_run_git`` cannot pass stdin) and
+    unlinked in a ``finally``. Patch bytes are never embedded in exception
+    text; a ``NamedTemporaryFile`` write failure raises ``OSError`` uncaught.
+
+    Raises:
+        GitError: If ``git apply --cached --binary`` fails.
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".patch") as fh:
+            fh.write(patch)
+            tmp_path = fh.name
+        proc = _run_git(repo, ["apply", "--cached", "--binary", tmp_path], timeout=30, retries=0)
+        if proc.returncode != 0:
+            raise GitError(f"git apply --cached --binary failed in {repo}: {proc.stderr.strip()}")
+    finally:
+        if tmp_path is not None:
+            os.unlink(tmp_path)
 
 
 def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int = 300) -> None:
