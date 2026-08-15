@@ -527,7 +527,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     ctx.data["stacks"] = stacks
     ctx.data["partitions"] = partitions
     ctx.data["partition_groups"] = groups
-    ctx.data["partitions_not_audited"] = skipped
+    ctx.data["partition_omissions"] = skipped
     return None
 
 
@@ -1083,7 +1083,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
         directory,
         partitions,
         groups,
-        ctx.data["partitions_not_audited"],
+        ctx.data["partition_omissions"],
         failures=failures,
         assignments=assignments,
     )
@@ -2207,8 +2207,11 @@ def _render_report(ctx: FlowContext) -> str:
     plan_write = ctx.data["plan_write"]
     issue_publication = ctx.data.get("issue_publication")
     partitions = ctx.data["partitions"]
-    partitions_not_audited = ctx.data["partitions_not_audited"]
+    partition_omissions = ctx.data["partition_omissions"]
     groups = ctx.data["partition_groups"]
+    ledger = _coverage_ledger(partitions, groups, partition_omissions)
+    not_audited = ledger["not_audited"]
+    partially_audited = ledger["partially_audited"]
     service_lines = (
         "\n".join(f"- **{service.name}** — `{service.root.as_posix()}`" for service in services)
         or "- No service roots detected."
@@ -2227,17 +2230,24 @@ def _render_report(ctx: FlowContext) -> str:
         )
         or "- None."
     )
+    omitted_bullets = [
+        f"  - **{entry['partition']}** — `{entry['root']}/` ({entry['file_count']} files) "
+        f"— not audited (omitted: {', '.join(entry['omitted_stacks'])})"
+        for entry in not_audited
+    ]
+    partial_bullets = [
+        f"  - **{entry['partition']}** — `{entry['root']}/` ({entry['file_count']} files) "
+        f"— partially audited (audited: {', '.join(entry['audited_stacks'])}; "
+        f"omitted: {', '.join(entry['omitted_stacks'])})"
+        for entry in partially_audited
+    ]
     not_audited_lines = (
         (
             "- Partitions not audited (reason: group-ceiling; raise "
             "`max-partition-groups` to include them):\n"
-            + "\n".join(
-                f"  - **{omission.partition.name}** — `{omission.partition.root}/` "
-                f"({len(omission.partition.files)} files)"
-                for omission in partitions_not_audited
-            )
+            + "\n".join(omitted_bullets + partial_bullets)
         )
-        if partitions_not_audited
+        if omitted_bullets or partial_bullets
         else f"- All {len(partitions)} partitions were audited."
     )
     tier_bound = {

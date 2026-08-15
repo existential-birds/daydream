@@ -707,6 +707,11 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     # Every ceiling-skipped partition is named with its root and reason.
     assert "**frontend**" in section and "group-ceiling" in section
     assert "`frontend/`" in section
+    # A partially-audited partition is a distinct bullet naming both stacks.
+    assert "**residue**" in section
+    assert "partially audited" in section
+    assert "audited: python" in section
+    assert "omitted: generic" in section
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
     # The failed assignment resolves to its group's roots, not just a key.
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
