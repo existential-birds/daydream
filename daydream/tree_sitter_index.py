@@ -13,6 +13,7 @@ Adding a new language requires only:
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -99,7 +100,7 @@ def get_parser(language_id: str) -> Parser | None:
 PYTHON_IMPORT_QUERY = """
 (import_statement name: (dotted_name) @import)
 (import_from_statement module_name: (dotted_name) @import)
-(import_from_statement module_name: (relative_import) @import)
+(import_from_statement module_name: (relative_import)) @import
 """
 
 TYPESCRIPT_IMPORT_QUERY = """
@@ -210,33 +211,46 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
 # --- Import resolution -------------------------------------------------------
 
 
+def _module_candidates(base: Path, dotted: str) -> list[Path]:
+    """Resolve a dotted module name under `base` to .py and package candidates."""
+    target = base
+    for part in dotted.split("."):
+        target = target / part
+    return [target.with_suffix(".py"), target / "__init__.py"]
+
+
 def _resolve_python_import(import_str: str, repo_root: Path, importer: Path) -> list[Path]:
     candidates: list[Path] = []
-    if import_str.startswith("."):
-        # Relative import; ascend N-1 package levels for N leading dots,
-        # then resolve the remaining path against that ancestor.
-        relative_level = len(import_str) - len(import_str.lstrip("."))
+    if import_str.startswith("from "):
+        # Relative component of a `from` statement; parse it to read the
+        # ImportFrom level (ascent) and retained aliases (bare-relative names).
+        # Best-effort: malformed/unsupported captures degrade to no candidates.
+        try:
+            body = ast.parse(import_str).body
+        except SyntaxError:
+            return []
+        if len(body) != 1 or not isinstance(body[0], ast.ImportFrom):
+            return []
+        node = body[0]
+        if node.level < 1:
+            return []
         base = importer.parent
-        for _ in range(relative_level - 1):
+        for _ in range(node.level - 1):
             base = base.parent
-        cleaned = import_str[relative_level:]
-        parts = cleaned.split(".") if cleaned else []
-        target = base
-        for part in parts:
-            target = target / part
-        candidates.extend([target.with_suffix(".py"), target / "__init__.py"])
+        if node.module is not None:
+            candidates.extend(_module_candidates(base, node.module))
+        else:
+            candidates.append(base / "__init__.py")
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                candidates.extend(_module_candidates(base, alias.name))
     else:
         parts = import_str.split(".")
-        target = repo_root
-        for part in parts:
-            target = target / part
-        candidates.extend([target.with_suffix(".py"), target / "__init__.py"])
+        candidates.extend(_module_candidates(repo_root, import_str))
         # Also try resolving the parent (e.g. `from foo.bar import baz`).
         if len(parts) >= 2:
-            parent = repo_root
-            for part in parts[:-1]:
-                parent = parent / part
-            candidates.extend([parent.with_suffix(".py"), parent / "__init__.py"])
+            candidates.extend(_module_candidates(repo_root, ".".join(parts[:-1])))
     return [c for c in candidates if c.exists() and c.is_file()]
 
 
