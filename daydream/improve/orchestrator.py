@@ -52,6 +52,7 @@ from daydream.improve.partition import (
     PARTITION_MAX_FILES,
     Partition,
     PartitionGroup,
+    PartitionStackOmission,
     build_partitions,
     group_partitions,
     stack_by_path,
@@ -391,7 +392,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     stacks: list[StackAssignment] = []
     partitions: list[Partition] = []
     groups: list[PartitionGroup] = []
-    skipped: list[Partition] = []
+    skipped: list[PartitionStackOmission] = []
     if not description_mode:
         # Availability is resolved once in runner.run and threaded via config;
         # None flows through to detect_stacks' optimistic default.
@@ -537,7 +538,7 @@ def _partition_repository(
     stacks: list[StackAssignment],
     *,
     branch_focus: bool,
-) -> tuple[list[Partition], list[PartitionGroup], list[Partition]]:
+) -> tuple[list[Partition], list[PartitionGroup], list[PartitionStackOmission]]:
     """Cover the audited surface with partitions and pack them into groups.
 
     Branch focus and the ``quick`` tier bypass partitioning: both audit one
@@ -609,7 +610,7 @@ def _group_dict(group: PartitionGroup) -> dict[str, Any]:
 def _coverage_ledger(
     partitions: list[Partition],
     groups: list[PartitionGroup],
-    skipped: list[Partition],
+    skipped: list[PartitionStackOmission],
 ) -> dict[str, Any]:
     """Build the coverage ledger recording what the audit did and did not cover."""
     return {
@@ -631,12 +632,12 @@ def _coverage_ledger(
         ],
         "not_audited": [
             {
-                "partition": partition.name,
-                "root": partition.root,
-                "file_count": len(partition.files),
+                "partition": omission.partition.name,
+                "root": omission.partition.root,
+                "file_count": len(omission.partition.files),
                 "reason": "group-ceiling",
             }
-            for partition in skipped
+            for omission in skipped
         ],
     }
 
@@ -1085,7 +1086,7 @@ def _record_audit_coverage(
     directory: Path,
     partitions: list[Partition],
     groups: list[PartitionGroup],
-    skipped: list[Partition],
+    skipped: list[PartitionStackOmission],
     *,
     failures: dict[str, str],
     assignments: list[_AuditAssignment],
@@ -2211,9 +2212,9 @@ def _render_report(ctx: FlowContext) -> str:
             "- Partitions not audited (reason: group-ceiling; raise "
             "`max-partition-groups` to include them):\n"
             + "\n".join(
-                f"  - **{partition.name}** — `{partition.root}/` "
-                f"({len(partition.files)} files)"
-                for partition in partitions_not_audited
+                f"  - **{omission.partition.name}** — `{omission.partition.root}/` "
+                f"({len(omission.partition.files)} files)"
+                for omission in partitions_not_audited
             )
         )
         if partitions_not_audited
