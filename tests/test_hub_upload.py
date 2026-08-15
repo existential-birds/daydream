@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from daydream.archive import hub
+from tests.harness.config import write_target_hub_key
 
 
 class _RepoInfo:
@@ -75,9 +76,7 @@ def test_target_file_config_never_selects_hub_destination(
     from daydream.runner import RunConfig
 
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n', encoding="utf-8"
-    )
+    write_target_hub_key(tmp_path)
     file_cfg = load_file_config(tmp_path)  # contains the key, must be ignored
     assert hub.resolve_hub_repo(RunConfig(file_config=file_cfg)) is None
 

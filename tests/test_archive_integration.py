@@ -22,6 +22,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     now_iso,
 )
+from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.trajectory import make_recorder
 
 
@@ -242,7 +243,7 @@ async def test_archive_callback_uploads_to_hub_when_configured(
 
 @pytest.mark.parametrize("filename,body,set_hf_token", [
     (None, None, False),
-    ("pyproject.toml", '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n', True),
+    ("pyproject.toml", TARGET_HUB_KEY_CONFIG, True),
     (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n', True),
 ])
 async def test_archive_callback_does_not_upload_when_unconfigured(

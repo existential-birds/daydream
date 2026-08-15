@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from tests.harness.config import write_target_hub_key
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -173,9 +174,7 @@ def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
     """A target file setting trajectory_hub_repo loads cleanly and contributes
     nothing — the field is removed from the model entirely."""
-    (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n', encoding="utf-8"
-    )
+    write_target_hub_key(tmp_path)
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
