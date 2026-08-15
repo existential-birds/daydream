@@ -732,6 +732,30 @@ def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: P
     assert "unverified_assumptions" in prompt
 
 
+def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: Path) -> None:
+    """The verifier's advertised Bash commands must be rendered from the enforced
+    single source — never a hand-written partial list — and must not instruct a
+    shell command the read-only guard denies."""
+    from daydream.deep.prompts import build_verification_prompt
+    from daydream.phases import _render_bash_allowlist
+
+    items = [
+        {"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
+         "line": 10, "description": "x", "rationale": "y"}
+    ]
+    prompt = build_verification_prompt(
+        items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
+    )
+
+    # Full single-source render present (a partial list would omit e.g. `git status`).
+    assert _render_bash_allowlist() in prompt
+    # The stale partial list is gone, no shell-grep step remains, and the
+    # read-only clause an existing test pins survives.
+    assert "`git`, `cat`, `ls`" not in prompt
+    assert "grep -rn" not in prompt
+    assert "Do NOT write, edit, or move files." in prompt
+
+
 def test_verification_prompt_ignores_output_path(tmp_path: Path) -> None:
     """Two different output_path values produce byte-identical prompts."""
     from daydream.deep.prompts import build_verification_prompt
