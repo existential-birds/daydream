@@ -301,24 +301,23 @@ file (a zero delta exceeds it) and a `NaN`/`inf` value would silently disable
 the metric, so any
 invalid value degrades to the named default.
 
-HuggingFace trajectory upload is opt-in across three tiers (highest first): the
-`--trajectory-hub-repo` CLI flag, the `DAYDREAM_TRAJECTORY_HUB_REPO` env var, and
-the `trajectory_hub_repo` file key. When unset, nothing leaves your machine.
-When set, every run's complete archive bundle
-(`~/.daydream/archive/runs/<session_id>/`) is uploaded to that dataset repo as a
-per-run folder keyed by session id:
+HuggingFace trajectory upload is opt-in, and its destination is selected by the
+operator only, across two sources (highest first): the `--trajectory-hub-repo`
+CLI flag, then the `DAYDREAM_TRAJECTORY_HUB_REPO` env var. A `trajectory_hub_repo`
+key in the target checkout's file config is ignored and can never select a
+destination. When unset, nothing leaves your machine. When set, every run's
+complete archive bundle (`~/.daydream/archive/runs/<session_id>/`) is uploaded
+to that dataset repo as a per-run folder keyed by session id, provided the
+`huggingface_hub` package is installed and `HF_TOKEN` is set; if either is
+missing (or the upload fails), the run is never aborted — a one-line warning
+is emitted and the bundle is left un-uploaded. On the first upload the dataset
+repo is created private; an already-existing repo is reused with its current
+visibility (a pre-existing public repo is re-used but triggers a warning):
 
-| Key | Default | Semantics |
-|-----|---------|-----------|
-| `trajectory_hub_repo` | _(unset)_ | HuggingFace dataset repo id (`owner/repo`) to upload each run's archive bundle to. Requires `HF_TOKEN`; creates the repo **private** if it does not exist (a pre-existing repo with the same id is reused with its current visibility). Missing token or any upload failure skips with a one-line warning — never fails the run. Requires `huggingface_hub` installed (`pip install huggingface-hub`); a non-string value is treated as unset. |
-
-```toml
-# pyproject.toml  →  [tool.daydream]
-[tool.daydream]
-trajectory_hub_repo = "existential-birds/daydream-trajectories"
-
-# or env var (remote/hosted deployments: one line in the bootstrap profile)
+```sh
+# env var (remote/hosted deployments: one line in the bootstrap profile)
 export DAYDREAM_TRAJECTORY_HUB_REPO="existential-birds/daydream-trajectories"
+export HF_TOKEN="hf_..."   # required for upload to proceed
 ```
 
 The LLM supervisor uses one batched call. Configure its model under

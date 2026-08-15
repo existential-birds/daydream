@@ -1,12 +1,13 @@
 """Opt-in HuggingFace dataset repo upload of daydream run bundles.
 
-Resolves the 3-tier ``trajectory_hub_repo`` source (CLI flag -> env var ->
-file config) and uploads a completed run bundle (``~/.daydream/archive/runs/
-<session_id>/``) to a private HuggingFace dataset repo, one folder per run
-keyed by session id. Everything here is non-fatal: the archive callback that
-invokes it must never fail the run, so every failure mode degrades to a
-warning and ``False``, and a pre-existing public target repo is reused only
-with a visibility warning (the upload still proceeds).
+Resolves the 2-tier ``trajectory_hub_repo`` source (CLI flag -> env var) and
+uploads a completed run bundle (``~/.daydream/archive/runs/<session_id>/``)
+to a private HuggingFace dataset repo, one folder per run keyed by session id.
+The target checkout's file config is never a destination source. Everything
+here is non-fatal: the archive callback that invokes it must never fail the
+run, so every failure mode degrades to a warning and ``False``, and a
+pre-existing public target repo is reused only with a visibility warning (the
+upload still proceeds).
 
 ``huggingface_hub`` is imported lazily inside :func:`upload_run_bundle` so
 users who never enable the feature carry no hard dependency.
@@ -44,20 +45,15 @@ def resolve_hub_repo(config: RunConfig) -> str | None:
     """Resolve the configured HuggingFace dataset repo id, or None if unset.
 
     Tier order (highest first): the CLI-tier ``config.trajectory_hub_repo``,
-    then the ``DAYDREAM_TRAJECTORY_HUB_REPO`` env var, then the file-config
-    ``trajectory_hub_repo``. Empty strings are treated as unset.
+    then the ``DAYDREAM_TRAJECTORY_HUB_REPO`` env var. The target checkout's
+    file config never selects a destination. Empty strings are treated as
+    unset.
     """
     if config.trajectory_hub_repo:
         return config.trajectory_hub_repo
     env = os.environ.get("DAYDREAM_TRAJECTORY_HUB_REPO")
     if env:
         return env
-    # The file config is read straight off the public ``RunConfig.file_config``
-    # field — no deferred import from runner is needed (runner itself imports
-    # archive lazily), and no private helper is reached into.
-    file_config = config.file_config
-    if file_config is not None and file_config.trajectory_hub_repo:
-        return file_config.trajectory_hub_repo
     return None
 
 

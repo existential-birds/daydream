@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **security:** Restrict archive upload destinations to the operator-controlled `--trajectory-hub-repo` / `DAYDREAM_TRAJECTORY_HUB_REPO` sources; a `trajectory_hub_repo` key in the target checkout's file config is now ignored.
+
 ## [0.26.0] - 2026-08-12
 
 ### Added

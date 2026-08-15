@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from tests.harness.config import write_target_hub_key
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -170,19 +171,12 @@ def test_approve_on_clean_non_bool_degrades_to_none(tmp_path: Path) -> None:
     assert cfg.approve_on_clean is None
 
 
-def test_trajectory_hub_repo_parses_as_string(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        '[tool.daydream]\ntrajectory_hub_repo = "existential-birds/daydream-trajectories"\n',
-        encoding="utf-8",
-    )
+def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
+    """A target file setting trajectory_hub_repo loads cleanly and contributes
+    nothing — the field is removed from the model entirely."""
+    write_target_hub_key(tmp_path)
     cfg = load_file_config(tmp_path)
-    assert cfg.trajectory_hub_repo == "existential-birds/daydream-trajectories"
-
-
-def test_trajectory_hub_repo_non_string_degrades_to_none(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[tool.daydream]\ntrajectory_hub_repo = 42\n", encoding="utf-8")
-    cfg = load_file_config(tmp_path)
-    assert cfg.trajectory_hub_repo is None
+    assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
 
 
 def test_uncovered_sweep_toggle_is_bool_only(tmp_path: Path) -> None:

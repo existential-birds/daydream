@@ -22,6 +22,7 @@ from daydream.trajectory import (
     TrajectoryRecorder,
     now_iso,
 )
+from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.trajectory import make_recorder
 
 
@@ -240,15 +241,28 @@ async def test_archive_callback_uploads_to_hub_when_configured(
     assert (run_dir / "manifest.json").is_file()
 
 
+@pytest.mark.parametrize("filename,body,set_hf_token", [
+    (None, None, False),
+    ("pyproject.toml", TARGET_HUB_KEY_CONFIG, True),
+    (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n', True),
+])
 async def test_archive_callback_does_not_upload_when_unconfigured(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    filename: str | None, body: str | None, set_hf_token: bool,
 ) -> None:
-    """Without a configured trajectory_hub_repo, the uploader is never called."""
+    """Without an operator-configured trajectory_hub_repo, the uploader is never called.
+
+    Covers the bare unconfigured case plus a target checkout setting the key in
+    pyproject.toml or .daydream.toml — the ignored key never reaches the
+    uploader even with HF_TOKEN present."""
+    from daydream.config_file import load_file_config
     from daydream.runner import RunConfig, _make_archive_callback
     from tests.harness.trajectory import make_recorder
     from tests.test_archive_integration import _add_user_step
 
     calls: list = []
+    if set_hf_token:
+        monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
 
     def _fake_upload(*args: object, **kwargs: object) -> bool:
@@ -259,7 +273,13 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
 
     target_dir = tmp_path / "project"
     target_dir.mkdir()
-    config = RunConfig(archive=True, run_eval=False)
+    if filename is not None and body is not None:
+        (target_dir / filename).write_text(body, encoding="utf-8")
+    config = RunConfig(
+        archive=True,
+        run_eval=False,
+        file_config=load_file_config(target_dir) if filename is not None else None,
+    )
     cb = _make_archive_callback(config, target_dir)
     recorder = make_recorder(tmp_path, on_write=cb)
     _add_user_step(recorder)
