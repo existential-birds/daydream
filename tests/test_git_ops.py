@@ -490,6 +490,19 @@ def test_grep_pathspecs_restrict_search(tmp_path: Path) -> None:
     assert "notes.md" not in matches
 
 
+def test_grep_fixed_matches_returns_path_pattern_pairs(tmp_path: Path) -> None:
+    repo = _make_repo_with_main(tmp_path)
+    (repo / "widget_user.py").write_text("import widget\n")
+    (repo / "gadget_user.ts").write_text("gadget\n")
+    (repo / "partial.py").write_text("widget_factory\n")
+    (repo / "notes.md").write_text("widget gadget\n")
+    _git(repo, "add", "widget_user.py", "gadget_user.ts", "partial.py", "notes.md")
+    _commit(repo, "add files")
+    matches = git_ops.grep_fixed_matches(repo, ("widget", "gadget"), word=True, pathspecs=("*.py", "*.ts"))
+    assert len(matches) == 2
+    assert set(matches) == {("widget_user.py", "widget"), ("gadget_user.ts", "gadget")}
+
+
 def test_status_porcelain_clean_and_dirty(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     assert git_ops.status_porcelain(repo) == ""
