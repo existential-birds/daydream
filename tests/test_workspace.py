@@ -7,7 +7,9 @@ mocking — every code path runs against actual git.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -15,12 +17,14 @@ import pytest
 from rich.console import Console
 
 from daydream import git_ops
-from daydream.git_ops import BranchNotFoundError
+from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.workspace import (
     WorkContext,
     WorkspaceCopyPathError,
     copy_files_into_ephemeral,
+    open_audit_workspace,
     open_workspace,
+    prune_stale_audit_worktrees,
 )
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -325,22 +329,16 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
     entry = "../outside.txt" if escape_kind == "parent" else str(outside)
 
     if source_kind == "config":
-        (repo / "pyproject.toml").write_text(
-            f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n'
-        )
+        (repo / "pyproject.toml").write_text(f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n')
         extra = None
     else:
-        (repo / "pyproject.toml").write_text(
-            '[tool.daydream.workspace]\ncopy = [".env"]\n'
-        )
+        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
         extra = [Path(entry)]
 
     dest = tmp_path / "ephemeral"
     dest.mkdir()
 
-    with pytest.raises(
-        WorkspaceCopyPathError, match="must be relative and must not contain"
-    ):
+    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
         copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
 
     # Fail-closed: the valid earlier ".env" entry was NOT copied.
@@ -350,17 +348,13 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
 
 
 @pytest.mark.parametrize("root_kind", ["source", "destination"])
-def test_copy_rejects_resolved_symlink_escape(
-    tmp_path: Path, root_kind: str
-) -> None:
+def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
     secret = outside_dir / "secret.txt"
     secret.write_text("KEEP\n")
-    (repo / "pyproject.toml").write_text(
-        '[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n'
-    )
+    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
     (repo / "sub").mkdir()
 
     dest = tmp_path / "ephemeral"
@@ -404,9 +398,7 @@ def test_copy_allows_source_symlink_resolving_inside_source(
     dest = tmp_path / "ephemeral"
     dest.mkdir()
 
-    copied = copy_files_into_ephemeral(
-        repo, dest, extra=[Path("inside-link.cfg")], skip=False
-    )
+    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("inside-link.cfg")], skip=False)
 
     assert copied == [Path("inside-link.cfg")]
     assert (dest / "inside-link.cfg").read_text() == "inside\n"
@@ -481,9 +473,7 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: P
     # would silently skip (not a file) and the fail-closed assertion below could
     # never detect a regressed guard.
     (tmp_path / "retained.cfg").write_text("secret\n")
-    with pytest.raises(
-        WorkspaceCopyPathError, match="must be relative and must not contain"
-    ):
+    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
         async with open_workspace(
             repo,
             branch=None,
@@ -533,3 +523,237 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
     assert "topic is checked out in cwd" in out
     assert "2 commits behind origin/topic" in out
     assert "reviewing origin/topic" in out
+
+
+# --- 14. open_audit_workspace (detached audit snapshot) ---------------------
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_preserves_target_state_when_audit_commits(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    # tracked staged + unstaged state the audit must reproduce
+    (repo / "staged.txt").write_text("v2")
+    _git(repo, "add", "staged.txt")
+    (repo / "unstaged.txt").write_text("v1")
+    _git(repo, "add", "unstaged.txt")
+    _commit(repo, "add unstaged tracked")
+    (repo / "unstaged.txt").write_text("v2")
+    before_head = git_ops.head_sha(repo)
+    before_status = git_ops.status_porcelain(repo)
+    before_refs = _git(repo, "show-ref")
+
+    captured: Path | None = None
+    async with open_audit_workspace(repo, run_id="audit-test") as audit:
+        captured = audit
+        assert git_ops.is_inside_worktree(audit) is True
+        # the audit worktree reproduces the staged + unstaged tracked state
+        assert (audit / "staged.txt").read_text() == "v2"
+        assert (audit / "unstaged.txt").read_text() == "v2"
+        # a model commit inside the audit worktree...
+        (audit / "model-note.txt").write_text("model wrote this")
+        _git(audit, "add", "-A")
+        _git(audit, "commit", "-m", "model commit")
+
+    # ...must leave the target untouched, and the audit worktree cleaned up.
+    assert captured is not None and not captured.exists()
+    assert git_ops.head_sha(repo) == before_head
+    assert git_ops.status_porcelain(repo) == before_status
+    assert _git(repo, "show-ref") == before_refs
+    assert _git(repo, "stash", "list") == ""
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_reproduces_clean_head_when_no_tracked_changes(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    async with open_audit_workspace(repo, run_id="audit-clean") as audit:
+        assert git_ops.head_sha(audit) == git_ops.head_sha(repo)
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    captured: Path | None = None
+    with pytest.raises(RuntimeError, match="boom"):
+        async with open_audit_workspace(repo, run_id="audit-exc") as audit:
+            captured = audit
+            raise RuntimeError("boom")
+    assert captured is not None and not captured.exists()
+
+
+@pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_reclaims_crashed_run_leftover(
+    tmp_path: Path,
+) -> None:
+    """A hard-killed improve run's locked audit worktree is reclaimed.
+
+    ``open_audit_workspace`` creates the worktree locked and only the owning
+    run's exit removes it, so a hard-killed run leaves a locked audit worktree
+    behind with no ``*-reanchor`` name for ``prune_stale_reanchor_worktrees``
+    to match — this prune is its reclamation path.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    stale_dir = repo / ".daydream" / "audit" / "run-crashed"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-crashed",
+        str(stale_dir),
+        "HEAD",
+    )
+    (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
+    # Age the lock beyond the staleness window so it reads as a crashed session.
+    common = Path(_git(repo, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = repo / common
+    old = time.time() - 48 * 3600
+    os.utime(common / "worktrees" / stale_dir.name / "locked", (old, old))
+
+    removed = prune_stale_audit_worktrees(repo)
+
+    assert removed == 1
+    assert not stale_dir.exists()
+    assert "run-crashed" not in _git(repo, "worktree", "list")
+
+
+@pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_skips_live_locked_worktree(
+    tmp_path: Path,
+) -> None:
+    """A live audit worktree (fresh lock) is never destroyed by the prune."""
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    live_dir = repo / ".daydream" / "audit" / "run-live"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-live",
+        str(live_dir),
+        "HEAD",
+    )
+
+    removed = prune_stale_audit_worktrees(repo)
+
+    assert removed == 0
+    assert live_dir.is_dir()  # a concurrent run mid-write is never destroyed
+
+
+@pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_skips_own_run_even_when_lock_is_stale(
+    tmp_path: Path,
+) -> None:
+    """The run's own audit worktree survives the prune past the stale-lock age.
+
+    ``_step_write_plans`` prunes stale audit worktrees, but a single improve
+    run can exceed 24h — its own lock then looks stale even though the run is
+    alive. The prune must never remove the run's own live cwd mid-flow; only
+    the owning run's exit cleanup removes it.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    own_dir = repo / ".daydream" / "audit" / "run-own"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-own",
+        str(own_dir),
+        "HEAD",
+    )
+    (own_dir / "marker.txt").write_text("live", encoding="utf-8")
+    # Age the lock beyond the staleness window, as a >24h run's own lock reads.
+    common = Path(_git(repo, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = repo / common
+    old = time.time() - 48 * 3600
+    os.utime(common / "worktrees" / own_dir.name / "locked", (old, old))
+
+    removed = prune_stale_audit_worktrees(repo, exclude_run_id="run-own")
+
+    assert removed == 0
+    assert own_dir.is_dir()  # the run's own cwd is never destroyed mid-flow
+    # A stale worktree from a *different* run is still reclaimed.
+    crashed_dir = repo / ".daydream" / "audit" / "run-crashed"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-crashed",
+        str(crashed_dir),
+        "HEAD",
+    )
+    os.utime(common / "worktrees" / crashed_dir.name / "locked", (old, old))
+    removed = prune_stale_audit_worktrees(repo, exclude_run_id="run-own")
+    assert removed == 1
+    assert not crashed_dir.exists()
+    assert own_dir.is_dir()
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_yields_source_when_head_unborn(tmp_path: Path) -> None:
+    """A repo with no initial commit runs without a snapshot worktree.
+
+    ``git stash create`` (and ``git worktree add``) fail on an unborn HEAD —
+    there is no commit to snapshot or materialize — so the source itself is
+    yielded and the improve run proceeds without worktree isolation.
+    """
+    repo = tmp_path / "unborn"
+    _init_repo(repo)
+    (repo / "staged.txt").write_text("v1")
+    _git(repo, "add", "staged.txt")
+
+    async with open_audit_workspace(repo, run_id="audit-unborn") as audit:
+        assert audit == repo
+        # No worktree was created, and the source's staged state was untouched.
+        assert not (repo / ".daydream" / "audit").exists()
+        proc = subprocess.run(  # noqa: S603
+            ["git", "rev-parse", "--verify", "HEAD"],  # noqa: S607
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode != 0  # still unborn while the workspace is open
+    assert (repo / "staged.txt").read_text() == "v1"
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_does_not_warn_when_worktree_add_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed ``git worktree add`` must not trigger cleanup of a never-created worktree.
+
+    The pre-existing run path makes ``git worktree add`` fail after the parent
+    ``mkdir`` succeeded; cleanup must not then attempt to remove a worktree
+    that was never created, which would surface a spurious "Failed to remove
+    audit worktree" warning over the primary add error.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    doomed = repo / ".daydream" / "audit" / "audit-fail"
+    doomed.mkdir(parents=True, exist_ok=True)
+    (doomed / "marker.txt").write_text("occupied", encoding="utf-8")
+
+    with pytest.raises(GitError, match="already exists"):
+        async with open_audit_workspace(repo, run_id="audit-fail"):
+            pytest.fail("the audit body must not run")
+
+    assert "Failed to remove audit worktree" not in capsys.readouterr().out

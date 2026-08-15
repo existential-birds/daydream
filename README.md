@@ -519,14 +519,14 @@ Daydream can run as a self-hosted PR review bot in your own repository's GitHub 
 | `.daydream/diff.patch` | Unified diff captured at run start |
 | `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report |
 | `.daydream/exploration/` | Cached pre-scan grounding; survives the run and is reused by the next one |
-| `.daydream/exploration/cache-key` | Key the cached pre-scan was produced from (head SHA + diff + tier + depth) |
+| `.daydream/exploration/cache-key` | Key the cached pre-scan was produced from (format version + head SHA + diff + tier + depth) |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
 
 `.daydream/exploration/` is reused on an **exact** key match regardless of
 uncommitted worktree edits: the key intentionally excludes uncommitted edits
-(head SHA + diff + tier + depth), so an exact-key hit on a dirty tree serves
+(format version + head SHA + diff + tier + depth), so an exact-key hit on a dirty tree serves
 exploration computed before those edits. Near-matches never count — a stale hit
 would misground every review prompt. The `--shallow` and `--review` flows still
 delete the directory, so alternating flows degrades to a cache miss (never to

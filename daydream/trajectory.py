@@ -116,12 +116,20 @@ _JWT_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
 )
 _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
-# PEM private-key blocks (PKCS1 and PKCS8). Multi-line body collapsed before the
-# bare API-key rule scans it. CERTIFICATE blocks are public material — not matched.
+# PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA).
+# Multi-line body collapsed before the bare API-key rule scans it. CERTIFICATE
+# blocks are public material — not matched.
+# The header fragment is shared (imported) by the benchmark's buffering
+# anchors, so a variant addition needs one edit here, not four.
+_PEM_HEADER = r"(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY"
 _PEM_KEY_PATTERN = re.compile(
-    r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
+    rf"-----BEGIN {_PEM_HEADER}-----"
+    rf".*?-----END {_PEM_HEADER}-----",
     re.DOTALL,
 )
+#: Replacement marker for PEM private-key blocks. Shared (imported) by the
+#: benchmark's buffering anchors so every redaction site emits one marker.
+_PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
@@ -135,7 +143,7 @@ _ENV_VAR_PATTERN = re.compile(
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
-    (_PEM_KEY_PATTERN, "[REDACTED_PEM_KEY]"),
+    (_PEM_KEY_PATTERN, _PEM_KEY_REDACTED_MARKER),
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
     (_JWT_PATTERN, "[REDACTED_JWT]"),

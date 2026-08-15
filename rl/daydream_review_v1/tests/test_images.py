@@ -1,13 +1,17 @@
 """Container image contracts: immutable base inputs and the green-baseline gate.
 
-Two kinds of contract live here. The static ``base.Dockerfile`` and ``repo.Dockerfile`` checks run
-with no Docker at all — they assert the build pins every remote input to an immutable
-version and verifies it for integrity before use. A **fast** tier — no Docker
-required — rejects ``--red`` invocations that cannot select the fixture repo,
-ensuring the guard fires before any build side-effect. The two ``slow`` tests
-execute real Docker builds for the red and green baseline paths: the red path
-plants a failing assertion and the build must die (enforcement IS the build
-failing), while a green one builds and bakes the checkout.
+Four kinds of contract live here. The static ``base.Dockerfile`` and
+``repo.Dockerfile`` checks run with no Docker at all — they assert the build pins
+every remote input to an immutable version and verifies it for integrity before
+use. A **fast** tier — no Docker required — rejects ``--red`` invocations that
+cannot select the fixture repo, ensuring the guard fires before any build
+side-effect. A manifest/README tier asserts the locked-dependency policy: the
+itsdangerous manifest entry installs strictly from its committed uv.lock and the
+README documents the four mandatory setup rules. The three ``slow`` tests execute
+real Docker builds: the red baseline path plants a failing assertion and the
+build must die (enforcement IS the build failing), the green baseline path builds
+and bakes the checkout, and the reference-image build proves the itsdangerous
+image builds only when the locked setup plus the green baseline succeed.
 """
 
 from __future__ import annotations
@@ -33,10 +37,10 @@ FIXTURE_IMAGE = "daydream-rl/fixture"
 BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
 
 
-def _build(base_image: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
+def _build(base_image: str, *args: str, slug: str = FIXTURE_SLUG) -> subprocess.CompletedProcess[str]:
+    """Build the repo image for ``slug`` (the fixture by default); ``base_image`` owns the base."""
     return subprocess.run(
-        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", base_image, *args],
+        ["uv", "run", "python", "images/build_images.py", "--only", slug, "--no-base", base_image, *args],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -59,19 +63,7 @@ README = PROJECT_ROOT / "README.md"
 REFERENCE_IMAGE = "daydream-rl/itsdangerous"
 REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
 REFERENCE_CORPUS = PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"
-
-
-def _build_reference(base_image: str) -> subprocess.CompletedProcess[str]:
-    """Build the reference repo image only; the ``base_image`` fixture owns the base."""
-    return subprocess.run(
-        [
-            "uv", "run", "python", "images/build_images.py",
-            "--only", "pallets/itsdangerous",
-            "--corpus", str(REFERENCE_CORPUS),
-            "--no-base", base_image,
-        ],
-        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
-    )
+REFERENCE_SLUG = "pallets/itsdangerous"
 
 
 @pytest.mark.parametrize(
@@ -86,9 +78,9 @@ def _build_reference(base_image: str) -> subprocess.CompletedProcess[str]:
             [
                 "--red",
                 "--corpus",
-                str(PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"),
+                str(REFERENCE_CORPUS),
                 "--only",
-                "pallets/itsdangerous",
+                REFERENCE_SLUG,
             ],
             "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
             id="non-fixture-only",
@@ -330,7 +322,7 @@ def test_readme_documents_the_locked_dependency_policy() -> None:
 @DOCKER_REQUIRED
 def test_reference_image_builds_with_locked_dependencies(base_image: str) -> None:
     """The reference image builds only when the locked setup + green baseline succeed."""
-    result = _build_reference(base_image)
+    result = _build(base_image, "--corpus", str(REFERENCE_CORPUS), slug=REFERENCE_SLUG)
     combined = result.stdout + result.stderr
     assert result.returncode == 0, combined[-3000:]
     assert f"built {REFERENCE_TAG}" in result.stdout, combined[-3000:]
@@ -363,19 +355,30 @@ def test_docker_required_gates_on_daemon_reachability() -> None:
     )
 
 
+def _slow_test_names() -> list[str]:
+    """Names of this module's @pytest.mark.slow tests, derived from the marker
+    itself so a newly added slow test is covered without editing a name list."""
+    return sorted(
+        name
+        for name, obj in vars(sys.modules[__name__]).items()
+        if any(getattr(m, "name", None) == "slow" for m in getattr(obj, "pytestmark", ()))
+    )
+
+
 def test_docker_skip_is_per_test_not_module_wide() -> None:
     """M8 regression: the Docker skip is per-test, not module-wide, so the static
     build-contract tests (added in the next task) collect in a Docker-less CI."""
     module = sys.modules[__name__]
     assert "pytestmark" not in vars(module), "module-wide Docker skip would gate the static tests"
     assert "DOCKER_REQUIRED" in vars(module), "per-test DOCKER_REQUIRED marker missing"
-    # Both slow integration tests must carry the skip; neither may rely on a
-    # module-level marker that would also skip the static tests.  Check for
-    # actual skipif marker content, not just pytestmark attribute existence.
-    for name in (
-        "test_green_baseline_gate_fails_the_build_on_a_red_suite",
-        "test_green_baseline_builds_and_bakes_the_checkout",
-    ):
+    # Every slow test must carry the skip; none may rely on a module-level
+    # marker that would also skip the static tests.  Enumerate by the slow
+    # marker (not a hardcoded name list) so the reference-image test and any
+    # future slow test are covered.  Check for actual skipif marker content,
+    # not just pytestmark attribute existence.
+    slow_tests = _slow_test_names()
+    assert slow_tests, "no @pytest.mark.slow tests found"
+    for name in slow_tests:
         test_func = getattr(module, name)
         marks = getattr(test_func, "pytestmark", [])
         assert marks, f"{name} has no pytestmark (would not skip)"
@@ -521,3 +524,97 @@ def test_base_dockerfile_does_not_pipe_downloads_into_shell_or_tar(forbidden_lit
     """M3/M4: no remote execution pipeline remains in the build contract."""
     text = BASE_DOCKERFILE.read_text(encoding="utf-8")
     assert forbidden_literal not in text, f"Dockerfile must not contain {forbidden_literal!r}"
+
+
+def test_build_emits_canonical_argv_for_all_call_sites(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F1: _build is the single helper; slug defaults to the fixture, and the
+    reference build passes the reference slug + corpus through the same argv."""
+    captured: list[list[str]] = []
+
+    def _capture(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", _capture)
+    base = "daydream-rl/base:v1.2.3"
+
+    # One shared 5-element prefix; each case is (extra _build args, slug,
+    # expected argv tail) so the delta between call sites — slug, --red,
+    # --corpus — is the visible invariant, not three verbatim argv copies.
+    prefix = ["uv", "run", "python", "images/build_images.py", "--only"]
+    cases: list[tuple[tuple[str, ...], str | None, list[str]]] = [
+        ((), None, [FIXTURE_SLUG, "--no-base", base]),
+        (("--red",), None, [FIXTURE_SLUG, "--no-base", base, "--red"]),
+        (
+            ("--corpus", str(REFERENCE_CORPUS)),
+            REFERENCE_SLUG,
+            [REFERENCE_SLUG, "--no-base", base, "--corpus", str(REFERENCE_CORPUS)],
+        ),
+    ]
+    for extra_args, slug, expected_tail in cases:
+        kwargs: dict[str, str] = {} if slug is None else {"slug": slug}
+        _build(base, *extra_args, **kwargs)
+        assert captured[-1] == prefix + expected_tail, captured[-1]
+
+    assert "_build_reference" not in vars(sys.modules[__name__])
+
+
+def test_corpus_and_slug_literals_single_source() -> None:
+    """F2: corpus path and reference slug each resolve through one named constant."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    corpus = "corpus-" + "reference"          # built to avoid self-matching
+    slug = "pallets/" + "itsdangerous"        # built to avoid self-matching
+    marker = '[repos."' + slug + '"]'
+    # Scan only the module-top constants block and the manifest-entry tests,
+    # mirroring the F3 guard's window-narrowing: a docstring or comment
+    # elsewhere quoting the path cannot trip the guard.
+    constants_end = src.index("REFERENCE_SLUG = ") + len('REFERENCE_SLUG = "' + slug + '"')
+    constants = src[src.index("MANIFEST = ") : constants_end]
+    assert constants.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
+    # The slug literal is REFERENCE_SLUG once plus one occurrence per
+    # manifest-entry marker; counting relative to the markers keeps the guard
+    # valid when a third manifest test is added or the marker is extracted
+    # into a shared constant.
+    assert constants.count(slug) == 1, "slug literal must appear in the constants block only in REFERENCE_SLUG"
+    manifest = src[
+        src.index(marker) : src.index("def test_readme_documents_the_locked_dependency_policy")
+    ]
+    assert manifest.count(slug) == manifest.count(marker), (
+        "slug literal must appear once per manifest marker"
+    )
+    assert "REFERENCE_CORPUS" in src and "REFERENCE_SLUG" in src
+
+
+def test_module_docstring_describes_actual_contracts() -> None:
+    """F4: the docstring names the four contract kinds and counts the slow tests
+    that actually carry the marker, so the count cannot drift from the file."""
+    doc = sys.modules[__name__].__doc__ or ""
+    for kind in ("Dockerfile", "--red", "manifest", "slow", "reference"):
+        assert kind in doc, f"docstring must name contract kind/area {kind!r}"
+    slow_tests = _slow_test_names()
+    number = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}.get(
+        len(slow_tests), str(len(slow_tests))
+    )
+    assert f"the {number} ``slow`` tests" in doc.lower(), (
+        f"docstring must count the {len(slow_tests)} slow tests: {slow_tests}"
+    )
+    assert "two slow" not in doc.lower(), "stale 'two slow tests' count must be gone"
+
+
+def test_reference_probe_quotes_the_work_repo_path() -> None:
+    """F3 guard (verify-only): the sh -c probe's /work/repo is escaped double-quoted,
+    so the single-quoted sh -c region is never terminated by a bare path."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    quoted = '\\"' + "/work/repo" + '\\"'   # built to avoid self-matching
+    bare = "'" + "/work/repo" + "'"         # built to avoid self-matching
+    # Scan only the reference probe's own python -c payload, anchored on its
+    # distinctive assert target rather than on source formatting: reordered
+    # kwargs, split payload literals, or a reformatted sh -c list cannot move
+    # the window, and prose elsewhere quoting the path cannot trip it either.
+    probe_end = src.index("itsdangerous.__file__")
+    probe_start = src.rindex("python -c '", 0, probe_end)
+    probe_src = src[probe_start : probe_end]
+    assert quoted in probe_src, "python -c body must receive a quoted path literal"
+    assert bare not in probe_src, "a single-quoted path would break the sh -c region"

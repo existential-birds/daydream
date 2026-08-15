@@ -62,6 +62,7 @@ def _write_manifest(path: Path, slugs: list[str]) -> Path:
         f'image = "daydream-rl/{slug.split("/")[-1]}"\n'
         f'test_command = "pytest -q"\n'
         "setup_cmds = []\n"
+        f'protected_test_paths = {json.dumps(["tests"])}\n'
         for slug in slugs
     )
     path.write_text(body, encoding="utf-8")
@@ -113,6 +114,7 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
     dest = tmp_path / "occupied"
     dest.mkdir()
     subprocess.run(["git", "-C", str(dest), "init", "--quiet", "--initial-branch", "main"], check=True)
+    subprocess.run(["git", "-C", str(dest), "config", "commit.gpgsign", "false"], check=True)
     subprocess.run(["git", "-C", str(dest), "config", "user.name", "Caller"], check=True)
     subprocess.run(["git", "-C", str(dest), "config", "user.email", "caller@example.com"], check=True)
     (dest / "caller.txt").write_text("caller-owned", encoding="utf-8")
@@ -165,6 +167,7 @@ def test_load_builds_tasks_from_fixture_corpus(corpus_mini_dir: Path, fixture_ma
     assert pr1.head_sha == FIXTURE_PR1_HEAD_SHA
     assert pr1.base_ref == "main"
     assert pr1.test_command == FIXTURE_TEST_COMMAND
+    assert pr1.protected_test_paths == ["tests"]
     assert pr1.clone_url == f"https://github.com/{FIXTURE_SLUG}"
     assert pr1.image == f"daydream-rl/fixture:{FIXTURE_PR1_HEAD_SHA[:12]}"
     assert pr1.name == f"{FIXTURE_SLUG}#1"
@@ -266,6 +269,82 @@ def test_load_manifest_rejects_unknown_key(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "block, error_type",
+    [
+        (  # missing field entirely
+            '[repos."acme/widgets"]\n'
+            'clone_url = "https://github.com/acme/widgets"\n'
+            'image = "daydream-rl/widgets"\n'
+            'test_command = "pytest -q"\n'
+            "setup_cmds = []\n",
+            "missing",
+        ),
+        (  # present but empty
+            '[repos."acme/widgets"]\n'
+            'clone_url = "https://github.com/acme/widgets"\n'
+            'image = "daydream-rl/widgets"\n'
+            'test_command = "pytest -q"\n'
+            "setup_cmds = []\n"
+            "protected_test_paths = []\n",
+            "too_short",
+        ),
+    ],
+    ids=["missing", "empty"],
+)
+def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
+    tmp_path: Path, block: str, error_type: str
+) -> None:
+    """A missing or empty protected_test_paths inventory is a load error.
+
+    The security boundary is structural: an entry that ships without a
+    protected-path inventory must never silently load into an unprotected task.
+    """
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(block, encoding="utf-8")
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_manifest(manifest)
+    assert (error_type, ("protected_test_paths",)) in [
+        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    ["", ":(exclude)tests", "tests/*", "tests/?", "tests/[x]"],
+    ids=["empty", "leading-colon-magic", "glob-star", "glob-question", "glob-bracket"],
+)
+def test_load_manifest_rejects_non_literal_protected_test_paths(
+    tmp_path: Path, entry: str
+) -> None:
+    """A protected_test_paths entry with git pathspec syntax is a load error.
+
+    The manifest promises LITERAL repository-relative paths, but the scoring gate
+    passes each entry to git as a bare pathspec, where ``*``/``?``/``[`` are glob
+    metacharacters and a leading ``:`` is pathspec magic. A glob-shaped entry that
+    matches nothing would read as a clean diff and an empty ls-files list, letting
+    test_command run against an unprotected oracle — so such entries must never
+    load, exactly like a missing or empty inventory.
+    """
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        '[repos."acme/widgets"]\n'
+        'clone_url = "https://github.com/acme/widgets"\n'
+        'image = "daydream-rl/widgets"\n'
+        'test_command = "pytest -q"\n'
+        "setup_cmds = []\n"
+        f"protected_test_paths = {json.dumps([entry])}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_manifest(manifest)
+    assert ("value_error", ("protected_test_paths",)) in [
+        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
+
+
 def test_golden_comment_rejects_unknown_key() -> None:
     """A misspelled/extra key in benchmark_data.json must not be silently dropped.
 
@@ -351,4 +430,13 @@ def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path
     assert task.data.head_sha == "4bb03cd6819228f30079885297299fe568a62863"
     assert task.data.base_sha == "4dffa1963f896a0a311dec3c14f003a5f382c446"
     assert task.data.test_command == "/opt/repo-venv/bin/python -m pytest -q"
+    assert task.data.protected_test_paths == [
+        "tests",
+        "conftest.py",
+        ".pytest.ini",
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+    ]
     assert task.data.image == "daydream-rl/itsdangerous:4bb03cd68192"

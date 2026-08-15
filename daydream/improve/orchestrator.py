@@ -94,6 +94,7 @@ from daydream.trajectory import (
     redact_text,
 )
 from daydream.ui import print_error, print_info, print_success, print_warning
+from daydream.workspace import prune_stale_audit_worktrees
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -120,6 +121,26 @@ RECON_SCHEMA: dict[str, Any] = {
 }
 
 _EVIDENCE_LOCATION = re.compile(r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)")
+
+
+def _audit_repo(ctx: FlowContext) -> Path:
+    """Return the detached audit worktree used as the model cwd for improve turns.
+
+    The runner opens one audit worktree per improve run (see
+    :func:`daydream.workspace.open_audit_workspace`) and stores its path on
+    ``ctx.data["audit_repo"]``. Every advisory model turn (recon/audit/vet/
+    plan-write) runs with this path as its ``cwd``; the target worktree is never
+    a model cwd (except for unborn-HEAD targets, where
+    :func:`daydream.workspace.open_audit_workspace` yields the source itself
+    with no isolation), so a model commit can never reach the target's HEAD,
+    named refs, or staged index.
+
+    Raises:
+        KeyError: If the runner did not open an audit workspace (a wiring bug —
+            fail loud, never fall back to ``ctx.work.repo``).
+    """
+    return Path(ctx.data["audit_repo"])
+
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 _MAINTENANCE_SIGNALS = set(MAINTENANCE_SIGNALS)
 _CHANGE_SHAPES = set(CHANGE_SHAPES)
@@ -203,7 +224,7 @@ def _build_recon_prompt(
     exploration_summary: str,
 ) -> str:
     service_lines = "\n".join(
-        f"- {service.name}: {service.root.as_posix()}" for service in services
+        f"- {service.name}: {(repo / service.root).as_posix()}" for service in services
     )
     audited_roots = sorted(
         {root for group in groups for root in group.roots if root != "."}
@@ -402,13 +423,14 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         )
 
     backend = ctx.backend_for("recon")
+    audit_repo = _audit_repo(ctx)
     async with phase_scope(DaydreamPhase.RECON):
-        exploration = await repo_scan(backend, target)
+        exploration = await repo_scan(backend, audit_repo)
         recon, _, _ = await run_agent(
             backend,
-            target,
+            audit_repo,
             _build_recon_prompt(
-                target, services, groups, exploration.to_prompt_section()
+                audit_repo, services, groups, exploration.to_prompt_section()
             ),
             phase=DaydreamPhase.RECON,
             output_schema=RECON_SCHEMA,
@@ -910,7 +932,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 group=_group_dict(assignment.group),
                 scope_note=scope_note,
                 recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
-                cwd=ctx.work.repo,
+                cwd=_audit_repo(ctx),
                 tier=tier,
             )
             if branch_focus:
@@ -930,7 +952,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                         try:
                             output, _, _ = await run_agent(
                                 backend,
-                                ctx.work.repo,
+                                _audit_repo(ctx),
                                 task_prompt,
                                 phase=DaydreamPhase.AUDIT,
                                 output_schema=(
@@ -1227,7 +1249,7 @@ async def _step_vet(ctx: FlowContext) -> None:
             ]
             prompt = ctx.registry.prompt("vet")(
                 findings=indexed,
-                cwd=ctx.work.repo,
+                cwd=_audit_repo(ctx),
             )
             if branch_focus:
                 prompt += (
@@ -1249,7 +1271,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                         try:
                             output, _, _ = await run_agent(
                                 backend,
-                                ctx.work.repo,
+                                _audit_repo(ctx),
                                 task_prompt,
                                 phase=DaydreamPhase.VET,
                                 output_schema=(
@@ -1533,6 +1555,7 @@ def _expected_plan_fingerprints(finding: dict[str, Any]) -> list[str]:
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
     prune_stale_reanchor_worktrees(ctx.work.repo)
+    prune_stale_audit_worktrees(ctx.work.repo, exclude_run_id=ctx.work.run_id)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]
@@ -1616,7 +1639,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     verification_commands=_legacy_verification_commands(
                         ctx.data["recon"]
                     ),
-                    cwd=ctx.work.repo,
+                    cwd=_audit_repo(ctx),
                 )
             except Exception:  # noqa: BLE001 - isolate each plan safely
                 _land(
@@ -1646,7 +1669,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     async with phase_scope(DaydreamPhase.PLAN_WRITE):
                         output, _, aborted_reason = await run_agent(
                             backend,
-                            ctx.work.repo,
+                            _audit_repo(ctx),
                             generation_prompt,
                             phase=DaydreamPhase.PLAN_WRITE,
                             output_schema=PLAN_AUTHOR_SCHEMA,

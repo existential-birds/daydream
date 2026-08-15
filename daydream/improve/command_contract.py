@@ -27,7 +27,7 @@ WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "maxLength": 512,
-    "pattern": rf"^(?:\.|{REPOSITORY_FILE_PATH_PATTERN[1:-1]})$",
+    "pattern": rf"^(?:\.|{REPOSITORY_FILE_PATH_PATTERN[1:-1]}|/{REPOSITORY_FILE_PATH_PATTERN[1:-1]})$",
 }
 LINE_ANCHOR_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -201,6 +201,7 @@ class ContractRejection:
 
     def render(self, prefix: str) -> str:
         return f"{self.code}@{prefix}{self.pointer}"
+
 
 
 def _json_pointer(parts: list[object]) -> str:
@@ -535,12 +536,16 @@ def _validate_command_records(
             )
             continue
         working_directory = command["working_directory"]
+        is_absolute = working_directory.startswith("/")
         if (
             (
                 working_directory != "."
+                and not is_absolute
                 and not valid_repository_file_path(working_directory)
             )
-            or not path_is_confined(repo, working_directory)
+            or not path_is_confined(
+                repo, working_directory, allow_absolute=is_absolute
+            )
             or not (repo / working_directory).is_dir()
         ):
             reject(

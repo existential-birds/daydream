@@ -6,7 +6,6 @@ import hashlib
 import json
 import re
 import subprocess
-import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
@@ -23,6 +22,7 @@ from daydream.improve.render import (
     render_plan,
 )
 from daydream.trajectory import redact_text
+from daydream.workspace import _prune_stale_locked_worktrees
 
 REJECTIONS_SCHEMA_VERSION = 1
 PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION = 1
@@ -708,30 +708,17 @@ def prune_stale_reanchor_worktrees(repo: Path) -> int:
     the directory does not grow unboundedly. Individual failures are tolerated
     so one stale worktree never blocks a plan run.
 
-    The prune is lock-aware: a live re-anchor worktree (locked at creation, age
-    near zero) is skipped without any removal attempt, so a concurrent run
-    mid-write is never destroyed. A worktree whose lock is older than
-    ``_REANCHOR_LOCK_STALE_AFTER_S`` is a crashed session's leftover: it is
-    reclaimed via ``git_ops.worktree_remove_unlocked`` (unlock, then
-    force-remove) rather than wedged forever. Unlocked worktrees are removed
-    the same way, the unlock being a no-op for them.
+    The prune is lock-aware and delegates its policy to
+    :func:`daydream.workspace._prune_stale_locked_worktrees` — the same shared
+    body the audit prune uses — so the staleness window, live-lock skip rule,
+    and unlock-before-remove ordering live in one place and cannot silently
+    drift between the two modules.
     """
-    removed = 0
-    for path in _iter_reanchor_worktrees(repo):
-        try:
-            locked_at = git_ops.worktree_lock_mtime(repo, path)
-            if (
-                locked_at is not None
-                and time.time() - locked_at <= _REANCHOR_LOCK_STALE_AFTER_S
-            ):
-                # Live re-anchor worktree (lock age near zero): never unlock or
-                # remove it, so a concurrent run mid-write is not destroyed.
-                continue
-            git_ops.worktree_remove_unlocked(repo, path)
-        except git_ops.GitError:
-            continue
-        removed += 1
-    return removed
+    return _prune_stale_locked_worktrees(
+        repo,
+        _iter_reanchor_worktrees(repo),
+        stale_after_s=_REANCHOR_LOCK_STALE_AFTER_S,
+    )
 
 
 # Verdicts for a named prune of a single re-anchor worktree. Distinct outcomes

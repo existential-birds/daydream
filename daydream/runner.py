@@ -71,7 +71,7 @@ from daydream.ui import (
     print_success,
     prompt_user,
 )
-from daydream.workspace import WorkContext, open_workspace
+from daydream.workspace import WorkContext, open_audit_workspace, open_workspace
 
 if TYPE_CHECKING:
     from daydream.pr_review import ParsedIssue
@@ -956,7 +956,23 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
         )
         console.print()
 
-        return await run_flow(ctx.registry, "improve", ctx)
+        # Every improve advisory model turn (recon/audit/vet/plan-write) runs
+        # with a detached audit worktree as its cwd; the target worktree is
+        # never a model cwd (except for unborn-HEAD targets, where
+        # open_audit_workspace yields the source itself with no isolation).
+        # The audit worktree snapshots the target's
+        # committed + staged + unstaged tracked state, so an undirected model
+        # commit lands only in the detached audit HEAD and is discarded with
+        # the worktree at exit — it cannot advance the target's HEAD or staged
+        # index (named refs live in the repository's shared ref store and can
+        # be written from any worktree). This is not a hard guarantee: the
+        # audit worktree is a descendant of the target, and the sandbox's
+        # accepted residual is that it does not reliably block git commit
+        # against any reachable repo, so a deliberate cd-up-then-commit
+        # against the parent target remains possible.
+        async with open_audit_workspace(work.repo, run_id=work.run_id) as audit_repo:
+            ctx.data["audit_repo"] = audit_repo
+            return await run_flow(ctx.registry, "improve", ctx)
 
 
 async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:

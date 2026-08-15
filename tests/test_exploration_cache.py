@@ -1,7 +1,8 @@
 """Cross-run reuse of the deep pipeline's exploration pre-scan.
 
 ``.daydream/exploration/`` now survives a run and is keyed by
-``head sha + diff + tier + depth`` (``daydream.exploration.exploration_cache_key``).
+``head sha + diff + tier + depth + format version``
+(``daydream.exploration.exploration_cache_key``).
 A second run with an identical key reuses the directory verbatim and fires zero
 specialist agents; any key change re-runs the pre-scan and rewrites the files.
 
@@ -211,8 +212,11 @@ async def test_failed_exploration_is_not_durably_cached(
     assert not (exploration / "cache-key").exists()
 
 
-def test_cache_key_is_sensitive_to_every_component() -> None:
-    """Each of head, diff, tier, depth changes the key."""
+def test_cache_key_is_sensitive_to_every_component(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each of head, diff, tier, depth, and the format version changes the key."""
+    from daydream import exploration as exploration_mod
     from daydream.exploration import exploration_cache_key
 
     base = exploration_cache_key("sha1", "diff", "standard", 2)
@@ -221,6 +225,12 @@ def test_cache_key_is_sensitive_to_every_component() -> None:
     assert base != exploration_cache_key("sha1", "other", "standard", 2)
     assert base != exploration_cache_key("sha1", "diff", "deep", 2)
     assert base != exploration_cache_key("sha1", "diff", "standard", 3)
+
+    # The format version is part of the key: a bump must change it. The override
+    # value is arbitrary (never assert the production value), so a legitimate
+    # upgrade stays green while a removal from the payload goes red.
+    monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", 999)
+    assert base != exploration_cache_key("sha1", "diff", "standard", 2)
 
 
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
