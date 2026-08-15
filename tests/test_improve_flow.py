@@ -30,7 +30,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
-from tests.harness.git_helpers import commit, git, init_repo
+from tests.harness.git_helpers import commit, configure_identity, git, init_repo
 from tests.harness.improve_backend import (
     ImproveStubBackend,
     IncrementalPlanBackend,
@@ -2701,6 +2701,71 @@ async def test_improve_model_calls_run_in_audit_worktree_not_target(
         assert ".daydream/audit/" in str(call["cwd"]), str(call["cwd"])
     # The target tree is untouched (host artifacts under gitignored paths only).
     assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+class _AuditCommittingBackend(ImproveStubBackend):
+    """Stub that performs a REAL git commit in every distinct cwd it is given.
+
+    Simulates the Codex read-only 'git commit' residual: the model turn commits
+    into whatever working directory it runs in, so isolation must confine those
+    commits to the audit worktree by construction. A unique per-call scratch
+    file is written first so the commit always has something to commit (the
+    audit worktree is materialized exactly at the snapshot, so a plain
+    add+commit on a clean tree would be a no-op failure).
+    """
+
+    def __init__(self, target: Path) -> None:
+        super().__init__(target)
+        self._commit_count = 0
+
+    async def execute(
+        self, cwd, prompt, output_schema=None, continuation=None,
+        agents=None, max_turns=None, read_only=False, persist_session=True,
+    ):
+        self._commit_count += 1
+        (cwd / "model-scratch.txt").write_text(
+            f"model residual {self._commit_count}\n"
+        )
+        git(cwd, "add", "-A")
+        git(cwd, "commit", "-m", "model residual commit")
+        async for event in super().execute(
+            cwd, prompt, output_schema=output_schema, continuation=continuation,
+            agents=agents, max_turns=max_turns, read_only=read_only,
+            persist_session=persist_session,
+        ):
+            yield event
+
+
+@pytest.mark.anyio
+async def test_improve_model_commit_is_confined_to_audit_worktree(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    configure_identity(improve_monorepo_target)
+    stub = _AuditCommittingBackend(improve_monorepo_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **k: stub)
+
+    before_head = git(improve_monorepo_target, "rev-parse", "HEAD")
+    before_refs = git(improve_monorepo_target, "show-ref")
+    before_status = _git_status_porcelain(improve_monorepo_target)
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    assert stub.calls
+    # Every model turn ran in ONE detached audit worktree (a single non-target path).
+    audit_cwds = {str(call["cwd"]) for call in stub.calls}
+    assert len(audit_cwds) == 1, audit_cwds
+    audit_path = next(iter(audit_cwds))
+    assert ".daydream/audit/" in audit_path and audit_path != str(improve_monorepo_target)
+    # Target HEAD, named refs, and staged index/diff are unchanged after the full run.
+    assert git(improve_monorepo_target, "rev-parse", "HEAD") == before_head
+    assert git(improve_monorepo_target, "show-ref") == before_refs
+    assert _git_status_porcelain(improve_monorepo_target) == before_status
+    # The audit worktree is gone (the model committed into it, yet it was removed).
+    worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
+    assert ".daydream/audit/" not in worktrees
 
 
 @pytest.mark.anyio
