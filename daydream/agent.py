@@ -348,24 +348,32 @@ def _summarize_input(input_data: dict[str, Any]) -> str:
     """One-line summary of tool input for log output."""
     if not input_data:
         return ""
-    # For known tools, pick the most informative key
+    # For known tools, pick the most informative key. The COMPLETE selected
+    # string is redacted before any [:200] slice — redact-after-slice would
+    # truncate a credential into an unmatchable fragment.
     if "command" in input_data:
-        return input_data["command"][:200]
+        return redact_text(input_data["command"])[:200]
     if "path" in input_data:
-        return f"{input_data['path']}" + (f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else "")
+        complete = f"{input_data['path']}" + (
+            f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else ""
+        )
+        return redact_text(complete)
     # Generic: first value that's a string
     for v in input_data.values():
         if isinstance(v, str):
-            return v[:200]
-    return str(input_data)[:200]
+            return redact_text(v)[:200]
+    return redact_text(str(input_data))[:200]
 
 
 def _summarize_output(output: str) -> str:
     """One-line summary of tool output for log output."""
     if not output:
         return "(empty)"
+    # Redact the COMPLETE output before strip/first-line/[:200] — a credential
+    # straddling the summary boundary must be caught before the slice.
+    redacted = redact_text(output)
     # Take first non-empty line or first 200 chars
-    first_line = output.strip().split("\n")[0]
+    first_line = redacted.strip().split("\n")[0]
     return first_line[:200]
 
 
@@ -564,7 +572,7 @@ async def run_agent(
                                     raise MissingSkillError(skill_match.group(1))
 
                                 if _state.log_mode:
-                                    print(event.text, flush=True)
+                                    _print_log(event.text)
                                 elif use_callback and progress_callback is not None:
                                     last_line = event.text.strip().split("\n")[-1]
                                     if last_line:
@@ -581,7 +589,7 @@ async def run_agent(
 
                             elif isinstance(event, ThinkingEvent):
                                 if _state.log_mode:
-                                    print(f"[thinking] {event.text}", flush=True)
+                                    _print_log(f"[thinking] {event.text}")
                                 elif not use_callback:
                                     if agent_renderer.has_content:
                                         agent_renderer.finish()
@@ -593,7 +601,7 @@ async def run_agent(
                             elif isinstance(event, ToolStartEvent):
                                 if _state.log_mode:
                                     tool_names[event.id] = event.name
-                                    print(f"[tool:{event.name}] {_summarize_input(event.input)}", flush=True)
+                                    _print_log(f"[tool:{event.name}] {_summarize_input(event.input)}")
                                 elif progress_callback is not None:
                                     # Record the originating call so a backgrounded launch's result
                                     # can later resolve a Task-family label for the progress line.
@@ -635,7 +643,7 @@ async def run_agent(
                                         f"[tool:{tool_name} ERROR]" if event.is_error
                                         else f"[tool:{tool_name} result]"
                                     )
-                                    print(f"{prefix} {_summarize_output(event.output)}", flush=True)
+                                    _print_log(f"{prefix} {_summarize_output(event.output)}")
                                 else:
                                     # Populate the task_id→label map in both modes, so a later
                                     # TaskOutput/TaskStop resolves its originating label.
@@ -652,9 +660,8 @@ async def run_agent(
 
                             elif isinstance(event, MetricsEvent):
                                 if _state.log_mode:
-                                    print(
+                                    _print_log(
                                         f"[metrics] prompt={event.prompt_tokens} completion={event.completion_tokens}",
-                                        flush=True
                                     )
                                 # EVNT-02 / MAP-06: recorder-only, no UI in normal mode. Must precede the
                                 # CostEvent branch so isinstance order is correct.
@@ -664,7 +671,7 @@ async def run_agent(
                             elif isinstance(event, CostEvent):
                                 if _state.log_mode:
                                     cost_str = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
-                                    print(f"[cost] {cost_str}", flush=True)
+                                    _print_log(f"[cost] {cost_str}")
                                 elif event.cost_usd and not use_callback:
                                     if agent_renderer.has_content:
                                         agent_renderer.finish()
@@ -682,9 +689,9 @@ async def run_agent(
                                 structured_result = event.structured_output
                                 if event.structured_output is not None:
                                     if _state.log_mode:
-                                        print(
-                                            f"[result] {json.dumps(event.structured_output)[:500]}",
-                                            flush=True,
+                                        redacted = _redact_log_value(event.structured_output)
+                                        _print_log(
+                                            f"[result] {json.dumps(redacted)[:500]}",
                                         )
                                     elif not use_callback:
                                         issues = (
@@ -724,7 +731,7 @@ async def run_agent(
                             inv.mark_aborted(budget_reason)
                             inv.observe(TurnEndEvent())
                         if _state.log_mode:
-                            print(f"[aborted] {budget_reason}", flush=True)
+                            _print_log(f"[aborted] {budget_reason}")
                         elif use_callback and progress_callback is not None:
                             result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
                             if inspect.isawaitable(result):
@@ -753,7 +760,7 @@ async def run_agent(
                         f"attempt {attempt + 2}/{max_attempts + 1} after {delay:.1f}s..."
                     )
                     if _state.log_mode:
-                        print(f"[retry] {retry_msg}", flush=True)
+                        _print_log(f"[retry] {retry_msg}")
                     elif use_callback and progress_callback is not None:
                         result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
                         if inspect.isawaitable(result):

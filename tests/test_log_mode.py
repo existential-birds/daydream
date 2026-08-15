@@ -34,6 +34,11 @@ from daydream.backends import (
 from daydream.runner import RunConfig, run
 from tests.harness.backend import ScriptedBackend
 
+# Synthetic credential-shaped sentinel: the ``{6,}`` API-key rule requires at
+# least 6 chars after the ``ghp_`` prefix, so a truncated ``ghp_yyy`` fragment
+# (only 3) is unmatchable — the discriminating boundary tests rely on this.
+REDACTION_SENTINEL = "ghp_" + "x" * 16
+
 MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
 
@@ -65,24 +70,36 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
 @pytest.mark.parametrize(
     ("events", "config_overrides", "required", "forbidden"),
     [
+        # Sentinel-absence is asserted at the agent boundary in
+        # test_log_mode_emission_redacts_sentinels_on_agent_path; the deep
+        # pipeline's out-of-scope phases.py prints legitimately carry raw content,
+        # so ``forbidden`` stays empty here. Marker presence proves the agent's
+        # `_print_log` redaction runs on the real path.
         pytest.param(
-            [TextEvent("hello world")],
+            [TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("hello world",),
-            ("\x1b[", "[bold]", "[dim]"),
+            ("hello", "[REDACTED_API_KEY]"),
+            (),
             id="plain-text",
+        ),
+        pytest.param(
+            [ThinkingEvent(f"thinking about {REDACTION_SENTINEL}")],
+            {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[thinking]", "[REDACTED_API_KEY]"),
+            (),
+            id="thinking",
         ),
         pytest.param(
             [
                 ToolStartEvent(
                     id="test-id",
                     name="bash",
-                    input={"command": "echo hello", "description": "test command"},
+                    input={"command": f"echo {REDACTION_SENTINEL}"},
                 ),
-                ToolResultEvent(id="test-id", output="hello\nworld", is_error=False),
+                ToolResultEvent(id="test-id", output=f"token={REDACTION_SENTINEL}", is_error=False),
             ],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[tool:bash] echo hello", "[tool:bash result] hello"),
+            ("[tool:bash]", "[REDACTED_API_KEY]"),
             (),
             id="tool-events",
         ),
@@ -118,12 +135,12 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
         pytest.param(
             [
                 ResultEvent(
-                    structured_output={"status": "complete", "findings": ["issue1", "issue2"]},
+                    structured_output={"status": "complete", "token": REDACTION_SENTINEL},
                     continuation=None,
                 )
             ],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[result]", '"status": "complete"', '"findings"'),
+            ("[result]", "[REDACTED_API_KEY]"),
             (),
             id="result-event",
         ),
@@ -180,6 +197,31 @@ def test_log_mode_rendering(
         assert substring in output
     for substring in forbidden:
         assert substring not in output
+
+
+def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
+    """A token straddling the 200-char summary boundary is redacted, not truncated
+    into an unmatchable fragment. Redact-after-slice would leak the raw 'ghp_'."""
+    from daydream.agent import _summarize_input
+
+    # The space before the token is REQUIRED: `_API_KEY_PATTERN` anchors on `\b`,
+    # so a token glued directly after a word char is never matchable and the test
+    # would fail against BOTH implementations. With the space, redact_text matches
+    # the complete ``ghp_`` + 8 alnum token, while ``[:200]`` still cuts 9 chars
+    # into it — a redact-after implementation leaks the unmatchable ``ghp_yyyyy``
+    # fragment (the ``{6,}`` rule needs 6+ chars after the prefix).
+    command = "x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10   # [:200] cuts into the token
+    out = _summarize_input({"command": command})
+    assert "ghp_" not in out        # no raw fragment survives the 200-cut
+    assert "[REDACTED" in out       # redaction marker (even truncated) present
+
+    # Same boundary check on the output summary: a token straddling the [:200]
+    # first-line cut must be caught before strip/first-line/slice.
+    from daydream.agent import _summarize_output
+
+    out = _summarize_output("x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10)
+    assert "ghp_" not in out
+    assert "[REDACTED" in out
 
 
 def test_log_mode_trajectory_still_written(
