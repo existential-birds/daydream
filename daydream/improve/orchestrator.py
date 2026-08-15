@@ -84,6 +84,7 @@ from daydream.improve.render import markdown_cell
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
     DaydreamPhase,
     get_current_recorder,
@@ -208,6 +209,8 @@ def _build_recon_prompt(
     )
     root_list = ", ".join(f"`{root}`" for root in audited_roots)
     return f"""IMPROVE_RECON
+
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
 Read the repository at {repo} without modifying it. Return structured
 reconnaissance facts only:
