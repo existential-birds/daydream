@@ -42,6 +42,7 @@ def hf_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ("cli/repo", None, "cli/repo"),
         ("", "env/repo", "env/repo"),          # empty CLI falls through to env
         (None, "env/repo", "env/repo"),        # env wins when CLI unset
+        (None, "", None),                     # empty env treated as unset
         (None, None, None),                    # neither source set -> unset
     ],
 )

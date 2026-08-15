@@ -307,11 +307,17 @@ CLI flag, then the `DAYDREAM_TRAJECTORY_HUB_REPO` env var. A `trajectory_hub_rep
 key in the target checkout's file config is ignored and can never select a
 destination. When unset, nothing leaves your machine. When set, every run's
 complete archive bundle (`~/.daydream/archive/runs/<session_id>/`) is uploaded
-to that dataset repo as a per-run folder keyed by session id:
+to that dataset repo as a per-run folder keyed by session id, provided the
+`huggingface_hub` package is installed and `HF_TOKEN` is set; if either is
+missing (or the upload fails), the run is never aborted — a one-line warning
+is emitted and the bundle is left un-uploaded. On the first upload the dataset
+repo is created private; an already-existing repo is reused with its current
+visibility (a pre-existing public repo is re-used but triggers a warning):
 
-```toml
+```sh
 # env var (remote/hosted deployments: one line in the bootstrap profile)
 export DAYDREAM_TRAJECTORY_HUB_REPO="existential-birds/daydream-trajectories"
+export HF_TOKEN="hf_..."   # required for upload to proceed
 ```
 
 The LLM supervisor uses one batched call. Configure its model under
