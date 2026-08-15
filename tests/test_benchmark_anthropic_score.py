@@ -204,6 +204,162 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
     assert [fn["golden_comment"] for fn in leaf["false_negatives"]] == ["golden one"]
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            {
+                "golden_comments": [
+                    {"comment": "same bug", "severity": "medium"},
+                    {"comment": "same bug", "severity": "medium"},
+                ],
+                "issues": ["same bug"],
+                "groups": [[0]],
+                "verdicts": [
+                    {"reasoning": "g0", "match": True, "confidence": 0.9},
+                    {"reasoning": "g1", "match": True, "confidence": 0.8},
+                ],
+                "expected_tp": [
+                    {"golden_comment": "same bug", "severity": "medium",
+                     "matched_candidate": "same bug", "confidence": 0.9,
+                     "reasoning": "g0"},
+                ],
+                "expected_fp": [],
+                "expected_fn": [{"golden_comment": "same bug", "severity": "medium"}],
+                "tp": 1, "fp": 0, "fn": 1,
+                "precision": 1.0, "recall": 0.5,
+                "total_tp": 1, "total_fp": 0, "total_fn": 1,
+            },
+            id="duplicate-goldens",
+        ),
+        pytest.param(
+            {
+                "golden_comments": [{"comment": "the bug", "severity": "medium"}],
+                "issues": ["the bug", "the bug"],
+                "groups": [[0], [1]],
+                "verdicts": [
+                    {"reasoning": "c0", "match": True, "confidence": 0.9},
+                    {"reasoning": "c1", "match": True, "confidence": 0.8},
+                ],
+                "expected_tp": [
+                    {"golden_comment": "the bug", "severity": "medium",
+                     "matched_candidate": "the bug", "confidence": 0.9,
+                     "reasoning": "c0"},
+                ],
+                "expected_fp": [{"candidate": "the bug"}],
+                "expected_fn": [],
+                "tp": 1, "fp": 1, "fn": 0,
+                "precision": 0.5, "recall": 1.0,
+                "total_tp": 1, "total_fp": 1, "total_fn": 0,
+            },
+            id="duplicate-candidates",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_direct_judge_tracks_duplicate_text_occurrences_by_position(tmp_path, case):
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "benchmark_data.json").write_text(json.dumps({
+        URL: {
+            "golden_comments": case["golden_comments"],
+            "reviews": [{"tool": "daydream", "repo_name": "repo", "pr_url": URL,
+                         "review_comments": [{"body": "the bug"}]}],
+        }
+    }))
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=case["issues"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=case["groups"])
+    # Dedup only calls the completer when there are >= 2 candidates (_MIN_DEDUP_CANDIDATES);
+    # with a single candidate no groups request/response is emitted, so the queue
+    # must mirror the actual call order to keep verdicts aligned with judge tasks.
+    client_queue = [{"issues": case["issues"]}]
+    if len(case["issues"]) >= 2:
+        client_queue.append({"groups": case["groups"]})
+    client_queue += case["verdicts"]
+    client = FakeAnthropicJson(client_queue)
+
+    scores = await run_anthropic_scoring(
+        tmp_path, "claude-opus-4-5-20251101", golden_urls=[URL], tool="daydream", client=client
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    assert leaf["true_positives"] == case["expected_tp"]
+    assert leaf["false_positives"] == case["expected_fp"]
+    assert leaf["false_negatives"] == case["expected_fn"]
+    assert (leaf["tp"], leaf["fp"], leaf["fn"]) == (case["tp"], case["fp"], case["fn"])
+    assert leaf["precision"] == pytest.approx(case["precision"])
+    assert leaf["recall"] == pytest.approx(case["recall"])
+    assert all(
+        "golden_index" not in rec and "candidate_index" not in rec
+        for rec in leaf["true_positives"] + leaf["false_positives"] + leaf["false_negatives"]
+    )
+    assert (scores.total_tp, scores.total_fp, scores.total_fn) == (
+        case["total_tp"], case["total_fp"], case["total_fn"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_judge_finds_two_tps_when_greedy_would_strand_one(tmp_path):
+    """A greedy one-to-one pass can strand a golden whose candidate group was taken by an
+    earlier high-confidence match even when a feasible two-TP assignment exists; the
+    maximum-cardinality matching must find both true positives."""
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "benchmark_data.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "golden_comments": [
+                        {"comment": "bug a", "severity": "medium"},
+                        {"comment": "bug b", "severity": "medium"},
+                    ],
+                    "reviews": [
+                        {
+                            "tool": "daydream",
+                            "repo_name": "repo",
+                            "pr_url": URL,
+                            "review_comments": [{"body": "the bug"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", texts=["fix c", "fix d"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream", groups=[[0], [1]])
+    # Greedy would take g1c0 (0.9) first, leaving g0 unmatched even though g0c0 + g1c1
+    # is a feasible two-TP assignment. Judge tasks run in (gi, ci) order: g0c0, g0c1, g1c0, g1c1.
+    client = FakeAnthropicJson(
+        [
+            {"issues": ["fix c", "fix d"]},
+            {"groups": [[0], [1]]},
+            {"reasoning": "g0c0", "match": True, "confidence": 0.5},
+            {"reasoning": "g0c1", "match": False, "confidence": 0.0},
+            {"reasoning": "g1c0", "match": True, "confidence": 0.9},
+            {"reasoning": "g1c1", "match": True, "confidence": 0.5},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["bug a", "bug b"]
+    assert leaf["false_positives"] == []
+    assert leaf["false_negatives"] == []
+    assert (leaf["tp"], leaf["fp"], leaf["fn"]) == (2, 0, 0)
+    assert leaf["precision"] == 1.0 and leaf["recall"] == 1.0
+    assert (scores.total_tp, scores.total_fp, scores.total_fn) == (2, 0, 0)
+
+
 @pytest.mark.asyncio
 async def test_direct_judge_precision_counts_dedup_siblings_once(tmp_path):
     """A dedup sibling group is one logical candidate: matching it must not leave

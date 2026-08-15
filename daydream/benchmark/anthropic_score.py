@@ -482,79 +482,72 @@ async def _evaluate_review(
     semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
     tasks = []
     task_meta = []
-    for golden_comment in golden:
-        for candidate in candidates:
+    for gi, golden_comment in enumerate(golden):
+        for ci, candidate in enumerate(candidates):
             tasks.append(_judge_limited(semaphore, judge, golden_comment["comment"], candidate))
-            task_meta.append(
-                {
-                    "golden": golden_comment["comment"],
-                    "golden_severity": golden_comment.get("severity"),
-                    "candidate": candidate,
-                }
-            )
+            task_meta.append((gi, ci))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    golden_matched = {
-        comment["comment"]: {
-            "severity": comment.get("severity"),
-            "matched": False,
-            "best_confidence": -1.0,  # sentinel: any valid confidence (including 0.0) beats this
-            "matched_candidate": None,
-        }
-        for comment in golden
-    }
-    candidate_matched = dict.fromkeys(candidates, False)
-    sibling_map = _build_sibling_map(candidates, dedup_groups)
+    # Occurrences are tracked by their zero-based list position, not their text, so
+    # equal-text comments at different positions stay structurally distinct.
+    candidate_matched: list[bool] = [False] * len(candidates)
+    sibling_map = _build_sibling_map(len(candidates), dedup_groups)
     errors = []
 
-    positives: list[tuple[Any, int, str, str, JudgeVerdict]] = []
+    positives: list[tuple[float, int, int, int, JudgeVerdict]] = []
 
     for index, result in enumerate(results):
-        meta = task_meta[index]
-        golden_text = meta["golden"]
-        candidate = meta["candidate"]
+        gi, ci = task_meta[index]
+        golden_comment = golden[gi]["comment"]
         if isinstance(result, BaseException):
-            errors.append({"golden": golden_text, "candidate": candidate, "error": str(result)})
+            errors.append({"golden": golden_comment, "candidate": candidates[ci], "error": str(result)})
             continue
 
         if result.match:
-            positives.append((-result.confidence, index, golden_text, candidate, result))
+            positives.append((-result.confidence, index, gi, ci, result))
 
     # One-to-one assignment: each candidate (with its dedup siblings) satisfies at most one golden.
+    # A plain greedy pass can strand a golden whose candidate groups were all taken by earlier,
+    # higher-confidence matches even when a feasible two-TP assignment exists, so the assignment
+    # is built as a maximum-cardinality matching via alternating-path augmentation.
     positives.sort(key=lambda item: (item[0], item[1]))
-    used_groups: set[frozenset[str]] = set()
-    for negated_confidence, _index, golden_text, candidate, result in positives:
-        info = golden_matched[golden_text]
-        siblings = sibling_map.get(candidate, set())
-        group = frozenset({candidate} | siblings)
-        if info["matched"] or group in used_groups:
+    group_of_candidate: dict[int, frozenset[int]] = {
+        ci: frozenset({ci} | sibling_map.get(ci, set())) for ci in range(len(candidates))
+    }
+    golden_edges: list[list[tuple[int, JudgeVerdict]]] = [[] for _ in golden]
+    for _negated_confidence, _index, gi, ci, result in positives:
+        golden_edges[gi].append((ci, result))
+
+    golden_matches = _assign_golden_matches(golden_edges, group_of_candidate)
+
+    for gi, match in enumerate(golden_matches):
+        if match is None:
             continue
-        used_groups.add(group)
-        info["matched"] = True
-        info["best_confidence"] = -negated_confidence
-        info["matched_candidate"] = candidate
-        info["reasoning"] = result.reasoning
-        candidate_matched[candidate] = True
-        for sibling in siblings:
+        ci, _verdict = match
+        candidate_matched[ci] = True
+        for sibling in sibling_map.get(ci, set()):
             candidate_matched[sibling] = True
 
     true_positives = []
     false_negatives = []
-    for golden_text, info in golden_matched.items():
-        if info["matched"]:
+    for gi, match in enumerate(golden_matches):
+        golden_comment = golden[gi]["comment"]
+        severity = golden[gi].get("severity")
+        if match is not None:
+            ci, verdict = match
             true_positives.append(
                 {
-                    "golden_comment": golden_text,
-                    "severity": info["severity"],
-                    "matched_candidate": info["matched_candidate"],
-                    "confidence": info["best_confidence"],
-                    "reasoning": info.get("reasoning"),
+                    "golden_comment": golden_comment,
+                    "severity": severity,
+                    "matched_candidate": candidates[ci],
+                    "confidence": verdict.confidence,
+                    "reasoning": verdict.reasoning,
                 }
             )
         else:
-            false_negatives.append({"golden_comment": golden_text, "severity": info["severity"]})
+            false_negatives.append({"golden_comment": golden_comment, "severity": severity})
 
-    false_positives = [{"candidate": candidate} for candidate, matched in candidate_matched.items() if not matched]
+    false_positives = [{"candidate": candidates[ci]} for ci, matched in enumerate(candidate_matched) if not matched]
     total_candidates = len(candidates)
     total_golden = len(golden)
     tp_count = len(true_positives)
@@ -579,6 +572,58 @@ async def _evaluate_review(
     }
 
 
+def _assign_golden_matches(
+    golden_edges: list[list[tuple[int, JudgeVerdict]]],
+    group_of_candidate: dict[int, frozenset[int]],
+) -> list[tuple[int, JudgeVerdict] | None]:
+    """Build a maximum-cardinality one-to-one assignment of goldens to candidate groups.
+
+    Each candidate — together with its dedup siblings (its group) — satisfies at most
+    one golden. A plain greedy pass can strand a golden whose candidate groups were all
+    taken by earlier, higher-confidence matches even when a feasible two-TP assignment
+    exists, so the assignment is grown via alternating-path augmentation (Kuhn's
+    algorithm): goldens are processed in order of their strongest match confidence, and
+    a displaced golden is re-matched to its next-best free edge. Cardinality is the
+    objective; the confidence ordering only shapes tie-breaking. Returns, per golden,
+    the assigned ``(candidate_index, verdict)`` or ``None``.
+    """
+    golden_matches: list[tuple[int, JudgeVerdict] | None] = [None] * len(golden_edges)
+    group_holder: dict[frozenset[int], int] = {}
+
+    # On the initial pass, contested candidates go to the golden with the strongest match;
+    # ties stay in golden-index order (stable sort), keeping the assignment deterministic.
+    # During augmentation a displaced golden re-matches to its next-best free edge, so the
+    # final holder of a contested group may not hold its strongest edge.
+    golden_order = sorted(
+        range(len(golden_edges)),
+        key=lambda gi: golden_edges[gi][0][1].confidence if golden_edges[gi] else -1.0,
+        reverse=True,
+    )
+
+    def _try_assign(gi: int, seen_groups: set[frozenset[int]], visited_goldens: set[int]) -> bool:
+        """Match ``gi`` to a free candidate group, displacing other goldens along an
+        alternating path when needed. True if a (re)assignment was made."""
+        if gi in visited_goldens:
+            return False
+        visited_goldens.add(gi)
+        for ci, result in golden_edges[gi]:
+            group = group_of_candidate[ci]
+            if group in seen_groups:
+                continue
+            seen_groups.add(group)
+            holder = group_holder.get(group)
+            if holder is None or _try_assign(holder, seen_groups, visited_goldens):
+                group_holder[group] = gi
+                golden_matches[gi] = (ci, result)
+                return True
+        return False
+
+    for gi in golden_order:
+        _try_assign(gi, set(), set())
+
+    return golden_matches
+
+
 async def _judge_limited(
     semaphore: asyncio.Semaphore, judge: FindingJudge, golden_comment: str, candidate: str
 ) -> JudgeVerdict:
@@ -587,15 +632,14 @@ async def _judge_limited(
         return await judge.same_issue(golden_comment, candidate)
 
 
-def _build_sibling_map(candidates: list[str], groups: list[list[int]] | None) -> dict[str, set[str]]:
+def _build_sibling_map(candidate_count: int, groups: list[list[int]] | None) -> dict[int, set[int]]:
     if not groups:
         return {}
-    sibling_map: dict[str, set[str]] = {}
+    sibling_map: dict[int, set[int]] = {}
     for group in groups:
-        group_texts = {candidates[index] for index in group if index < len(candidates)}
-        for index in group:
-            if index < len(candidates):
-                sibling_map[candidates[index]] = group_texts - {candidates[index]}
+        members = {idx for idx in group if 0 <= idx < candidate_count}
+        for idx in members:
+            sibling_map[idx] = members - {idx}
     return sibling_map
 
 
