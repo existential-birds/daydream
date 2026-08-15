@@ -172,15 +172,11 @@ async def open_workspace(
         # --base accepts any commit-ish (SHA, tag, relative expr), so use
         # ref_exists rather than the named-ref-only branch_exists.
         if not git_ops.ref_exists(repo, base_branch):
-            raise BranchNotFoundError(
-                f"base ref '{base_branch}' not found in {repo}"
-            )
+            raise BranchNotFoundError(f"base ref '{base_branch}' not found in {repo}")
 
         base_sha = git_ops.merge_base(repo, base_branch)
         if base_sha is None:
-            raise BranchNotFoundError(
-                f"could not resolve merge-base for '{base_branch}' in {repo}"
-            )
+            raise BranchNotFoundError(f"could not resolve merge-base for '{base_branch}' in {repo}")
 
         head_sha = git_ops.head_sha(repo)
         head_branch = git_ops.current_branch(repo)
@@ -211,6 +207,70 @@ async def open_workspace(
                     console,
                     f"Failed to remove ephemeral worktree {worktree_path}: {exc}",
                 )
+
+
+@asynccontextmanager
+async def open_audit_workspace(
+    source: Path,
+    *,
+    run_id: str,
+) -> AsyncIterator[Path]:
+    """Open a detached audit worktree snapshotting *source*'s tracked state.
+
+    Snapshots the target's committed + staged + unstaged *tracked* state via
+    :func:`daydream.git_ops.stash_create` (a dangling commit that never touches
+    the target working tree, index, or refs) and materializes it as a detached
+    worktree under ``<source>/.daydream/audit/<run_id>``. The audit worktree is
+    the model's ``cwd`` for improve advisory turns, so any commit a model makes
+    lands only in the detached HEAD and can never reach the target's HEAD,
+    named refs, or staged index.
+
+    The worktree is created locked (``lock_reason=<run_id>``) so concurrent
+    stale-worktree pruning on the target repository cannot grab it mid-run, and
+    removed with :func:`daydream.git_ops.worktree_remove_unlocked` on exit.
+
+    Args:
+        source: The target worktree to snapshot (must be a worktree root).
+        run_id: Unique run identifier used for the audit worktree path.
+
+    Yields:
+        The audit worktree path (detached; the model's ``cwd`` for the run).
+
+    Raises:
+        GitError: If the snapshot or worktree creation fails — the audit
+            workspace could not be established, so the run must not proceed
+            silently. Cleanup failures are best-effort (warned, never raised)
+            so they never mask the run's primary outcome.
+    """
+    git_ops.assert_is_worktree(source)
+
+    snapshot = git_ops.stash_create(source)
+    ref = snapshot or git_ops.head_sha(source)
+
+    worktree_path = source / ".daydream" / "audit" / run_id
+    try:
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        git_ops.worktree_add(
+            source,
+            worktree_path,
+            ref,
+            detach=True,
+            lock_reason=run_id,
+        )
+        yield worktree_path
+    finally:
+        try:
+            git_ops.worktree_remove_unlocked(source, worktree_path, force=True)
+        except GitError as exc:
+            # Best-effort cleanup -- never let removal failure mask the
+            # primary outcome of the run (mirrors open_workspace).
+            from daydream.agent import console
+            from daydream.ui import print_warning
+
+            print_warning(
+                console,
+                f"Failed to remove audit worktree {worktree_path}: {exc}",
+            )
 
 
 def copy_files_into_ephemeral(
@@ -309,9 +369,7 @@ def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> No
             resolves outside *root*, or cannot be resolved at all.
     """
     if entry.is_absolute() or ".." in entry.parts:
-        raise WorkspaceCopyPathError(
-            f"workspace copy path must be relative and must not contain '..': {entry}"
-        )
+        raise WorkspaceCopyPathError(f"workspace copy path must be relative and must not contain '..': {entry}")
 
     try:
         resolved = (root / entry).resolve(strict=False)
@@ -321,9 +379,7 @@ def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> No
         ) from exc
 
     if not resolved.is_relative_to(root.resolve()):
-        raise WorkspaceCopyPathError(
-            f"workspace copy path resolves outside the {root_label} worktree: {entry}"
-        )
+        raise WorkspaceCopyPathError(f"workspace copy path resolves outside the {root_label} worktree: {entry}")
 
 
 def _make_run_id() -> str:
@@ -338,9 +394,7 @@ def _resolve_ref(source: Path, branch: str | None) -> str:
         return git_ops.head_sha(source)
 
     if not git_ops.branch_exists(source, branch):
-        raise BranchNotFoundError(
-            f"branch '{branch}' not found locally or on origin in {source}"
-        )
+        raise BranchNotFoundError(f"branch '{branch}' not found locally or on origin in {source}")
 
     # Emit the staleness warning when the requested branch is also the
     # currently checked out branch in source. ``upstream_ahead_count`` returns

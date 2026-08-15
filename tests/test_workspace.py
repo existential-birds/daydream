@@ -20,6 +20,7 @@ from daydream.workspace import (
     WorkContext,
     WorkspaceCopyPathError,
     copy_files_into_ephemeral,
+    open_audit_workspace,
     open_workspace,
 )
 from tests.harness.git_helpers import bare_remote as _bare_remote
@@ -325,22 +326,16 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
     entry = "../outside.txt" if escape_kind == "parent" else str(outside)
 
     if source_kind == "config":
-        (repo / "pyproject.toml").write_text(
-            f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n'
-        )
+        (repo / "pyproject.toml").write_text(f'[tool.daydream.workspace]\ncopy = [".env", "{entry}"]\n')
         extra = None
     else:
-        (repo / "pyproject.toml").write_text(
-            '[tool.daydream.workspace]\ncopy = [".env"]\n'
-        )
+        (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
         extra = [Path(entry)]
 
     dest = tmp_path / "ephemeral"
     dest.mkdir()
 
-    with pytest.raises(
-        WorkspaceCopyPathError, match="must be relative and must not contain"
-    ):
+    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
         copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
 
     # Fail-closed: the valid earlier ".env" entry was NOT copied.
@@ -350,17 +345,13 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
 
 
 @pytest.mark.parametrize("root_kind", ["source", "destination"])
-def test_copy_rejects_resolved_symlink_escape(
-    tmp_path: Path, root_kind: str
-) -> None:
+def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
     outside_dir = tmp_path / "outside"
     outside_dir.mkdir()
     secret = outside_dir / "secret.txt"
     secret.write_text("KEEP\n")
-    (repo / "pyproject.toml").write_text(
-        '[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n'
-    )
+    (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
     (repo / "sub").mkdir()
 
     dest = tmp_path / "ephemeral"
@@ -404,9 +395,7 @@ def test_copy_allows_source_symlink_resolving_inside_source(
     dest = tmp_path / "ephemeral"
     dest.mkdir()
 
-    copied = copy_files_into_ephemeral(
-        repo, dest, extra=[Path("inside-link.cfg")], skip=False
-    )
+    copied = copy_files_into_ephemeral(repo, dest, extra=[Path("inside-link.cfg")], skip=False)
 
     assert copied == [Path("inside-link.cfg")]
     assert (dest / "inside-link.cfg").read_text() == "inside\n"
@@ -481,9 +470,7 @@ async def test_open_workspace_rejects_escape_without_persistent_copy(tmp_path: P
     # would silently skip (not a file) and the fail-closed assertion below could
     # never detect a regressed guard.
     (tmp_path / "retained.cfg").write_text("secret\n")
-    with pytest.raises(
-        WorkspaceCopyPathError, match="must be relative and must not contain"
-    ):
+    with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
         async with open_workspace(
             repo,
             branch=None,
@@ -533,3 +520,61 @@ async def test_stale_local_warning_fires(tmp_path: Path, monkeypatch: pytest.Mon
     assert "topic is checked out in cwd" in out
     assert "2 commits behind origin/topic" in out
     assert "reviewing origin/topic" in out
+
+
+# --- 14. open_audit_workspace (detached audit snapshot) ---------------------
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_preserves_target_state_when_audit_commits(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    # tracked staged + unstaged state the audit must reproduce
+    (repo / "staged.txt").write_text("v2")
+    _git(repo, "add", "staged.txt")
+    (repo / "unstaged.txt").write_text("v1")
+    _git(repo, "add", "unstaged.txt")
+    _commit(repo, "add unstaged tracked")
+    (repo / "unstaged.txt").write_text("v2")
+    before_head = git_ops.head_sha(repo)
+    before_status = git_ops.status_porcelain(repo)
+    before_refs = _git(repo, "show-ref")
+
+    captured: Path | None = None
+    async with open_audit_workspace(repo, run_id="audit-test") as audit:
+        captured = audit
+        assert git_ops.is_inside_worktree(audit) is True
+        # the audit worktree reproduces the staged + unstaged tracked state
+        assert (audit / "staged.txt").read_text() == "v2"
+        assert (audit / "unstaged.txt").read_text() == "v2"
+        # a model commit inside the audit worktree...
+        (audit / "model-note.txt").write_text("model wrote this")
+        _git(audit, "add", "-A")
+        _git(audit, "commit", "-m", "model commit")
+
+    # ...must leave the target untouched, and the audit worktree cleaned up.
+    assert captured is not None and not captured.exists()
+    assert git_ops.head_sha(repo) == before_head
+    assert git_ops.status_porcelain(repo) == before_status
+    assert _git(repo, "show-ref") == before_refs
+    assert _git(repo, "stash", "list") == ""
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_reproduces_clean_head_when_no_tracked_changes(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    async with open_audit_workspace(repo, run_id="audit-clean") as audit:
+        assert git_ops.head_sha(audit) == git_ops.head_sha(repo)
+
+
+@pytest.mark.anyio
+async def test_audit_workspace_cleanup_runs_on_exception(tmp_path: Path) -> None:
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    captured: Path | None = None
+    with pytest.raises(RuntimeError, match="boom"):
+        async with open_audit_workspace(repo, run_id="audit-exc") as audit:
+            captured = audit
+            raise RuntimeError("boom")
+    assert captured is not None and not captured.exists()
