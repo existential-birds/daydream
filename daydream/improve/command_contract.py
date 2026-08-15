@@ -234,10 +234,14 @@ def path_is_confined(
     """Return whether a repository path crosses no symlink/root edge.
 
     When ``allow_absolute`` is set and ``value`` starts with ``"/"``, the
-    relative-lexical gate is skipped and the confinement loop alone decides
-    (it already resolves absolute paths against the repo root). Relative
-    paths and the default ``allow_absolute=False`` keep today's exact
-    behavior.
+    relative-lexical gate is skipped and the confinement loop alone decides:
+    it walks the components at or below the repo root and settles containment
+    with the final ``is_relative_to`` check against the resolved repo root.
+    Components above the repo root are deliberately not symlink-tested — a
+    symlinked ancestor of the repo (e.g. ``/tmp`` on macOS) would otherwise
+    reject the absolute spelling of a path the identical relative spelling
+    accepts, and skipping that test cannot escape containment. Relative paths
+    and the default ``allow_absolute=False`` keep today's exact behavior.
     """
     validator = (
         valid_directory_scope_lexical
@@ -253,7 +257,24 @@ def path_is_confined(
     root = repo.resolve()
     candidate = repo
     if value != ".":
-        for part in PurePosixPath(value.rstrip("/")).parts:
+        parts = PurePosixPath(value.rstrip("/")).parts
+        if allow_absolute and value.startswith("/"):
+            # PurePosixPath.parts begins with "/", so a bare component-wise
+            # division would reset candidate to the filesystem root and
+            # re-descend the repo's own ancestors — symlink-testing each one
+            # and rejecting the absolute spelling of an in-repo path whenever
+            # an ancestor is a symlink (e.g. /tmp -> /private/tmp). Ancestors
+            # are adjudicated by the containment check below; walk only the
+            # components at or below the repo root, exactly like the relative
+            # form does.
+            base = PurePosixPath(repo).parts
+            if parts[: len(base)] == base:
+                parts = parts[len(base) :]
+            else:
+                resolved_base = PurePosixPath(str(root)).parts
+                if parts[: len(resolved_base)] == resolved_base:
+                    parts = parts[len(resolved_base) :]
+        for part in parts:
             candidate /= part
             try:
                 if candidate.is_symlink():
