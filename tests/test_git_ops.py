@@ -1454,6 +1454,36 @@ def test_clone_of_linked_worktree_materializes_head_and_staged_patch(
     assert _git(clone, "diff", "--", "services/taste/parser.go") == ""
 
 
+def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
+    """remove_remote drops the clone's origin without touching its HEAD."""
+    source = _make_repo_with_main(tmp_path / "src")
+    clone = tmp_path / "clone"
+    git_ops.clone(str(source), clone)
+    assert git_ops.remote_url(clone) == str(source)
+    before = git_ops.head_sha(clone)
+
+    git_ops.remove_remote(clone)
+    assert git_ops.remote_url(clone) is None
+    assert git_ops.head_sha(clone) == before
+
+
+def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:
+    """A staged index patch from source reproduces source's staged index in a clone."""
+    source = _make_repo_with_main(tmp_path / "src")
+    clone = tmp_path / "clone"
+    git_ops.clone(str(source), clone)
+    (source / "base.txt").write_text("staged snapshot\n")
+    _git(source, "add", "base.txt")
+    shutil.copy2(source / "base.txt", clone / "base.txt")
+
+    patch = git_ops.staged_patch(source)
+    assert patch  # nonempty bytes
+
+    git_ops.apply_staged_patch(clone, patch)
+    assert git_ops.staged_patch(clone) == git_ops.staged_patch(source)
+    assert _git(clone, "diff", "--", "base.txt") == ""
+
+
 def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
     """clone() raises GitError when the remote URL is invalid."""
     target = tmp_path / "nope"
