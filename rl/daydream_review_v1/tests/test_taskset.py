@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
@@ -17,7 +18,11 @@ from daydream_review_v1.fixture import (
     FIXTURE_TEST_COMMAND,
     build_fixture_repo,
 )
-from daydream_review_v1.taskset import DaydreamReviewConfig, DaydreamReviewTaskset
+from daydream_review_v1.taskset import (
+    DaydreamReviewConfig,
+    DaydreamReviewTaskset,
+    load_manifest,
+)
 
 
 def _write_corpus(root: Path, repo: str, prs: list[dict[str, object]]) -> Path:
@@ -243,6 +248,21 @@ def test_load_rejects_missing_manifest_entry(tmp_path: Path) -> None:
         list(taskset.load())
     assert "acme/widgets" in str(excinfo.value)
     assert "manifest" in str(excinfo.value).lower()
+
+
+def test_load_manifest_rejects_unknown_key(tmp_path: Path) -> None:
+    """A misspelled optional key (setp_cmds) fails load_manifest, naming the key."""
+    manifest = _write_manifest(tmp_path / "manifest.toml", ["acme/widgets"])
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + 'setp_cmds = ["true"]\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_manifest(manifest)
+    assert ("extra_forbidden", ("setp_cmds",)) in [
+        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    ]
 
 
 def test_load_rejects_record_without_base_sha(tmp_path: Path) -> None:
