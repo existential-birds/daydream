@@ -150,7 +150,10 @@ RUN if [ "${INSTALL_CODEX}" = "1" ]; then \
 # used, not .tar.xz, so the base needs no xz-utils. The Node archive is
 # downloaded to a temp file and verified against a locally pinned SHA256 constant
 # (captured from v22.17.1's published signed SHASUMS256.txt at pin time) before it
-# is extracted.
+# is extracted. The pi package tarball is likewise downloaded to a temp file and
+# verified against a locally pinned SHA256 constant (captured from the npm
+# registry tarball at pin time) before npm installs it — no streaming install
+# from the registry whose bytes were never pinned.
 ARG INSTALL_PI=1
 ARG NODE_VERSION=22.17.1
 ARG PI_VERSION=0.82.1
@@ -167,7 +170,12 @@ RUN if [ "${INSTALL_PI}" = "1" ]; then \
       tar -xzf "${archive}" -C /usr/local --strip-components=1 \
           --exclude CHANGELOG.md --exclude LICENSE --exclude README.md; \
       rm "${archive}"; \
-      npm install -g --no-fund --no-audit "@earendil-works/pi-coding-agent@${PI_VERSION}"; \
+      pi_checksum=8343ab95cbab5766f2f5d48844df8db13e772ead2e2976166cbb820a29dacb7d; \
+      pi_tarball="/tmp/pi-coding-agent-${PI_VERSION}.tgz"; \
+      curl -fsSL "https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-${PI_VERSION}.tgz" -o "${pi_tarball}"; \
+      printf '%s *%s\n' "${pi_checksum}" "${pi_tarball}" | sha256sum -c -; \
+      npm install -g --no-fund --no-audit "${pi_tarball}"; \
+      rm "${pi_tarball}"; \
       npm cache clean --force; \
       pi --version; \
     fi
