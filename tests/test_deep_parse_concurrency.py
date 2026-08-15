@@ -61,6 +61,16 @@ def _install_raw(
     monkeypatch: pytest.MonkeyPatch, stub: StubBackend,
     install_backend: Callable[[object], object],
 ) -> None:
+    """Install a *caller-supplied custom* stub backend via the shared
+    ``install_backend`` fixture, then pin skill availability.
+
+    Unlike ``install_stub_backend`` (which builds its own ``StubBackend`` from a
+    target), this installs a custom stub (e.g. a rendezvous or failing stub) at
+    the ``create_backend`` seam so tests can observe parse concurrency / failure
+    behavior. The two skill-availability pins are identical to
+    ``install_stub_backend``'s defaults and keep the test off the local Beagle
+    plugin registry.
+    """
     install_backend(stub)
     monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
     monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
