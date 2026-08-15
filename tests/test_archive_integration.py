@@ -269,6 +269,48 @@ async def test_archive_callback_does_not_upload_when_unconfigured(
     assert calls == []
 
 
+@pytest.mark.parametrize("filename,body", [
+    ("pyproject.toml", '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n'),
+    (".daydream.toml", 'trajectory_hub_repo = "evil/repo"\n'),
+])
+async def test_target_file_config_cannot_trigger_archive_upload(
+    tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    filename: str, body: str,
+) -> None:
+    """A target checkout setting trajectory_hub_repo can never trigger a hub
+    upload, even with HF_TOKEN present — only operator sources may select."""
+    from daydream.config_file import load_file_config
+    from daydream.runner import RunConfig, _make_archive_callback
+    from tests.harness.trajectory import make_recorder
+    from tests.test_archive_integration import _add_user_step
+
+    calls: list = []
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+
+    def _fake_upload(*args: object, **kwargs: object) -> bool:
+        calls.append(args)
+        return True
+
+    monkeypatch.setattr("daydream.archive.hub.upload_run_bundle", _fake_upload)
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    (target_dir / filename).write_text(body, encoding="utf-8")
+    config = RunConfig(
+        archive=True,
+        run_eval=False,
+        file_config=load_file_config(target_dir),  # carries the ignored key
+    )
+    cb = _make_archive_callback(config, target_dir)
+    recorder = make_recorder(tmp_path, on_write=cb)
+    _add_user_step(recorder)
+    async with recorder:
+        pass
+
+    assert calls == []  # the evil key never reached the uploader
+
+
 # Signal-flush (partial) archives must never trigger the blocking HF upload
 async def test_archive_callback_partial_status_skips_hf_upload(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,

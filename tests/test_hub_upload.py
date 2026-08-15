@@ -35,38 +35,50 @@ def hf_run_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return run_dir
 
 
-def test_resolve_hub_repo_precedence_cli_over_env_over_file(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("cli_repo", "env_repo", "expected"),
+    [
+        ("cli/repo", "env/repo", "cli/repo"),  # CLI wins over env
+        ("cli/repo", None, "cli/repo"),
+        ("", "env/repo", "env/repo"),          # empty CLI falls through to env
+        (None, "env/repo", "env/repo"),        # env wins when CLI unset
+        (None, None, None),                    # neither source set -> unset
+    ],
+)
+def test_resolve_hub_repo_prefers_cli_then_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_repo: str | None,
+    env_repo: str | None,
+    expected: str | None,
+) -> None:
     from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import RunConfig
+
+    if env_repo is None:
+        monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+    else:
+        monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", env_repo)
+    # A target checkout's file config is present but can never select a destination
+    file_cfg = DaydreamFileConfig(model="target-file-marker")
+    assert hub.resolve_hub_repo(
+        RunConfig(trajectory_hub_repo=cli_repo, file_config=file_cfg)
+    ) == expected
+
+
+def test_target_file_config_never_selects_hub_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A target pyproject.toml setting trajectory_hub_repo must resolve to None:
+    the file-config tier is gone and contributes nothing."""
+    from daydream.config_file import load_file_config
     from daydream.runner import RunConfig
 
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    file_cfg = DaydreamFileConfig(trajectory_hub_repo="file/repo")
-    cli_cfg = RunConfig(trajectory_hub_repo="cli/repo", file_config=file_cfg)
-    assert hub.resolve_hub_repo(cli_cfg) == "cli/repo"
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
-    assert hub.resolve_hub_repo(cli_cfg) == "cli/repo"
-    env_only = RunConfig(trajectory_hub_repo=None, file_config=file_cfg)
-    assert hub.resolve_hub_repo(env_only) == "env/repo"
-    file_only = RunConfig(trajectory_hub_repo=None, file_config=file_cfg)
-    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO")
-    assert hub.resolve_hub_repo(file_only) == "file/repo"
-    assert hub.resolve_hub_repo(RunConfig()) is None
-
-
-def test_resolve_hub_repo_empty_strings_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.config_file import DaydreamFileConfig
-    from daydream.runner import RunConfig
-
-    file_cfg = DaydreamFileConfig(trajectory_hub_repo="file/repo")
-    # empty CLI tier falls through to env
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "env/repo")
-    assert hub.resolve_hub_repo(RunConfig(trajectory_hub_repo="", file_config=file_cfg)) == "env/repo"
-    # empty env tier falls through to file
-    monkeypatch.setenv("DAYDREAM_TRAJECTORY_HUB_REPO", "")
-    assert hub.resolve_hub_repo(RunConfig(file_config=file_cfg)) == "file/repo"
-    # empty file tier is unset
-    empty_file_cfg = DaydreamFileConfig(trajectory_hub_repo="")
-    assert hub.resolve_hub_repo(RunConfig(file_config=empty_file_cfg)) is None
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream]\ntrajectory_hub_repo = "evil/repo"\n', encoding="utf-8"
+    )
+    file_cfg = load_file_config(tmp_path)  # contains the key, must be ignored
+    assert hub.resolve_hub_repo(RunConfig(file_config=file_cfg)) is None
 
 
 def test_upload_run_bundle_creates_private_repo_and_uploads(
