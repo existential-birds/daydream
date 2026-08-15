@@ -27,11 +27,6 @@ Codex CLI before review), then follow the canonical installation guide:
 There is no automatic PR-open trigger. A credential-bearing review runs only
 after a trusted comment explicitly approves the current head.
 
-**Private-repo limitation:** on private repositories GitHub may run no
-workflows for fork PRs when the "run workflows from fork pull requests" policy
-is disabled. Enable the applicable repository policy before using the trusted
-`@<bot> review` path for those forks.
-
 ## Security model — the privilege split
 
 No single job ever holds both PR code and the App private key:

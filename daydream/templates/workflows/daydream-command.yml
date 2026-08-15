@@ -94,9 +94,11 @@ jobs:
 
       # Acknowledge only after the dispatch's head resolution succeeds: the
       # `gh api` above is fallible, and a transient error must not leave the
-      # maintainer with a 👀 reaction and no review, comment, or explanation —
-      # the failed run surfaces on the PR instead of the reaction mis-signalling
-      # success.
+      # maintainer with a 👀 reaction and no review, comment, or explanation.
+      # Note: a failed dispatch does NOT surface on the PR — no Daydream Review
+      # run is created, so surface-analyze-failure (which fires on the review's
+      # workflow_run event) never triggers and the failure is visible only in
+      # this workflow's Actions tab.
       - name: Acknowledge with eyes reaction
         if: steps.match.outputs.matched == 'true'
         env:

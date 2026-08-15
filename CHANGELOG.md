@@ -7,11 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **security:** Restrict archive upload destinations to the operator-controlled `--trajectory-hub-repo` / `DAYDREAM_TRAJECTORY_HUB_REPO` sources; a `trajectory_hub_repo` key in the target checkout's file config is now ignored.
-- **rl:** Verify untracked-oracle caveat for protected test-oracle paths (issue #571) — confirmed the fail-closed docstring and README manifest caveat are present and accurate at HEAD (b824946), landed by commit df1fd3f (#558); no code or behavior change.
-
 ## [0.27.0] - 2026-08-15
 
 ### Security
@@ -20,8 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **security:** Close the residual approval TOCTOU in the `@<bot> review` command path — the dispatch now also binds the approving comment's creation time, and the review gate rejects any approved head whose commit postdates that comment.
+- **security:** Close the residual approval TOCTOU in the `@<bot> review` command path — the dispatch now also binds the approving comment's creation time, and the review gate rejects when the head repo's server-set `pushed_at` (a repo-wide timestamp, never the PR head commit's date) postdates that comment.
 - **bot:** Surface head-drift rejections on the PR (issue #336) — a failed `workflow_dispatch` analyze run uploads a failure-context artifact that `surface-analyze-failure` resolves, so the instructive "comment the review command again" message reaches the PR instead of staying in the Actions log.
+- **security:** Restrict archive upload destinations to the operator-controlled `--trajectory-hub-repo` / `DAYDREAM_TRAJECTORY_HUB_REPO` sources; a `trajectory_hub_repo` key in the target checkout's file config is now ignored.
+- **rl:** Verify untracked-oracle caveat for protected test-oracle paths (issue #571) — confirmed the fail-closed docstring and README manifest caveat are present and accurate at HEAD (b824946), landed by commit df1fd3f (#558); no code or behavior change.
 
 ## [0.26.0] - 2026-08-12
 

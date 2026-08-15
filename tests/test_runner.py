@@ -258,6 +258,68 @@ async def test_run_allows_matching_approved_head(
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_head_mismatch_on_real_worktree(
+    monkeypatch, silence_runner_ui, deep_target, make_config,
+):
+    """Head drift on a real checkout: run() returns 1 and no flow is dispatched.
+
+    Unlike the stub-based gate tests above (``patch_workspace`` yields a
+    synthetic ``WorkContext`` with a hardcoded fake ``head_sha``), this drives
+    ``open_workspace`` -> ``git_ops.head_sha`` for real, so a regression in
+    the workspace plumbing surfaces as a failing gate instead of a silent
+    no-op on real checkouts.
+    """
+    called: list[str] = []
+
+    def _record(name: str):
+        async def stub(work, config):
+            called.append(name)
+            return 0
+
+        return stub
+
+    for name in _DISPATCH_TARGETS:
+        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+
+    config = make_config(deep_target, approved_head_sha="DEADBEEF")
+    exit_code = await runner.run(config)
+    assert exit_code == 1
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_run_allows_matching_approved_head_on_real_worktree(
+    monkeypatch, silence_runner_ui, deep_target, make_config,
+):
+    """Matching approved head on a real checkout: run() proceeds to the flow.
+
+    The dispatch stub records the ``WorkContext`` the real ``open_workspace``
+    built, proving ``work.head_sha`` came from ``git rev-parse HEAD`` on the
+    actual repo and not from a synthetic context.
+    """
+    called: list[str] = []
+    head_shas: list[str] = []
+
+    def _record(name: str):
+        async def stub(work, config):
+            called.append(name)
+            head_shas.append(work.head_sha)
+            return 0
+
+        return stub
+
+    for name in _DISPATCH_TARGETS:
+        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+
+    real_head = _git(deep_target, "rev-parse", "HEAD").strip()
+    config = make_config(deep_target, approved_head_sha=real_head)
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called == ["_run_loop_deep"]
+    assert head_shas == [real_head]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
 async def test_deep_run_mints_app_identity_before_posting_path(
     flow_name: str | None,

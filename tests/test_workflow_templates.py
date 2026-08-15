@@ -171,6 +171,50 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
 
 @pytest.mark.parametrize(
     "wf_path",
+    [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
+    ids=["template", "live"],
+)
+def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: Path) -> None:
+    """The 👀 acknowledgement must come after the dispatch step and stay gated
+    on its success. A failed dispatch (unresolvable head SHA or a `gh workflow
+    run` error) creates no Daydream Review run, so surface-analyze-failure
+    never fires and nothing surfaces on the PR — a reaction posted before or
+    regardless of the dispatch outcome would mis-signal success. The step
+    ordering IS the mechanism, so a reordering that moves the ack above the
+    dispatch (or drops its success gate) must fail here.
+    """
+    wf = load_workflow(wf_path)
+    steps = job_steps(wf, "dispatch")
+    dispatch = next(
+        step
+        for step in steps
+        if "gh workflow run daydream-review.yml" in step.get("run", "")
+    )
+    ack = next(step for step in steps if step.get("name") == "Acknowledge with eyes reaction")
+
+    # The ack must follow the dispatch in step order.
+    assert steps.index(dispatch) < steps.index(ack), (
+        f"{wf_path.name}: the 👀 acknowledgement must come after the dispatch step "
+        "so a dispatch failure never mis-signals success"
+    )
+
+    # The ack's if: must keep GitHub's implicit success() gate — no status
+    # function (always()/failure()/cancelled()) may let it run after a failed
+    # dispatch, and the dispatch step may not continue-on-error (which would
+    # keep the job alive past its failure and still post the reaction).
+    ack_if = ack.get("if", "")
+    assert not any(fn in ack_if for fn in ("always()", "failure()", "cancelled()")), (
+        f"{wf_path.name}: the acknowledgement must stay gated on dispatch success "
+        "(its if: must keep GitHub's implicit success())"
+    )
+    assert "continue-on-error" not in dispatch, (
+        f"{wf_path.name}: the dispatch step must not continue-on-error, or a failed "
+        "dispatch would still post the 👀 reaction"
+    )
+
+
+@pytest.mark.parametrize(
+    "wf_path",
     [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
     ids=["template", "live"],
 )
@@ -193,7 +237,14 @@ def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    assert "head.repo.pushed_at" in verify["run"]
+    # The drift gate anchors on the approved commit's push time scoped to the
+    # PR's head ref (the head repository's activity feed), not the repo-wide
+    # head.repo.pushed_at, and rejects a push at-or-after the comment: the
+    # second-granularity timestamps cannot distinguish a same-second push, so
+    # equality must fail closed (\< strict-before guard) rather than pass.
+    assert ".head.ref" in verify["run"]
+    assert "activity" in verify["run"]
+    assert r'\< "$APPROVED_AT"' in verify["run"]
     assert "APPROVED_AT" in verify["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
@@ -236,12 +287,14 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     wf = load_workflow(wf_path)
     steps = job_steps(wf, "analyze")
 
-    # The drift gate records the failure context (pr_number + the instructive
-    # message) before exiting in EVERY rejection branch — head changed,
-    # unresolvable commit date, commit newer than the approving comment — so
-    # surface-analyze-failure comments the instructive message on the PR
-    # (issue #336). A rejection that exits without the write would degrade the
-    # comment to the generic fallback body.
+    # The drift gate funnels every rejection through one helper that records
+    # the failure context (pr_number + the instructive message) before exiting
+    # — head changed, unresolvable push time, push at-or-after the approving
+    # comment — so surface-analyze-failure comments the instructive message on
+    # the PR (issue #336). A rejection that exits without the write would
+    # degrade the comment to the generic fallback body. The single write/exit
+    # point lives in the helper, so a new rejection branch only has to call it
+    # (rather than re-triplicating the mkdir/printf/exit skeleton).
     verify = next(
         step
         for step in steps
@@ -250,20 +303,21 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     lines = verify["run"].splitlines()
     write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
     exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
-    assert len(exit_idx) >= 3, (
-        f"{wf_path.name}: drift gate must reject head changes, unresolvable "
-        "commit dates, and commits newer than the approving comment"
+    reject_calls = [i for i, ln in enumerate(lines) if re.match(r"reject \"", ln.strip())]
+    assert len(write_idx) == 1 and len(exit_idx) == 1, (
+        f"{wf_path.name}: every drift rejection must funnel through the single "
+        "failure-context helper (one write, one exit) (issue #336)"
     )
-    assert len(write_idx) == len(exit_idx), (
-        f"{wf_path.name}: every drift-rejection branch must record the failure "
-        "context before exiting (issue #336)"
+    assert write_idx[0] < exit_idx[0], (
+        f"{wf_path.name}: the helper must record the failure context before exiting"
     )
-    assert all('"message"' in lines[i] for i in write_idx), (
-        f"{wf_path.name}: each recorded failure context must carry the "
+    assert '"message"' in lines[write_idx[0]], (
+        f"{wf_path.name}: the recorded failure context must carry the "
         "instructive message (issue #336)"
     )
-    assert all(wi < ei for wi, ei in zip(write_idx, exit_idx)), (
-        f"{wf_path.name}: the failure context must be recorded before the branch exits"
+    assert len(reject_calls) >= 3, (
+        f"{wf_path.name}: the drift gate must reject head changes, unresolvable "
+        "push times, and pushes at/after the approving comment"
     )
 
     # Any other failure still records the PR number via the job-level handler.
@@ -330,14 +384,43 @@ def test_single_workflow_head_bound_gate() -> None:
     assert "approved_head_sha" in decide.get("outputs", {}) or "head.sha" in decide.get("run", "")
     assert "approved_at" in decide.get("outputs", {}) or "approved_at=" in decide.get("run", "")
 
+    # Acknowledge only AFTER head resolution succeeds (mirroring the split
+    # workflow's ack-after-dispatch ordering): a fallible gh api exit in the
+    # decide step must abort the job before the ack, so a transient
+    # head-resolution failure surfaces as a failed run rather than a 👀 with no
+    # review or comment (issue #336).
+    ack = next(step for step in gate["steps"] if step.get("name") == "Acknowledge with eyes reaction")
+    assert gate["steps"].index(ack) > gate["steps"].index(decide)
+
     steps = wf["jobs"]["analyze"]["steps"]
     verify = next(
         step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    assert "head.repo.pushed_at" in verify["run"]
+    assert ".head.ref" in verify["run"]
+    assert "activity" in verify["run"]
+    assert r'\< "$APPROVED_AT"' in verify["run"]
     assert "APPROVED_AT" in wf["jobs"]["analyze"]["env"]
+
+    # The drift gate funnels every rejection through one helper that records
+    # the failure context (pr_number + the instructive message) before exiting
+    # — head changed, unresolvable push time, push at-or-after the approving
+    # comment — so surface-failure comments the instructive message instead of
+    # the generic fallback body (issue #336). The single write/exit point lives
+    # in the helper, so a new rejection branch only has to call it.
+    lines = verify["run"].splitlines()
+    write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
+    exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
+    reject_calls = [i for i, ln in enumerate(lines) if re.match(r"reject \"", ln.strip())]
+    assert len(write_idx) == 1 and len(exit_idx) == 1, (
+        "single/daydream.yml: every drift rejection must funnel through the "
+        "single failure-context helper (one write, one exit) (issue #336)"
+    )
+    assert write_idx[0] < exit_idx[0]
+    assert '"message"' in lines[write_idx[0]]
+    assert len(reject_calls) >= 3
+
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
     review = next(

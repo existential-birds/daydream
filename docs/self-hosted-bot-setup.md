@@ -192,7 +192,9 @@ again to approve and review the new head.
 
 If you have a terminal available, run the `--verify` command shown at the top of
 this guide to audit the install component-by-component, including that the
-installed workflows exactly match the packaged approval-gated versions.
+installed workflows still satisfy the approval-gate contract of the packaged
+versions (contract-intact customizations, such as a different model backend,
+pass with a warning; only drift that breaks the gate is a hard failure).
 
 ---
 

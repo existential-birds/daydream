@@ -74,17 +74,10 @@ jobs:
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
           permission-pull-requests: write
 
-      # Acknowledge BEFORE resolving the head: a fallible `gh api` exit below
-      # would otherwise abort the job and silently skip the ack with no PR-side
-      # feedback, so the 👀 reaction is gated only on the command match.
-      - name: Acknowledge with eyes reaction
-        if: steps.match.outputs.matched == 'true'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
-
+      # Resolve the trusted target head before acknowledging: the `gh api` below
+      # is fallible, and a transient error must not leave the maintainer with a
+      # 👀 reaction and no review, comment, or explanation — the failed run
+      # surfaces on the PR instead of the reaction mis-signalling success.
       - name: Decide and resolve PR
         id: decide
         env:
@@ -108,6 +101,19 @@ jobs:
           echo "approved_head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
           echo "approved_at=${APPROVED_AT}" >> "$GITHUB_OUTPUT"
 
+      # Acknowledge only after head resolution succeeds: a fallible `gh api`
+      # exit in the decide step aborts the job here, so the ack never fires and
+      # the failed run surfaces on the PR — mirroring the split workflow's
+      # ack-after-dispatch ordering instead of mis-signalling success with a 👀
+      # reaction and no review (issue #336).
+      - name: Acknowledge with eyes reaction
+        if: steps.match.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
+
   # Runs the reviewer over the checked-out PR head. Touches untrusted PR code, so
   # it holds NO App credentials — ANTHROPIC_API_KEY is its only secret and the
   # GITHUB_TOKEN is read-only.
@@ -129,29 +135,52 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          LIVE_HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
-          if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
-            echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
-            # Record the failure context before exiting so surface-failure can
-            # comment on the PR with the instructive message (issue #336).
+          # Every drift rejection funnels through this helper: it records the
+          # failure context (pr_number + the instructive message) before exiting
+          # so surface-failure can comment on the PR with the instructive
+          # message instead of the generic fallback body (issue #336). The
+          # console message carries the details for the log; the record message
+          # is the shorter text posted on the PR.
+          reject() {
+            local console_message="$1"
+            local record_message="$2"
+            echo "$console_message" >&2
             mkdir -p findings
-            printf '{"pr_number": "%s", "message": "The PR head changed after approval. Comment the review command again to approve the new head"}' "$PR_NUMBER" > findings/failure.json
+            printf '{"pr_number": "%s", "message": "%s"}' "$PR_NUMBER" "$record_message" > findings/failure.json
             exit 1
+          }
+          HEAD_INFO="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '{sha: .head.sha, ref: .head.ref, repo: (.head.repo.full_name? // "")}')"
+          LIVE_HEAD_SHA="$(printf '%s' "$HEAD_INFO" | jq -r .sha)"
+          HEAD_REF="$(printf '%s' "$HEAD_INFO" | jq -r .ref)"
+          HEAD_REPO="$(printf '%s' "$HEAD_INFO" | jq -r .repo)"
+          if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
+            reject "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." \
+              "The PR head changed after approval. Comment the review command again to approve the new head"
           fi
           # The gate resolves the head at run time; the approving comment's
-          # creation time is the comment-time anchor. The head repository's
-          # pushed_at is server-set by GitHub when a push is received, so it
-          # cannot be backdated like commit.committer.date; a head pushed after
-          # the comment has pushed_at newer than it and is not reviewable
-          # without a fresh command.
-          HEAD_PUSHED_AT="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.repo.pushed_at)"
-          if [ -z "$HEAD_PUSHED_AT" ]; then
-            echo "Could not resolve the head repository push time for approved head $APPROVED_HEAD_SHA" >&2
-            exit 1
-          fi
-          if [ "$HEAD_PUSHED_AT" \> "$APPROVED_AT" ]; then
-            echo "PR #$PR_NUMBER head repository was pushed ($HEAD_PUSHED_AT) after the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
-            exit 1
+          # creation time is the comment-time anchor. The approved commit's push
+          # time is the head repository's activity scoped to the PR's head ref —
+          # server-set by GitHub when a push is received, so it cannot be
+          # backdated like commit.committer.date, and scoped to this PR rather
+          # than the repo-wide pushed_at that every push to the repo bumps. The
+          # timestamps are second-granularity, so a push in the same wall-clock
+          # second as the comment is indistinguishable from one that landed
+          # before it: reject when the push is NOT strictly before the comment
+          # (equality fails closed), not only when it is strictly after. A
+          # deleted head repository cannot receive pushes — the approved head is
+          # frozen and the bound SHA cannot change — so there is no window to
+          # close and no push time to resolve.
+          if [ -n "$HEAD_REPO" ]; then
+            HEAD_PUSHED_AT="$(gh api "repos/$HEAD_REPO/activity?ref=refs/heads/$HEAD_REF&per_page=100" \
+              --jq '[.[] | select(.activity_type == "push" or .activity_type == "branch_creation" or .activity_type == "force_push") | .timestamp][0] // empty')"
+            if [ -z "$HEAD_PUSHED_AT" ]; then
+              reject "Could not resolve the push time for approved head $APPROVED_HEAD_SHA" \
+                "Could not verify the approved head push time. Comment the review command again to approve the new head"
+            fi
+            if ! [ "$HEAD_PUSHED_AT" \< "$APPROVED_AT" ]; then
+              reject "PR #$PR_NUMBER head was pushed ($HEAD_PUSHED_AT) at or after the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." \
+                "The approved head was pushed after the approving comment. Comment the review command again to approve the new head"
+            fi
           fi
           BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq .baseRefName)"
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"

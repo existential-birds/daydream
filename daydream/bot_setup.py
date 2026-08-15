@@ -25,9 +25,8 @@ import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
-
-import yaml
 
 from daydream import config, git_ops
 from daydream.agent import console
@@ -621,6 +620,10 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
     rather than silently judged by a guess.
     """
     try:
+        import yaml  # lazy: pyyaml is a dev-only dependency (see pyproject.toml)
+    except ImportError:
+        return False
+    try:
         wf = yaml.safe_load(content)
     except yaml.YAMLError:
         return False
@@ -628,9 +631,9 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
         return False
     # PyYAML parses the bare ``on:`` key as boolean ``True``; normalize the
     # trigger map the same way the test harness's ``_wf_triggers`` does.
-    on = wf.get("on")
+    on: Any = wf.get("on")
     if on is None:
-        on = wf.get(True)
+        on = cast(dict[Any, Any], wf).get(True)
     triggers = on if isinstance(on, dict) else {}
 
     if name == "daydream-review.yml":
@@ -640,9 +643,12 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
         inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
         return isinstance(inputs, dict) and "approved_head_sha" in inputs
     if name == "daydream-command.yml":
-        # The single approval point: every review dispatch must bind the
-        # approved head (the test harness asserts the same on the dispatch
-        # step's run).
+        # The single approval point: every review dispatch must bind the live
+        # PR head to the approved_head_sha input. Require the binding itself —
+        # the input set to the gh-api-resolved $HEAD_SHA variable (the test
+        # harness asserts the same) — so a drift that keeps the literal token
+        # in a hardcoded value, echo, or comment fails instead of passing as
+        # gate-intact.
         dispatch_steps = [
             step
             for job in wf.get("jobs", {}).values()
@@ -652,7 +658,10 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
             and "gh workflow run daydream-review.yml" in step.get("run", "")
         ]
         return bool(dispatch_steps) and all(
-            "approved_head_sha" in step.get("run", "") for step in dispatch_steps
+            '-f approved_head_sha="$HEAD_SHA"' in step.get("run", "")
+            and "gh api" in step.get("run", "")
+            and ".head.sha" in step.get("run", "")
+            for step in dispatch_steps
         )
     if name == "daydream-post.yml":
         return "workflow_run" in triggers

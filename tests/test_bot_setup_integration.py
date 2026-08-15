@@ -223,7 +223,11 @@ def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin
     workflows_check = next(check for check in result.checks if check.name == "workflows")
     assert result.ok is False
     assert workflows_check.passed is False
-    assert "daydream-review.yml" in workflows_check.detail
+    # Pin the *outdated* failure mode: the file is present but stale, so the
+    # detail must name it under "Out of date" — not under "Missing" (which
+    # would also contain the filename and pass these assertions otherwise).
+    assert "Out of date workflow file(s): .github/workflows/daydream-review.yml" in workflows_check.detail
+    assert "Missing workflow file(s)" not in workflows_check.detail
 
 
 def test_verify_accepts_customized_workflow_with_intact_gate(
