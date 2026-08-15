@@ -203,7 +203,7 @@ svg{display:block;width:100%;height:auto;overflow:visible;}
 
   <section class="section" id="sec-judge" data-nav="Judge sensitivity">
     <div class="h2"><span class="glyph">◇</span>JUDGE SENSITIVITY<span class="n">daydream across judges</span></div>
-    <p class="subhead">The judge model is not fixed. Where daydream has been scored by more than one judge its P/R/F1 appears side-by-side; judges that have not yet scored daydream render an honest placeholder the same generator fills in once it is re-judged.</p>
+    <p class="subhead">The judge model is not fixed. Where daydream has been scored by more than one judge its P/R/F1 appears side-by-side; judges with a 0-of-N scored count render an honest placeholder the same generator fills in once it is re-judged.</p>
     <div id="judge-sens"></div>
   </section>
 
@@ -279,7 +279,7 @@ function renderJudgeBtns(){
   DATA.judges.forEach(j=>{
     const b=document.createElement("button");
     b.className="judgebtn"+(j.id===STATE.judge?" on":"");
-    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${j.has_daydream?"daydream scored":"not yet scored"} · ${j.field.length} field</span>`;
+    b.innerHTML=`<span class="jname">${esc(j.display)}</span><span class="jmeta">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored · ${j.field.length} field</span>`;
     b.onclick=()=>{STATE.judge=j.id;renderJudgeBtns();renderJudgeDependent();};
     host.appendChild(b);
   });
@@ -305,7 +305,7 @@ function renderJudgeNote(){
   const j=curJudge();
   const base=j.has_daydream
     ? `Selected judge ${esc(j.display)} scored daydream on ${j.daydream_pr_count} PRs; the compared field runs on the ${j.subset_pr_count}-PR complete cohort where every ranked tool has a present leaf.`
-    : `Selected judge ${esc(j.display)} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
+    : `Selected judge ${esc(j.display)} has ${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs scored — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
   const excl=(j.excluded_tools||[]).map(ex=>`${esc(ex.display)} (${ex.scored_pr_count} of ${j.required_pr_count} PRs)`).join(", ");
   $("#judgenote").innerHTML=excl?`${base} Excluded from the ranked field (no present leaf on the anchor): ${excl}.`:`${base}`;
 }
@@ -315,7 +315,7 @@ function renderKPIs(){
   const j=curJudge();$("#kpi-judgetag").textContent="· "+j.display;
   const host=$("#kpis");host.innerHTML="";
   if(!j.has_daydream||!j.daydream){
-    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">daydream not yet scored under ${esc(j.display)}</div>
+    host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored under ${esc(j.display)}</div>
       The ${j.field.length}-tool SaaS field below is computed on its complete ${j.subset_pr_count}-PR cohort within the daydream anchor set. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
     return;
   }
@@ -419,7 +419,7 @@ function renderLeaderboards(){
 function renderFP(){
   const j=curJudge();
   if(!j.has_daydream||!j.daydream){
-    $("#fp-sub").textContent="daydream not yet scored under this judge — the over-flagging view fills in once it is re-judged.";
+    $("#fp-sub").textContent=`${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs scored under this judge — the over-flagging view fills in once it is re-judged.`;
     $("#fp-stack").innerHTML='<div class="placeholder">no daydream FP/TP under '+esc(j.display)+'</div>';
     $("#fp-ratio").innerHTML="";return;
   }
@@ -473,8 +473,8 @@ function renderJudgeSens(){
         <div style="margin-top:12px;font-size:11px;color:var(--dim)">tp ${d.tp} · fp ${d.fp} · fn ${d.fn} · ${d.n_prs} PRs</div>`;
     } else {
       card.innerHTML=`<div class="ct"><span class="dot" style="background:var(--amber);box-shadow:0 0 9px var(--amber)"></span>${esc(j.display)}</div>
-        <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">not yet scored</div>
-        <div style="font-size:11px">daydream has no leaf under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
+        <div class="placeholder" style="padding:20px 14px"><div class="big" style="font-size:12px">${j.daydream_pr_count} of ${j.required_pr_count} PRs scored</div>
+        <div style="font-size:11px">daydream has scored ${j.daydream_pr_count} of ${j.required_pr_count} anchor PRs under this judge. The ${j.field.length}-tool field is ready; re-run the judge on daydream to populate.</div></div>`;
     }
     grid.appendChild(card);
   });

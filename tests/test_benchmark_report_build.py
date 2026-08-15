@@ -257,6 +257,25 @@ def test_template_renders_excluded_tools_and_per_row_scored_counts() -> None:
     assert "PRs" in lb
 
 
+def test_template_uses_numeric_daydream_coverage() -> None:
+    """The binary 'daydream scored' / 'not yet scored' labels and the misleading
+    'daydream has no leaf under this judge' copy are gone; coverage renders as a
+    numeric scored-of-required count against the judge's anchor-subset size."""
+    template = TEMPLATE_HTML.read_text()
+
+    for literal in (
+        "daydream scored",           # judge-button ternary (:282)
+        "not yet scored",            # judge button, KPI placeholder, judge-sens
+        "has NOT yet scored daydream",  # renderJudgeNote (:308)
+        "daydream not yet scored",   # renderKPIs / renderFP placeholders
+        "daydream has no leaf under this judge",  # renderJudgeSens (:474)
+    ):
+        assert literal not in template
+
+    assert "j.daydream_pr_count" in template
+    assert "j.required_pr_count" in template
+
+
 def test_price_card_comes_from_shared_pricing_table(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
