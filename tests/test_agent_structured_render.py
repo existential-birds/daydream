@@ -13,6 +13,8 @@ tests.test_agent_recorder_integration (the single canonical definition).
 
 from __future__ import annotations
 
+import copy
+import json
 from io import StringIO
 
 from rich.console import Console
@@ -27,6 +29,33 @@ from tests.test_agent_recorder_integration import MockBackend
 
 RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}'
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
+
+
+def test_redact_log_value_recurses_without_mutating() -> None:
+    """_redact_log_value redacts string keys AND values recursively, in fresh
+    containers, and never mutates its argument."""
+    from daydream.agent import _redact_log_value
+
+    sentinel = "ghp_" + "x" * 16
+    payload = {
+        "token": sentinel,
+        sentinel: "key-that-is-a-secret",
+        "nested": {"path": f"/Users/{sentinel}"},
+        "items": [sentinel, 42, None],
+        "flag": True,
+        1: "non-string-key",
+    }
+    original = copy.deepcopy(payload)
+    out = _redact_log_value(payload)
+
+    assert payload == original                    # argument never mutated
+    assert out is not payload                     # fresh top-level container
+    assert out["nested"] is not payload["nested"]  # fresh nested container
+    assert sentinel not in json.dumps(out)        # redacted in values AND keys
+    assert "[REDACTED" in json.dumps(out)         # a marker replaced it
+    assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
+    assert out["flag"] is True
+    assert out[1] == "non-string-key"             # non-string keys untouched
 
 
 async def test_structured_output_text_is_not_rendered(monkeypatch, tmp_path):

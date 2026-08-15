@@ -369,6 +369,32 @@ def _summarize_output(output: str) -> str:
     return first_line[:200]
 
 
+def _redact_log_value(value: Any) -> Any:
+    """Recursively redact a log-mode value without mutating its argument.
+
+    ``str`` leaves and string dict keys are run through the fail-closed log
+    boundary; containers are rebuilt fresh so the caller's object is never
+    touched. The redactor never raises, so no error propagation is needed.
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {
+            (redact_text(k) if isinstance(k, str) else k): _redact_log_value(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_log_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_log_value(item) for item in value)
+    return value
+
+
+def _print_log(value: str) -> None:
+    """The single safe ``--log`` emitter: redact, then print."""
+    print(redact_text(value), flush=True)
+
+
 async def run_agent(
     backend: Backend,
     cwd: Path,
