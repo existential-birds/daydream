@@ -385,6 +385,45 @@ def test_build_collapses_field_to_complete_cohort_when_tool_incomplete(
     assert set(report["per_pr_scores"][judge["id"]]) == {PR_URL}
 
 
+def test_judge_discloses_excluded_saas_tools(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retained judge lists the SaaS tools considered but excluded from its ranked
+    field (no present leaf on any daydream-anchor PR), each with a 0 scored count,
+    plus the anchor-subset denominator the counts are measured against."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path, pr_trajectories={
+        PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+        SECOND_PR_URL: ("cal.com-10601.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+        THIRD_PR_URL: ("cal.com-10602.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+    })
+    dd = {"tp": 1, "fp": 0, "fn": 0, "total_candidates": 1, "total_golden": 1}
+    complete = {"tp": 1, "fp": 1, "fn": 1, "total_candidates": 1, "total_golden": 1}
+    pr1, pr2 = {"daydream-owl-alpha": dd}, {"daydream-owl-alpha": dd}
+    for t in _COMPLETE_SAAS_TOOLS:
+        pr1[t] = complete
+        pr2[t] = complete
+    # No present leaf on any anchor PR: saas-orphan only on a non-daydream PR;
+    # saas-skipped only skipped leaves on the anchor PRs.
+    pr3 = {"saas-orphan": complete}
+    pr1["saas-skipped"] = {"skipped": True}
+    pr2["saas-skipped"] = {"skipped": True}
+    jdir = tmp_path / "results" / _JUDGE_DIRNAME
+    (jdir / "evaluations.json").write_text(
+        json.dumps({PR_URL: pr1, SECOND_PR_URL: pr2, THIRD_PR_URL: pr3})
+    )
+    report = build_mod.build(args)
+    judge = next(j for j in report["judges"] if j["id"] == "claude-opus-4-5-20251101")
+    assert judge["required_pr_count"] == 2
+    assert judge["excluded_tools"] == [
+        {"tool": "saas-orphan", "display": "saas-orphan", "scored_pr_count": 0},
+        {"tool": "saas-skipped", "display": "saas-skipped", "scored_pr_count": 0},
+    ]
+    assert {r["tool"] for r in judge["field"]} == set(_COMPLETE_SAAS_TOOLS)
+    # The anchor PR count is unchanged by the disclosure fields.
+    assert judge["daydream_pr_count"] == 2
+
+
 def test_build_skips_judge_with_no_complete_common_cohort(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

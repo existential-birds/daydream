@@ -401,6 +401,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         has_dd = bool(daydream_prs)
         raw_saas_tools = sorted(t for t in all_tools if t != dd_tool)
         saas_tools = [t for t in raw_saas_tools if bool(_complete_cohort(evals, [t], dd_subset))]
+        # SaaS tools considered for the panel but excluded from the ranked field: no
+        # present leaf on any daydream-anchor PR. Preserve raw_saas_tools' sorted order.
+        excluded_tools = [
+            {"tool": t, "display": display_names.get(t, t), "scored_pr_count": 0}
+            for t in raw_saas_tools
+            if t not in set(saas_tools)
+        ]
         if len(raw_saas_tools) < _MIN_SAAS_TOOLS_FOR_PANEL:
             # Verify daydream-subset overlap so future re-judges still anchor cleanly.
             skipped_judges.append(_skip(canon, b, raw_saas_tools,
@@ -446,6 +453,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             # daydream's own scored PR count (present leaves), independent of the
             # competitor-collapsed comparison cohort (subset_pr_count <= this).
             "daydream_pr_count": len(daydream_prs),
+            # The anchor-subset size the disclosure counts are measured against,
+            # captured at judge-loop time (the report-wide anchor may be re-pointed
+            # afterwards on the strict-subset fallback path).
+            "required_pr_count": len(dd_subset),
+            # SaaS tools excluded from the ranked field (no present leaf on any
+            # daydream-anchor PR), each with its 0 scored-PR count.
+            "excluded_tools": excluded_tools,
             # The judge's complete cohort: every PR in it has a present leaf for
             # every comparison tool. Per-PR scores and label slices must trace to
             # this same set so no panel contradicts the standing aggregate.
