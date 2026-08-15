@@ -1,13 +1,17 @@
 """Container image contracts: immutable base inputs and the green-baseline gate.
 
-Two kinds of contract live here. The static ``base.Dockerfile`` and ``repo.Dockerfile`` checks run
-with no Docker at all — they assert the build pins every remote input to an immutable
-version and verifies it for integrity before use. A **fast** tier — no Docker
-required — rejects ``--red`` invocations that cannot select the fixture repo,
-ensuring the guard fires before any build side-effect. The two ``slow`` tests
-execute real Docker builds for the red and green baseline paths: the red path
-plants a failing assertion and the build must die (enforcement IS the build
-failing), while a green one builds and bakes the checkout.
+Four kinds of contract live here. The static ``base.Dockerfile`` and
+``repo.Dockerfile`` checks run with no Docker at all — they assert the build pins
+every remote input to an immutable version and verifies it for integrity before
+use. A **fast** tier — no Docker required — rejects ``--red`` invocations that
+cannot select the fixture repo, ensuring the guard fires before any build
+side-effect. A manifest/README tier asserts the locked-dependency policy: the
+itsdangerous manifest entry installs strictly from its committed uv.lock and the
+README documents the four mandatory setup rules. The three ``slow`` tests execute
+real Docker builds: the red baseline path plants a failing assertion and the
+build must die (enforcement IS the build failing), the green baseline path builds
+and bakes the checkout, and the reference-image build proves the itsdangerous
+image builds only when the locked setup plus the green baseline succeed.
 """
 
 from __future__ import annotations
@@ -553,3 +557,12 @@ def test_corpus_and_slug_literals_single_source() -> None:
     assert src.count(corpus) == 1, "corpus path must appear only in REFERENCE_CORPUS"
     assert src.count(slug) == 3, "slug literal must be REFERENCE_SLUG + the 2 manifest markers"
     assert "REFERENCE_CORPUS" in src and "REFERENCE_SLUG" in src
+
+
+def test_module_docstring_describes_actual_contracts() -> None:
+    """F4: the docstring names the four contract kinds and three slow tests."""
+    doc = sys.modules[__name__].__doc__ or ""
+    for kind in ("Dockerfile", "--red", "manifest", "slow", "reference"):
+        assert kind in doc, f"docstring must name contract kind/area {kind!r}"
+    assert "three" in doc.lower(), "docstring must count the three slow tests"
+    assert "two" not in doc.lower(), "stale 'two slow tests' count must be gone"
