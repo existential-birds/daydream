@@ -21,6 +21,7 @@ from daydream import git_ops, runner
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
+from daydream.trajectory import DaydreamRunFlow
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.git_helpers import commit as _commit
@@ -1236,3 +1237,31 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
     assert test_backend.read_only_calls == [False, False, False, True], (
         test_backend.read_only_calls
     )
+
+
+def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
+    from daydream.runner import RunConfig, _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == "pi"
+    assert recorder.test_backend_name == "codex"
+
+
+def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
+    from daydream.runner import RunConfig, _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+    )
+    assert recorder.backend_name == "claude"
+    assert recorder.review_backend_name == "claude"
+    assert recorder.fix_backend_name == "claude"
+    assert recorder.test_backend_name == "claude"

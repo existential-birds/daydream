@@ -361,6 +361,10 @@ def _open_recorder(
     """
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
+    # Backend identity mirrors archive/manifest.py: the representative backend is
+    # resolved via the review phase, plus per-phase fix/test resolutions, all
+    # resolved here in the single construction site.
+    backend_name = _resolved_backend_name(config, "review")
     return TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
@@ -370,6 +374,10 @@ def _open_recorder(
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
+        backend_name=backend_name,
+        review_backend_name=backend_name,
+        fix_backend_name=_resolved_backend_name(config, "fix"),
+        test_backend_name=_resolved_backend_name(config, "test"),
         on_write=_make_archive_callback(config, target_dir, work),
     )
 
