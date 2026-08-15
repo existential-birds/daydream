@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 import verifiers.v1 as vf
+from daydream.atif import validate
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
-from daydream.atif import validate
 
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
@@ -128,10 +128,17 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
 # a ``/`` after a string boundary, followed by a letter. The original capture
 # host's ``/private/tmp/`` prefix was one instance of this shape; the guard
 # rejects any match in either fixture blob, not just that one prefix.
+#
+# NOTE: this runs over ``json.dumps(blob)``, where embedded newlines are escaped
+# to ``\n``, so a path whose leading ``/`` sits at the start of a line *inside* a
+# content string (rather than at a JSON value boundary) is invisible to it. That
+# shape is not present in today's fixtures -- every real machine path sat at a
+# JSON value boundary -- so the guard is a first-line check, not a proof that no
+# absolute-path shape exists anywhere.
 _ABS_PATH_RE = re.compile(r'(?:^|[\s"\'])/[A-Za-z]')
 
 
-def _walk_json_keys(node: object, targets: frozenset[str], prefix: str = "") -> list[str]:
+def _walk_json_keys(node: object, targets: set[str], prefix: str = "") -> list[str]:
     """Collect every JSON key path whose key is in *targets* (recursive).
 
     Each entry is a dot-joined path from the JSON root (e.g.

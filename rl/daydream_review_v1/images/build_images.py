@@ -171,7 +171,7 @@ def _immutable_base_image(value: str) -> str | None:
     return None
 
 
-def _base_build_cmd(wheel: Path, tags: list[str], *, no_cache: bool = False) -> list[str]:
+def _base_build_cmd(wheel: Path | str, tags: list[str], *, no_cache: bool = False) -> list[str]:
     """Assemble the ``docker build`` argv for the base image.
 
     Centralising the argv (rather than inlining it per call site) keeps the

@@ -349,20 +349,20 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_base_layer_hardening_executes_on_warm_host() -> None:
-    """Warm-host live coverage: a real --no-cache base build re-executes the gpg
-    verify chain and the three checksummed download sequences instead of serving
-    the already-present base's cached layers.
+    """Warm-host live coverage of the base-image hardening.
 
-    The session ``base_image`` fixture short-circuits when the image exists
-    (conftest.py:40-55) and every repo build passes ``--no-base``, so on a warm
-    host the hardening is otherwise never re-run. ``--no-cache`` defeats the
-    layer cache regardless of the wheel being deterministic; build success is
-    the observable signal because a failed gpg verify or checksum mismatch fails
-    the build's ``RUN`` step. The built image is probed for its hardening RUN
-    markers rather than for the absence of ``CACHED`` in the build log: with
-    ``--no-cache`` BuildKit still logs ``CACHED`` for FROM steps whose base
-    images are already in the local store, so that log-text heuristic only holds
-    on a cold host.
+    Builds a fresh base image with ``--no-cache`` and verifies the resulting
+    image actually contains the hardening layers (gpg-verify and checksum
+    verification) via ``docker image history``. The session ``base_image``
+    fixture short-circuits when the image exists (conftest.py:40-55) and every
+    repo build passes ``--no-base``, so on a warm host the hardening is
+    otherwise never re-run; this test forces the build to run and then probes
+    the produced image. The asserted observables (image-history markers and a
+    clean build return code) confirm the hardening layers are present and the
+    build succeeded, but they do not by themselves prove the layers were
+    re-executed rather than served from cache -- a log-text ``CACHED`` heuristic
+    is deliberately avoided because BuildKit logs ``CACHED`` for FROM steps
+    whose base images are already in the local store.
     """
     wheel = build_images.build_wheel(build_images.DIST_DIR)
     tag = f"{build_images.BASE_REPOSITORY}:warmhost-{uuid.uuid4().hex[:8]}"
