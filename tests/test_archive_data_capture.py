@@ -174,6 +174,31 @@ async def test_default_deep_run_populates_eval_and_captures_recommended_patch(
     assert "# daydream recommended change" not in diff_text
 
 
+async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_files(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    """A pre-existing untracked file (present before the run) is absent from the
+    archived recommended.patch while a fix-created untracked file is present."""
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(
+        multi_stack_target, monkeypatch, real_internal_phases=True
+    )
+    stub.fix_edit_line = "# daydream recommended change\n"
+    stub.fix_new_generated = "migrations/0002_add_x.sql"  # fix-created, untracked
+    (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    recommended = (run_dir / "recommended.patch").read_text()
+    assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
+    assert "notes.txt" not in recommended              # pre-existing file excluded
+
+
 async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
 ) -> None:
