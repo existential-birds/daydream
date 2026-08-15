@@ -217,6 +217,43 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     assert "[REDACTED_API_KEY]" in str(e.value)
 
 
+def test_streamed_failure_redacts_pem_block_spanning_lines(tmp_path, monkeypatch):
+    """A PEM block split across streamed lines (BEGIN/body/END on separate
+    lines) must still be redacted whole before reaching on_line and the failure
+    tail — per-line redaction would never present BEGIN and END together, so
+    the base64 body would leak raw."""
+    lines: list[str] = []
+    body = "PRIVATEKEYMATERIAL" * 20
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([
+                "-----BEGIN RSA PRIVATE KEY-----\n",
+                body + "\n",
+                "-----END RSA PRIVATE KEY-----\n",
+            ])
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.Popen", lambda *a, **k: FakeProc())
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
+    assert body not in "".join(lines)   # live echo carries no raw PEM body
+    assert "[REDACTED_PEM_KEY]" in "".join(lines)
+    assert body not in str(e.value)     # retained tail carries no raw PEM body
+    assert "[REDACTED_PEM_KEY]" in str(e.value)
+
+
 def test_captured_failure_redacts_before_tail_truncation(tmp_path, monkeypatch):
     """A PEM block whose tail would be sliced off mid-block must still be fully
     redacted before the _STDERR_TAIL cut — redact-after-slice would leave the
@@ -238,7 +275,6 @@ def test_captured_failure_redacts_before_tail_truncation(tmp_path, monkeypatch):
         run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
     tail = str(e.value)
     assert "PRIVATEKEYMATERIAL" not in tail
-    assert "-----BEGIN RSA PRIVATE KEY-----" not in tail
     assert "-----END RSA PRIVATE KEY-----" not in tail
     assert "[REDACTED_PEM_KEY]" in tail
 

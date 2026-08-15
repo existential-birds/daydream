@@ -153,6 +153,13 @@ def _run_streamed(
     """
     tail: collections.deque[str] = collections.deque(maxlen=40)
     lines: queue.Queue[str | None] = queue.Queue()
+    # A PEM block spans multiple lines; redacting each line alone never presents
+    # the BEGIN/END anchors to _PEM_KEY_PATTERN (re.DOTALL) together, so the
+    # base64 body would leak to on_line and the failure tail. Hold lines from a
+    # BEGIN marker until its END marker, then redact the whole block at once —
+    # the streamed analogue of the captured path's redact-the-complete-string
+    # invariant.
+    pem_buffer: list[str] = []
     with subprocess.Popen(  # noqa: S603 - args are harness-controlled, not user input
         cmd,  # noqa: S607 - daydream is a trusted command
         stdout=subprocess.PIPE,
@@ -180,7 +187,21 @@ def _run_streamed(
                 ) from None
             if line is None:
                 break
-            redacted = redact_text(line)
+            if "-----BEGIN" in line and "PRIVATE KEY" in line and "-----END" not in line:
+                pem_buffer.append(line)
+            elif pem_buffer:
+                pem_buffer.append(line)
+                if "-----END" in line:
+                    redacted = redact_text("".join(pem_buffer))
+                    on_line(redacted)
+                    tail.append(redacted)
+                    pem_buffer.clear()
+            else:
+                redacted = redact_text(line)
+                on_line(redacted)
+                tail.append(redacted)
+        if pem_buffer:  # stream ended mid-block: redact the held lines as one
+            redacted = redact_text("".join(pem_buffer))
             on_line(redacted)
             tail.append(redacted)
         returncode = proc.wait()

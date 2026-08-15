@@ -75,6 +75,11 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
         # pipeline's out-of-scope phases.py prints legitimately carry raw content,
         # so ``forbidden`` stays empty here. Marker presence proves the agent's
         # `_print_log` redaction runs on the real path.
+        # Contract loss, stated explicitly: the pre-redaction version of this case
+        # asserted no Rich markup in log-mode output
+        # (``forbidden=("\x1b[", "[bold]", "[dim]")``); that assertion was dropped
+        # in the redaction rewrite and no remaining test asserts log-mode output
+        # is markup-free.
         pytest.param(
             [TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
@@ -87,7 +92,7 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
             {"log_mode": True, "quiet": True, "output_mode": "review"},
             ("[thinking]", "[REDACTED_API_KEY]"),
             (),
-            id="thinking",
+            id="thinking-sentinel",
         ),
         pytest.param(
             [
