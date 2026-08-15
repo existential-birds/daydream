@@ -140,7 +140,7 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
                 )
             ],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[result]", "[REDACTED_API_KEY]"),
+            ("[result]", "[REDACTED_CREDENTIAL]"),
             (),
             id="result-event",
         ),

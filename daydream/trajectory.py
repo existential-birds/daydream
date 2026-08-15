@@ -105,7 +105,7 @@ def _merge_metrics(existing: "Metrics", incoming: "Metrics") -> "Metrics":
     })
 
 # Redaction patterns (REDA-01..04). Redaction composes three stages in order:
-# (1) auth-header + auth-scheme rules (Redactor._redact_structured_text) so a
+# (1) auth-header + auth-scheme rules (redact_structured_text) so a
 # shaped value under a header (e.g. `Authorization: Bearer sk-1234`) is consumed
 # whole and never double-marked; (2) the flat rules below — URL-credential before
 # bare API-key (so the captured credential isn't re-matched), PEM before env-var
@@ -170,26 +170,33 @@ def redact_text(value: str) -> str:
     return value
 
 
-def redact_value(value: Any) -> Any:
+def redact_value(value: Any, sensitive: bool = False) -> Any:
     """Recursively redact a value without mutating its argument (never raises).
 
-    ``str`` leaves and string dict keys are run through :func:`redact_text`;
-    containers are rebuilt fresh so the caller's object is never touched.
-    Non-container, non-string leaves pass through unchanged. This is the
-    canonical structured redactor for log-mode event payloads; the recursion
-    lives here so every consumer shares the same fail-closed boundary.
+    Key-aware (issue #455): ``str`` leaves under a sensitive key — their own
+    key, or inherited from a sensitive ancestor container — are replaced with
+    ``_REDACTED_CREDENTIAL``; other string leaves run through
+    :func:`redact_structured_text`. String dict keys are run through
+    :func:`redact_text` so secret-shaped keys are scrubbed too; containers
+    are rebuilt fresh so the caller's object is never touched. Non-container,
+    non-string leaves pass through unchanged. This is the canonical
+    structured redactor for log-mode event payloads and the trajectory path
+    alike; the recursion lives here so every consumer shares the same
+    fail-closed boundary.
     """
     if isinstance(value, str):
-        return redact_text(value)
+        return _REDACTED_CREDENTIAL if sensitive else redact_structured_text(value)
     if isinstance(value, dict):
         return {
-            (redact_text(k) if isinstance(k, str) else k): redact_value(v)
+            (redact_text(k) if isinstance(k, str) else k): redact_value(
+                v, sensitive or (_is_sensitive_key(k) if isinstance(k, str) else False)
+            )
             for k, v in value.items()
         }
     if isinstance(value, list):
-        return [redact_value(item) for item in value]
+        return [redact_value(item, sensitive) for item in value]
     if isinstance(value, tuple):
-        return tuple(redact_value(item) for item in value)
+        return tuple(redact_value(item, sensitive) for item in value)
     return value
 
 
@@ -353,16 +360,39 @@ _AUTHORIZATION_HEADER_PATTERN = re.compile(
 _AUTH_SCHEME_PATTERN = re.compile(r"^(Basic|Bearer|Token)\s+(\S+)")
 # Structured key<: or =>value pairs in free text (JSON, Python-repr, YAML,
 # assignment). The key may be wrapped in single or double quotes; values are
-# single/double-quoted or a bare token. A value that starts with a structural
+# single/double-quoted or a bare token, with backslash-escaped quotes honored
+# inside quoted values. A value that starts with a structural
 # open-brace does not match (the pair is skipped so the scan continues to
 # inner keys). A negative lookahead prevents re-matching a value that is
 # immediately followed by a [REDACTED_*] marker (existing env-var/API-key/
 # header redactions must not be clobbered).
 _STRUCTURED_KEY_VALUE_PATTERN = re.compile(
     r"(['\"]?)([A-Za-z_][A-Za-z0-9_.\-]*)\1([^\S\n\r]*[:=][^\S\n\r]*)"
-    r"(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'\[\]{}()]++))"
+    r"(?:\"((?:\\.|[^\"\\])*)\"|'((?:\\.|[^'\\])*)'|([^\s\"'\[\]{}()]++))"
     r"(?![^\S\n\r]*\[REDACTED)",
 )
+
+
+def _redact_structured_key_value(match: re.Match[str]) -> str:
+    """Replace one sensitive ``key<: or =>value`` pair (match->str transform).
+
+    Re-emits the key's quote wrapper (group 1) and the value's surrounding
+    quotes so JSON/Python-repr text stays structurally valid: the value token
+    becomes ``_REDACTED_CREDENTIAL``, never dropped. Existing ``[REDACTED_*]``
+    markers and empty values are never re-matched.
+    """
+    key = match.group(2)
+    if not _is_sensitive_key(key):
+        return match.group(0)
+    value = match.group(4) or match.group(5) or match.group(6)
+    if value is None or value == "" or "[REDACTED" in value:
+        return match.group(0)
+    wrapped_key = f"{match.group(1)}{key}{match.group(1)}"
+    if match.group(4) is not None:
+        return f'{wrapped_key}{match.group(3)}"{_REDACTED_CREDENTIAL}"'
+    if match.group(5) is not None:
+        return f"{wrapped_key}{match.group(3)}'{_REDACTED_CREDENTIAL}'"
+    return f"{wrapped_key}{match.group(3)}{_REDACTED_CREDENTIAL}"
 
 
 def _redact_structured_key_values(text: str) -> str:
@@ -375,21 +405,41 @@ def _redact_structured_key_values(text: str) -> str:
     ``"[REDACTION_FAILED]"``.
     """
     try:
+        return _STRUCTURED_KEY_VALUE_PATTERN.sub(_redact_structured_key_value, text)
+    except Exception:  # noqa: BLE001 - fail closed at every host boundary
+        return "[REDACTION_FAILED]"
 
-        def _replace(match: re.Match[str]) -> str:
-            key = match.group(2)
-            if not _is_sensitive_key(key):
-                return match.group(0)
-            value = (
-                match.group(4)
-                if match.group(4) is not None
-                else (match.group(5) if match.group(5) is not None else match.group(6))
-            )
-            if value is None or value == "" or "[REDACTED" in value:
-                return match.group(0)
-            return f"{key}{match.group(3)}{_REDACTED_CREDENTIAL}"
 
-        return _STRUCTURED_KEY_VALUE_PATTERN.sub(_replace, text)
+def _redact_header_value(match: re.Match[str]) -> str:
+    """Replace one auth-header line's opaque credential (match->str transform).
+
+    Keeps the header name — and a ``Basic|Bearer|Token`` scheme when present —
+    replacing the trailing credential with ``_REDACTED_CREDENTIAL``.
+    """
+    name = match.group(1)
+    value = match.group(2)
+    scheme_match = _AUTH_SCHEME_PATTERN.match(value)
+    if scheme_match is not None:
+        return f"{name}: {scheme_match.group(1)} {_REDACTED_CREDENTIAL}"
+    return f"{name}: {_REDACTED_CREDENTIAL}"
+
+
+def redact_structured_text(s: str) -> str:
+    """Redact structured free-text surfaces (fail-closed).
+
+    Composes, in order: (1) auth-header + auth-scheme rules so a shaped value
+    under a header (``Authorization: Bearer sk-1234``) is consumed whole and
+    never double-marked; (2) the flat ``_REDACTION_RULES`` via
+    :func:`redact_text`; (3) structured key-value redaction
+    (``_redact_structured_key_values``), which skips existing
+    ``[REDACTED_*]`` markers so earlier stages' output is never clobbered.
+    Any exception in any stage degrades the whole field to
+    ``"[REDACTION_FAILED]"`` — never raw pass-through.
+    """
+    try:
+        s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
+        s = redact_text(s)
+        return _redact_structured_key_values(s)
     except Exception:  # noqa: BLE001 - fail closed at every host boundary
         return "[REDACTION_FAILED]"
 
@@ -402,80 +452,34 @@ class Redactor:
     ``ToolCall.arguments`` value, and every ``ObservationResult.content``
     string. Tool-call arguments and other native structures are walked
     recursively with key-aware sensitive-key detection
-    (``_redact_value`` / ``_is_sensitive_key``), so credentials under
+    (``redact_value`` / ``_is_sensitive_key``), so credentials under
     lower/mixed/camel-case keys are replaced even at nested depth while the
     surrounding shape is preserved; free-text surfaces compose the flat rules
     with auth-header and structured key-value stages
-    (``_redact_structured_text``). Per REDA-05 the failure mode is
+    (``redact_structured_text``). Per REDA-05 the failure mode is
     "redact-or-omit": any internal exception replaces the offending value
     with ``"[REDACTION_FAILED]"`` rather than letting the raw value through.
     """
-
-    def _redact_text(self, s: str) -> str:
-        """Apply every flat redaction rule to *s* and return the result."""
-        return redact_text(s)
-
-    def _redact_structured_text(self, s: str) -> str:
-        """Redact structured free-text surfaces (fail-closed).
-
-        Composes, in order: (1) auth-header + auth-scheme rules so a shaped
-        value under a header (``Authorization: Bearer sk-1234``) is consumed
-        whole and never double-marked; (2) the flat ``_REDACTION_RULES`` via
-        :func:`redact_text`; (3) structured key-value redaction
-        (``_redact_structured_key_values``), which skips existing
-        ``[REDACTED_*]`` markers so earlier stages' output is never clobbered.
-        Any exception in any stage degrades the whole field to
-        ``"[REDACTION_FAILED]"`` — never raw pass-through.
-        """
-        try:
-
-            def _redact_header_value(match: re.Match[str]) -> str:
-                name = match.group(1)
-                value = match.group(2)
-                scheme_match = _AUTH_SCHEME_PATTERN.match(value)
-                if scheme_match is not None:
-                    return f"{name}: {scheme_match.group(1)} {_REDACTED_CREDENTIAL}"
-                return f"{name}: {_REDACTED_CREDENTIAL}"
-
-            s = _AUTHORIZATION_HEADER_PATTERN.sub(_redact_header_value, s)
-            s = self._redact_text(s)
-            return _redact_structured_key_values(s)
-        except Exception:  # noqa: BLE001 - fail closed at every host boundary
-            return "[REDACTION_FAILED]"
 
     def _redact_optional_text(self, value: str | None) -> str | None:
         """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
         if value is None:
             return None
-        return self._redact_structured_text(value)
+        return redact_structured_text(value)
 
     def _redact_value(self, value: Any, sensitive: bool = False) -> Any:
         """Recursively redact *value*, key-aware, without mutating it.
 
-        String leaves under a sensitive key (their own key, or inherited from
-        a sensitive ancestor container) are replaced with ``_REDACTED_CREDENTIAL``;
-        other string leaves run through ``_redact_structured_text``. Dict
-        children are sensitive when the parent is sensitive OR their own key
-        is sensitive (``_is_sensitive_key``); list/tuple elements inherit the
-        container's sensitivity. Fresh containers are built at every level, so
-        the caller's object is never touched. Non-string scalars pass through
-        unchanged.
+        Delegates to the canonical module-level :func:`redact_value` so the
+        trajectory path and log-mode payload redaction share one recursion
+        (issue #455): string leaves under a sensitive key (their own key, or
+        inherited from a sensitive ancestor container) become
+        ``_REDACTED_CREDENTIAL``, other string leaves run through
+        :func:`redact_structured_text`, and string dict keys are scrubbed via
+        :func:`redact_text`. Fresh containers are built at every level, so the
+        caller's object is never touched.
         """
-        if isinstance(value, str):
-            return _REDACTED_CREDENTIAL if sensitive else self._redact_structured_text(value)
-        if isinstance(value, dict):
-            return {
-                key: self._redact_value(
-                    item,
-                    sensitive or (_is_sensitive_key(key) if isinstance(key, str) else False),
-                )
-                for key, item in value.items()
-            }
-        if isinstance(value, list):
-            return [self._redact_value(item, sensitive) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._redact_value(item, sensitive) for item in value)
-        return value
+        return redact_value(value, sensitive)
 
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Redact every value inside a ToolCall.arguments dict (native walk).
@@ -506,7 +510,7 @@ class Redactor:
             new_content: Any = r.content
             if isinstance(r.content, str):
                 try:
-                    new_content = self._redact_structured_text(r.content)
+                    new_content = redact_structured_text(r.content)
                 except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                     new_content = "[REDACTION_FAILED]"
             elif isinstance(r.content, list):
