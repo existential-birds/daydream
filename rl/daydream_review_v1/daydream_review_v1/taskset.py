@@ -142,13 +142,11 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     return diff.exit_code == 1
 
 
-async def _claimed_test_verdict(runtime: vf.Runtime, archive_root: str) -> bool | None:
+def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
     """daydream's own ``deep/test-verdict.json`` claim, or ``None`` if absent."""
-    with tempfile.TemporaryDirectory(prefix="daydream-verdict-") as staging:
-        run_dir = await fetch_run_dir(runtime, Path(staging), archive_root)
-        if run_dir is None:
-            return None
-        verdict = _read_json(run_dir / "deep" / "test-verdict.json", default=None)
+    if run_dir is None:
+        return None
+    verdict = _read_json(run_dir / "deep" / "test-verdict.json", default=None)
     if not isinstance(verdict, dict) or not isinstance(verdict.get("passed"), bool):
         return None
     return bool(verdict["passed"])
@@ -275,10 +273,10 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     async def score(self, trace: vf.Trace, runtime: vf.Runtime | None = None) -> None:
         """Score *trace*, staging the archived run dir into the state exactly once.
 
-        The single :func:`fetch_run_dir` call per score happens here, at the
-        entrypoint; the consumers read the staged snapshot off ``state.run_dir``
-        and never re-enter the runtime. With no runtime the base class simply
-        skips the runtime-dependent signals, and there is nothing to stage.
+        The single run-dir fetch happens here, at the entrypoint; the consumers
+        read the staged snapshot off ``state.run_dir`` and never re-enter the
+        runtime. With no runtime the base class simply skips the
+        runtime-dependent signals, and there is nothing to stage.
         """
         if runtime is None:
             await super().score(trace, None)
@@ -295,12 +293,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     @vf.reward(weight=1.0)
     async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
         """daydream's own trajectory composite over the archived run."""
-        with tempfile.TemporaryDirectory(prefix="daydream-rundir-") as staging:
-            run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
-            if run_dir is None:
-                trace.info["reward_breakdown"] = {"error": "no archived run dir"}
-                return 0.0
-            breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
+        run_dir = _review_state(trace).run_dir
+        if run_dir is None:
+            trace.info["reward_breakdown"] = {"error": "no archived run dir"}
+            return 0.0
+        breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
 
         trace.info["reward_breakdown"] = {
             "correctness_per_finding": breakdown.correctness_per_finding,
@@ -328,7 +325,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             # There is no re-run to compare against on this path, but a rollout
             # that changed nothing and still wrote a green test-verdict is the
             # sharpest hack shape there is, so record the bare claim.
-            claimed = await _claimed_test_verdict(runtime, _archive_root(trace))
+            claimed = _claimed_test_verdict(_review_state(trace).run_dir)
             if claimed is not None:
                 trace.record_metric("test_claim_passed_without_fix", float(claimed))
             return self.config.no_fix_reward
@@ -343,7 +340,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         # the suite actually does. Recorded here rather than as a @vf.metric
         # because metrics run BEFORE rewards (verifiers task.py:299-306), so a
         # metric cannot see this re-run without paying for a second one.
-        claimed = await _claimed_test_verdict(runtime, _archive_root(trace))
+        claimed = _claimed_test_verdict(_review_state(trace).run_dir)
         if claimed is not None:
             trace.record_metric("test_claim_mismatch", float(claimed != passed))
 
@@ -357,13 +354,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         the bot's golden comments whose file appears among daydream's merged
         findings. It exists to inform #91's rubric design, not to grade a rollout.
         """
-        with tempfile.TemporaryDirectory(prefix="daydream-shape-") as staging:
-            run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
-            items: list[dict[str, Any]] = []
-            if run_dir is not None:
-                merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
-                if isinstance(merged, dict):
-                    items = merged.get("items") or []
+        run_dir = _review_state(trace).run_dir
+        items: list[dict[str, Any]] = []
+        if run_dir is not None:
+            merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
+            if isinstance(merged, dict):
+                items = merged.get("items") or []
 
         found_files = {item.get("file") for item in items if isinstance(item, dict)}
         golden_paths = [c.path for c in self.data.golden_comments if c.path]
