@@ -927,9 +927,7 @@ def capture_recommended_patch(
     # Pre-fix untracked files (preexisting_untracked) are filtered out first so
     # files that were already untracked before the run never enter the patch.
     try:
-        untracked = list_untracked(repo)
-        if preexisting_untracked is not None:
-            untracked = [path for path in untracked if path not in preexisting_untracked]
+        untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
         for rel in untracked:
             proc = _run_git(repo, ["diff", "--no-index", "/dev/null", rel], timeout=30, retries=0)
             if proc.returncode in (0, 1):
@@ -1315,9 +1313,7 @@ def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) 
         tracked = proc.stdout.splitlines() if proc.returncode == 0 else []
     except GitError:
         tracked = []
-    untracked = list_untracked(repo)
-    if preexisting_untracked is not None:
-        untracked = [path for path in untracked if path not in preexisting_untracked]
+    untracked = _filter_preexisting_untracked(list_untracked(repo), preexisting_untracked)
     for line in [*tracked, *untracked]:
         name = line.strip()
         if name and name not in seen:
@@ -1350,8 +1346,7 @@ def changed_files_against(
     names: list[str] = []
     seen: set[str] = set()
     untracked = [line.strip() for line in untracked_proc.stdout.splitlines() if line.strip()]
-    if preexisting_untracked is not None:
-        untracked = [path for path in untracked if path not in preexisting_untracked]
+    untracked = _filter_preexisting_untracked(untracked, preexisting_untracked)
     for line in [*proc.stdout.splitlines(), *untracked]:
         name = line.strip()
         if name and name not in seen:
@@ -1374,6 +1369,22 @@ def list_untracked(repo: Path) -> list[str]:
     if proc.returncode != 0:
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def _filter_preexisting_untracked(
+    untracked: list[str], preexisting_untracked: set[str] | None
+) -> list[str]:
+    """Drop paths that were already untracked before a fix ran.
+
+    Filters *untracked* against the *preexisting_untracked* snapshot so files
+    that existed before the run (e.g. a user's scratch file) are never
+    misattributed to daydream. ``None`` passes the list through unchanged,
+    preserving legacy behavior. Order of *untracked* is preserved, never
+    re-sorted.
+    """
+    if preexisting_untracked is None:
+        return untracked
+    return [path for path in untracked if path not in preexisting_untracked]
 
 
 def ls_files(repo: Path) -> list[str]:
