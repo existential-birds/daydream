@@ -55,8 +55,10 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     untracked files into a fresh clone with no source remote. Uses only
     :mod:`daydream.git_ops` primitives plus shutil/pathlib — never
     ``git rev-parse --git-common-dir``, ``git worktree list``, or the source
-    ``.git`` file (the linked-worktree #221 trap). Unstaged deletions and
-    submodule gitlink entries are skipped: they have no copyable worktree file.
+    ``.git`` file (the linked-worktree #221 trap). Unstaged deletions are
+    mirrored (the worktree file is removed from the clone) and symlinks are
+    recreated as links — never materialised as their targets. Submodule gitlink
+    entries are skipped: they have no copyable worktree file.
 
     Returns:
         The clone path.
@@ -68,21 +70,113 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     git_ops.clone(str(source), destination)
     git_ops.checkout_detach(destination, git_ops.head_sha(source))
     git_ops.remove_remote(destination)
-    for rel in [*git_ops.ls_files(source), *git_ops.list_untracked(source)]:
+    # ls-files and ls-files --others --exclude-standard are disjoint by
+    # construction, so one loop covers both. Enumerate strictly so a mid-prep
+    # git failure raises (per this function's error-propagation contract) instead
+    # of silently producing a clone missing tracked/untracked files.
+    for rel in [*git_ops.ls_files(source, strict=True), *git_ops.list_untracked(source, strict=True)]:
         src = source / rel
-        # ls-files and ls-files --others --exclude-standard are disjoint by
-        # construction, so one loop covers both. Skip index entries whose
-        # worktree file is missing (unstaged deletion) or a directory
-        # (submodule gitlink) — neither is copyable.
-        if not src.exists() or src.is_dir():
-            continue
         dst = destination / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
+        if src.is_symlink():
+            # Mirror the LINK itself. copy2 follows the link (materialising a
+            # regular file, or copying a directory target) and src.exists()/
+            # src.is_dir() would drop directory-pointing and dangling links,
+            # leaving a phantom 120000-mode typechange against the clone's index.
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.unlink(missing_ok=True)
+            os.symlink(os.readlink(src), dst)
+        elif src.is_dir():
+            continue  # submodule gitlink — no copyable worktree file
+        elif src.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.is_symlink():
+                # Committed symlink now a regular file in the source.
+                dst.unlink()
+            shutil.copy2(src, dst)
+        else:
+            # Unstaged deletion: the path is still tracked but the source's
+            # worktree file is gone — mirror the missing file so the audit model
+            # does not see a phantom file in every git status/ls it runs.
+            if dst.is_dir() and not dst.is_symlink():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink(missing_ok=True)
     patch = git_ops.staged_patch(source)
     if patch:
         git_ops.apply_staged_patch(destination, patch)
     return destination
+
+
+# Child-environment variables whose value would give an isolated codex
+# subprocess a handle on the caller's repo: the inherited ``$PWD``/``$OLDPWD``
+# and the ``GIT_*`` redirection vars that could point the clone's git ops back
+# at the source's refs/index/worktree.
+_GIT_REDIRECT_STRIP_VARS = (
+    "PWD",
+    "OLDPWD",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_PREFIX",
+)
+
+
+class _SharedCheckout:
+    """A disposable read-only checkout shared by concurrent ``execute()`` calls.
+
+    The clone is built once per ``(backend, cwd)`` and reference-counted, so
+    parallel read-only calls in a fan-out reuse the same checkout instead of each
+    cloning the monorepo; the temp dir is removed when the last holder's
+    generator exits. Sequential calls each rebuild (snapshot freshness is never
+    traded for cache hits), so per-call cleanup semantics are preserved.
+    """
+
+    __slots__ = ("cwd", "path", "temp_dir", "refs")
+
+    def __init__(self, cwd: Path, path: Path, temp_dir: tempfile.TemporaryDirectory[str]) -> None:
+        self.cwd = cwd
+        self.path = path
+        self.temp_dir = temp_dir
+        self.refs = 0
+
+
+def _isolated_child_env(cwd: Path, execution_cwd: Path) -> dict[str, str] | None:
+    """Return the isolated subprocess environment, or ``None`` when no isolation.
+
+    When *execution_cwd* differs from *cwd* (the disposable-clone case), the
+    child must not inherit a path to the caller's repo: the returned copy of the
+    parent environment strips ``$PWD``/``$OLDPWD`` and the ``GIT_*`` redirect
+    vars that could point the clone's git ops at the source. Returns ``None``
+    when the process runs in *cwd* unchanged (nothing to strip). The isolation is
+    path-hiding, not physical — a model that independently discovers the source
+    path could still write to its refs.
+    """
+    if execution_cwd == cwd:
+        return None
+    child_env = os.environ.copy()
+    for var in _GIT_REDIRECT_STRIP_VARS:
+        child_env.pop(var, None)
+    return child_env
+
+
+def _rebind_source_paths(prompt: str, source: Path, execution: Path) -> str:
+    """Rebind every rendering of *source* to *execution* in *prompt*.
+
+    The match is anchored at path boundaries — a sibling path merely sharing
+    *source*'s prefix (``/home/user/work-2``, ``/home/user/workspace``,
+    ``/home/user/work.py``) is never rewritten — while ``//``-doubled renderings
+    (a single run of ``+`` over each slash) and the symlink-resolved form of
+    *source* are also rebound, so no textual variant of the source repo path can
+    survive into the bytes written to the isolated subprocess's stdin.
+    """
+    for candidate in {str(source), str(source.resolve())}:
+        pattern = re.escape(candidate).replace("/", "/+") + r"(?![\w.-])"
+        prompt = re.sub(pattern, str(execution), prompt)
+    return prompt
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -135,6 +229,10 @@ class CodexBackend:
         self.reasoning_effort = reasoning_effort
         self.fanout_concurrency = resolve_fanout_concurrency("DAYDREAM_FANOUT_CONCURRENCY", 8)
         self._processes: list[asyncio.subprocess.Process] = []
+        # Disposable read-only checkouts shared across concurrent execute() calls
+        # (built once per cwd, refcounted; cleaned up when the last holder exits).
+        self._checkout_lock = asyncio.Lock()
+        self._checkouts: dict[Path, _SharedCheckout] = {}
 
     async def execute(
         self,
@@ -173,7 +271,11 @@ class CodexBackend:
                 not expose persisted CLI sessions here, so this is ignored.
 
         Raises:
-            CodexError: If the Codex turn fails.
+            CodexError: If the Codex turn fails, if the disposable read-only
+                checkout cannot be created, or if a ``read_only`` session is
+                resumed (a resumed thread's stored cwd is the per-call clone,
+                deleted when the creating turn ends — fail closed rather than
+                silently continuing in a nonexistent cwd).
             StreamStalledError: If the ``codex`` subprocess emits nothing on
                 stdout for the idle window (see
                 :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
@@ -240,19 +342,46 @@ class CodexBackend:
             return item_id
 
         proc: asyncio.subprocess.Process | None = None
-        temp_dir: tempfile.TemporaryDirectory[str] | None = None
         execution_cwd = cwd
+        shared_checkout: _SharedCheckout | None = None
 
         try:
-            if read_only and git_ops.is_inside_worktree(cwd):
+            if read_only:
                 try:
-                    temp_dir = tempfile.TemporaryDirectory(prefix="daydream-codex-read-only-")
-                    destination = Path(temp_dir.name) / "repo"
-                    execution_cwd = await asyncio.to_thread(
-                        _prepare_read_only_checkout, cwd, destination,
-                    )
-                except (git_ops.GitError, OSError, shutil.Error) as exc:
+                    is_worktree_root = await asyncio.to_thread(git_ops.is_inside_worktree, cwd)
+                except git_ops.GitError as exc:
+                    # Wrap the pre-check's git failures too — the documented
+                    # CodexError on read-only prep failure covers the full prep.
                     raise CodexError("failed to create disposable read-only checkout") from exc
+                if is_worktree_root:
+                    if continuation is not None and continuation.backend == "codex":
+                        # A resumed thread's stored cwd is the per-call disposable
+                        # clone, deleted when the creating turn exits — honoring the
+                        # resume here would run the thread in a nonexistent cwd
+                        # (the prompt rebind targets a fresh clone path, not the
+                        # thread's stored one). Fail closed.
+                        raise CodexError(
+                            "read-only Codex sessions cannot be resumed: the thread's stored "
+                            "cwd is a per-call disposable clone deleted when the turn ends"
+                        )
+                    async with self._checkout_lock:
+                        shared_checkout = self._checkouts.get(cwd)
+                        if shared_checkout is None:
+                            temp_dir = tempfile.TemporaryDirectory(prefix="daydream-codex-read-only-")
+                            destination = Path(temp_dir.name) / "repo"
+                            try:
+                                prepared = await asyncio.to_thread(
+                                    _prepare_read_only_checkout, cwd, destination,
+                                )
+                            except (git_ops.GitError, OSError, shutil.Error) as exc:
+                                temp_dir.cleanup()
+                                raise CodexError(
+                                    "failed to create disposable read-only checkout"
+                                ) from exc
+                            shared_checkout = _SharedCheckout(cwd, prepared, temp_dir)
+                            self._checkouts[cwd] = shared_checkout
+                        shared_checkout.refs += 1
+                    execution_cwd = shared_checkout.path
 
             args = [
                 "codex",
@@ -269,32 +398,15 @@ class CodexBackend:
                 args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
             if schema_path:
                 args.extend(["--output-schema", schema_path])
-            if continuation and continuation.backend == "codex":
+            if continuation is not None and continuation.backend == "codex":
                 args.extend(["resume", continuation.data["thread_id"]])
 
-            # When running in the disposable clone, the spawned subprocess must
-            # not inherit a path to the caller's repo: strip $PWD (and the
-            # GIT_* overrides that could redirect the clone's git ops back at
-            # the source) from the child environment, and start the child in the
-            # clone so its own cwd is never the source path. The isolation is
-            # path-hiding, not physical — a model that independently discovers
-            # the source path could still write to its refs.
-            child_env: dict[str, str] | None = None
-            if execution_cwd != cwd:
-                child_env = os.environ.copy()
-                for var in (
-                    "PWD",
-                    "OLDPWD",
-                    "GIT_DIR",
-                    "GIT_WORK_TREE",
-                    "GIT_INDEX_FILE",
-                    "GIT_OBJECT_DIRECTORY",
-                    "GIT_COMMON_DIR",
-                    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                    "GIT_CEILING_DIRECTORIES",
-                    "GIT_PREFIX",
-                ):
-                    child_env.pop(var, None)
+            # When running in the disposable clone, the child must not inherit a
+            # path to the caller's repo: _isolated_child_env strips $PWD/$OLDPWD
+            # and the GIT_* overrides that could redirect the clone's git ops back
+            # at the source, and the child is started in the clone (below) so its
+            # own cwd is never the source path. Path-hiding, not physical.
+            child_env = _isolated_child_env(cwd, execution_cwd)
 
             proc = await asyncio.create_subprocess_exec(
                 *args,
@@ -310,9 +422,9 @@ class CodexBackend:
 
             if proc.stdin:
                 if execution_cwd != cwd:
-                    # Rebind the prompt so the caller's source path never
-                    # appears in the bytes written to the isolated subprocess.
-                    prompt = prompt.replace(str(cwd), str(execution_cwd))
+                    # Rebind the prompt so no rendering of the caller's source
+                    # path appears in the bytes written to the isolated subprocess.
+                    prompt = _rebind_source_paths(prompt, cwd, execution_cwd)
                 proc.stdin.write(prompt.encode())
                 proc.stdin.close()
 
@@ -586,8 +698,12 @@ class CodexBackend:
             self._processes = [active for active in self._processes if active is not proc]
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
-            if temp_dir is not None:
-                temp_dir.cleanup()
+            if shared_checkout is not None:
+                async with self._checkout_lock:
+                    shared_checkout.refs -= 1
+                    if shared_checkout.refs <= 0:
+                        self._checkouts.pop(shared_checkout.cwd, None)
+                        shared_checkout.temp_dir.cleanup()
 
     async def cancel(self) -> None:
         """Cancel all running Codex processes.

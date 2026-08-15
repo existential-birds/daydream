@@ -1306,7 +1306,7 @@ def staged_patch(repo: Path) -> bytes:
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
         raise GitError(f"git diff --cached --binary failed in {repo}: {stderr.strip()}")
-    return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    return proc.stdout
 
 
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
@@ -1376,18 +1376,31 @@ def changed_files_against(
     return names
 
 
-def list_untracked(repo: Path) -> list[str]:
+def list_untracked(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of untracked, non-ignored files.
 
     Soft-failure semantics mirror :func:`changed_files`: returns ``[]`` on any
     git error or non-zero exit. Used to snapshot the untracked set before a fix
     pass so newly-orphaned files created by a failed group can be detected.
+
+    Args:
+        strict: When True, a git error or non-zero exit raises
+            :class:`GitError` instead of soft-failing to ``[]`` — used by the
+            disposable read-only-checkout prep, whose error-propagation contract
+            needs a reliable enumeration (a silent ``[]`` would produce a clone
+            missing the untracked files).
     """
     try:
         proc = _run_git(repo, ["ls-files", "--others", "--exclude-standard"], timeout=10)
     except GitError:
+        if strict:
+            raise
         return []
     if proc.returncode != 0:
+        if strict:
+            raise GitError(
+                f"git ls-files --others --exclude-standard failed in {repo}: {proc.stderr.strip()}"
+            )
         return []
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
@@ -1408,7 +1421,7 @@ def _filter_preexisting_untracked(
     return [path for path in untracked if path not in preexisting_untracked]
 
 
-def ls_files(repo: Path) -> list[str]:
+def ls_files(repo: Path, *, strict: bool = False) -> list[str]:
     """Return repo-relative paths of tracked files.
 
     Enumerates every file git knows about via ``git ls-files -z``, NUL-split
@@ -1422,12 +1435,21 @@ def ls_files(repo: Path) -> list[str]:
     "could not look" can catch it; best-effort callers wrap the call in
     ``try/except``.
 
+    Args:
+        strict: When True, a non-zero ``git`` exit also raises
+            :class:`GitError` (instead of returning ``[]``) — used by the
+            disposable read-only-checkout prep, whose error-propagation contract
+            needs a reliable enumeration.
+
     Returns:
         Repo-relative path strings in ``git ls-files`` output order. Empty
-        list on a non-zero exit.
+        list on a non-zero exit (unless *strict*).
     """
     proc = _run_git(repo, ["ls-files", "-z"], capture_bytes=True)
     if proc.returncode != 0:
+        if strict:
+            stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+            raise GitError(f"git ls-files failed in {repo}: {stderr.strip()}")
         return []
     stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
     return [

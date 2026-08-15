@@ -1468,20 +1468,57 @@ def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
 
 
 def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:
-    """A staged index patch from source reproduces source's staged index in a clone."""
+    """A staged index patch from source reproduces source's staged index in a clone.
+
+    Binary payload exercises the ``--binary``/base85 machinery, so the
+    byte-captured round-trip claim in :func:`git_ops.staged_patch` is real.
+    """
     source = _make_repo_with_main(tmp_path / "src")
     clone = tmp_path / "clone"
     git_ops.clone(str(source), clone)
-    (source / "base.txt").write_text("staged snapshot\n")
-    _git(source, "add", "base.txt")
-    shutil.copy2(source / "base.txt", clone / "base.txt")
+    payload = bytes(range(256))  # every byte value, incl. NUL/newline — not text
+    (source / "blob.bin").write_bytes(payload)
+    _git(source, "add", "blob.bin")
+    shutil.copy2(source / "blob.bin", clone / "blob.bin")
 
     patch = git_ops.staged_patch(source)
     assert patch  # nonempty bytes
 
     git_ops.apply_staged_patch(clone, patch)
     assert git_ops.staged_patch(clone) == git_ops.staged_patch(source)
-    assert _git(clone, "diff", "--", "base.txt") == ""
+    assert _git(clone, "diff", "--", "blob.bin") == ""
+    assert (clone / "blob.bin").read_bytes() == payload
+
+
+def test_strict_enumeration_raises_where_soft_fails(tmp_path: Path) -> None:
+    """strict=True propagates a non-zero git exit; the soft default returns [].
+
+    The disposable read-only-checkout prep relies on strict enumeration so a
+    mid-prep git failure surfaces (its documented error-propagation contract)
+    instead of silently producing a clone missing tracked/untracked files.
+    """
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+
+    # Soft default: no crash, empty result.
+    assert git_ops.ls_files(not_a_repo) == []
+    assert git_ops.list_untracked(not_a_repo) == []
+
+    # Strict: the same failure raises GitError that callers wrap in CodexError.
+    with pytest.raises(git_ops.GitError):
+        git_ops.ls_files(not_a_repo, strict=True)
+    with pytest.raises(git_ops.GitError):
+        git_ops.list_untracked(not_a_repo, strict=True)
+
+    # On a real repo, strict returns the same paths as the soft call.
+    repo = _make_repo_with_main(tmp_path / "src")
+    (repo / "tracked.txt").write_text("x")
+    (repo / "untracked.txt").write_text("y")
+    _git(repo, "add", "tracked.txt")
+    assert git_ops.ls_files(repo, strict=True) == git_ops.ls_files(repo)
+    assert git_ops.list_untracked(repo, strict=True) == git_ops.list_untracked(repo)
+    assert "tracked.txt" in git_ops.ls_files(repo, strict=True)
+    assert "untracked.txt" in git_ops.list_untracked(repo, strict=True)
 
 
 def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:

@@ -319,7 +319,10 @@ class Backend(Protocol):
                 restricts filesystem writes but not git index/object-store
                 operations, so the clone is what makes a commit update only
                 the disposable clone's refs and index — never the caller's
-                HEAD, staged index, refs, or remotes. Any other *cwd* — one
+                HEAD, staged index, refs, or remotes, which are unreachable
+                via any path the subprocess is given (its argv, stdin, env,
+                and cwd); a model that independently discovers the source
+                path could still write to its refs. Any other *cwd* — one
                 outside a Git worktree, or inside a worktree but not at its
                 root — uses the read-only sandbox in place. Callers select
                 this flag explicitly per call site: the diagnostic subagents

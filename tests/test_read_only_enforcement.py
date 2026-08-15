@@ -31,8 +31,16 @@ _COMMITTING_CODEX = textwrap.dedent(
     argv = sys.argv[1:]
     cwd = argv[argv.index("--cd") + 1]
     os.chdir(cwd)
+    # git_ops.clone does not inherit the source repo's local user.name/
+    # user.email, so pin a hermetic identity for the commit instead of
+    # depending on ambient global git config (absent on CI).
+    env = dict(os.environ)
+    env.setdefault("GIT_AUTHOR_NAME", "daydream-test")
+    env.setdefault("GIT_AUTHOR_EMAIL", "daydream-test@example.com")
+    env.setdefault("GIT_COMMITTER_NAME", "daydream-test")
+    env.setdefault("GIT_COMMITTER_EMAIL", "daydream-test@example.com")
     before = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    subprocess.run(["git", "commit", "--allow-empty", "-m", "isolated audit commit"], check=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "isolated audit commit"], env=env, check=True)
     after = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     remotes = subprocess.run(["git", "remote"], capture_output=True, text=True).stdout.strip()
     with open(marker, "w") as fh:
