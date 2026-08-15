@@ -21,7 +21,7 @@
 # `suite_non_regression` compares these paths against the baked head SHA, fail-closed:
 # any tracked difference (committed, staged, unstaged, deleted, renamed), any
 # non-ignored untracked file under a protected path, or any Git error means the
-# oracle changed and the rollout earns zero test reward without running
+# oracle changed and the rollout records `suite_non_regression` 0.0 without running
 # `test_command`. Cover every runner-config filename `test_command` can load,
 # including absent ones whose later creation could alter collection.
 

@@ -71,3 +71,33 @@ def test_seal_json_roundtrip(tmp_path):
     assert parsed == seal
     assert json.loads(raw)["algorithm"] == "sha256"
     assert verify(parsed, [a], candidate_diff=b"candidate-diff") is True
+
+
+def test_validate_rejects_unsupported_algorithm():
+    """A seal.json with a downgraded algorithm (e.g. md5) must fail closed."""
+    import pytest
+
+    from daydream_review_v1.verifier import SealResult
+
+    raw = json.dumps(
+        {
+            "algorithm": "md5",
+            "artifact_digests": {"a.json": "0" * 32},
+            "candidate_diff_digest": "0" * 64,
+            "candidate_diff": "",
+        }
+    )
+    with pytest.raises(ValueError, match="unsupported seal algorithm"):
+        SealResult.model_validate_json(raw)
+
+
+def test_validate_rejects_malformed_json():
+    """Garbage seal.json content must fail closed as a verification failure."""
+    import pytest
+
+    from daydream_review_v1.verifier import SealResult
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        SealResult.model_validate_json("this is not json{")
+    with pytest.raises(ValueError, match="must be a JSON object"):
+        SealResult.model_validate_json('["not", "an", "object"]')

@@ -536,7 +536,19 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
                 state.run_dir = await fetch_run_dir(runtime, Path(staging), _archive_root(trace))
                 # Seal verification is host-side over the staged copy; a seal
                 # failure is a tamper signal (explicit zero), never a crash.
-                state.seal_ok = verify_seal(state.run_dir) if state.run_dir is not None else None
+                # The candidate diff is re-derived from the sandbox here so the
+                # seal binds the diff the verifier checkout will actually apply.
+                if state.run_dir is not None:
+                    if trace.info.get("daydream_seal_ok") is False:
+                        # The harness could not produce a seal at all; score the
+                        # run as a failed seal, never as an unsealed full-trust
+                        # run (rundir.seal_archived_run also writes a fail-closed
+                        # marker; this covers even a marker-write failure).
+                        state.seal_ok = False
+                    else:
+                        state.seal_ok = await verify_seal(
+                            state.run_dir, runtime, _repo_path(trace), self.data.head_sha
+                        )
             if state.seal_ok is not None:
                 trace.record_metric("seal_verified", float(state.seal_ok))
             try:

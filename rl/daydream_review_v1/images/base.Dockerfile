@@ -194,10 +194,14 @@ RUN if [ "${INSTALL_PI}" = "1" ]; then \
 # in-process); the supervisor re-chowns the sealed run dir root-owned read-only
 # at seal time (rundir.seal_archived_run), which is what makes the sealed
 # artifacts agent-inaccessible.
+# util-linux is installed explicitly because it provides the setpriv binary the
+# wrapper and the verifier re-run both exec — pinning the privilege-drop
+# dependency instead of trusting it to ship in the base image.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends gosu \
+ && apt-get install -y --no-install-recommends util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home agent \
+ && useradd --system --create-home verifier \
  && chown -R agent:agent /rollout \
  && chmod 0755 /rollout/archive
 

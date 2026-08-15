@@ -88,6 +88,8 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     sampled = [node for node in trace["nodes"] if node.get("sampled")]
     assert sampled, "no sampled assistant turns — endpoint injection or the dialect did not work"
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
+    assert 0.0 <= trace["rewards"]["intrinsic_composite"] <= 1.0, trace["rewards"]
+    assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0), trace["metrics"]
     assert trace["info"]["daydream_backend"] == "claude"
     assert trace["info"]["daydream_exit_code"] == 0
     # Scoring really read daydream's archived run dir out of the sandbox.
@@ -133,6 +135,6 @@ def test_live_rollout(tmp_path: Path) -> None:
 
     trace = _sole_trace(paths)
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    assert trace["rewards"]["intrinsic_composite"] in (0.0, 1.0)
+    assert 0.0 <= trace["rewards"]["intrinsic_composite"] <= 1.0
     assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0)
     assert trace["info"]["daydream_backend"] == backend

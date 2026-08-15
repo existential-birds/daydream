@@ -15,6 +15,7 @@ out of daydream's lockfile, and this primitive must not disturb that boundary.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -32,11 +33,15 @@ class SealResult:
     ``artifact_digests`` maps each artifact's path relative to the common parent
     of the sealed paths (posix form) to its sha256 hex digest; the algorithm is
     pinned as ``"sha256"`` so a verify can never silently downgrade.
-    ``candidate_diff`` carries the raw diff bytes so the verifying side can
-    re-check them against the recorded digest without re-entering the sandbox
-    (the supervisor records the diff into the seal record). Serialized to JSON
-    by the supervisor (:meth:`model_dump_json`) and parsed back at
-    verification time (:meth:`model_validate_json`).
+    ``candidate_diff`` carries the raw diff bytes as an audit record of what
+    was sealed. Verification does not trust this embedded copy: the verifying
+    side re-derives the diff from the sandbox at scoring time and compares its
+    digest against ``candidate_diff_digest``, so the seal is bound to the diff
+    the verifier checkout actually applies. Diff bytes are arbitrary (git diff
+    output is not guaranteed UTF-8), so the record is serialized to JSON as
+    base64, never as a UTF-8 decode. Serialized by the supervisor
+    (:meth:`model_dump_json`) and parsed back at verification time
+    (:meth:`model_validate_json`).
     """
 
     algorithm: Literal["sha256"] = _ALGORITHM
@@ -45,13 +50,19 @@ class SealResult:
     candidate_diff: bytes = b""
 
     def model_dump_json(self) -> str:
-        """Serialize the seal to a JSON string (deterministic key order)."""
+        """Serialize the seal to a JSON string (deterministic key order).
+
+        ``candidate_diff`` is base64-encoded: the diff bytes are arbitrary
+        (git diff output is not guaranteed UTF-8), and a UTF-8 decode here
+        would make seal production raise on a non-UTF-8 diff — leaving the run
+        unsealed instead of sealed.
+        """
         return json.dumps(
             {
                 "algorithm": self.algorithm,
                 "artifact_digests": self.artifact_digests,
                 "candidate_diff_digest": self.candidate_diff_digest,
-                "candidate_diff": self.candidate_diff.decode("utf-8"),
+                "candidate_diff": base64.b64encode(self.candidate_diff).decode("ascii"),
             },
             sort_keys=True,
         )
@@ -86,11 +97,15 @@ class SealResult:
         raw_diff = data.get("candidate_diff")
         if not isinstance(raw_diff, str):
             raise ValueError("seal.json candidate_diff must be a string")
+        try:
+            diff_bytes = base64.b64decode(raw_diff.encode("ascii"))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("seal.json candidate_diff is not valid base64") from exc
         return cls(
             algorithm=algorithm,
             artifact_digests=digests,
             candidate_diff_digest=diff,
-            candidate_diff=raw_diff.encode("utf-8"),
+            candidate_diff=diff_bytes,
         )
 
 
@@ -108,26 +123,31 @@ def _relative_keys(paths: list[Path]) -> dict[str, Path]:
     return {path.relative_to(common).as_posix(): path for path in paths}
 
 
+def read_paths(paths: list[Path]) -> dict[str, bytes]:
+    """Read each path's raw bytes, keyed by its posix path relative to the common parent.
+
+    Raises:
+        OSError: If an artifact cannot be read. Callers choose the policy:
+            :func:`seal_artifacts` lets it propagate (a supervisor-side
+            programming error), :func:`verify` absorbs it as a failed seal.
+        ValueError: If the paths share no common parent (see :func:`_relative_keys`).
+    """
+    return {rel: path.read_bytes() for rel, path in _relative_keys(paths).items()}
+
+
 def seal_artifacts(paths: list[Path], candidate_diff: bytes) -> SealResult:
     """Seal *paths* (sha256 of each artifact's raw bytes) plus *candidate_diff*.
 
-    The raw diff is carried in the seal record so the verifying side can re-check
-    it against ``candidate_diff_digest`` without re-entering the sandbox.
+    The raw diff is carried in the seal record as an audit copy; verification
+    re-derives the diff from the sandbox at scoring time instead of trusting
+    this embedded copy (:func:`rundir.verify_seal`).
 
     Raises:
         OSError: If an artifact cannot be read. Sealing is the supervisor's job
             over a known-good staged copy, so a missing artifact here is a
             programming error, not a tamper to absorb.
     """
-    digests = {
-        rel: hashlib.sha256(path.read_bytes()).hexdigest() for rel, path in _relative_keys(paths).items()
-    }
-    return SealResult(
-        algorithm=_ALGORITHM,
-        artifact_digests=digests,
-        candidate_diff_digest=hashlib.sha256(candidate_diff).hexdigest(),
-        candidate_diff=candidate_diff,
-    )
+    return seal_bytes(read_paths(paths), candidate_diff)
 
 
 def seal_bytes(artifacts: dict[str, bytes], candidate_diff: bytes) -> SealResult:
@@ -156,7 +176,7 @@ def verify(seal: SealResult, paths: list[Path], candidate_diff: bytes) -> bool:
     """
     try:
         digests = {
-            rel: hashlib.sha256(path.read_bytes()).hexdigest() for rel, path in _relative_keys(paths).items()
+            rel: hashlib.sha256(data).hexdigest() for rel, data in read_paths(paths).items()
         }
         if hashlib.sha256(candidate_diff).hexdigest() != seal.candidate_diff_digest:
             return False

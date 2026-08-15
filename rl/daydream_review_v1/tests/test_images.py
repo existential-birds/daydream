@@ -353,7 +353,9 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
 
     Builds a fresh base image with ``--no-cache`` and verifies the resulting
     image actually contains the hardening layers (gpg-verify and checksum
-    verification) via ``docker image history``. The session ``base_image``
+    verification) via ``docker image history``, and that the run-as-agent
+    privilege-drop seam really drops root in the built image. The session
+    ``base_image``
     fixture short-circuits when the image exists (conftest.py:40-55) and every
     repo build passes ``--no-base``, so on a warm host the hardening is
     otherwise never re-run; this test forces the build to run and then probes
@@ -394,6 +396,23 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         assert "sha256sum -c" in probe.stdout, (
             "built image lacks the checksum-verification hardening layer"
         )
+        # The privilege-drop seam must actually work in the built image, not
+        # just be declared: the image's default user stays root, and the
+        # root-owned run-as-agent wrapper drops to a non-root uid (the `agent`
+        # user). A missing or non-executable wrapper is exactly the
+        # rollout-time failure this probe catches at build time.
+        default_uid = subprocess.run(
+            ["docker", "run", "--rm", tag, "id", "-u"],
+            capture_output=True, text=True, check=False,
+        )
+        dropped_uid = subprocess.run(
+            ["docker", "run", "--rm", tag, "run-as-agent", "id", "-u"],
+            capture_output=True, text=True, check=False,
+        )
+        assert default_uid.returncode == 0, default_uid.stdout + default_uid.stderr
+        assert dropped_uid.returncode == 0, dropped_uid.stdout + dropped_uid.stderr
+        assert default_uid.stdout.strip() == "0", "image default user must stay root"
+        assert dropped_uid.stdout.strip() != "0", "run-as-agent must drop off root"
     finally:
         subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
 
@@ -676,23 +695,28 @@ def test_reference_probe_quotes_the_work_repo_path() -> None:
     assert bare not in probe_src, "a single-quoted path would break the sh -c region"
 
 
-def test_run_as_agent_wrapper_is_root_owned_and_drops_privilege() -> None:
-    """The wrapper is root-owned and setprivs down to the agent identity (image contract)."""
+def test_run_as_agent_wrapper_drops_privilege() -> None:
+    """The wrapper setprivs down to the agent identity (image contract). Root
+    ownership is established only inside the built image (base.Dockerfile chowns
+    run-as-agent root:root), so no st_uid check is made on the checkout copy."""
     wrapper = PROJECT_ROOT / "images" / "run-as-agent"
     assert wrapper.is_file(), "run-as-agent wrapper missing"
     mode = wrapper.stat().st_mode & 0o777
-    assert mode & 0o400 and mode & 0o100, "wrapper must be root-executable (0755)"
+    assert mode & 0o400 and mode & 0o100, "wrapper must be owner-executable (0755)"
     text = wrapper.read_text(encoding="utf-8")
-    assert "setpriv" in text or "gosu" in text, "wrapper must drop privileges via setpriv/gosu"
+    assert "setpriv" in text, "wrapper must drop privileges via setpriv"
     assert "agent" in text, "wrapper must target the non-root agent user"
 
 
 def test_base_image_has_distinct_agent_identity() -> None:
-    """base.Dockerfile declares a non-root agent user and root-owned archive."""
+    """base.Dockerfile declares non-root agent and verifier users, an
+    agent-owned archive, and the explicit setpriv provider (util-linux)."""
     dockerfile = (PROJECT_ROOT / "images" / "base.Dockerfile").read_text(encoding="utf-8")
-    assert "gosu" in dockerfile
+    assert "util-linux" in dockerfile  # setpriv provider pinned explicitly, not implicit
     assert "useradd" in dockerfile or "adduser" in dockerfile
-    assert "chmod" in dockerfile and "archive" in dockerfile  # archive made agent-inaccessible
+    assert "agent" in dockerfile
+    assert "verifier" in dockerfile  # read-only verifier identity provisioned
+    assert "chown" in dockerfile and "agent:agent" in dockerfile  # /rollout (incl. archive) is agent-owned
 
 
 def test_readme_documents_single_reward_axis_and_metric() -> None:

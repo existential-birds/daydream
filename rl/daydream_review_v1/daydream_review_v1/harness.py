@@ -13,6 +13,7 @@ rollout agent is one config key: ``backend``.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import verifiers.v1 as vf
@@ -28,6 +29,8 @@ from daydream_review_v1.backends import (
 )
 from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, daydream_completed, seal_archived_run
 from daydream_review_v1.taskset import DEFAULT_REPO_PATH, DaydreamReviewData
+
+logger = logging.getLogger(__name__)
 
 
 class DaydreamReviewHarnessConfig(vf.HarnessConfig):
@@ -89,6 +92,11 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         """Fail fast with remediation text; the image bakes everything else (D6)."""
         strategy = self.strategy
         binaries = ("daydream", *strategy.required_binaries)
+        if runtime.type == "docker":
+            # The image's root-owned run-as-agent wrapper is the single
+            # privilege-drop seam; a wrapper-less image must fail here, not
+            # opaquely at docker exec.
+            binaries = (*binaries, "run-as-agent")
         checks = " && ".join(f"command -v {binary} >/dev/null" for binary in binaries)
         result = await runtime.run(
             ["sh", "-c", f"{checks} && test -d {self.config.repo_path}"], self.config.resolved_env
@@ -187,10 +195,25 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # with the archived artifacts zeroes the reward instead of recording
         # honest telemetry. The candidate diff is the rollout's own committed
         # diff against the baked head (b"" when it cannot be re-derived).
-        await seal_archived_run(
+        sealed = await seal_archived_run(
             runtime,
             self.config.archive_root,
             repo=self.config.repo_path,
             head_sha=data.head_sha,
         )
+        # A seal-production failure must never be silent or fail-open:
+        # seal_archived_run overwrites seal.json with an unvalidatable marker
+        # (verify_seal -> False -> zero reward), and the trace records the
+        # outcome so an operator can distinguish "sealed and verified" from
+        # "sealing failed, zero protection" — a completed run with no valid
+        # seal is never scored at full trust as if the protection existed.
+        trace.info["daydream_seal_ok"] = sealed
+        if not sealed:
+            logger.warning(
+                "seal_archived_run failed for %s (repo=%s, head=%s): the rollout "
+                "will score seal_verified 0.0 and zero intrinsic reward",
+                self.config.archive_root,
+                self.config.repo_path,
+                data.head_sha,
+            )
         return result

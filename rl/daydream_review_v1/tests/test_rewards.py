@@ -434,7 +434,7 @@ async def test_missing_run_dir_scores_zero(
     assert trace.metrics["n_findings"] == 0.0
 
 
-async def test_fix_tests_pass_green(
+async def test_green_suite_records_non_regression(
     tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     archive_root = tmp_path / "archive"
@@ -451,15 +451,63 @@ async def test_fix_tests_pass_green(
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
-async def test_green_unrelated_edit_gets_no_suite_reward(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+async def test_verifier_identity_branch_executes_and_fails_closed(
+    tmp_path: Path,
+    runtime,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Starting green and making an unrelated/test-only edit earns no suite credit."""
+    """The verifier identity branch is reachable and fail-closed on the real runtime.
+
+    The image provisions the distinct non-root verifier identity
+    (``base.Dockerfile``); the host subprocess smoke path does not, so force the
+    identity probe to simulate the container. The real checkout construction
+    then executes (git clone/detach/apply against the staged repo), and the
+    root-owned ``chown`` cannot succeed as an unprivileged host user — so
+    construction fails and the re-run must be an explicit zero, never a fallback
+    to the agent-mutable tree, whose suite here is green (contrast
+    ``test_green_suite_records_non_regression``, which scores 1.0 on exactly the
+    mutable-tree fallback shape).
+    """
+    from daydream_review_v1 import taskset
+
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # The fix is COMMITTED: the verifier checkout's candidate diff is
+    # ``git diff <head_sha> HEAD``, i.e. the committed contents, never the
+    # working tree.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    async def _identity_available(_runtime: vf.Runtime) -> bool:
+        return True  # container shape: setpriv + verifier user provisioned
+
+    monkeypatch.setattr(taskset, "_verifier_identity_available", _identity_available)
+
+    await task.score(trace, runtime)
+
+    # The oracle gate passed: the zero below comes from the verifier branch's
+    # fail-closed checkout construction, not from a changed test oracle.
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 0.0
+    # _prepare_verify_checkout really executed its git steps: the verify clone
+    # exists and carries the applied candidate diff (it is left on disk by the
+    # failed construction rather than silently skipped).
+    verify_dir = tmp_path / "repo-verify"
+    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED
+
+
+async def test_green_unrelated_edit_gets_no_suite_reward(
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path,
+) -> None:
+    """Starting green and making an unrelated edit earns no suite credit."""
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
     task = _task(corpus_mini_dir, fixture_manifest_path)
     # The baked head is already green; the agent only touches README (unrelated)
-    # and a test comment (test-only) — the suite stays green.
+    # — the suite stays green.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
     (repo / "README.md").write_text("# changed\n", encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -473,7 +521,7 @@ async def test_green_unrelated_edit_gets_no_suite_reward(
     assert trace.metrics["suite_non_regression"] == 1.0
 
 
-async def test_fix_tests_pass_red(
+async def test_red_suite_records_no_non_regression(
     tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     archive_root = tmp_path / "archive"
@@ -489,7 +537,7 @@ async def test_fix_tests_pass_red(
 
 
 async def test_suite_result_is_telemetry_not_reward(
-    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A green suite no longer sums into the reward: only intrinsic_composite remains."""
     archive_root = tmp_path / "archive"
@@ -508,7 +556,7 @@ async def test_suite_result_is_telemetry_not_reward(
 
 
 async def test_tampered_suite_never_records_honest_non_regression(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+    tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:
     """A gutted test oracle records suite_non_regression 0.0 and no suite reward."""
     archive_root = tmp_path / "archive"
@@ -538,7 +586,7 @@ async def test_tampered_suite_never_records_honest_non_regression(
     ],
     ids=["test-source-tamper", "test-package-config-tamper", "untracked-oracle-file"],
 )
-async def test_fix_tests_pass_rejects_protected_test_path_changes(
+async def test_suite_rejects_protected_test_path_changes(
     edit: str | None,
     tamper_rel: str,
     tamper_content: str,
@@ -797,7 +845,7 @@ async def test_oracle_gate_rejects_root_sitecustomize(
     ],
     ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
 )
-async def test_no_fixes_returns_no_fix_reward(
+async def test_no_fixes_records_no_non_regression(
     patch: str | None, commit: bool, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
     """An untouched tree records suite_non_regression 0.0 however recommended.patch looks.
@@ -1140,48 +1188,35 @@ async def test_reward_version_is_pinned(
     assert breakdown["intrinsic_reward_version"] == REWARD_VERSION
 
 
-async def test_reward_breakdown_carries_dual_version_stamps(
-    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
-) -> None:
-    """The rollout reward contract and the intrinsic scorer version are two stamps."""
-    from daydream.training.reward import REWARD_VERSION
-
-    from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
-
-    assert REWARD_VERSION == "2026.05.28-2"  # intrinsic parity pin (unchanged)
-    assert ROLLOUT_REWARD_VERSION == "2026.08.15-1"
-
-    archive_root = tmp_path / "archive"
-    _stage_run(archive_root, rundir_golden)
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
-
-    await task.score(trace, runtime)
-
-    breakdown = trace.info["reward_breakdown"]
-    assert breakdown["reward_version"] == ROLLOUT_REWARD_VERSION
-    assert breakdown["intrinsic_reward_version"] == REWARD_VERSION
-
-
 async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
 ) -> None:
     """A tampered sealed artifact makes the only reward zero and non-regression dishonest."""
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # The seal binds the committed diff re-derived at verify time; stage a real
+    # repo with a committed fix so the tamper below is the ONLY mismatch.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        capture_output=True,
+        check=True,
+    ).stdout
     # Harness produced the seal; the agent then rewrote an archived artifact.
     from daydream_review_v1.rundir import RUN_DIR_FILES
     from daydream_review_v1.verifier import seal_artifacts
 
-    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()]
-    seal = seal_artifacts(present, candidate_diff=b"candidate-diff")
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    seal = seal_artifacts(present, candidate_diff=diff)
     (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
     (run_dir / "deep" / "merged-items.json").write_text(
         json.dumps({"items": []}), encoding="utf-8"
     )  # tamper after sealing
 
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
 
@@ -1196,15 +1231,25 @@ async def test_untampered_sealed_run_scores_normally(
     """An intact seal leaves scoring unchanged."""
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # The seal must match the committed diff the verifier re-derives at scoring
+    # time from the live repo: stage a real repo with a committed fix.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        capture_output=True,
+        check=True,
+    ).stdout
     from daydream_review_v1.rundir import RUN_DIR_FILES
     from daydream_review_v1.verifier import seal_artifacts
 
-    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()]
-    seal = seal_artifacts(present, candidate_diff=b"candidate-diff")
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    seal = seal_artifacts(present, candidate_diff=diff)
     (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
 
-    task = _task(corpus_mini_dir, fixture_manifest_path)
-    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
 
@@ -1214,3 +1259,44 @@ async def test_untampered_sealed_run_scores_normally(
             assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
         ).composite
     )
+
+
+async def test_seal_detects_committed_diff_changed_after_sealing(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """The seal binds the diff applied at scoring time, not a self-consistent record.
+
+    verify_seal re-derives the candidate diff from the live repo, so a commit
+    made after sealing (a tampered committed diff — exactly what the verifier
+    checkout would apply) fails verification. The old tautology — re-hashing
+    the seal's own embedded copy of the diff — could never fail on this.
+    """
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.verifier import seal_artifacts
+
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    seal = seal_artifacts(present, candidate_diff=diff)
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+
+    # The committed diff changes after sealing: a second commit past the fix.
+    (repo / "README.md").write_text("# changed\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "--quiet", "-m", "tamper"], check=True)
+
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["seal_verified"] == 0.0
+    assert trace.rewards["intrinsic_composite"] == 0.0
