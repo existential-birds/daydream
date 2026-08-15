@@ -42,7 +42,7 @@ _MAX_RETRIES = 3
 _MAX_EXTRACTION_TOKENS = 4096
 _MAX_DEDUP_TOKENS = 4096
 _MIN_DEDUP_CANDIDATES = 2
-_JUDGE_CONCURRENCY = 10  # max parallel judge calls; mirrors CapacityLimiter convention in phases.py
+_JUDGE_CONCURRENCY = 10  # caps parallel model calls across extraction/dedup/judging; mirrors phases.py CapacityLimiter
 _TOOL = "daydream"
 
 _EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
@@ -194,6 +194,9 @@ async def run_anthropic_extraction(
     all_candidates = _load_json_dict(candidates_file, required=False)
 
     selected = _make_selection(golden_urls)
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+    tasks = []
+    meta = []
     for golden_url, entry in data.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -206,15 +209,25 @@ async def run_anthropic_extraction(
             if not all_text.strip():
                 continue
 
-            response = await client.complete_json(
-                system=_EXTRACTION_SYSTEM,
-                user=_EXTRACTION_PROMPT.format(comment=all_text),
-                max_tokens=_MAX_EXTRACTION_TOKENS,
+            tasks.append(
+                _complete_json_limited(
+                    semaphore,
+                    client,
+                    system=_EXTRACTION_SYSTEM,
+                    user=_EXTRACTION_PROMPT.format(comment=all_text),
+                    max_tokens=_MAX_EXTRACTION_TOKENS,
+                )
             )
-            issues = _extract_issues(response)
-            all_candidates.setdefault(golden_url, {})[tool] = [
-                {"text": issue, "path": None, "line": None, "source": "extracted"} for issue in issues
-            ]
+            meta.append(golden_url)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for golden_url, result in zip(meta, results, strict=True):
+        if isinstance(result, BaseException):
+            raise result
+        issues = _extract_issues(result)
+        all_candidates.setdefault(golden_url, {})[tool] = [
+            {"text": issue, "path": None, "line": None, "source": "extracted"} for issue in issues
+        ]
 
     candidates_file.write_text(json.dumps(all_candidates, indent=2))
 
@@ -243,6 +256,9 @@ async def run_anthropic_dedup(
     all_groups = _load_json_dict(groups_file, required=False)
 
     selected = _make_selection(golden_urls)
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+    tasks = []
+    meta = []
     for golden_url, tools in all_candidates.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -256,17 +272,24 @@ async def run_anthropic_dedup(
         if len(texts) < _MIN_DEDUP_CANDIDATES:
             continue
 
-        try:
-            response = await client.complete_json(
+        tasks.append(
+            _complete_json_limited(
+                semaphore,
+                client,
                 system=_DEDUP_SYSTEM,
                 user=_DEDUP_PROMPT.format(candidates=_numbered_candidates(texts)),
                 max_tokens=_MAX_DEDUP_TOKENS,
             )
-        except Exception:
-            response = None
-        groups = _extract_dedup_groups(response, len(texts)) if isinstance(response, dict) else None
+        )
+        meta.append((golden_url, len(texts)))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for (golden_url, n_texts), result in zip(meta, results, strict=True):
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+        groups = _extract_dedup_groups(result, n_texts) if isinstance(result, dict) else None
         if groups is None:
-            groups = _singleton_groups(len(texts))
+            groups = _singleton_groups(n_texts)
         all_groups.setdefault(golden_url, {})[tool] = groups
 
     groups_file.write_text(json.dumps(all_groups, indent=2))
@@ -622,6 +645,14 @@ def _assign_golden_matches(
         _try_assign(gi, set(), set())
 
     return golden_matches
+
+
+async def _complete_json_limited(
+    semaphore: asyncio.Semaphore, client: _AnthropicJsonCompleter, *, system: str, user: str, max_tokens: int
+) -> dict[str, Any]:
+    """Bound one ``complete_json`` model call under *semaphore*."""
+    async with semaphore:
+        return await client.complete_json(system=system, user=user, max_tokens=max_tokens)
 
 
 async def _judge_limited(

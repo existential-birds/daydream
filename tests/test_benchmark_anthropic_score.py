@@ -1,8 +1,10 @@
+import asyncio
 import json
 
 import pytest
 
 from daydream.benchmark.anthropic_score import (
+    _JUDGE_CONCURRENCY,
     AnthropicJsonClient,
     run_anthropic_dedup,
     run_anthropic_extraction,
@@ -23,6 +25,32 @@ class FakeAnthropicJson:
     async def complete_json(self, *, system, user, max_tokens):
         self.requests.append((system, user, max_tokens))
         return self._responses.pop(0)
+
+
+class OutOfOrderAnthropicJson:
+    """Completes later-scheduled requests first; tracks concurrent overlap."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._next_index = 0
+        self.active = 0
+        self.peak_active = 0
+
+    async def complete_json(self, *, system, user, max_tokens):
+        index = self._next_index
+        self._next_index += 1
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        try:
+            # Earlier indices yield more event-loop turns, so they finish last.
+            for _ in range(len(self._responses) - index):
+                await asyncio.sleep(0)
+            response = self._responses[index]
+            if isinstance(response, Exception):
+                raise response
+            return response
+        finally:
+            self.active -= 1
 
 
 def seed_benchmark_data(tmp_path, *, tool, body):
@@ -47,12 +75,42 @@ def seed_benchmark_data(tmp_path, *, tool, body):
     )
 
 
+def seed_parallel_benchmark_data(tmp_path, *, tool, reviews_by_url):
+    """Write results/benchmark_data.json from an ordered {url: [bodies]} map."""
+    (tmp_path / "results").mkdir()
+    data = {}
+    for golden_url, bodies in reviews_by_url.items():
+        data[golden_url] = {
+            "golden_comments": [{"comment": bodies[-1], "severity": "medium"}],
+            "reviews": [
+                {
+                    "tool": tool,
+                    "repo_name": "repo",
+                    "pr_url": golden_url,
+                    "review_comments": [{"body": body}],
+                }
+                for body in bodies
+            ],
+        }
+    (tmp_path / "results" / "benchmark_data.json").write_text(json.dumps(data))
+
+
 def seed_candidates(tmp_path, *, model, tool, texts):
     scores_dir = model_results_dir(tmp_path, model)
     scores_dir.mkdir(parents=True)
     (scores_dir / "candidates.json").write_text(
         json.dumps({URL: {tool: [{"text": text, "path": None, "line": None} for text in texts]}})
     )
+
+
+def seed_parallel_candidates(tmp_path, *, model, tool, texts_by_url):
+    """Write an ordered multi-URL candidates.json using the current field shape."""
+    scores_dir = model_results_dir(tmp_path, model)
+    scores_dir.mkdir(parents=True)
+    (scores_dir / "candidates.json").write_text(json.dumps({
+        url: {tool: [{"text": text, "path": None, "line": None} for text in texts]}
+        for url, texts in texts_by_url.items()
+    }))
 
 
 def seed_dedup_groups(tmp_path, *, model, tool, groups):
@@ -103,6 +161,30 @@ async def test_direct_extraction_writes_martian_candidates(tmp_path):
     assert all(c["source"] == "extracted" and c["path"] is None and c["line"] is None for c in leaf)
 
 
+@pytest.mark.asyncio
+async def test_direct_extraction_bounds_concurrency_and_preserves_source_order(tmp_path):
+    urls = [f"https://x/pull/{i}" for i in range(1, 12)]  # 11 URLs
+    reviews_by_url = {urls[0]: ["first review", "replacement review"]}
+    for url in urls[1:]:
+        reviews_by_url[url] = [f"review for {url}"]
+    seed_parallel_benchmark_data(tmp_path, tool="daydream", reviews_by_url=reviews_by_url)
+
+    responses = [{"issues": ["first issue"]}, {"issues": ["replacement issue"]}]
+    responses += [{"issues": [f"issue for {url}"]} for url in urls[1:]]
+    client = OutOfOrderAnthropicJson(responses)  # 12 requests
+
+    await run_anthropic_extraction(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    assert client.peak_active == _JUDGE_CONCURRENCY, f"peak={client.peak_active}"
+    candidates = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "candidates.json").read_text()
+    )
+    assert list(candidates.keys()) == urls
+    assert [c["text"] for c in candidates[urls[0]]["daydream"]] == ["replacement issue"]
+    for url in urls[1:]:
+        assert [c["text"] for c in candidates[url]["daydream"]] == [f"issue for {url}"]
+
+
 @pytest.mark.parametrize(
     ("texts", "response", "expected"),
     [
@@ -121,6 +203,28 @@ async def test_direct_dedup_writes_groups_or_singletons(tmp_path, texts, respons
 
     groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
     assert groups[URL]["daydream"] == expected
+
+
+@pytest.mark.asyncio
+async def test_direct_dedup_bounds_concurrency_preserves_order_and_falls_back_per_entry(tmp_path):
+    urls = [f"https://x/pull/{i}" for i in range(1, 13)]  # 12 URLs
+    texts_by_url = {url: [f"text a for {url}", f"text b for {url}"] for url in urls}
+    seed_parallel_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                             texts_by_url=texts_by_url)
+
+    responses = [{"groups": [[0, 1]]} for _ in urls]
+    responses[4] = RuntimeError("dedup request failed")  # 5th entry fails
+    client = OutOfOrderAnthropicJson(responses)
+
+    await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    assert client.peak_active == _JUDGE_CONCURRENCY, f"peak={client.peak_active}"
+    groups = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text()
+    )
+    assert list(groups.keys()) == urls
+    expected = [[[0, 1]] if i != 4 else [[0], [1]] for i in range(12)]
+    assert [groups[url]["daydream"] for url in urls] == expected
 
 
 @pytest.mark.asyncio
