@@ -11,6 +11,7 @@ in ``trace.info`` makes the reward path run real ``sh`` and real reads.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -291,6 +292,32 @@ _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@
 
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
+
+def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
+    """Harness-side seal production over a staged committed-fix repo.
+
+    Stages the fixture repo with the fix COMMITTED (the seal binds the committed
+    diff the verifier re-derives at scoring time, never the working tree),
+    hashes the archive members the harness recorded, and writes ``seal.json``
+    into *run_dir*. Returns the staged repo path.
+    """
+    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.verifier import seal_artifacts
+
+    repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
+        capture_output=True,
+        check=True,
+    ).stdout
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    seal = seal_artifacts(present, candidate_diff=diff)
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+    return repo
+
+
 # A gutted suite that PASSES if run: a vulnerable impl that executes the
 # tampered oracle gets exit 0 -> reward 1.0. The gate must return 0.0 instead.
 _TAMPER_PASSING = (
@@ -458,17 +485,20 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     fixture_manifest_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The verifier identity branch is reachable and fail-closed on the real runtime.
+    """The verifier identity branch is reachable and never falls back to the mutable tree.
 
     The image provisions the distinct non-root verifier identity
     (``base.Dockerfile``); the host subprocess smoke path does not, so force the
     identity probe to simulate the container. The real checkout construction
-    then executes (git clone/detach/apply against the staged repo), and the
-    root-owned ``chown`` cannot succeed as an unprivileged host user — so
-    construction fails and the re-run must be an explicit zero, never a fallback
-    to the agent-mutable tree, whose suite here is green (contrast
-    ``test_green_suite_records_non_regression``, which scores 1.0 on exactly the
-    mutable-tree fallback shape).
+    then executes (git clone/detach/apply against the staged repo). On an
+    unprivileged host the root-owned ``chown`` cannot succeed, so construction
+    fails and the re-run must be an explicit zero — fail-closed, never a
+    fallback to the agent-mutable tree, whose suite here is green (contrast
+    ``test_green_suite_records_non_regression``, which scores 1.0 on exactly
+    the mutable-tree fallback shape). On a root host with the verifier identity
+    (the production container shape) the ``chown`` succeeds and the suite
+    re-runs green under the verifier identity instead; the expected reading
+    follows the host shape either way.
     """
     from daydream_review_v1 import taskset
 
@@ -481,6 +511,11 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
+    # Keep the real host probe (setpriv + verifier user) before it is replaced:
+    # the assertion below must know whether the host can actually complete the
+    # verifier re-run, not just whether the branch was forced on.
+    real_identity_available = taskset._verifier_identity_available
+
     async def _identity_available(_runtime: vf.Runtime) -> bool:
         return True  # container shape: setpriv + verifier user provisioned
 
@@ -488,10 +523,16 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
 
     await task.score(trace, runtime)
 
-    # The oracle gate passed: the zero below comes from the verifier branch's
-    # fail-closed checkout construction, not from a changed test oracle.
+    # The oracle gate passed: the reading below comes from the verifier branch,
+    # not from a changed test oracle.
     assert trace.metrics["test_oracle_unchanged"] == 1.0
-    assert trace.metrics["suite_non_regression"] == 0.0
+    # The expected suite reading follows the host shape: the root-owned chown
+    # only fails on an unprivileged host, so there construction fails closed to
+    # an explicit zero; on a root host with the verifier identity the checkout
+    # is built and the suite re-runs green under the verifier identity. Both
+    # shapes prove the re-run never fell back to the agent-mutable tree.
+    verifier_rerun_succeeds = os.geteuid() == 0 and await real_identity_available(runtime)
+    assert trace.metrics["suite_non_regression"] == (1.0 if verifier_rerun_succeeds else 0.0)
     # _prepare_verify_checkout really executed its git steps: the verify clone
     # exists and carries the applied candidate diff (it is left on disk by the
     # failed construction rather than silently skipped).
@@ -1195,23 +1236,8 @@ async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # The seal binds the committed diff re-derived at verify time; stage a real
-    # repo with a committed fix so the tamper below is the ONLY mismatch.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
-        capture_output=True,
-        check=True,
-    ).stdout
     # Harness produced the seal; the agent then rewrote an archived artifact.
-    from daydream_review_v1.rundir import RUN_DIR_FILES
-    from daydream_review_v1.verifier import seal_artifacts
-
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
-    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
-    seal = seal_artifacts(present, candidate_diff=diff)
-    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+    repo = _seal_run(run_dir, task, tmp_path / "repo")
     (run_dir / "deep" / "merged-items.json").write_text(
         json.dumps({"items": []}), encoding="utf-8"
     )  # tamper after sealing
@@ -1232,22 +1258,7 @@ async def test_untampered_sealed_run_scores_normally(
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # The seal must match the committed diff the verifier re-derives at scoring
-    # time from the live repo: stage a real repo with a committed fix.
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
-        capture_output=True,
-        check=True,
-    ).stdout
-    from daydream_review_v1.rundir import RUN_DIR_FILES
-    from daydream_review_v1.verifier import seal_artifacts
-
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
-    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
-    seal = seal_artifacts(present, candidate_diff=diff)
-    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+    repo = _seal_run(run_dir, task, tmp_path / "repo")
 
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -1274,20 +1285,7 @@ async def test_seal_detects_committed_diff_changed_after_sealing(
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    diff = subprocess.run(
-        ["git", "-C", str(repo), "diff", task.data.head_sha, "HEAD"],
-        capture_output=True,
-        check=True,
-    ).stdout
-    from daydream_review_v1.rundir import RUN_DIR_FILES
-    from daydream_review_v1.verifier import seal_artifacts
-
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
-    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
-    seal = seal_artifacts(present, candidate_diff=diff)
-    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+    repo = _seal_run(run_dir, task, tmp_path / "repo")
 
     # The committed diff changes after sealing: a second commit past the fix.
     (repo / "README.md").write_text("# changed\n", encoding="utf-8")
@@ -1300,3 +1298,64 @@ async def test_seal_detects_committed_diff_changed_after_sealing(
 
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0
+
+
+async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A harness-sealed run whose seal vanished is a tamper, never legacy unsealed.
+
+    verify_seal's ``None`` is the legacy path only when no seal was expected:
+    the harness recorded ``daydream_seal_ok=True``, so a missing ``seal.json``
+    at scoring time is an internal contradiction and must fail closed
+    (``seal_verified`` 0.0, zero intrinsic, no honest non-regression) instead
+    of scoring the run at full trust.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)  # staged copy carries no seal.json
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+    trace.info["daydream_seal_ok"] = True  # the harness claims it sealed the run
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["seal_verified"] == 0.0
+    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0
+
+
+async def test_git_failure_at_verify_time_fails_closed(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A scoring-time diff re-derivation failure must not hash as the empty diff.
+
+    seal_archived_run records ``b""`` when git fails at seal time; if
+    verify_seal mapped a scoring-time git failure to ``b""`` too, a git failure
+    at BOTH times would yield matching sha256(b"") digests and verify True
+    (``seal_verified`` 1.0) on a run whose diff was never re-derived. A failed
+    re-derivation must fail closed like any other unverifiable seal.
+    """
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    from daydream_review_v1.rundir import RUN_DIR_FILES
+    from daydream_review_v1.verifier import seal_artifacts
+
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    # A seal produced while git failed at seal time seals the empty diff.
+    seal = seal_artifacts(present, candidate_diff=b"")
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+
+    # The repo under review is not a git repository: ``git diff`` fails at
+    # scoring time with a non-zero exit, exactly the empty-diff collision.
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "not-a-repo")
+    trace.info["daydream_seal_ok"] = True
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["seal_verified"] == 0.0
+    assert trace.rewards["intrinsic_composite"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0

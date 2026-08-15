@@ -202,7 +202,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home agent \
  && useradd --system --create-home verifier \
- && chown -R agent:agent /rollout \
+ && chown -R agent:agent /rollout /work \
  && chmod 0755 /rollout/archive
 
 COPY run-as-agent /usr/local/bin/run-as-agent

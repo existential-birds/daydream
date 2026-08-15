@@ -119,6 +119,8 @@ async def verify_seal(
     runtime: vf.Runtime,
     repo: str,
     head_sha: str,
+    *,
+    seal_expected: bool = False,
 ) -> bool | None:
     """Verify the staged run dir's supervisor-produced seal.
 
@@ -130,18 +132,29 @@ async def verify_seal(
             diff the verifier checkout will actually apply.
         repo: The repository under review inside the sandbox.
         head_sha: The baked head SHA the rollout diffed against.
+        seal_expected: Whether the harness claims to have sealed the run. A run
+            the harness sealed whose ``seal.json`` is missing at scoring time
+            is a vanished seal — a tamper, never a legacy unsealed run — so it
+            must fail closed rather than score at full trust.
 
     Returns:
         ``True`` when the seal verifies against the staged members and the diff
         re-derived from the sandbox; ``False`` when a seal exists but is
         missing, malformed, or mismatched (a tamper must zero the reward, not
-        crash scoring); ``None`` when no seal was produced (legacy/unsealed
-        runs keep their pre-seal scoring — the harness seals every completed
+        crash scoring) — including a vanished seal on a run the harness claims
+        to have sealed (*seal_expected*), and a diff that cannot be re-derived
+        (a git failure must fail closed, never hash as the empty diff); ``None``
+        when no seal was produced and none was expected (legacy/unsealed runs
+        keep their pre-seal scoring — the harness seals every completed
         production run, so this is the test-only path). Never raises.
     """
     seal_path = run_dir / "seal.json"
     if not seal_path.is_file():
-        return None
+        # A missing seal is the legacy path only when none was expected. The
+        # harness claimed to seal this run, so a vanished seal.json is an
+        # internal contradiction that must read as a tamper, never as an
+        # unsealed run at full trust.
+        return False if seal_expected else None
     try:
         seal = SealResult.model_validate_json(seal_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -162,8 +175,14 @@ async def verify_seal(
         diff_result = await runtime.run(["git", "-C", repo, "diff", head_sha, "HEAD"], {})
     except Exception:
         return False
-    candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
-    return verify(seal, present, candidate_diff=candidate_diff)
+    if diff_result.exit_code != 0:
+        # The diff cannot be re-derived, so there is nothing to verify against.
+        # Hashing b"" here would let a git failure at BOTH seal and scoring
+        # time pass as a matching empty diff (seal_verified 1.0 on a run whose
+        # diff was never re-derived); a failed re-derivation must fail closed
+        # like any other unverifiable seal.
+        return False
+    return verify(seal, present, candidate_diff=diff_result.stdout.encode())
 
 
 async def seal_archived_run(

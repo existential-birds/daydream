@@ -146,6 +146,20 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             self.config.repo_path,
         ]
         if runtime.type == "docker":
+            # The repo image clones the checkout as root (repo.Dockerfile), so
+            # hand the workspace — and the in-container origin mirror the deep
+            # flow pushes its fix to — to the agent identity before the
+            # privilege drop. Otherwise every deep-flow write (.daydream/,
+            # worktrees, fix edits, git add/commit, push) EACCESes as the
+            # agent uid and the rollout dies before any model turn.
+            handoff = await runtime.run(
+                ["chown", "-R", "agent:agent", self.config.repo_path, "/srv/mirror.git"], env
+            )
+            if handoff.exit_code != 0:
+                raise RuntimeError(
+                    "could not hand the checkout to the agent identity: "
+                    f"{handoff.stdout}{handoff.stderr}"
+                )
             # Container launches drop from the container default user (root) to
             # the non-root agent identity through the image's root-owned
             # run-as-agent wrapper, so every daydream process and backend CLI

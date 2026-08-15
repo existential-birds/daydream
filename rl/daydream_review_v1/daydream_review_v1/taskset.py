@@ -547,7 +547,14 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
                         state.seal_ok = False
                     else:
                         state.seal_ok = await verify_seal(
-                            state.run_dir, runtime, _repo_path(trace), self.data.head_sha
+                            state.run_dir,
+                            runtime,
+                            _repo_path(trace),
+                            self.data.head_sha,
+                            # The harness claims to have sealed this run: a
+                            # seal that did not survive to scoring is a vanished
+                            # seal (tamper), never the legacy unsealed path.
+                            seal_expected=trace.info.get("daydream_seal_ok") is True,
                         )
             if state.seal_ok is not None:
                 trace.record_metric("seal_verified", float(state.seal_ok))
@@ -670,7 +677,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         if verify_dir is None:
             return vf.ProgramResult(exit_code=1, stdout="", stderr="verify checkout construction failed")
         command = f"cd {shlex.quote(verify_dir)} && {self.data.test_command}"
-        runner = f"setpriv --reuid=verifier --regid=verifier --clear-groups sh -c {shlex.quote(command)}"
+        runner = f"setpriv --no-new-privs --reuid=verifier --regid=verifier --clear-groups sh -c {shlex.quote(command)}"
         return await runtime.run(["sh", "-c", runner], {})
 
     @vf.metric

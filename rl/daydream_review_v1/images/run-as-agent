@@ -8,4 +8,4 @@ if [ "$(id -u)" != "0" ]; then
     echo "run-as-agent: must be run as root" >&2
     exit 1
 fi
-exec setpriv --reuid=agent --regid=agent --clear-groups "$@"
+exec setpriv --no-new-privs --reuid=agent --regid=agent --clear-groups "$@"

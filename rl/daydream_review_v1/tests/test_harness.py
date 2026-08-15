@@ -222,6 +222,11 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
     under the distinct non-root verifier identity against a separate
     root-owned read-only checkout — never the agent-mutable tree. The local
     subprocess smoke path has no wrapper (no root boundary to cross).
+
+    Beyond argv, the wrapper itself must actually deliver the drop — the
+    property it exists for, not just the prefix it is named with — so a
+    wrapper that cannot leave root (or a harness that merely names one) fails
+    this container contract.
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
@@ -233,6 +238,17 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
     assert argv[0] == "run-as-agent"
     assert argv[1] == "daydream"
     assert argv[argv.index("--backend") + 1] == "claude"
+
+    # Pin the terminal property of the seam by executing it: root must drop
+    # off root, and a non-root caller must be refused.
+    wrapper = PROJECT_ROOT / "images" / "run-as-agent"
+    dropped = subprocess.run([str(wrapper), "id", "-u"], capture_output=True, text=True)
+    if os.geteuid() == 0:
+        assert dropped.returncode == 0, dropped.stderr
+        assert dropped.stdout.strip() != "0", "run-as-agent must drop off root"
+    else:
+        assert dropped.returncode != 0, "non-root callers must be refused"
+        assert "must be run as root" in dropped.stderr
 
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
@@ -254,6 +270,12 @@ def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
         assert "must be run as root" in result.stderr
     elif result.returncode == 0:
         assert result.stdout.strip() != "0", "run-as-agent must drop off root"
+    else:
+        # Root host where the wrapper failed (broken wrapper or missing agent
+        # user): fail-closed means the payload must never run as root, even on
+        # the failure path — a non-zero exit that still emitted the root uid
+        # would be a silent fail-open.
+        assert result.stdout.strip() != "0", "a failing wrapper must not run the payload as root"
 
 
 class _ArchivingDockerRuntime(_DockerLikeRuntime):
