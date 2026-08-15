@@ -10,9 +10,10 @@ entry both in-process judge routes drive.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,7 @@ _MAX_RETRIES = 3
 _MAX_EXTRACTION_TOKENS = 4096
 _MAX_DEDUP_TOKENS = 4096
 _MIN_DEDUP_CANDIDATES = 2
-_JUDGE_CONCURRENCY = 10  # max parallel judge calls; mirrors CapacityLimiter convention in phases.py
+_JUDGE_CONCURRENCY = 10  # caps parallel model calls across extraction/dedup/judging; mirrors phases.py CapacityLimiter
 _TOOL = "daydream"
 
 _EXTRACTION_SYSTEM = "You extract code review issues from comments. Always respond with valid JSON."
@@ -194,6 +195,8 @@ async def run_anthropic_extraction(
     all_candidates = _load_json_dict(candidates_file, required=False)
 
     selected = _make_selection(golden_urls)
+    jobs: list[tuple[tuple[int, str], Callable[[], Awaitable[Any]]]] = []
+    last_review_index: dict[str, int] = {}
     for golden_url, entry in data.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -206,15 +209,38 @@ async def run_anthropic_extraction(
             if not all_text.strip():
                 continue
 
-            response = await client.complete_json(
-                system=_EXTRACTION_SYSTEM,
-                user=_EXTRACTION_PROMPT.format(comment=all_text),
-                max_tokens=_MAX_EXTRACTION_TOKENS,
+            job_index = len(jobs)
+            jobs.append(
+                (
+                    (job_index, golden_url),
+                    functools.partial(
+                        client.complete_json,
+                        system=_EXTRACTION_SYSTEM,
+                        user=_EXTRACTION_PROMPT.format(comment=all_text),
+                        max_tokens=_MAX_EXTRACTION_TOKENS,
+                    ),
+                )
             )
-            issues = _extract_issues(response)
+            # Reserve the URL key up front so candidates.json keeps source order
+            # regardless of completion order.
+            all_candidates.setdefault(golden_url, {})
+            last_review_index[golden_url] = job_index
+
+    def _handle(meta: tuple[int, str], result: Any) -> None:
+        job_index, golden_url = meta
+        # Extraction is fail-fast: any permanent failure (5xx after retries, or a
+        # malformed response) aborts the run before the remaining paid calls finish.
+        if isinstance(result, BaseException):
+            raise result
+        issues = _extract_issues(result)
+        # A URL with several reviews keeps only its last review's issues; committing
+        # by completion order would make the winner nondeterministic.
+        if job_index == last_review_index[golden_url]:
             all_candidates.setdefault(golden_url, {})[tool] = [
                 {"text": issue, "path": None, "line": None, "source": "extracted"} for issue in issues
             ]
+
+    await run_bounded(jobs, handle=_handle)
 
     candidates_file.write_text(json.dumps(all_candidates, indent=2))
 
@@ -243,6 +269,7 @@ async def run_anthropic_dedup(
     all_groups = _load_json_dict(groups_file, required=False)
 
     selected = _make_selection(golden_urls)
+    jobs: list[tuple[tuple[str, int], Callable[[], Awaitable[Any]]]] = []
     for golden_url, tools in all_candidates.items():
         if selected is not None and golden_url not in selected:
             continue
@@ -256,18 +283,30 @@ async def run_anthropic_dedup(
         if len(texts) < _MIN_DEDUP_CANDIDATES:
             continue
 
-        try:
-            response = await client.complete_json(
-                system=_DEDUP_SYSTEM,
-                user=_DEDUP_PROMPT.format(candidates=_numbered_candidates(texts)),
-                max_tokens=_MAX_DEDUP_TOKENS,
+        jobs.append(
+            (
+                (golden_url, len(texts)),
+                functools.partial(
+                    client.complete_json,
+                    system=_DEDUP_SYSTEM,
+                    user=_DEDUP_PROMPT.format(candidates=_numbered_candidates(texts)),
+                    max_tokens=_MAX_DEDUP_TOKENS,
+                ),
             )
-        except Exception:
-            response = None
-        groups = _extract_dedup_groups(response, len(texts)) if isinstance(response, dict) else None
+        )
+        # Reserve the URL key up front so dedup_groups.json keeps source order.
+        all_groups.setdefault(golden_url, {})
+
+    def _handle(meta: tuple[str, int], result: Any) -> None:
+        golden_url, n_texts = meta
+        if isinstance(result, BaseException) and not isinstance(result, Exception):
+            raise result
+        groups = _extract_dedup_groups(result, n_texts) if isinstance(result, dict) else None
         if groups is None:
-            groups = _singleton_groups(len(texts))
+            groups = _singleton_groups(n_texts)
         all_groups.setdefault(golden_url, {})[tool] = groups
+
+    await run_bounded(jobs, handle=_handle)
 
     groups_file.write_text(json.dumps(all_groups, indent=2))
 
@@ -479,32 +518,36 @@ async def _evaluate_review(
             "recall": 0.0,
         }
 
-    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
-    tasks = []
-    task_meta = []
+    jobs: list[tuple[tuple[int, int, int], Callable[[], Awaitable[JudgeVerdict]]]] = []
     for gi, golden_comment in enumerate(golden):
         for ci, candidate in enumerate(candidates):
-            tasks.append(_judge_limited(semaphore, judge, golden_comment["comment"], candidate))
-            task_meta.append((gi, ci))
+            jobs.append(
+                (
+                    (len(jobs), gi, ci),
+                    functools.partial(judge.same_issue, golden_comment["comment"], candidate),
+                )
+            )
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
     # Occurrences are tracked by their zero-based list position, not their text, so
     # equal-text comments at different positions stay structurally distinct.
     candidate_matched: list[bool] = [False] * len(candidates)
     sibling_map = _build_sibling_map(len(candidates), dedup_groups)
-    errors = []
+    # Keyed by source index so the persisted error list stays in source order.
+    errors_by_index: dict[int, dict[str, str]] = {}
 
     positives: list[tuple[float, int, int, int, JudgeVerdict]] = []
 
-    for index, result in enumerate(results):
-        gi, ci = task_meta[index]
+    def _handle(meta: tuple[int, int, int], result: Any) -> None:
+        index, gi, ci = meta
         golden_comment = golden[gi]["comment"]
         if isinstance(result, BaseException):
-            errors.append({"golden": golden_comment, "candidate": candidates[ci], "error": str(result)})
-            continue
+            errors_by_index[index] = {"golden": golden_comment, "candidate": candidates[ci], "error": str(result)}
+            return
 
         if result.match:
             positives.append((-result.confidence, index, gi, ci, result))
+
+    await run_bounded(jobs, handle=_handle)
 
     # One-to-one assignment: each candidate (with its dedup siblings) satisfies at most one golden.
     # A plain greedy pass can strand a golden whose candidate groups were all taken by earlier,
@@ -554,6 +597,8 @@ async def _evaluate_review(
     predicted_count = tp_count + len(false_positives)
     precision = tp_count / predicted_count if predicted_count > 0 else 0.0
     recall = tp_count / total_golden if total_golden > 0 else 0.0
+
+    errors = [errors_by_index[index] for index in sorted(errors_by_index)]
 
     return {
         "skipped": False,
@@ -624,12 +669,45 @@ def _assign_golden_matches(
     return golden_matches
 
 
-async def _judge_limited(
-    semaphore: asyncio.Semaphore, judge: FindingJudge, golden_comment: str, candidate: str
-) -> JudgeVerdict:
-    """Bound judge concurrency; `JudgeError` propagates to the per-pair error record."""
-    async with semaphore:
-        return await judge.same_issue(golden_comment, candidate)
+async def run_bounded(
+    jobs: list[tuple[Any, Callable[[], Awaitable[Any]]]],
+    *,
+    handle: Callable[[Any, Any], None],
+) -> None:
+    """Run ``(meta, call)`` jobs under one shared ``_JUDGE_CONCURRENCY`` semaphore.
+
+    ``handle(meta, result)`` fires as each job completes (completion order); a
+    failed job is delivered as the exception instance for the caller's policy
+    (abort, fall back, or record). If ``handle`` raises — a fail-fast policy —
+    every still-pending job is cancelled before the exception propagates, so no
+    further paid model calls start after an abort. Callers that need deterministic
+    output order key their own state by ``meta``.
+    """
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+
+    async def _bounded(call: Callable[[], Awaitable[Any]]) -> Any:
+        async with semaphore:
+            return await call()
+
+    tasks = [asyncio.create_task(_bounded(call)) for _, call in jobs]
+    metas = [meta for meta, _ in jobs]
+    task_index = {task: i for i, task in enumerate(tasks)}
+    pending = set(tasks)
+    try:
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                index = task_index[task]
+                try:
+                    result = task.result()
+                except BaseException as exc:
+                    result = exc
+                handle(metas[index], result)
+    except BaseException:
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise
 
 
 def _build_sibling_map(candidate_count: int, groups: list[list[int]] | None) -> dict[int, set[int]]:

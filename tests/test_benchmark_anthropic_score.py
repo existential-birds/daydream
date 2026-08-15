@@ -1,8 +1,10 @@
+import asyncio
 import json
 
 import pytest
 
 from daydream.benchmark.anthropic_score import (
+    _JUDGE_CONCURRENCY,
     AnthropicJsonClient,
     run_anthropic_dedup,
     run_anthropic_extraction,
@@ -25,34 +27,68 @@ class FakeAnthropicJson:
         return self._responses.pop(0)
 
 
+class OutOfOrderAnthropicJson:
+    """Completes later-scheduled requests first; tracks concurrent overlap."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self._next_index = 0
+        self.active = 0
+        self.peak_active = 0
+
+    async def complete_json(self, *, system, user, max_tokens):
+        index = self._next_index
+        self._next_index += 1
+        self.active += 1
+        self.peak_active = max(self.peak_active, self.active)
+        try:
+            # Earlier indices yield more event-loop turns, so they finish last.
+            for _ in range(len(self._responses) - index):
+                await asyncio.sleep(0)
+            response = self._responses[index]
+            if isinstance(response, Exception):
+                raise response
+            return response
+        finally:
+            self.active -= 1
+
+
 def seed_benchmark_data(tmp_path, *, tool, body):
-    results = tmp_path / "results"
-    results.mkdir()
-    (results / "benchmark_data.json").write_text(
-        json.dumps(
-            {
-                URL: {
-                    "golden_comments": [{"comment": body, "severity": "medium"}],
-                    "reviews": [
-                        {
-                            "tool": tool,
-                            "repo_name": "repo",
-                            "pr_url": URL,
-                            "review_comments": [{"body": body}],
-                        }
-                    ]
+    seed_parallel_benchmark_data(tmp_path, tool=tool, reviews_by_url={URL: [body]})
+
+
+def seed_parallel_benchmark_data(tmp_path, *, tool, reviews_by_url):
+    """Write results/benchmark_data.json from an ordered {url: [bodies]} map."""
+    (tmp_path / "results").mkdir()
+    data = {}
+    for golden_url, bodies in reviews_by_url.items():
+        data[golden_url] = {
+            "golden_comments": [{"comment": bodies[-1], "severity": "medium"}],
+            "reviews": [
+                {
+                    "tool": tool,
+                    "repo_name": "repo",
+                    "pr_url": golden_url,
+                    "review_comments": [{"body": body}],
                 }
-            }
-        )
-    )
+                for body in bodies
+            ],
+        }
+    (tmp_path / "results" / "benchmark_data.json").write_text(json.dumps(data))
 
 
 def seed_candidates(tmp_path, *, model, tool, texts):
+    seed_parallel_candidates(tmp_path, model=model, tool=tool, texts_by_url={URL: texts})
+
+
+def seed_parallel_candidates(tmp_path, *, model, tool, texts_by_url):
+    """Write an ordered multi-URL candidates.json using the current field shape."""
     scores_dir = model_results_dir(tmp_path, model)
     scores_dir.mkdir(parents=True)
-    (scores_dir / "candidates.json").write_text(
-        json.dumps({URL: {tool: [{"text": text, "path": None, "line": None} for text in texts]}})
-    )
+    (scores_dir / "candidates.json").write_text(json.dumps({
+        url: {tool: [{"text": text, "path": None, "line": None} for text in texts]}
+        for url, texts in texts_by_url.items()
+    }))
 
 
 def seed_dedup_groups(tmp_path, *, model, tool, groups):
@@ -103,6 +139,30 @@ async def test_direct_extraction_writes_martian_candidates(tmp_path):
     assert all(c["source"] == "extracted" and c["path"] is None and c["line"] is None for c in leaf)
 
 
+@pytest.mark.asyncio
+async def test_direct_extraction_bounds_concurrency_and_preserves_source_order(tmp_path):
+    urls = [f"https://x/pull/{i}" for i in range(1, 12)]  # 11 URLs
+    reviews_by_url = {urls[0]: ["first review", "replacement review"]}
+    for url in urls[1:]:
+        reviews_by_url[url] = [f"review for {url}"]
+    seed_parallel_benchmark_data(tmp_path, tool="daydream", reviews_by_url=reviews_by_url)
+
+    responses = [{"issues": ["first issue"]}, {"issues": ["replacement issue"]}]
+    responses += [{"issues": [f"issue for {url}"]} for url in urls[1:]]
+    client = OutOfOrderAnthropicJson(responses)  # 12 requests
+
+    await run_anthropic_extraction(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    assert client.peak_active == _JUDGE_CONCURRENCY, f"peak={client.peak_active}"
+    candidates = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "candidates.json").read_text()
+    )
+    assert list(candidates.keys()) == urls
+    assert [c["text"] for c in candidates[urls[0]]["daydream"]] == ["replacement issue"]
+    for url in urls[1:]:
+        assert [c["text"] for c in candidates[url]["daydream"]] == [f"issue for {url}"]
+
+
 @pytest.mark.parametrize(
     ("texts", "response", "expected"),
     [
@@ -121,6 +181,28 @@ async def test_direct_dedup_writes_groups_or_singletons(tmp_path, texts, respons
 
     groups = json.loads((model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text())
     assert groups[URL]["daydream"] == expected
+
+
+@pytest.mark.asyncio
+async def test_direct_dedup_bounds_concurrency_preserves_order_and_falls_back_per_entry(tmp_path):
+    urls = [f"https://x/pull/{i}" for i in range(1, 13)]  # 12 URLs
+    texts_by_url = {url: [f"text a for {url}", f"text b for {url}"] for url in urls}
+    seed_parallel_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                             texts_by_url=texts_by_url)
+
+    responses = [{"groups": [[0, 1]]} for _ in urls]
+    responses[4] = RuntimeError("dedup request failed")  # 5th entry fails
+    client = OutOfOrderAnthropicJson(responses)
+
+    await run_anthropic_dedup(tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client)
+
+    assert client.peak_active == _JUDGE_CONCURRENCY, f"peak={client.peak_active}"
+    groups = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "dedup_groups.json").read_text()
+    )
+    assert list(groups.keys()) == urls
+    expected = [[[0, 1]] if i != 4 else [[0], [1]] for i in range(12)]
+    assert [groups[url]["daydream"] for url in urls] == expected
 
 
 @pytest.mark.asyncio
@@ -202,6 +284,77 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
     assert leaf["precision"] <= 1.0
     assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["golden two"]
     assert [fn["golden_comment"] for fn in leaf["false_negatives"]] == ["golden one"]
+
+
+@pytest.mark.asyncio
+async def test_direct_judge_records_per_pair_errors_in_source_order(tmp_path):
+    """Judge failures are recorded per golden-candidate pair and re-emitted in
+    source index order regardless of completion order; each errors entry carries
+    the verbatim golden/candidate/error for its own pair."""
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "benchmark_data.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "golden_comments": [
+                        {"comment": "golden a", "severity": "medium"},
+                        {"comment": "golden b", "severity": "medium"},
+                    ],
+                    "reviews": [
+                        {
+                            "tool": "daydream",
+                            "repo_name": "repo",
+                            "pr_url": URL,
+                            "review_comments": [{"body": "the bug"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                    texts=["cand a", "cand b", "cand c"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                      groups=[[0], [1], [2]])
+    # Judge tasks run in (gi, ci) order: (0,0) ok, (0,1) fails, (0,2) ok,
+    # (1,0) fails, (1,1) ok, (1,2) ok. OutOfOrderAnthropicJson completes them
+    # in reverse, so the recorded errors must be re-sorted by source index when
+    # persisted (2 errors / 6 comparisons stays under JUDGE_ERROR_RATIO_THRESHOLD).
+    client = OutOfOrderAnthropicJson(
+        [
+            {"issues": ["cand a", "cand b", "cand c"]},
+            {"groups": [[0], [1], [2]]},
+            {"reasoning": "a0", "match": True, "confidence": 0.9},
+            RuntimeError("judge failed for golden a x cand b"),
+            {"reasoning": "a2", "match": True, "confidence": 0.7},
+            RuntimeError("judge failed for golden b x cand a"),
+            {"reasoning": "b1", "match": True, "confidence": 0.8},
+            {"reasoning": "b2", "match": True, "confidence": 0.6},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    # Each failure is keyed to its own pair and re-emitted in source order.
+    assert leaf["errors"] == [
+        {"golden": "golden a", "candidate": "cand b", "error": "judge failed for golden a x cand b"},
+        {"golden": "golden b", "candidate": "cand a", "error": "judge failed for golden b x cand a"},
+    ]
+    assert leaf["errors_count"] == 2
+    # Failed pairs only record errors; successful pairs still count.
+    assert (leaf["tp"], leaf["fp"], leaf["fn"]) == (2, 1, 0)
+    assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["golden a", "golden b"]
+    assert leaf["false_positives"] == [{"candidate": "cand c"}]
+    assert scores.total_tp == 2
 
 
 @pytest.mark.parametrize(
@@ -507,3 +660,47 @@ async def test_direct_scoring_filters_extraction_and_dedup_to_selected_urls(tmp_
     # Selected-only scoring.
     assert scores.scored_pr_count == 1
     assert scores.total_tp == 1
+
+
+class FailFastAnthropicJson:
+    """Like FakeAnthropicJson but with real I/O-style awaits so pending semaphore
+    jobs stay cancellable; tracks how many calls actually started."""
+
+    def __init__(self, responses, fail_index=None):
+        self._responses = list(responses)
+        self._fail_index = fail_index
+        self._next = 0
+        self.started = 0
+
+    async def complete_json(self, *, system, user, max_tokens):
+        idx = self._next
+        self._next += 1
+        self.started += 1
+        if self._fail_index is not None and idx == self._fail_index:
+            await asyncio.sleep(0.001)
+            raise RuntimeError("permanent 5xx")
+        await asyncio.sleep(0.02)
+        return self._responses[idx]
+
+
+@pytest.mark.asyncio
+async def test_direct_extraction_fails_fast_and_cancels_pending(tmp_path):
+    """Extraction is fail-fast: a permanent failure aborts and cancels pending
+    jobs so no further paid calls start after the abort (nothing is written)."""
+    urls = [f"https://x/pull/{i}" for i in range(1, 13)]  # 12 URLs
+    reviews_by_url = {url: [f"review for {url}"] for url in urls}
+    seed_parallel_benchmark_data(tmp_path, tool="daydream", reviews_by_url=reviews_by_url)
+
+    responses = [{"issues": [f"ok {i}"]} for i in range(12)]
+    client = FailFastAnthropicJson(responses, fail_index=5)  # 6th job fails
+
+    with pytest.raises(RuntimeError):
+        await run_anthropic_extraction(
+            tmp_path, "claude-opus-4-5-20251101", tool="daydream", client=client
+        )
+
+    # A permanent failure must not schedule every remaining paid call.
+    assert client.started < len(urls), f"fail-fast broken: started {client.started}/{len(urls)}"
+    # Nothing is persisted after an abort.
+    cand = model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "candidates.json"
+    assert not cand.exists(), "fail-fast abort must not write candidates.json"
