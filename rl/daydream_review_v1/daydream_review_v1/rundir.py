@@ -22,6 +22,13 @@ import verifiers.v1 as vf
 #: optional: a review-only rollout has no verdicts, a green run has no
 #: fix-failures. ``deep/stack-*-records.json`` is collected separately by glob —
 #: its names depend on which stacks the router detected.
+#:
+#: ``trajectory.json`` and any per-fork ``trajectories/*.json`` are deliberately
+#: NOT listed here: they carry untrusted, model-directed operational text from
+#: the committed golden run (test-only data) and must never be forwarded into
+#: model context through the collector. Exclusion is by omission from this
+#: allowlist and is pinned by tests/test_rundir.py::
+#: test_fetch_run_dir_excludes_fixture_trajectories.
 RUN_DIR_FILES: tuple[str, ...] = (
     "manifest.json",
     "review-output.md",
