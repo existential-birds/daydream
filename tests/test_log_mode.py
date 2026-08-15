@@ -224,6 +224,39 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     assert "[REDACTED" in out
 
 
+def test_log_mode_summaries_redact_structured_credentials() -> None:
+    """Log-mode summaries must use the structured redactor, not the flat one.
+
+    Issue #455 broadens structured credential redaction. Flat ``redact_text``
+    leaks structured credentials that ``redact_structured_text`` catches -- e.g.
+    a nested ``key=value`` assignment (``token=opaque-test-12345``) and a Basic
+    auth header's base64 credential. These flow through the real agent summary
+    paths (``_summarize_input`` / ``_summarize_output`` / ``_print_log``), so a
+    flat-only redactor would print the secret in --log mode.
+    """
+    from daydream.agent import _print_log, _summarize_input, _summarize_output
+
+    # Nested assignment under a sensitive key: flat redaction leaks the token.
+    out = _summarize_input({"command": "the config: token=opaque-test-12345"})
+    assert "opaque-test-12345" not in out
+    assert "[REDACTED" in out
+
+    # Basic auth header value (base64): flat redaction leaks it.
+    out = _summarize_output("Authorization: Basic dXNlcjpwYXNzd29yZA== more")
+    assert "dXNlcjpwYXNzd29yZA==" not in out
+    assert "[REDACTED" in out
+
+    # And the direct _print_log emitter on a command with a structured pair.
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_log("run: token=opaque-test-12345 done")
+    assert "opaque-test-12345" not in buf.getvalue()
+    assert "[REDACTED" in buf.getvalue()
+
+
 def test_log_mode_console_redacts_string_payloads() -> None:
     """phases.py imports agent's module-level console; in --log mode that
     console redacts string payloads, so phase/UI output (e.g. the failure
