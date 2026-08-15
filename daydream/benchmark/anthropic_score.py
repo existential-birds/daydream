@@ -272,6 +272,16 @@ async def run_anthropic_dedup(
     groups_file.write_text(json.dumps(all_groups, indent=2))
 
 
+async def _enter_shared_http(stack: AsyncExitStack) -> httpx.AsyncClient:
+    """Enter a single shared ``httpx.AsyncClient`` on *stack* for one scoring run.
+
+    The stack closes the client on both success and exception, and the same
+    client serves extraction, dedup, and the concurrent evaluation judges.
+    Callers that want a longer-lived pool inject their own client instead.
+    """
+    return await stack.enter_async_context(httpx.AsyncClient())
+
+
 async def run_direct_scoring(
     benchmark_repo: Path,
     judge_model: str,
@@ -298,7 +308,7 @@ async def run_direct_scoring(
             api_key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
             if not api_key:
                 raise BenchmarkStepError(f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run direct scoring.")
-            http = await stack.enter_async_context(httpx.AsyncClient())
+            http = await _enter_shared_http(stack)
             client = AnthropicJsonClient(api_key=api_key, model=judge_model, http=http)
 
         await run_anthropic_extraction(

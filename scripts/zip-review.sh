@@ -100,7 +100,19 @@ else
   echo "Warning: no review-output.md found" >&2
 fi
 
-# Create zip
-zip -r "$ZIP_FILE" "${FILES_TO_ZIP[@]}"
+# Create zip via python3's stdlib zipfile so the script has no external `zip` binary dependency.
+python3 - "$ZIP_FILE" "${FILES_TO_ZIP[@]}" <<'PY'
+import sys
+import zipfile
+from pathlib import Path
+
+with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as zf:
+    for src in (Path(p) for p in sys.argv[2:]):
+        if src.is_dir():
+            for f in sorted((p for p in src.rglob("*") if p.is_file()), key=str):
+                zf.write(f, f.as_posix().lstrip("/"))
+        else:
+            zf.write(src, src.as_posix().lstrip("/"))
+PY
 echo ""
 echo "Done: $(du -h "$ZIP_FILE" | cut -f1) $ZIP_FILE"
