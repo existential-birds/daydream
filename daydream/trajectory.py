@@ -127,6 +127,9 @@ _PEM_KEY_PATTERN = re.compile(
     rf".*?-----END {_PEM_HEADER}-----",
     re.DOTALL,
 )
+#: Replacement marker for PEM private-key blocks. Shared (imported) by the
+#: benchmark's buffering anchors so every redaction site emits one marker.
+_PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
@@ -140,7 +143,7 @@ _ENV_VAR_PATTERN = re.compile(
 )
 _REDACTION_RULES: tuple[tuple[Any, str], ...] = (
     (_URL_CREDENTIAL_PATTERN, r"\1[REDACTED_USER]:[REDACTED_API_KEY]@"),
-    (_PEM_KEY_PATTERN, "[REDACTED_PEM_KEY]"),
+    (_PEM_KEY_PATTERN, _PEM_KEY_REDACTED_MARKER),
     (_ENV_VAR_PATTERN, r"\1=[REDACTED_ENV_VAR]"),
     (_API_KEY_PATTERN, "[REDACTED_API_KEY]"),
     (_JWT_PATTERN, "[REDACTED_JWT]"),

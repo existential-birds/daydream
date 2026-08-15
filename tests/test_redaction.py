@@ -475,18 +475,23 @@ _DSA_PEM = (
     "-----END DSA PRIVATE KEY-----"
 )
 
+# Shared by the block and env-assignment redaction tests — one spec for the six
+# PEM variants so the parametrize lists cannot drift out of sync.
+_PEM_KEY_CASES: list[tuple[str, str]] = [
+    (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
+    (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
+    (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
+    (_OPENSSH_PEM, "OPENSSHKEYBODY"),
+    (_EC_PEM, "ECKEYBODY"),
+    (_DSA_PEM, "DSAKEYBODY"),
+]
+_PEM_KEY_IDS = ["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"]
+
 
 @pytest.mark.parametrize(
     ("pem", "body"),
-    [
-        (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
-        (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
-        (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
-        (_OPENSSH_PEM, "OPENSSHKEYBODY"),
-        (_EC_PEM, "ECKEYBODY"),
-        (_DSA_PEM, "DSAKEYBODY"),
-    ],
-    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
+    _PEM_KEY_CASES,
+    ids=_PEM_KEY_IDS,
 )
 def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
     """PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA) replaced with [REDACTED_PEM_KEY]."""
@@ -496,18 +501,7 @@ def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
     assert "[REDACTED_PEM_KEY]" in out.message
 
 
-@pytest.mark.parametrize(
-    ("pem", "body"),
-    [
-        (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
-        (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
-        (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
-        (_OPENSSH_PEM, "OPENSSHKEYBODY"),
-        (_EC_PEM, "ECKEYBODY"),
-        (_DSA_PEM, "DSAKEYBODY"),
-    ],
-    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
-)
+@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS)
 def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> None:
     """VAR=<PEM> redacts fully — PEM rule must run before the env-var rule, no base64 body survives."""
     out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
