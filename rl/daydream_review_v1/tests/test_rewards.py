@@ -1068,3 +1068,25 @@ async def test_reward_version_is_pinned(
     await task.score(trace, runtime)
 
     assert trace.info["reward_breakdown"]["reward_version"] == REWARD_VERSION
+
+
+async def test_reward_breakdown_carries_dual_version_stamps(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """The rollout reward contract and the intrinsic scorer version are two stamps."""
+    from daydream.training.reward import REWARD_VERSION
+    from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
+
+    assert REWARD_VERSION == "2026.05.28-2"  # intrinsic parity pin (unchanged)
+    assert ROLLOUT_REWARD_VERSION == "2026.08.15-1"
+
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
+
+    await task.score(trace, runtime)
+
+    breakdown = trace.info["reward_breakdown"]
+    assert breakdown["reward_version"] == ROLLOUT_REWARD_VERSION
+    assert breakdown["intrinsic_reward_version"] == REWARD_VERSION

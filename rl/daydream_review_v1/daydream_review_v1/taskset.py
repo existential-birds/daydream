@@ -37,6 +37,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_REPO_PATH = "/work/repo"
 
+#: The aggregate rollout reward contract version, distinct from the intrinsic
+#: scorer's ``REWARD_VERSION`` (``daydream/training/reward.py``, unchanged and
+#: the intrinsic parity pin). ``reward_breakdown`` stamps both: ``reward_version``
+#: is this rollout contract, and ``intrinsic_reward_version`` is the offline
+#: scorer it was evaluated against. Archives scored before this boundary was
+#: introduced carry only the intrinsic version and need no migration tag.
+ROLLOUT_REWARD_VERSION = "2026.08.15-1"
+
 
 def _archive_root(trace: vf.Trace) -> str:
     """Archive root the harness told daydream to use, for this rollout."""
@@ -483,7 +491,8 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             "length_penalty": breakdown.length_penalty,
             "composite": breakdown.composite,
             "axes_present": breakdown.axes_present,
-            "reward_version": breakdown.reward_version,
+            "reward_version": ROLLOUT_REWARD_VERSION,
+            "intrinsic_reward_version": breakdown.reward_version,
         }
         return self.config.w_composite * (breakdown.composite or 0.0)
 
