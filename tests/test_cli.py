@@ -35,12 +35,17 @@ def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
     assert _resolved_backend_name(config, "review") == "claude"
 
 
+# Backend names selectable via --backend/-b.
+BACKEND_NAMES = ["codex", "osprey"]
+
+
 @pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
-def test_backend_flag_codex(monkeypatch, flag):
-    """Accept each backend flag spelling and select the Codex backend."""
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, "codex"])
+@pytest.mark.parametrize("backend", BACKEND_NAMES, ids=lambda name: name)
+def test_backend_flag(monkeypatch, flag, backend):
+    """Accept each backend flag spelling and select the named backend."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, backend])
     config = _parse_args()
-    assert config.backend == "codex"
+    assert config.backend == backend
 
 
 def test_invalid_backend_rejected(monkeypatch):
