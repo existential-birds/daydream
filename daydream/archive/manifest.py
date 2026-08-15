@@ -274,13 +274,16 @@ def build_manifest(
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
-    from daydream.runner import _recorder_backend_names  # noqa: PLC0415 - deferred import avoids cycle
+    from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
+        _default_backend_name,
+        _resolved_backend_name,
+        _resolved_review_backend_name,
+    )
 
-    # Mirror the trajectory's backend identity through the same shared resolver
-    # used by runner._open_recorder (authoritative per-flow mapping prose lives
-    # in its docstring), so the manifest and trajectory never diverge on which
-    # backend produced the run.
-    names = _recorder_backend_names(config, recorder.run_flow)
+    # ``backend`` records the phase-agnostic general default (config.backend →
+    # file-config global → "claude"), never a per-phase override;
+    # ``review_backend`` is stamped only when a review-specific override exists.
+    backend_used = _default_backend_name(config)
 
     m = Manifest(
         session_id=recorder.session_id,
@@ -289,10 +292,10 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=names.backend,
-        review_backend=names.backend,
-        fix_backend=names.fix or None,
-        test_backend=names.test or None,
+        backend=backend_used,
+        review_backend=_resolved_review_backend_name(config),
+        fix_backend=_resolved_backend_name(config, "fix"),
+        test_backend=_resolved_backend_name(config, "test"),
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,
