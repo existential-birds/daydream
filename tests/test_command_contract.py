@@ -65,6 +65,17 @@ PATH_ACCEPTS = [
     "space name.py",
 ]
 
+LEGAL_FILENAMES = [
+    "foo bar.py",
+    "Café.md",
+    "file#1.py",
+    "a%file.txt",
+    "(x).py",
+    "a&b.py",
+    "~/.bashrc",
+    "space name.py",
+]
+
 MULTI_DOT_PATHS = [
     "..cache",
     "...",
@@ -83,8 +94,6 @@ PATH_REJECTS = [
     "x`y",     # backtick excluded (shell metachar)
     ".",       # bare current dir is not a valid file path
     "./",      # bare ./ is not a valid file path
-    "foo\n",   # trailing newline: schema (re.search) and lexical (fullmatch) must agree
-    "src/main.rs\n",
 ]
 
 
@@ -121,6 +130,17 @@ def test_file_path_empty_and_length_bounds() -> None:
     # the lexical gate must agree with the schema at the same cap
     assert valid_repository_file_path("a" * 4096)
     assert not valid_repository_file_path("a" * 4097)
+    # the directory-scope pair must agree at the same 4096 (PATH_MAX) cap
+    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4097)
+    assert valid_directory_scope_lexical("a" * 4096)
+    assert not valid_directory_scope_lexical("a" * 4097)
+    # PATH_MAX is a byte budget (POSIX), so the lexical gates measure UTF-8
+    # bytes, not code points: 2048 × 2-byte é == 4096 bytes == the cap.
+    assert valid_repository_file_path("é" * 2048)
+    assert not valid_repository_file_path("é" * 2049)
+    assert valid_directory_scope_lexical("é" * 2048)
+    assert not valid_directory_scope_lexical("é" * 2049)
 
 
 def test_working_directory_accepts_cwd() -> None:
@@ -135,13 +155,28 @@ def test_working_directory_accepts_cwd() -> None:
     # Absolute form still requires a non-empty segment after the slash.
     assert not regex.match("/")
     assert not regex.match("//double-slash")
+    # The ./ prefix is relative-only: /./foo must not be schema-legal (the
+    # runtime confinement gate rejects it, so the gates must agree).
+    assert not regex.match("/./foo")
+    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("/./foo")
     # issues #572/#573: inherited grammar now accepts legal names; cap is 4096
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("Café.md")
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("./foo")
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
     assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
-    # trailing newline: the schema gate must reject exactly like the lexical gate
-    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("src/main.rs\n")
+
+
+def test_lexical_gates_reject_trailing_newline() -> None:
+    """Trailing newline is rejected by the fullmatch gates, not the schema.
+
+    The exported patterns anchor with ^/$ because the A/Z anchors are not
+    valid ECMA-262 (Codex/OpenAI strict mode rejects them), and Python
+    re.search lets $ match before a trailing newline, so the schema alone
+    cannot express this rejection. The runtime gates are the enforcement point.
+    """
+    for value in ("foo\n", "src/main.rs\n"):
+        assert not valid_repository_file_path(value)
+        assert not valid_directory_scope_lexical(value)
 
 
 @pytest.mark.parametrize("value", MULTI_DOT_PATHS)
@@ -211,11 +246,9 @@ def test_legal_filenames_are_confined(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "~").mkdir()  # corpus spelling ~/.bashrc nests through a ~ dir
-    for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
-                 "a&b.py", "~/.bashrc", "space name.py"]:
+    for name in LEGAL_FILENAMES:
         (repo / name).write_text("x")
-    for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
-                 "a&b.py", "~/.bashrc", "space name.py", "./foo bar.py"]:
+    for name in LEGAL_FILENAMES + ["./foo bar.py"]:
         assert path_is_confined(repo, name), f"{name!r} must be confined"
     # security carve-outs still rejected by the confinement gate too
     assert not path_is_confined(repo, "../x")

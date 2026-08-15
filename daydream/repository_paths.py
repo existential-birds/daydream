@@ -21,11 +21,22 @@ _PATH_SEGMENT = (
     rf"(?:{_SEG_NONDOT}{_SEG_CHAR}*"
     rf"|\.{_SEG_NONDOT}{_SEG_CHAR}*"            # single leading dot + non-dot body (.foo)
     rf"|\.\.{_SEG_CHAR}+)")            # two leading dots + >=1 char (..cache, ...)
-REPOSITORY_FILE_PATH_PATTERN = rf"\A(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*\Z"
-DIRECTORY_SCOPE_PATTERN      = rf"\A(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?\Z"
+# Anchor-free grammar core shared by every schema: one or more segments. No
+# ^/$ anchors and no leading "./" prefix — consumers layer those per
+# alternative, so a prefix meant for relative spellings cannot leak into an
+# absolute alternative (e.g. WORKING_DIRECTORY_SCHEMA's "/…" form).
+REPOSITORY_FILE_PATH_SEGMENTS = rf"{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*"
+REPOSITORY_FILE_PATH_PATTERN = rf"^(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}$"
+DIRECTORY_SCOPE_PATTERN      = rf"^(?:\./)?{REPOSITORY_FILE_PATH_SEGMENTS}/?$"
 
+# POSIX PATH_MAX (4096) is a byte budget; the lexical gates measure UTF-8 bytes.
 REPOSITORY_FILE_PATH_MAX_LENGTH = 4096
 
+# \A/\Z are not ECMA-262-valid (Codex/OpenAI strict mode rejects them), so the
+# patterns anchor with ^/$; Python re.search lets $ match before a trailing
+# newline, so the schema alone cannot reject trailing-newline spellings — the
+# fullmatch lexical gates (valid_repository_file_path et al.) are the
+# enforcement point.
 REPOSITORY_FILE_PATH_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
@@ -45,14 +56,14 @@ _DIRECTORY_SCOPE = re.compile(DIRECTORY_SCOPE_PATTERN)
 
 def valid_repository_file_path(value: str) -> bool:
     """Return whether ``value`` has the safe repository-file grammar."""
-    return len(value) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
+    return len(value.encode("utf-8")) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
         _REPOSITORY_FILE_PATH.fullmatch(value)
     )
 
 
 def valid_directory_scope_lexical(value: str) -> bool:
     """Return whether ``value`` is a safe file-or-directory scope."""
-    return len(value) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
+    return len(value.encode("utf-8")) <= REPOSITORY_FILE_PATH_MAX_LENGTH and bool(
         _DIRECTORY_SCOPE.fullmatch(value)
     )
 
@@ -158,6 +169,7 @@ __all__ = [
     "DIRECTORY_SCOPE_SCHEMA",
     "REPOSITORY_FILE_PATH_PATTERN",
     "REPOSITORY_FILE_PATH_SCHEMA",
+    "REPOSITORY_FILE_PATH_SEGMENTS",
     "canonicalize_directory_scope",
     "path_is_confined",
     "valid_directory_scope_lexical",
