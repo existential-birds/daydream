@@ -101,6 +101,7 @@ from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
     CrossStackMergeError,
     FixResult,
+    _resolve_finding_file_ref,
     _write_single_stack_merged_items,
     phase_alternative_review,
     phase_arbiter_review,
@@ -2625,6 +2626,25 @@ async def _evaluate_quality_gate(
             )
 
 
+def _first_unconfined_finding(
+    repo: Path, items: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Return the first item whose ``file`` ref the confinement gate rejects.
+
+    Mirrors ``_preflight_finding_file_refs``'s item order (items[0] first,
+    then the rest) and reuses the phase's own predicate
+    (``_resolve_finding_file_ref``) so there is no grammar drift between the
+    phase's preflight raise and this guard's offender identification.
+    Returns ``None`` when every item is confined.
+    """
+    for item in items:
+        try:
+            _resolve_finding_file_ref(repo, item.get("file"))
+        except ValueError:
+            return item
+    return None
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
     from daydream import git_ops
@@ -2706,15 +2726,39 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # crashes and the gate and post-fix residual net agree on the allowed set.
     changed_files = _resolve_changed_files(ctx)
     async with phase_scope(DaydreamPhase.FIX):
-        fix_failures = await phase_fix_parallel(
-            ctx.backend_for("fix"),
-            work,
-            items,
-            intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
-            group_max_wall_s=group_wall_s,
-            group_max_serial_items=group_serial,
-            changed_files=changed_files,
-        )
+        try:
+            fix_failures = await phase_fix_parallel(
+                ctx.backend_for("fix"),
+                work,
+                items,
+                intent_path=intent_p if (intent_grounded_this_run and intent_p.exists()) else None,
+                group_max_wall_s=group_wall_s,
+                group_max_serial_items=group_serial,
+                changed_files=changed_files,
+            )
+        except ValueError as exc:
+            # Issue #574: the phase's preflight confinement gate raises on an
+            # unconfined/missing/non-string finding ``file`` ref. Route it
+            # through the same exception-failure recovery below (patch capture,
+            # fix_failures persistence, tree restore, generated-file reject,
+            # Stop(1)) instead of letting it escape to cli.py's generic
+            # handler. The failure entry is keyed by the finding's STABLE id --
+            # never the unconfined path -- so the unsafe ref cannot become a
+            # grouping key or restore argument.
+            offender = _first_unconfined_finding(work.repo, items)
+            offender_id = offender.get("id") if offender else None
+            offender_file = offender.get("file") if offender else None
+            fix_failures = {
+                str(offender_id) if offender_id is not None else "<unconfined-finding>": (
+                    f"{type(exc).__name__}: {exc} (finding {offender_id}, "
+                    f"file {offender_file!r})"
+                )
+            }
+            print_warning(
+                console,
+                f"Fix preflight rejected an unconfined finding "
+                f"(finding {offender_id}, file {offender_file!r}); no fixes applied.",
+            )
     # Capture daydream's proposed diff (pre-fix tree → post-fix worktree)
     # NOW, before the fix-failure and test-failure early returns below, so
     # a run that generated a recommendation always archives it — even when
