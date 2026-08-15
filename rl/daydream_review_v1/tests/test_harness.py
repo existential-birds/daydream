@@ -251,6 +251,34 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
         assert "must be run as root" in dropped.stderr
 
 
+async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
+    corpus_mini_dir, fixture_manifest_path
+) -> None:
+    """The docker deep flow's first write succeeds because the harness hands the
+    checkout + in-container mirror to the agent uid before the privilege drop.
+
+    repo.Dockerfile clones /work/repo as root (no layer chowns it), so without
+    this handoff an agent-uid process would EACCES on its first write
+    (.daydream/ mkdir, patch, git add/commit/push). The harness issues
+    `chown -R agent:agent <repo> /srv/mirror.git` before launching through
+    run-as-agent; this pins that the ownership handoff is actually issued under
+    a docker-shaped runtime (the existing wrapper test only pinned argv[0]).
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
+    runtime = _DockerLikeRuntime(exit_code=0)
+
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+
+    handoff = ["chown", "-R", "agent:agent", harness.config.repo_path, "/srv/mirror.git"]
+    assert handoff in runtime.commands, (
+        "the harness must hand the checkout + mirror to the agent identity "
+        "before the privilege drop, or the deep flow's first write EACCESes"
+    )
+    (argv, _), = runtime.programs
+    assert argv[0] == "run-as-agent"
+
+
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
     """The privilege-drop seam must actually run, not just be argv[0].
 
