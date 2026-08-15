@@ -87,6 +87,7 @@ from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.repository_paths import canonicalize_working_directory
 from daydream.trajectory import (
     DaydreamPhase,
     get_current_recorder,
@@ -315,13 +316,20 @@ def _host_enumerated_commands(
         )
         return 0, [], ["HOST_COMMAND_ENUMERATION_FAILED@/host_commands"]
     already_cited = {
-        (command["command"], command["working_directory"])
+        (
+            command["command"],
+            canonicalize_working_directory(repo, command["working_directory"]),
+        )
         for command in model_commands
     }
     candidates = [
         command
         for command in enumerated
-        if (command["command"], command["working_directory"]) not in already_cited
+        if (
+            command["command"],
+            canonicalize_working_directory(repo, command["working_directory"]),
+        )
+        not in already_cited
     ]
     validated, errors = validate_host_commands(candidates, repo=repo)
     return len(candidates), validated, errors

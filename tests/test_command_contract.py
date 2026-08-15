@@ -316,6 +316,59 @@ def test_canonicalize_working_directory_all_spellings_share_one_key(tmp_path: Pa
     assert spelled == {"sub"}
 
 
+def test_host_enumeration_dedups_absolute_model_wd(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Must-have #1: an absolute-spelled model working_directory collapses
+    against the relative host record, so the host command is NOT re-admitted."""
+    from daydream.improve import orchestrator as orch
+
+    host_record = {
+        "id": "make-check",
+        "command": "make check",
+        "working_directory": "sub",
+    }
+    monkeypatch.setattr(
+        orch, "enumerate_repository_commands", lambda *a, **k: [host_record]
+    )
+    model = [{
+        "id": "m1",
+        "command": "make check",
+        "working_directory": f"{tmp_path}/sub",
+    }]
+    count, validated, _ = orch._host_enumerated_commands(
+        tmp_path, [], [], model_commands=model
+    )
+    assert count == 0  # host command deduped against the absolute model wd
+    assert validated == []
+
+
+def test_host_enumeration_does_not_dedup_different_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Discriminating: a genuinely different directory is NOT collapsed —
+    normalization must not widen dedup to 'same command anywhere'."""
+    from daydream.improve import orchestrator as orch
+
+    host_record = {
+        "id": "make-check",
+        "command": "make check",
+        "working_directory": "sub",
+    }
+    monkeypatch.setattr(
+        orch, "enumerate_repository_commands", lambda *a, **k: [host_record]
+    )
+    model = [{
+        "id": "m1",
+        "command": "make check",
+        "working_directory": f"{tmp_path}/other",
+    }]
+    count, _, _ = orch._host_enumerated_commands(
+        tmp_path, [], [], model_commands=model
+    )
+    assert count == 1  # different directory stays a separate candidate
+
+
 def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(
     tmp_path: Path,
 ) -> None:
