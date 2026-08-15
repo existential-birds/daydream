@@ -428,3 +428,31 @@ def test_repo_workflow_readme_declares_codex_and_points_to_canonical_install() -
     # Absence of the stale strings.
     for stale in ("Copy the three workflow files", "Install step 1", "ANTHROPIC_API_KEY"):
         assert stale not in text
+
+
+# CI coverage guard: the actionlint step in .github/workflows/ci.yml must
+# receive EVERY workflow the project ships — the repo's own top-level workflows
+# plus all recursively discovered template workflows (the nested
+# single/daydream.yml included). Reads the live selectors out of the ci.yml
+# actionlint step and expands them, so a selector that stops covering a shipped
+# file (or a newly nested template) fails this test rather than silently
+# shipping un-linted workflows.
+
+
+def test_ci_actionlint_covers_all_workflow_sources() -> None:
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
+    steps = job_steps(wf, "check")
+    actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
+    selectors = [tok for tok in actionlint["run"].split() if tok.endswith(".yml")]
+
+    actual = {p for s in selectors for p in _REPO_ROOT.glob(s)}
+    expected = {*REPO_WORKFLOWS_DIR.glob("*.yml"), *TEMPLATES_DIR.rglob("*.yml")}
+    actual_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in actual)
+    expected_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in expected)
+    assert actual == expected, (
+        "actionlint selectors in .github/workflows/ci.yml cover a different set "
+        "of workflows than the project ships. "
+        f"actual={actual_rel} expected={expected_rel}. "
+        "Extend the actionlint run's selectors so the glob-expanded set equals "
+        "the repo workflows plus all shipped template workflows (nested included)."
+    )
