@@ -37,9 +37,12 @@ from daydream.backends import (
     resolve_fanout_concurrency,
 )
 
-# Read-only Bash allowlist (failure summarizer): permitted only if the command
-# begins with one of these prefixes AND has no shell-chaining metacharacter that
-# could smuggle in a mutation. Mirrored in the summarizer prompt (phases.py).
+# Read-only Bash allowlist shared by every agent that runs under the read-only
+# guard (setup-investigator, failure summarizer, exploration specialists,
+# verification agent): permitted only if the command begins with one of these
+# prefixes AND has no shell-chaining metacharacter that could smuggle in a
+# mutation. Mirrored via _render_bash_allowlist() in the sibling prompts that
+# advertise it (phases.py, deep/prompts.py).
 READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "ls",
     "cat",
