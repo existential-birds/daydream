@@ -46,11 +46,10 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 _ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
 _SETUP_BRANCH = "daydream/setup-bot"
 
-# Events the #147 workflow templates consume (daydream-review.yml →
-# pull_request, daydream-command.yml → issue_comment, daydream-post.yml →
-# workflow_run). Declared in the manifest so the App is subscribed to exactly
-# what the shipped workflows listen for.
-_MANIFEST_EVENTS = ("pull_request", "issue_comment", "workflow_run")
+# Events consumed by the approval-gated workflows: trusted review commands and
+# completed review runs. Credential-bearing review workflows are not subscribed
+# to pull_request events.
+_MANIFEST_EVENTS = ("issue_comment", "workflow_run")
 
 _APP_NAME_DEFAULT = "Daydream Review Bot"
 _GITHUB_NEW_APP_URL = "https://github.com/settings/apps/new"
@@ -339,7 +338,8 @@ _PR_BODY = (
     "GitHub App identity. Review the setup guide before merging:\n\n"
     "- Setup guide: `docs/self-hosted-bot-setup.md`\n"
     "- Security model: see the *Security model* section of that guide.\n\n"
-    "Merging this PR makes the bot live on this repository."
+    "After merging, a trusted maintainer can request a head-bound review by "
+    "commenting `@<bot> review` on a pull request."
 )
 
 
@@ -582,7 +582,7 @@ def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
 
 
 def _check_workflows(repo_dir: Path) -> Check:
-    """Check (4): the three workflow files exist on the default branch."""
+    """Check (4): installed workflows byte-match the packaged templates."""
     try:
         base = git_ops.default_branch(repo_dir)
     except git_ops.BranchNotFoundError as exc:
@@ -593,21 +593,32 @@ def _check_workflows(repo_dir: Path) -> Check:
         )
 
     missing: list[str] = []
+    outdated: list[str] = []
     for template in workflow_template_files():
         path = f"{_WORKFLOWS_DIR}/{template.name}"
         try:
-            git_ops.show(repo_dir, f"origin/{base}", path)
+            installed = git_ops.show(repo_dir, f"origin/{base}", path)
         except GitError:
             missing.append(path)
-    if not missing:
-        return Check(name="workflows", passed=True, detail=f"All workflow files present on '{base}'.")
+            continue
+        if installed != template.read_bytes():
+            outdated.append(path)
+
+    if not missing and not outdated:
+        return Check(name="workflows", passed=True, detail=f"All workflow files match on '{base}'.")
+
+    problems: list[str] = []
+    if missing:
+        problems.append("Missing workflow file(s): " + ", ".join(missing))
+    if outdated:
+        problems.append("Out of date workflow file(s): " + ", ".join(outdated))
     return Check(
         name="workflows",
         passed=False,
         detail=(
-            f"Missing workflow file(s) on '{base}': "
-            + ", ".join(missing)
-            + " — run `daydream setup` (or merge the setup PR) to land them."
+            f"Workflow check failed on '{base}': "
+            + "; ".join(problems)
+            + " — run `daydream setup` (or merge the setup PR) to install the packaged versions."
         ),
     )
 
@@ -631,8 +642,8 @@ def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
        and the :data:`config.BOT_HANDLE_VAR` variable exist at the scope.
     3. **Permissions** — the App grants a superset of
        :data:`config.APP_PERMISSIONS` (skipped, non-required, without creds).
-    4. **Workflows** — the three packaged workflow files exist on the default
-       branch.
+    4. **Workflows** — the installed workflow files byte-match the packaged
+       templates on the default branch.
 
     This is strictly read-only: it never sets a secret, variable, or file. Each
     failed required check's ``detail`` names the exact missing element and the
@@ -862,5 +873,8 @@ def run_setup(
         print_info(console, "Workflow files already present on this repository; nothing to land.")
     else:
         print_success(console, f"Opened workflow PR: {pr_url}")
-        print_info(console, "Merge the PR to go live — the bot reviews PRs once it lands on the default branch.")
+        print_info(
+            console,
+            "Merge the PR, then request reviews with a trusted `@<bot> review` comment.",
+        )
     return 0

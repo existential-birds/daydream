@@ -42,6 +42,11 @@ def test_callback_listener_captures_code_then_exchanges(monkeypatch):
     assert slug == "acme-bot"
 
 
+def test_manifest_events_exclude_pull_request() -> None:
+    """The App subscribes only to events consumed by approval-gated workflows."""
+    assert bot_setup._MANIFEST_EVENTS == ("issue_comment", "workflow_run")
+
+
 def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
     manifest = bot_setup._manifest_payload(
         redirect_url="http://localhost:8080/callback",
@@ -190,6 +195,29 @@ def test_verify_healthy_install_passes_all_checks(
     assert all(c.passed for c in result.checks)
     # The App-installed check actually consulted the installations endpoint.
     assert fake_gh.calls("GET", "/app/installations")
+
+
+def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
+    """A present but stale workflow fails the doctor byte comparison."""
+    from daydream.templates import workflow_template_files
+    from tests.conftest import _commit, _git
+
+    workflows_dir = repo_with_origin / ".github/workflows"
+    workflows_dir.mkdir(parents=True)
+    for template in workflow_template_files():
+        content = template.read_text()
+        if template.name == "daydream-review.yml":
+            content += "\n# stale installed copy\n"
+        (workflows_dir / template.name).write_text(content)
+    _git(repo_with_origin, "add", ".github/workflows")
+    _commit(repo_with_origin, "add stale workflows")
+    _git(repo_with_origin, "push", "origin", "main")
+
+    result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
+    workflows_check = next(check for check in result.checks if check.name == "workflows")
+    assert result.ok is False
+    assert workflows_check.passed is False
+    assert "daydream-review.yml" in workflows_check.detail
 
 
 # --- Task 9: CLI `setup` verb + run_setup orchestrator ----------------------
