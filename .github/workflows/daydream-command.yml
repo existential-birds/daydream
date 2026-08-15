@@ -84,4 +84,12 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.issue.number }}
-        run: gh workflow run daydream-review.yml --repo "$REPO" -f pr_number="$PR_NUMBER"
+        run: |
+          HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ -z "$HEAD_SHA" ]; then
+            echo "Unable to resolve the head SHA for PR #$PR_NUMBER" >&2
+            exit 1
+          fi
+          gh workflow run daydream-review.yml --repo "$REPO" \
+            -f pr_number="$PR_NUMBER" \
+            -f approved_head_sha="$HEAD_SHA"

@@ -59,6 +59,14 @@ def job_steps(wf: dict[str, Any], job: str) -> list[dict[str, Any]]:
     return steps
 
 
+def _wf_triggers(wf: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``on:`` trigger map, normalizing PyYAML's boolean key."""
+    on = wf.get("on")
+    if on is None and True in wf and isinstance(wf[True], dict):
+        on = wf[True]
+    return on if isinstance(on, dict) else {}
+
+
 def has_checkout(job: dict[str, Any]) -> bool:
     return any("actions/checkout" in s.get("uses", "") for s in job["steps"])
 
@@ -121,6 +129,25 @@ def _action_references(wf: dict[str, Any]) -> list[str]:
 # shell.
 
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
+
+
+def test_command_workflows_dispatch_approved_head() -> None:
+    """The live trusted command workflow binds the PR head at approval time."""
+    path = REPO_WORKFLOWS_DIR / "daydream-command.yml"
+    wf = load_workflow(path)
+    dispatch = next(
+        step
+        for step in job_steps(wf, "dispatch")
+        if "gh workflow run daydream-review.yml" in step.get("run", "")
+    )
+
+    assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
+    assert '-f approved_head_sha="$HEAD_SHA"' in dispatch["run"]
+    assert "PR_NUMBER" in dispatch["env"]
+    assert not any(
+        _EVENT_INTERP.search(step.get("run", ""))
+        for step in job_steps(wf, "dispatch")
+    )
 
 
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
