@@ -128,6 +128,19 @@ def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
     assert path_is_confined(tmp_path, value, directory_scope=True)
 
 
+def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "improve").mkdir(parents=True)
+    abs_under = (repo / "improve").as_posix()
+    abs_outside = (repo.parent / "outside").as_posix()
+    # allow_absolute=True: confined absolute accepted, outside rejected.
+    assert path_is_confined(repo, abs_under, allow_absolute=True)
+    assert not path_is_confined(repo, abs_outside, allow_absolute=True)
+    # default (allow_absolute=False) must still reject absolute — this is what
+    # keeps evidence source_path / applicability scope paths unchanged.
+    assert not path_is_confined(repo, abs_under)
+
+
 def _iter_schema_patterns(schema: Any) -> Iterator[str]:
     """Yield the string value of every ``pattern`` key in a schema tree."""
     if isinstance(schema, dict):

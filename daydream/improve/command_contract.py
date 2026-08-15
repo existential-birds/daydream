@@ -229,14 +229,26 @@ def path_is_confined(
     value: str,
     *,
     directory_scope: bool = False,
+    allow_absolute: bool = False,
 ) -> bool:
-    """Return whether a lexical repository path crosses no symlink/root edge."""
+    """Return whether a repository path crosses no symlink/root edge.
+
+    When ``allow_absolute`` is set and ``value`` starts with ``"/"``, the
+    relative-lexical gate is skipped and the confinement loop alone decides
+    (it already resolves absolute paths against the repo root). Relative
+    paths and the default ``allow_absolute=False`` keep today's exact
+    behavior.
+    """
     validator = (
         valid_directory_scope_lexical
         if directory_scope
         else valid_repository_file_path
     )
-    if value != "." and not validator(value):
+    if (
+        value != "."
+        and not (allow_absolute and value.startswith("/"))
+        and not validator(value)
+    ):
         return False
     root = repo.resolve()
     candidate = repo
@@ -593,12 +605,16 @@ def _validate_command_records(
             )
             continue
         working_directory = command["working_directory"]
+        is_absolute = working_directory.startswith("/")
         if (
             (
                 working_directory != "."
+                and not is_absolute
                 and not valid_repository_file_path(working_directory)
             )
-            or not path_is_confined(repo, working_directory)
+            or not path_is_confined(
+                repo, working_directory, allow_absolute=is_absolute
+            )
             or not (repo / working_directory).is_dir()
         ):
             reject(
