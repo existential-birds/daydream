@@ -8,10 +8,13 @@ REDA-05 fail-safe.
 
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
-from daydream.trajectory import Redactor, now_iso
+from daydream.trajectory import Redactor, now_iso, redact_value
 
 
 def _user_step(message: str) -> Step:
@@ -524,3 +527,26 @@ def test_redactor_preserves_certificate_block() -> None:
     assert isinstance(out.message, str)
     assert "[REDACTED_PEM_KEY]" not in out.message
     assert "BEGIN CERTIFICATE" in out.message
+
+
+def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
+    """redact_value redacts string leaves AND string dict keys recursively, in
+    fresh containers, and never mutates its argument."""
+    sentinel = "ghp_" + "x" * 16
+    payload = {
+        "token": sentinel,
+        sentinel: "key-secret",
+        "nested": {"path": f"/Users/{sentinel}"},
+        "items": [sentinel, 42, None],
+        "flag": True,
+        1: "non-string-key",
+    }
+    original = copy.deepcopy(payload)
+    out = redact_value(payload)
+
+    assert payload == original                      # never mutates the argument
+    assert out is not payload and out["nested"] is not payload["nested"]  # fresh containers
+    assert sentinel not in json.dumps(out)          # redacted in values AND keys
+    assert "[REDACTED" in json.dumps(out)           # a marker replaced it
+    assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
+    assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
