@@ -24,7 +24,7 @@ claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models). [Osprey CLI](https://github.com/existential-birds/osprey) for `--backend osprey`; see [the Osprey backend guide](docs/backends/osprey.md).
+Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models).
 
 ### Golden paths
 
@@ -210,7 +210,7 @@ daydream corpus label <session_id> --outcome accepted  # manual outcome label ov
 
 ```bash
 daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project     # override backend (claude, codex, pi, osprey)
+daydream --backend codex /path/to/project     # override backend (claude, codex, pi)
 daydream --model claude-haiku-4-5 /path/to/project  # overrides ALL phases (beats config-file overrides)
 daydream --yes /path/to/project               # auto-apply fixes without prompting
 ```
@@ -347,17 +347,16 @@ environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
 ### Reasoning Effort
 
 `reasoning_effort` is accepted as a global key and per-phase, alongside
-`model`/`backend`. Each backend consumes it through its own native knob:
+`model`/`backend`. All three backends consume it through their own native knob:
 
 | Backend | Knob |
 |---------|------|
 | `claude` | `ClaudeAgentOptions.effort` → the CLI's `--effort` |
 | `codex` | `-c model_reasoning_effort=<level>` |
 | `pi` | `--thinking <level>` |
-| `osprey` | `--effort <level>` |
 
 The accepted levels are `low`, `medium`, `high`, `xhigh`, and `max` — the
-intersection of the shipped drivers' vocabularies, so any level is valid for any
+intersection of the three drivers' vocabularies, so any level is valid for any
 backend. (Codex additionally accepts `none`, and Pi `off`/`minimal`; those are
 usable via config but have no built-in default.)
 
@@ -379,7 +378,7 @@ ambient default.
 | `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback` |
 | `xhigh` | `arbiter` |
 
-**Improve advisor** (`IMPROVE_PHASE_DEFAULT_EFFORT`) — the configured backends,
+**Improve advisor** (`IMPROVE_PHASE_DEFAULT_EFFORT`) — all three backends,
 because the flow runs unattended and nothing it produces is reviewed in the
 moment.
 

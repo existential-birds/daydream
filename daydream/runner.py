@@ -96,8 +96,7 @@ class RunConfig:
             in the unified pipeline and are rejected at the CLI.
         pr_number: GitHub PR number for PR feedback mode. If None, normal mode.
         bot: Bot username whose comments to fetch (e.g. "coderabbitai[bot]").
-        backend: Default backend to use ("claude", "codex", "pi", or
-            "osprey"). Default is None;
+        backend: Default backend to use ("claude" or "codex"). Default is None;
             ``_resolve_backend`` falls back through the config file to ``"claude"``.
         model: Global default model applied across phases when no explicit
             per-phase model is set. Resolved by ``_resolved_model`` below the
@@ -105,10 +104,10 @@ class RunConfig:
             table sources. Default None.
         reasoning_effort: Global default reasoning-effort override (e.g. "low",
             "medium", "high"), resolved by ``_resolved_reasoning_effort``
-            (CLI > config-file phase > config-file global). Every CLI backend
+            (CLI > config-file phase > config-file global). Every backend
             applies it through its native knob (Codex as ``-c
             model_reasoning_effort=...``, Claude as ``--effort``, Pi as
-            ``--thinking``, and Osprey as ``--effort``). Default None.
+            ``--thinking``). Default None.
         file_config: File-sourced configuration (``[tool.daydream]`` /
             ``.daydream.toml``) feeding ``_resolved_model`` / ``_resolve_backend``
             as a low-precedence source. None is treated as an empty config.
@@ -493,9 +492,9 @@ def _resolve_backend(
     resolved_effort = _resolved_reasoning_effort(config, phase)
 
     def _make() -> Backend:
-        # Pi resolves project settings from cwd; Osprey runs its subprocess in
-        # the target workspace and reads its project-scoped configuration there.
-        if backend_name in {"pi", "osprey"}:
+        # ``cwd`` stays pi-only: it exists solely to resolve Pi's configured
+        # default model, and widening it churns every patched create_backend.
+        if backend_name == "pi":
             return create_backend(
                 backend_name, model=resolved_model, cwd=cwd, reasoning_effort=resolved_effort
             )

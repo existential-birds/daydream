@@ -260,9 +260,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
     )
     parser.add_argument(
         "--backend", "-b",
-        choices=["claude", "codex", "pi", "osprey"],
+        choices=["claude", "codex", "pi"],
         default=None,
-        help="Agent backend: claude, codex, pi, or osprey "
+        help="Agent backend: claude, codex, or pi "
              "(default: config file, then claude)",
     )
     parser.add_argument(

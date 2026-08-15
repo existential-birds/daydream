@@ -297,7 +297,7 @@ async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None
 
 
 @pytest.mark.asyncio
-async def test_trajectory_preserves_provider_session_model_and_tool_identity(tmp_path: Path) -> None:
+async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     lines, _ = _stream(
         {
             "event": "tool_call",
@@ -331,9 +331,6 @@ async def test_trajectory_preserves_provider_session_model_and_tool_identity(tmp
                 invocation.observe(event)
 
     trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
-    assert trajectory["agent"]["extra"]["provider"] == "openai-compatible"
-    assert trajectory["agent"]["extra"]["session_id"] == "s-137"
-    assert trajectory["agent"]["model_name"] == "custom-model"
     tool_call = trajectory["steps"][1]["tool_calls"][0]
     assert tool_call["function_name"] == "mcp.fetch"
     assert tool_call["tool_call_id"] == "c-2"

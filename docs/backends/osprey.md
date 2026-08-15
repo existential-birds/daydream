@@ -53,15 +53,13 @@ producer’s outcome. Missing headers, malformed required fields, unknown event
 names, truncated streams, and non-zero process exits are explicit bounded
 backend failures.
 
-## Provenance
+## Identity and tool calls
 
-When Daydream’s existing trajectory recorder is active, Osprey’s provider,
-model, session ID, terminal outcome, exit code, and observed turn durations are
-stored in the provider-neutral `trajectory.agent.extra` map. Tool calls retain
-the producer’s underlying `tool_name` and `tool_call_id`, including MCP calls
-resolved through Tool Search. The top-level trajectory session ID remains
-Daydream’s run identity; `agent.extra.session_id` is Osprey’s provider session
-identity.
+The successful `ResultEvent` continuation retains Osprey’s provider, model,
+session ID, terminal outcome, and exit code. Tool calls retain the producer’s
+underlying `tool_name` and `tool_call_id`, including MCP calls resolved through
+Tool Search. Daydream’s existing trajectory recorder continues to own the
+top-level run identity.
 
 Use this boundary rather than implementing another Python agent loop. Protocol
 drift requires an explicit Osprey JSONL version change and a corresponding

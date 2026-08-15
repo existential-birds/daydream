@@ -443,8 +443,9 @@ class OspreyBackend:
             from daydream.trajectory import get_current_recorder
 
             recorder = get_current_recorder()
-            if recorder is not None:
-                recorder.record_backend_identity(
+            record_identity = getattr(recorder, "record_backend_identity", None)
+            if callable(record_identity):
+                record_identity(
                     backend="osprey",
                     model=model,
                     provider=provider,
