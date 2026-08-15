@@ -32,7 +32,6 @@ from daydream.backends import (
     effective_fanout_concurrency,
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
-from daydream.backends.codex import CodexBackend
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -45,7 +44,7 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.prompt_budget import fits_inline_diff_budget
+from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
@@ -1737,11 +1736,12 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
         return ""
     return (
         "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
-        f"{confirmed_intent.strip()}\n\n"
         # The intent file may contain the PR body verbatim; frame it as untrusted
-        # reference data so an instruction-like body cannot steer the mutating
-        # fix agent. Only the confirmed product-behavior intent is authoritative.
+        # reference data BEFORE the echoed body so an instruction-like body cannot
+        # steer the mutating fix agent. Only the confirmed product-behavior intent
+        # is authoritative.
         f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n\n"
+        f"{confirmed_intent.strip()}\n\n"
         "This confirmed intent is the highest-priority authority: it outranks both "
         "the in-code-contract rule above and the finding itself. "
         "If applying this fix would undo, revert, or contradict a decision the "
@@ -2969,32 +2969,56 @@ async def phase_understand_intent(
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
 
-    # Issue #579 made every intent turn read-only. The Codex read-only profile
-    # executes in a disposable clone that mirrors only tracked and non-ignored
-    # untracked files; target repos commonly gitignore ``.daydream/``, so the
-    # on-disk ``diff.patch`` and ``exploration/summary.md`` the pointers name
-    # are absent from that clone. For the Codex read-only execution the prompt
-    # is made self-sufficient: the diff is always inlined (never a dangled file
-    # pointer) and the exploration summary is inlined when readable. Other
-    # backends keep their cwd in the worktree, where those files are present,
-    # so they keep the budget-gated pointer.
-    codex_read_only = isinstance(backend, CodexBackend)
-    inline_diff = diff_text if codex_read_only else _inlineable_diff(diff_text)
+    # Issue #579 made every intent turn read-only. Backends whose read-only
+    # profile executes in a disposable clone (the protocol-level
+    # ``read_only_disposable_clone`` capability) mirror only tracked and
+    # non-ignored untracked files; target repos commonly gitignore
+    # ``.daydream/``, so the on-disk ``diff.patch`` and ``exploration/summary.md``
+    # the pointers name are absent from that clone. For such executions the
+    # prompt is made self-sufficient within the shared prompt budget: the diff
+    # is inlined (truncated to ``INLINE_DIFF_BUDGET_BYTES`` when over budget —
+    # never a dangled file pointer, never an unbounded inline) and the
+    # exploration summary is inlined when readable, capped at the same budget.
+    # Other backends keep their cwd in the worktree, where those files are
+    # present, so they keep the budget-gated pointer.
+    read_only_disposable_clone = getattr(backend, "read_only_disposable_clone", False)
+    inline_diff: str | None
+    if read_only_disposable_clone and diff_text and not fits_inline_diff_budget(diff_text):
+        # Clone executions cannot fall back to the on-disk pointer (the
+        # gitignored ``.daydream/`` artifacts are absent from the disposable
+        # clone), so the inline is truncated to the shared prompt budget rather
+        # than dropped: still self-sufficient, never unbounded.
+        inline_diff = (
+            diff_text[:INLINE_DIFF_BUDGET_BYTES]
+            + "\n[diff truncated to fit the prompt budget]\n"
+        )
+    else:
+        inline_diff = _inlineable_diff(diff_text)
     inline_exploration_summary: str | None = None
-    if codex_read_only and exploration_dir is not None:
+    if read_only_disposable_clone and exploration_dir is not None:
         try:
-            inline_exploration_summary = (exploration_dir / "summary.md").read_text(
+            summary_text: str | None = (exploration_dir / "summary.md").read_text(
                 encoding="utf-8"
             )
         except OSError:
             # Best-effort: an unreadable summary just omits the exploration
             # block; it is never coerced into a fake summary.
-            inline_exploration_summary = None
+            summary_text = None
+        if summary_text is not None:
+            if not fits_inline_diff_budget(summary_text):
+                # The clone has no on-disk fallback for the summary either, so
+                # an over-budget summary is truncated to the shared prompt
+                # budget rather than dropped (or inlined unbounded).
+                summary_text = (
+                    summary_text[:INLINE_DIFF_BUDGET_BYTES]
+                    + "\n[exploration summary truncated]\n"
+                )
+            inline_exploration_summary = summary_text
     prompt = get_registry().prompt("intent")(
         diff_path=str(diff_path),
         branch=branch,
         log=log,
-        exploration_dir=None if codex_read_only else exploration_dir,
+        exploration_dir=None if read_only_disposable_clone else exploration_dir,
         pr_description=pr_description,
         inline_diff=inline_diff,
         inline_exploration_summary=inline_exploration_summary,
@@ -3047,14 +3071,16 @@ async def phase_understand_intent(
             return intent_text
 
         # User provided a correction — build new prompt with context. The
-        # correction turn runs read-only too, so for the Codex read-only
-        # execution the diff is inlined (the on-disk .daydream/diff.patch may
-        # be absent from the disposable clone).
-        if codex_read_only and diff_text:
+        # correction turn runs read-only too, so for a disposable-clone
+        # read-only execution the diff is inlined under the untrusted-content
+        # boundary (the on-disk ``.daydream/diff.patch`` may be absent from the
+        # clone), reusing the budgeted inline computed above.
+        if read_only_disposable_clone and inline_diff:
             diff_clause = (
+                f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
                 "Re-examine the codebase and the diff inlined below, and present an "
                 "updated understanding of the intent.\n\n"
-                f"{diff_text.rstrip()}\n"
+                f"{inline_diff.rstrip()}\n"
             )
         else:
             diff_clause = (

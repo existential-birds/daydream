@@ -2478,20 +2478,14 @@ def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool
     by_kind = _review_prompts_by_kind(stub)
     missing = [k for k, prompts in by_kind.items() if not prompts]
     assert not missing, f"expected prompts for all five kinds, missing: {missing}"
+    gated_constants = {
+        "AUTHORITATIVE_INTENT_RULE": AUTHORITATIVE_INTENT_RULE,
+        "PR_DESCRIPTION_UNTRUSTED_FRAMING": PR_DESCRIPTION_UNTRUSTED_FRAMING,
+    }
     for kind, prompts in by_kind.items():
-        if expect_present:
-            assert all(AUTHORITATIVE_INTENT_RULE in p for p in prompts), (
-                f"{kind}: expected AUTHORITATIVE_INTENT_RULE in every prompt"
-            )
-            assert all(PR_DESCRIPTION_UNTRUSTED_FRAMING in p for p in prompts), (
-                f"{kind}: expected PR_DESCRIPTION_UNTRUSTED_FRAMING in every prompt"
-            )
-        else:
-            assert all(AUTHORITATIVE_INTENT_RULE not in p for p in prompts), (
-                f"{kind}: expected AUTHORITATIVE_INTENT_RULE absent from every prompt"
-            )
-            assert all(PR_DESCRIPTION_UNTRUSTED_FRAMING not in p for p in prompts), (
-                f"{kind}: expected PR_DESCRIPTION_UNTRUSTED_FRAMING absent from every prompt"
+        for name, constant in gated_constants.items():
+            assert all((constant in p) == expect_present for p in prompts), (
+                f"{kind}: expected {name} {'in' if expect_present else 'absent from'} every prompt"
             )
 
 
@@ -2663,7 +2657,11 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
     # NEW #579: the intent turn ran against the read-only backend profile.
     intent_calls = _intent_calls(stub)
     assert intent_calls, "expected at least one intent call"
-    assert all(c["read_only"] is True for c in intent_calls), intent_calls
+    non_read_only = [i for i, c in enumerate(intent_calls) if c["read_only"] is not True]
+    assert not non_read_only, (
+        f"{len(non_read_only)} of {len(intent_calls)} intent calls were not read-only "
+        f"(call indices: {non_read_only})"
+    )
 
 
 @pytest.mark.asyncio
