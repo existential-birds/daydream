@@ -447,6 +447,32 @@ def test_capture_recommended_patch_clean_tree_uses_head_base(tmp_path: Path) -> 
     assert "+y = 2" in out.read_text()
 
 
+def test_capture_recommended_patch_excludes_only_preexisting_untracked_files(tmp_path: Path) -> None:
+    """R1-R4: a pre-existing untracked file (in preexisting_untracked) contributes
+    no creation hunk; a fix-created untracked file still does; tracked edits
+    serialize as today; omitting the snapshot keeps pre-existing files."""
+    repo = _init_repo_with_commit(tmp_path)
+    base = git_ops.head_sha(repo)                       # captured before the "fix"
+    (repo / "a.py").write_text("x = 1\ny = 2\n")        # tracked fix edit
+    (repo / "notes.txt").write_text("pre-existing\n")   # in the snapshot (pre-fix)
+    (repo / "new.py").write_text("fix = 1\n")           # created during the fix
+
+    out = repo / ".daydream" / "recommended.patch"
+    wrote = git_ops.capture_recommended_patch(
+        repo, base, out, preexisting_untracked={"notes.txt"}
+    )
+    assert wrote is True
+    text = out.read_text()
+    assert "new.py" in text            # fix-created untracked file captured
+    assert "notes.txt" not in text     # pre-existing untracked file excluded
+    assert "+y = 2" in text            # tracked diff unaffected
+
+    # R4 backward-compat: no snapshot -> the pre-existing file IS captured.
+    out2 = repo / ".daydream" / "recommended2.patch"
+    git_ops.capture_recommended_patch(repo, base, out2)
+    assert "notes.txt" in out2.read_text()
+
+
 def test_capture_recommended_patch_none_base_writes_nothing(tmp_path: Path) -> None:
     """A None base (no pre-fix snapshot could be taken) is a no-op."""
     repo = _init_repo_with_commit(tmp_path)

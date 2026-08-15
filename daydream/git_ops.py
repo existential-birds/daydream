@@ -879,7 +879,9 @@ def diff_worktree_against(repo: Path, ref: str, paths: list[str]) -> str:
     return proc.stdout
 
 
-def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) -> bool:
+def capture_recommended_patch(
+    repo: Path, base_ref: str | None, out_path: Path, *, preexisting_untracked: set[str] | None = None
+) -> bool:
     """Write daydream's proposed diff (``base_ref`` → working tree) to *out_path*.
 
     Captures the *recommended-change patch*: the difference between the pre-fix
@@ -904,6 +906,11 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
     Args:
         base_ref: Pre-fix base ref (a ``stash create`` SHA or a ``HEAD`` SHA),
             or ``None`` when no pre-fix snapshot could be taken.
+        preexisting_untracked: Set of repo-relative paths that were untracked
+            BEFORE the fix ran. Matching untracked files contribute no creation
+            hunk (they are not daydream's changes); files absent from the set
+            still do. Order follows :func:`list_untracked`, never re-sorted.
+            ``None`` (default) excludes nothing, preserving legacy behavior.
 
     Returns:
         ``True`` when a non-empty patch was written, else ``False``.
@@ -917,8 +924,13 @@ def capture_recommended_patch(repo: Path, base_ref: str | None, out_path: Path) 
     # `git diff <base_ref>` only reports tracked-file changes, so new files the
     # fix phase created are absent. Append a creation hunk for each via
     # `git diff --no-index /dev/null <file>` (exit 1 = "files differ", expected).
+    # Pre-fix untracked files (preexisting_untracked) are filtered out first so
+    # files that were already untracked before the run never enter the patch.
     try:
-        for rel in list_untracked(repo):
+        untracked = list_untracked(repo)
+        if preexisting_untracked is not None:
+            untracked = [path for path in untracked if path not in preexisting_untracked]
+        for rel in untracked:
             proc = _run_git(repo, ["diff", "--no-index", "/dev/null", rel], timeout=30, retries=0)
             if proc.returncode in (0, 1):
                 recommended += proc.stdout
@@ -941,6 +953,8 @@ def capture_recommended_patch_with_base(
     pre_fix_snapshot: str | None,
     pre_fix_head: str | None,
     out_path: Path,
+    *,
+    preexisting_untracked: set[str] | None = None,
 ) -> bool:
     """Capture the recommended patch, resolving the pre-fix base centrally.
 
@@ -963,12 +977,18 @@ def capture_recommended_patch_with_base(
             clean or the snapshot failed.
         pre_fix_head: Pre-fix ``HEAD`` SHA, or ``None``. Used only when
             *pre_fix_snapshot* is ``None``.
+        preexisting_untracked: Set of repo-relative paths that were untracked
+            BEFORE the fix ran, forwarded to
+            :func:`capture_recommended_patch` so they contribute no creation
+            hunk. ``None`` (default) excludes nothing.
 
     Returns:
         ``True`` when a non-empty patch was written, else ``False``.
     """
     base_ref = pre_fix_snapshot or pre_fix_head
-    return capture_recommended_patch(repo, base_ref, out_path)
+    return capture_recommended_patch(
+        repo, base_ref, out_path, preexisting_untracked=preexisting_untracked
+    )
 
 
 def log(repo: Path, base: str, head: str = "HEAD") -> str:
