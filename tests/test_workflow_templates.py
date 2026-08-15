@@ -150,6 +150,38 @@ def test_command_workflows_dispatch_approved_head() -> None:
     )
 
 
+def test_review_workflow_head_bound_gate() -> None:
+    """The live Codex review workflow requires an approved head and cleans up auth."""
+    wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
+
+    assert "pull_request" not in _wf_triggers(wf)
+    inputs = _wf_triggers(wf)["workflow_dispatch"]["inputs"]
+    assert "approved_head_sha" in inputs
+
+    steps = job_steps(wf, "analyze")
+    verify = next(
+        step
+        for step in steps
+        if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
+    )
+    checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
+    assert steps.index(verify) < checkout_idx
+
+    review = next(step for step in steps if "daydream --review" in step.get("run", ""))
+    assert "--approved-head-sha" in review["run"]
+    assert "APPROVED_HEAD_SHA" in review["env"]
+
+    cleanup = next(step for step in steps if "auth.json" in step.get("run", ""))
+    assert steps.index(review) < steps.index(cleanup)
+    assert cleanup.get("if", "") == "always()"
+
+
+def test_review_workflow_uses_only_model_credential() -> None:
+    """The live review gate adds no secret beyond the model credential."""
+    text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
+    assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
+
+
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
 def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
     wf = load_workflow(wf_path)
