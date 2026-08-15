@@ -264,23 +264,42 @@ def _resolve_ts_import(import_str: str, repo_root: Path, importer: Path) -> list
     return [c for c in candidates if c.exists() and c.is_file()]
 
 
-def _resolve_go_import(import_str: str, repo_root: Path, importer: Path) -> list[Path]:
-    # Best-effort: walk repo for a directory whose suffix matches the import path.
+def _build_go_package_index(repo_root: Path) -> dict[str, tuple[Path, ...]]:
+    """Index Go files by their parent directory's terminal name.
+
+    Traverses ``repo_root.rglob("*.go")`` exactly once and groups each file
+    under the terminal name of its parent directory. The first directory to
+    claim a terminal name wins: files under a later directory with the same
+    terminal name are ignored. Best-effort: an ``OSError`` during traversal
+    degrades to an empty index.
+    """
+    index: dict[str, list[Path]] = {}
+    owners: dict[str, Path] = {}
+    try:
+        for candidate in repo_root.rglob("*.go"):
+            if not candidate.is_file():
+                continue
+            parent = candidate.parent
+            name = parent.name
+            if not name:
+                continue
+            owner = owners.get(name)
+            if owner is None:
+                owners[name] = parent
+                index[name] = [candidate]
+            elif owner == parent:
+                index[name].append(candidate)
+    except OSError:
+        return {}
+    return {name: tuple(files) for name, files in index.items()}
+
+
+def _resolve_go_import(import_str: str, package_index: dict[str, tuple[Path, ...]]) -> list[Path]:
+    # Best-effort: look up the import's terminal component in the indexed tree.
     if not import_str:
         return []
-    parts = import_str.strip("/").split("/")
-    suffix = parts[-1]
-    matches: list[Path] = []
-    try:
-        for candidate in repo_root.rglob(suffix):
-            if candidate.is_dir():
-                # Confirm at least one .go file lives in it.
-                if any(candidate.glob("*.go")):
-                    matches.extend(candidate.glob("*.go"))
-                    break
-    except OSError:
-        return []
-    return matches
+    suffix = import_str.strip("/").split("/")[-1]
+    return list(package_index.get(suffix, ()))
 
 
 def _resolve_rust_import(import_str: str, repo_root: Path, importer: Path) -> list[Path]:
@@ -303,13 +322,19 @@ def _resolve_rust_import(import_str: str, repo_root: Path, importer: Path) -> li
     return [c for c in candidates if c.exists() and c.is_file()]
 
 
-def _resolve_import(language_id: str, import_str: str, repo_root: Path, importer: Path) -> list[Path]:
+def _resolve_import(
+    language_id: str,
+    import_str: str,
+    repo_root: Path,
+    importer: Path,
+    go_package_index: dict[str, tuple[Path, ...]] | None = None,
+) -> list[Path]:
     if language_id == "python":
         return _resolve_python_import(import_str, repo_root, importer)
     if language_id in ("typescript", "tsx", "javascript"):
         return _resolve_ts_import(import_str, repo_root, importer)
     if language_id == "go":
-        return _resolve_go_import(import_str, repo_root, importer)
+        return _resolve_go_import(import_str, go_package_index or {})
     if language_id == "rust":
         return _resolve_rust_import(import_str, repo_root, importer)
     return []
@@ -337,6 +362,19 @@ _GENERIC_STEMS = frozenset(
 # Reverse-edge grep is a best-effort seed, not an exhaustive index. A
 # legitimately widely-imported module can match hundreds of files; cap the
 # seed so no single module can blow the downstream prompt's context window.
+def _is_generic_or_invalid_stem(stem: str) -> bool:
+    """Return True if *stem* should be skipped by the reverse-import lookup.
+
+    Skips empty stems, stems in :data:`_GENERIC_STEMS`, and stems containing
+    characters (NUL, CR, LF) that cannot be expressed in a grep patterns file.
+    """
+    if not stem or stem in _GENERIC_STEMS:
+        return True
+    if "\x00" in stem or "\r" in stem or "\n" in stem:
+        return True
+    return False
+
+
 _MAX_IMPORTERS = 40
 
 # Restrict the reverse-edge grep to source files. A doc, plan, or config file
@@ -344,22 +382,48 @@ _MAX_IMPORTERS = 40
 _CODE_PATHSPECS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in LANGUAGES)
 
 
-def _find_importers(repo_root: Path, modified_path: str) -> list[str]:
-    """Best-effort `git grep` for source files that import the modified file.
+def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[str, list[str]]:
+    """Return one batched reverse-import lookup for all *modified_paths*.
 
-    Matches the modified file's stem at word boundaries, restricted to
-    tracked source files, skipping generic stems and capping the result at
-    :data:`_MAX_IMPORTERS`.
+    Feeds every changed module stem to a single :func:`git_ops.grep_fixed_matches`
+    call, then groups the ``(path, pattern)`` pairs per modified path. Each
+    modified path's list excludes that exact path and is capped at
+    :data:`_MAX_IMPORTERS`, so paths sharing a stem keep separate, per-path
+    caps. Best-effort: a ``GitError`` (or no usable stems) degrades to empty
+    lists with zero git calls.
     """
-    stem = Path(modified_path).stem
-    if not stem or stem in _GENERIC_STEMS:
-        return []
+    lookup: dict[str, list[str]] = {path: [] for path in modified_paths}
+    unique_stems: list[str] = []
+    seen_stems: set[str] = set()
+    for path in modified_paths:
+        stem = Path(path).stem
+        if _is_generic_or_invalid_stem(stem):
+            continue
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        unique_stems.append(stem)
+    if not unique_stems:
+        return lookup
+
     try:
-        matches = git_ops.grep(repo_root, stem, word=True, pathspecs=_CODE_PATHSPECS)
+        pairs = git_ops.grep_fixed_matches(repo_root, unique_stems, word=True, pathspecs=_CODE_PATHSPECS)
     except GitError:
-        return []
-    importers = [line for line in matches if line and line != modified_path]
-    return importers[:_MAX_IMPORTERS]
+        return lookup
+
+    by_stem: dict[str, list[str]] = {}
+    for path, matched in pairs:
+        if matched not in seen_stems:
+            continue
+        bucket = by_stem.setdefault(matched, [])
+        if path not in bucket:
+            bucket.append(path)
+    for path in modified_paths:
+        stem = Path(path).stem
+        if _is_generic_or_invalid_stem(stem):
+            continue
+        lookup[path] = [p for p in by_stem.get(stem, ()) if p != path][:_MAX_IMPORTERS]
+    return lookup
 
 
 # --- Public API --------------------------------------------------------------
@@ -400,6 +464,13 @@ def detect_affected_files(
         results.append(FileInfo(path=path, role=role))
 
     entries = _parse_diff_name_status(diff_text)
+    reverse_paths = [
+        entry.path
+        for entry in entries
+        if entry.status != "D" and Path(entry.path).suffix in LANGUAGES
+    ]
+    importers_by_path = _build_importer_lookup(repo_root, reverse_paths)
+    go_package_index: dict[str, tuple[Path, ...]] | None = None
 
     for entry in entries:
         _add(entry.path, "modified")
@@ -425,8 +496,10 @@ def detect_affected_files(
             continue
 
         imports = extract_imports(parser, source, query_string)
+        if language_id == "go" and imports and go_package_index is None:
+            go_package_index = _build_go_package_index(repo_root)
         for imp in imports:
-            resolved_paths = _resolve_import(language_id, imp, repo_root, abs_path)
+            resolved_paths = _resolve_import(language_id, imp, repo_root, abs_path, go_package_index)
             for resolved in resolved_paths:
                 try:
                     rel = resolved.resolve().relative_to(repo_root.resolve())
@@ -434,7 +507,7 @@ def detect_affected_files(
                     continue
                 _add(str(rel), "imports")
 
-        for importer in _find_importers(repo_root, entry.path):
+        for importer in importers_by_path.get(entry.path, ()):
             _add(importer, "imported_by")
 
     return results

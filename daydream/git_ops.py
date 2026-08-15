@@ -1163,6 +1163,98 @@ def grep(
     return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
 
 
+def grep_fixed_matches(
+    repo: Path,
+    patterns: Sequence[str],
+    *,
+    word: bool = False,
+    pathspecs: Sequence[str] | None = None,
+) -> list[tuple[str, str]]:
+    """Return ``(path, matched_pattern)`` pairs from one batched ``git grep``.
+
+    Runs a single ``git grep -F -o -z -f <file>`` so that every pattern is
+    matched in one process invocation, emitting one ``(path, pattern)`` tuple
+    per match. Patterns are deduplicated in input order; patterns containing
+    NUL, CR, or LF are skipped (they cannot be expressed as a single fixed
+    string in the patterns file).
+
+    Args:
+        repo: Repository root to search.
+        patterns: Fixed-string patterns matched literally (``-F``).
+        word: When true, match only at word boundaries (``-w``) so ``app``
+            does not also match ``application`` or ``mapping``.
+        pathspecs: Optional ``git`` pathspecs limiting the search to matching
+            files (e.g. ``("*.py", "*.ts")``). When omitted, every tracked
+            file is searched.
+
+    Returns:
+        List of ``(path, matched_pattern)`` pairs parsed from ``git grep``
+        output — one tuple per match occurrence, so the same pattern may
+        appear multiple times for the same file even when the matches share a
+        single line (``git grep -o`` emits a record per occurrence). Only the
+        input patterns are deduplicated. Empty when there are no matches or
+        no usable patterns.
+
+    Raises:
+        GitError: If ``git grep`` exits with an unexpected status or emits a
+            malformed record. Exit code ``1`` is "no matches" and is treated
+            as success (empty list).
+    """
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for pattern in patterns:
+        if not pattern or pattern in seen:
+            continue
+        if "\x00" in pattern or "\r" in pattern or "\n" in pattern:
+            continue
+        seen.add(pattern)
+        normalized.append(pattern)
+    if not normalized:
+        return []
+
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    proc: subprocess.CompletedProcess[Any] | None = None
+    try:
+        with tmp:
+            tmp.write(b"\n".join(os.fsencode(p) for p in normalized))
+        args = ["grep", "--no-color", "-F", "-o", "-z", "-f", tmp.name]
+        if word:
+            args.append("-w")
+        if pathspecs:
+            args.append("--")
+            args.extend(pathspecs)
+        proc = _run_git(repo, args, timeout=30, capture_bytes=True)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+    if proc is None:  # pragma: no cover - _run_git returns or raises
+        raise GitError("git grep -F -o -z -f failed")
+    if proc.returncode == 1:
+        return []
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+        raise GitError(f"git grep -F -o -z -f failed: {stderr.strip()}")
+
+    stdout = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    matches: list[tuple[str, str]] = []
+    for line in stdout.split(b"\n"):
+        if not line:
+            continue
+        parts = line.split(b"\x00", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise GitError("git grep -F -o -z -f returned a malformed record")
+        matches.append(
+            (
+                parts[0].decode("utf-8", errors="surrogateescape"),
+                parts[1].decode("utf-8", errors="surrogateescape"),
+            )
+        )
+    return matches
+
+
 def status_porcelain(repo: Path) -> str:
     """Return ``git status --porcelain`` output.
 

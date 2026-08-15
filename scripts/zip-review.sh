@@ -36,7 +36,13 @@ LATEST_RUN="$(ls -dt "$RUNS_DIR"/*/ | head -1)"
 LATEST_RUN="${LATEST_RUN%/}"
 RUN_ID="$(basename "$LATEST_RUN")"
 
-echo "Latest run: $RUN_ID ($(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LATEST_RUN"))"
+# Portable mtime: GNU stat -c, BSD stat -f fallback.
+if stat -c '%y' "$LATEST_RUN" >/dev/null 2>&1; then
+  RUN_TIME="$(stat -c '%y' "$LATEST_RUN" | cut -d. -f1)"
+else
+  RUN_TIME="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$LATEST_RUN")"
+fi
+echo "Latest run: $RUN_ID ($RUN_TIME)"
 
 # Derive a zip filename from branch name or run ID
 if [ -z "$BRANCH_NAME" ]; then
@@ -100,19 +106,25 @@ else
   echo "Warning: no review-output.md found" >&2
 fi
 
-# Create zip via python3's stdlib zipfile so the script has no external `zip` binary dependency.
+# Create zip via python3's stdlib so the script needs no external `zip` binary
+# (the script already requires python3 for metadata extraction). Archive paths
+# are relative to the current directory, matching `zip -r` semantics.
 python3 - "$ZIP_FILE" "${FILES_TO_ZIP[@]}" <<'PY'
+import os
 import sys
 import zipfile
-from pathlib import Path
 
-with zipfile.ZipFile(sys.argv[1], "w", zipfile.ZIP_DEFLATED) as zf:
-    for src in (Path(p) for p in sys.argv[2:]):
-        if src.is_dir():
-            for f in sorted((p for p in src.rglob("*") if p.is_file()), key=str):
-                zf.write(f, f.as_posix().lstrip("/"))
+zip_path = sys.argv[1]
+paths = sys.argv[2:]
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for path in paths:
+        if os.path.isdir(path):
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    full = os.path.join(root, name)
+                    zf.write(full, os.path.relpath(full, os.curdir))
         else:
-            zf.write(src, src.as_posix().lstrip("/"))
+            zf.write(path, os.path.relpath(path, os.curdir))
 PY
 echo ""
 echo "Done: $(du -h "$ZIP_FILE" | cut -f1) $ZIP_FILE"

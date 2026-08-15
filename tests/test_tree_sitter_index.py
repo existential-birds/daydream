@@ -2,11 +2,17 @@
 
 import inspect
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import _commit, _git, _make_repo_with_main
 
-from daydream.tree_sitter_index import _MAX_IMPORTERS, detect_affected_files
+from daydream import git_ops
+from daydream.tree_sitter_index import (
+    _MAX_IMPORTERS,
+    _is_generic_or_invalid_stem,
+    detect_affected_files,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -214,6 +220,39 @@ def test_go_impact_surface(tmp_path: Path):
     assert len(results) >= 2
 
 
+def test_go_imports_reuse_one_package_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _materialize(
+        tmp_path,
+        {
+            "cmd/alpha.go": 'package main\n\nimport "example.com/models"\n',
+            "cmd/beta.go": 'package main\n\nimport "example.com/helpers"\n',
+            "models/user.go": "package models\n",
+            "models/order.go": "package models\n",
+            "helpers/format.go": "package helpers\n",
+        },
+    )
+    real_rglob = Path.rglob
+    calls = 0
+
+    def one_go_traversal(self: Path, pattern: str) -> Any:
+        nonlocal calls
+        if self == repo and pattern == "*.go":
+            calls += 1
+            if calls > 1:
+                raise AssertionError("repo_root.rglob('*.go') called more than once")
+            return real_rglob(self, pattern)
+        raise AssertionError(f"unexpected rglob: {pattern!r}")
+
+    monkeypatch.setattr(Path, "rglob", one_go_traversal)
+
+    results = detect_affected_files(
+        _modified_diff("cmd/alpha.go") + _modified_diff("cmd/beta.go"), repo, depth=1
+    )
+    imports_paths = {r.path for r in results if r.role == "imports"}
+    assert imports_paths == {"models/user.go", "models/order.go", "helpers/format.go"}
+    assert {r.path for r in results if r.role == "modified"} == {"cmd/alpha.go", "cmd/beta.go"}
+
+
 def test_rust_impact_surface(tmp_path: Path):
     diff_text = (FIXTURES / "rust_multifile.diff").read_text()
     repo = _materialize(
@@ -312,14 +351,59 @@ def test_reverse_edge_excludes_non_code_files(tmp_path: Path):
     assert "notes.md" not in importers
 
 
-def test_reverse_edge_capped_at_max(tmp_path: Path):
+def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _make_repo_with_main(tmp_path)
-    (repo / "widget.py").write_text("x = 1\ny = 2\n")
+    for stem in ("widget", "gadget"):
+        (repo / f"{stem}.py").write_text("x = 1\ny = 2\n")
     overshoot = _MAX_IMPORTERS + 5
-    for i in range(overshoot):
-        (repo / f"importer_{i}.py").write_text("import widget\n")
-    _git(repo, "add", "widget.py", *[f"importer_{i}.py" for i in range(overshoot)])
+    for stem in ("widget", "gadget"):
+        for i in range(overshoot):
+            (repo / f"{stem}_importer_{i}.py").write_text(f"import {stem}\n")
+    _git(repo, "add", "widget.py", "gadget.py",
+         *[f"{stem}_importer_{i}.py" for stem in ("widget", "gadget") for i in range(overshoot)])
     _commit(repo, "many importers")
 
-    importers = _importers(detect_affected_files(_modified_diff("widget.py"), repo, depth=1))
-    assert len(importers) == _MAX_IMPORTERS
+    real_grep_fixed = git_ops.grep_fixed_matches
+    calls = 0
+
+    def one_batch(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("grep_fixed_matches called more than once")
+        return real_grep_fixed(*args, **kwargs)
+
+    def no_legacy_grep(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("legacy git_ops.grep must not be called")
+
+    monkeypatch.setattr(git_ops, "grep_fixed_matches", one_batch)
+    monkeypatch.setattr(git_ops, "grep", no_legacy_grep)
+
+    results = detect_affected_files(
+        _modified_diff("widget.py") + _modified_diff("gadget.py"), repo, depth=1
+    )
+    importers = _importers(results)
+    widget = {p for p in importers if p.startswith("widget_importer_")}
+    gadget = {p for p in importers if p.startswith("gadget_importer_")}
+    assert len(widget) == _MAX_IMPORTERS
+    assert len(gadget) == _MAX_IMPORTERS
+    assert len(importers) == _MAX_IMPORTERS * 2
+    assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
+
+
+@pytest.mark.parametrize(
+    "stem",
+    ["", "__init__", "mod", "index", "main", "app", "utils", "config", "tests", "conftest"],
+)
+def test_is_generic_or_invalid_stem_skips_empty_and_generic(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is True
+
+
+@pytest.mark.parametrize("stem", ["a\x00b", "a\rb", "a\nb"])
+def test_is_generic_or_invalid_stem_skips_nul_cr_lf(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is True
+
+
+@pytest.mark.parametrize("stem", ["widget", "gadget", "indexer", "app_store"])
+def test_is_generic_or_invalid_stem_accepts_specific_stems(stem: str) -> None:
+    assert _is_generic_or_invalid_stem(stem) is False
