@@ -102,6 +102,52 @@ def test_no_base_requires_immutable_base_identity() -> None:
     assert status == 2
 
 
+def test_immutable_base_image_accepts_only_versioned_identities() -> None:
+    """The validator accepts versioned tags/digests; aliases and junk are refused."""
+    digest_hex = "a" * 64
+    accepted = [
+        "daydream-rl/base:v1.2.3",
+        "daydream-rl/base:1.2.3",
+        "daydream-rl/base:v0.1.2-3-g5ce4c0e-dirty",  # git describe output
+        f"daydream-rl/base@sha256:{digest_hex}",
+        "daydream-rl/base:r2d2",  # Docker-grammar tag containing a digit
+    ]
+    rejected = [
+        build_images.BASE_LATEST,           # the mutable alias
+        "daydream-rl/base:stable",          # unversioned aliases
+        "daydream-rl/base:dev",
+        "daydream-rl/base:nightly",
+        "daydream-rl/base:main",
+        "daydream-rl/base:-foo",            # docker grammar: leading dash
+        "daydream-rl/base:foo/bar",         # docker grammar: slash
+        "daydream-rl/base:has space",       # docker grammar: whitespace
+        "daydream-rl/base:",                # empty tag
+        f"daydream-rl/base@sha256:{'x' * 64}",  # not hex
+        f"daydream-rl/base@sha256:{digest_hex[:-1]}",  # 63 hex, not 64
+    ]
+    for value in accepted:
+        assert build_images._immutable_base_image(value) == value, value
+    for value in rejected:
+        assert build_images._immutable_base_image(value) is None, value
+
+
+def test_build_base_selects_the_versioned_tag_not_the_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_build_base returns the immutable versioned tag by shape, never by position."""
+    versioned = "daydream-rl/base:v1.2.3-3-g5ce4c0e"
+
+    # Versioned tag first, as build_base_image emits it today.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [versioned, build_images.BASE_LATEST])
+    assert build_images._build_base() == (0, versioned)
+
+    # Alias first: the selection must not depend on the tag-list order.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [build_images.BASE_LATEST, versioned])
+    assert build_images._build_base() == (0, versioned)
+
+    # No immutable identity in the tags at all: a failure, never a bare alias.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [build_images.BASE_LATEST])
+    assert build_images._build_base() == (1, None)
+
+
 def test_main_uses_immutable_base_for_repository_builds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,6 +187,10 @@ def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
     # The base is still consumed via FROM, declared after the ARG.
     assert text.find("FROM ${BASE_IMAGE}") > text.find("ARG BASE_IMAGE")
     assert "daydream-rl/base:latest" not in text
+    # The comment spelling the accepted identity grammar must stay in sync with
+    # the single source of truth in build_images.py, so a grammar change cannot
+    # leave this Dockerfile silently out of date.
+    assert build_images.IMMUTABLE_BASE_FORMAT in text
 
 
 @pytest.mark.slow

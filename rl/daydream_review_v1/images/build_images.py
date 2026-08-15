@@ -68,8 +68,21 @@ DIST_DIR = IMAGES_DIR / "dist"
 BASE_REPOSITORY = "daydream-rl/base"
 BASE_LATEST = f"{BASE_REPOSITORY}:latest"
 
+#: The accepted immutable-base identity grammar, spelled exactly once. Every
+#: user-facing prose site — argparse help, the exit-2 message, the validator
+#: docstring, and (via a test-pinned comment) ``repo.Dockerfile`` — derives
+#: from this literal, and the patterns below implement exactly it. Changing the
+#: identity shape means changing this one literal (and the patterns).
+IMMUTABLE_BASE_FORMAT = "daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 hex>"
+
 #: A versioned base tag, e.g. ``daydream-rl/base:v0.1.2-3-g5ce4c0e`` (git describe).
-_BASE_TAG_RE = re.compile(r"^daydream-rl/base:[^:]+$")
+#: The tag portion follows Docker's reference grammar — ASCII alphanumerics plus
+#: ``_ . -``, never starting with ``.`` or ``-``, at most 128 characters. The
+#: separate digit check below is what makes a tag *versioned* rather than an
+#: unversioned alias such as ``stable`` or ``dev``.
+_BASE_TAG_RE = re.compile(r"^daydream-rl/base:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$")
+#: Versioned tags must contain a digit (``git describe`` output always does).
+_BASE_TAG_CONTAINS_DIGIT = re.compile(r"[0-9]")
 #: A canonical content digest, e.g. ``daydream-rl/base@sha256:<64 hex>``.
 _BASE_DIGEST_RE = re.compile(r"^daydream-rl/base@sha256:[0-9a-f]{64}$")
 
@@ -130,14 +143,18 @@ def base_tag() -> str:
 def _immutable_base_image(value: str) -> str | None:
     """Return *value* when it is an explicit immutable base identity, else ``None``.
 
-    Accepts a versioned tag (``daydream-rl/base:<tag>``) or a canonical digest
-    (``daydream-rl/base@sha256:<64 hex>``). The mutable ``latest`` alias is
-    rejected explicitly, before the tag pattern is consulted, so a snapshot build
-    never silently rides the alias as it moves.
+    The accepted grammar is the single literal ``IMMUTABLE_BASE_FORMAT``: a
+    versioned tag whose tag portion fits Docker's reference grammar and contains
+    a digit (excluding unversioned aliases like ``stable``/``dev``), or a
+    canonical SHA-256 digest. The mutable ``latest`` alias is rejected
+    explicitly, before the patterns are consulted, so a snapshot build never
+    silently rides the alias as it moves.
     """
     if value == BASE_LATEST:
         return None
-    if _BASE_TAG_RE.match(value) or _BASE_DIGEST_RE.match(value):
+    if _BASE_DIGEST_RE.match(value):
+        return value
+    if _BASE_TAG_RE.match(value) and _BASE_TAG_CONTAINS_DIGIT.search(value):
         return value
     return None
 
@@ -164,8 +181,12 @@ def build_base_image() -> list[str]:
 def _build_base() -> tuple[int, str | None]:
     """Build the base image and report its tags. Returns ``(exit_code, versioned_tag)``.
 
-    On success the versioned tag (``base_tag()``, ``tags[0]``) is returned as the
-    identity a snapshot build must consume — never the mutable alias.
+    On success the immutable versioned tag produced by ``base_tag()`` is
+    returned as the identity a snapshot build must consume — never the mutable
+    alias. The tag is selected by shape (the same ``_immutable_base_image``
+    predicate ``--no-base`` validates against), not by position:
+    ``build_base_image()`` tags the same build twice, and whichever order it
+    applies them in a snapshot must not inherit the alias.
     """
     try:
         tags = build_base_image()
@@ -175,7 +196,11 @@ def _build_base() -> tuple[int, str | None]:
         return (1, None)
     for tag in tags:
         print(f"built {tag}")
-    return (0, tags[0])
+    versioned = next((t for t in tags if _immutable_base_image(t) is not None), None)
+    if versioned is None:
+        print(f"FAILED base image: no immutable versioned tag among {tags}", file=sys.stderr)
+        return (1, None)
+    return (0, versioned)
 
 
 def write_setup_script(ctx: Path, setup_cmds: list[str]) -> None:
@@ -304,7 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     base.add_argument(
         "--no-base",
         metavar="BASE_IMAGE",
-        help="reuse the given immutable base image (daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 hex>)",
+        help=f"reuse the given immutable base image ({IMMUTABLE_BASE_FORMAT})",
     )
     base.add_argument("--base-only", action="store_true", help=f"build {BASE_LATEST} and no repo image")
     parser.add_argument(
@@ -338,8 +363,8 @@ def main(argv: list[str] | None = None) -> int:
         base_image = _immutable_base_image(args.no_base)
         if base_image is None:
             print(
-                f"invalid immutable base image {args.no_base!r}: expected daydream-rl/base:<tag> "
-                "or daydream-rl/base@sha256:<64 hex>; 'latest' is not allowed",
+                f"invalid immutable base image {args.no_base!r}: expected {IMMUTABLE_BASE_FORMAT}; "
+                "'latest' is not allowed",
                 file=sys.stderr,
             )
             return 2
@@ -348,9 +373,13 @@ def main(argv: list[str] | None = None) -> int:
         status, base_image = _build_base()
         if status:
             return status
-        # A successful base build must produce the versioned tag; a None tag on
-        # the success path is an invariant violation, never a cue to fall back.
-        assert base_image is not None
+        # A successful base build must produce the immutable versioned tag; a
+        # None tag on the success path is an invariant violation, never a cue to
+        # fall back. Deliberately a runtime check rather than an ``assert``:
+        # ``python -O`` strips asserts, and a stripped check would let a
+        # ``(0, None)`` base build feed BASE_IMAGE=None into every snapshot.
+        if base_image is None:
+            raise RuntimeError("_build_base() reported success without an immutable versioned tag")
 
     built: list[str] = []
     failed: list[str] = []
