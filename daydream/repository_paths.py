@@ -20,9 +20,9 @@ _SEG_CHAR   = r"[\w .#%~!&()+\-@]"              # segment char incl. dot
 _PATH_SEGMENT = (
     rf"(?:{_SEG_NONDOT}{_SEG_CHAR}*"
     rf"|\.{_SEG_NONDOT}{_SEG_CHAR}*"            # single leading dot + non-dot body (.foo)
-    rf"|\.\.[\w .#%~!&()+\-@.]+)")            # two leading dots + >=1 char (..cache, ...)
-REPOSITORY_FILE_PATH_PATTERN = rf"^(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*$"
-DIRECTORY_SCOPE_PATTERN      = rf"^(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?$"
+    rf"|\.\.{_SEG_CHAR}+)")            # two leading dots + >=1 char (..cache, ...)
+REPOSITORY_FILE_PATH_PATTERN = rf"\A(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*\Z"
+DIRECTORY_SCOPE_PATTERN      = rf"\A(?:\./)?{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?\Z"
 
 REPOSITORY_FILE_PATH_MAX_LENGTH = 4096
 
@@ -146,8 +146,11 @@ def path_is_confined(
 
 
 def canonicalize_directory_scope(value: str) -> str:
-    """Canonicalize the sole lossless scope spelling difference."""
-    return value.rstrip("/")
+    """Canonicalize the lossless scope spelling differences."""
+    stripped = value.rstrip("/")
+    if stripped.startswith("./"):
+        stripped = stripped[2:]
+    return stripped
 
 
 __all__ = [

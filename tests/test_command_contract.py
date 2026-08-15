@@ -19,9 +19,11 @@ from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
     WORKING_DIRECTORY_SCHEMA,
+    canonicalize_directory_scope,
     path_is_confined,
     valid_directory_scope_lexical,
     valid_repository_file_path,
+    validate_applicability,
 )
 from daydream.runner import RunConfig, run
 from tests.harness.improve_backend import install_improve_stub
@@ -81,6 +83,8 @@ PATH_REJECTS = [
     "x`y",     # backtick excluded (shell metachar)
     ".",       # bare current dir is not a valid file path
     "./",      # bare ./ is not a valid file path
+    "foo\n",   # trailing newline: schema (re.search) and lexical (fullmatch) must agree
+    "src/main.rs\n",
 ]
 
 
@@ -136,6 +140,8 @@ def test_working_directory_accepts_cwd() -> None:
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("./foo")
     assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
     assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
+    # trailing newline: the schema gate must reject exactly like the lexical gate
+    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("src/main.rs\n")
 
 
 @pytest.mark.parametrize("value", MULTI_DOT_PATHS)
@@ -166,15 +172,50 @@ def test_schema_and_lexical_gate_agree_on_corpus() -> None:
         assert not valid_repository_file_path(value), f"lexical gate should reject {value!r}"
 
 
+def test_validate_applicability_collapses_dot_slash_scope_spellings(
+    tmp_path: Path,
+) -> None:
+    """``./foo`` and ``foo`` are the same directory: string dedup must collapse them."""
+    repo = tmp_path / "repo"
+    (repo / "frontend").mkdir(parents=True)
+
+    def applicability(paths: list[str]) -> dict[str, Any]:
+        return {
+            "scope": {"kind": "in-scope-paths", "paths": paths},
+            "preconditions": [],
+            "rationale": "same directory spelled twice",
+        }
+
+    normalized, rejection = validate_applicability(
+        applicability(["frontend/", "./frontend", "frontend"]), repo=repo
+    )
+    assert rejection is not None
+    assert (rejection.code, rejection.pointer) == (
+        "RECON_APPLICABILITY_INVALID",
+        "/scope/paths",
+    )
+    assert normalized is None
+    # a lone ./-prefixed scope is legal and canonicalizes to the bare spelling
+    normalized, rejection = validate_applicability(
+        applicability(["./frontend"]), repo=repo
+    )
+    assert rejection is None
+    assert normalized is not None
+    assert normalized["scope"]["paths"] == ["frontend"]
+    assert canonicalize_directory_scope("./frontend") == "frontend"
+    assert canonicalize_directory_scope("./frontend/") == "frontend"
+
+
 def test_legal_filenames_are_confined(tmp_path: Path) -> None:
     """Legal filenames pass the confinement walk for real files; traversal never does."""
     repo = tmp_path / "repo"
     repo.mkdir()
+    (repo / "~").mkdir()  # corpus spelling ~/.bashrc nests through a ~ dir
     for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
-                 "a&b.py", "~.bashrc", "space name.py"]:
+                 "a&b.py", "~/.bashrc", "space name.py"]:
         (repo / name).write_text("x")
     for name in ["foo bar.py", "Café.md", "file#1.py", "a%file.txt", "(x).py",
-                 "a&b.py", "~.bashrc", "space name.py", "./foo bar.py"]:
+                 "a&b.py", "~/.bashrc", "space name.py", "./foo bar.py"]:
         assert path_is_confined(repo, name), f"{name!r} must be confined"
     # security carve-outs still rejected by the confinement gate too
     assert not path_is_confined(repo, "../x")

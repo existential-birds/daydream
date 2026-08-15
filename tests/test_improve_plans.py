@@ -338,6 +338,8 @@ def test_directory_scope_canonicalization_drops_the_trailing_slash(
     assert applicability["scope"]["paths"] == ["frontend/"]
     assert normalized["scope"]["paths"] == ["frontend"]
     assert canonicalize_directory_scope("frontend/") == "frontend"
+    assert canonicalize_directory_scope("./frontend") == "frontend"
+    assert canonicalize_directory_scope("./frontend/") == "frontend"
 
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:

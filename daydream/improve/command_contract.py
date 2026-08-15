@@ -28,7 +28,7 @@ WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
     "maxLength": REPOSITORY_FILE_PATH_MAX_LENGTH,
-    "pattern": rf"^(?:\.|{REPOSITORY_FILE_PATH_PATTERN[1:-1]}|/{REPOSITORY_FILE_PATH_PATTERN[1:-1]})$",
+    "pattern": rf"\A(?:\.|{REPOSITORY_FILE_PATH_PATTERN[2:-2]}|/{REPOSITORY_FILE_PATH_PATTERN[2:-2]})\Z",
 }
 LINE_ANCHOR_SCHEMA: dict[str, Any] = {
     "type": "object",
