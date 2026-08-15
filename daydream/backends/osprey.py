@@ -688,6 +688,10 @@ class OspreyBackend:
                         completion_tokens = _required_int(event, "completion_tokens")
                         cached_tokens = _optional_int(event, "cached_tokens")
                         reasoning_tokens = _optional_int(event, "thinking_tokens")
+                        if reasoning_tokens is not None and reasoning_tokens < 0:
+                            raise OspreyProtocolError(
+                                "turn_end thinking_tokens must be non-negative"
+                            )
                         cost = _parse_cost(event.get("cost_usd"), event_name=event_name)
                         turn_model = event.get("model")
                         if turn_model is not None and not isinstance(turn_model, str):
@@ -744,9 +748,17 @@ class OspreyBackend:
                 raise OspreyProtocolError("Osprey produced no session_start event")
             if not saw_session_end:
                 raise OspreyProtocolError("Osprey stream ended without session_end")
+            if terminal_exit_code is not None and terminal_exit_code != returncode:
+                raise OspreyProtocolError(
+                    "session_end exit_code does not match subprocess return code"
+                )
             if terminal_outcome not in _SUCCESS_OUTCOMES:
                 detail = failed_message or f"exit_code={terminal_exit_code!r}"
                 raise OspreyTerminalError(terminal_outcome or "unknown", detail)
+            if protocol_state.active_turn_id is not None:
+                raise OspreyProtocolError("successful session_end has an active turn")
+            if protocol_state.pending_tool_calls:
+                raise OspreyProtocolError("successful session_end has pending tool calls")
             if total_cost is not None and not saw_metric_cost:
                 yield CostEvent(
                     cost_usd=total_cost,

@@ -374,6 +374,64 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
     "events, message",
     [
         (
+            [{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}],
+            "active turn",
+        ),
+        (
+            [
+                {
+                    "event": "tool_call",
+                    "tool_call_id": "c-1",
+                    "tool_name": "tool_search",
+                    "arguments": {},
+                }
+            ],
+            "pending tool calls",
+        ),
+    ],
+)
+async def test_successful_session_end_requires_a_quiescent_stream(
+    events: list[dict[str, object]], message: str
+) -> None:
+    lines, _ = _stream(*events)
+
+    with pytest.raises(OspreyError, match=message):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+async def test_terminal_exit_code_must_match_process_status() -> None:
+    lines, _ = _stream()
+    lines[-1]["exit_code"] = 1
+
+    with pytest.raises(OspreyError, match="exit_code"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+async def test_negative_thinking_tokens_are_rejected() -> None:
+    lines, _ = _stream(
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {
+            "event": "turn_end",
+            "turn_id": "t-1",
+            "usage_reported": True,
+            "duration_ms": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "thinking_tokens": -1,
+        },
+    )
+
+    with pytest.raises(OspreyError, match="thinking_tokens"):
+        await _collect(OspreyBackend(osprey_binary="fake"), lines)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "events, message",
+    [
+        (
             [
                 {
                     "event": "turn_end",
