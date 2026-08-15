@@ -1443,6 +1443,96 @@ def test_clone_creates_working_tree(tmp_path: Path) -> None:
     assert (target / "base.txt").read_text() == "base\n"
 
 
+def test_clone_of_linked_worktree_materializes_head_and_staged_patch(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """A linked-worktree clone materializes that worktree's HEAD and a staged
+    binary patch round-trips into it (issue #221 / false-assumption STOP)."""
+    _main, linked = linked_worktree
+    # Stage a modification to a feature-only file (absent from main).
+    parser = linked / "services" / "taste" / "parser.go"
+    parser.write_text("package taste\n\n// staged spike\nfunc Spiked() {}\n")
+    _git(linked, "add", "services/taste/parser.go")
+    source_patch = git_ops.staged_patch(linked)
+    assert source_patch, "expected a nonempty staged patch"
+
+    clone = tmp_path / "spike-clone"
+    git_ops.clone(str(linked), clone)
+    assert git_ops.head_sha(clone) == git_ops.head_sha(linked)
+    # Copy the working file so the clone worktree matches the staged content.
+    shutil.copy2(parser, clone / "services" / "taste" / "parser.go")
+    git_ops.apply_staged_patch(clone, source_patch)
+    assert git_ops.staged_patch(clone) == source_patch
+    assert _git(clone, "diff", "--", "services/taste/parser.go") == ""
+
+
+def test_remove_remote_deletes_configured_remote(tmp_path: Path) -> None:
+    """remove_remote drops the clone's origin without touching its HEAD."""
+    source = _make_repo_with_main(tmp_path / "src")
+    clone = tmp_path / "clone"
+    git_ops.clone(str(source), clone)
+    assert git_ops.remote_url(clone) == str(source)
+    before = git_ops.head_sha(clone)
+
+    git_ops.remove_remote(clone)
+    assert git_ops.remote_url(clone) is None
+    assert git_ops.head_sha(clone) == before
+
+
+def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:
+    """A staged index patch from source reproduces source's staged index in a clone.
+
+    Binary payload exercises the ``--binary``/base85 machinery, so the
+    byte-captured round-trip claim in :func:`git_ops.staged_patch` is real.
+    """
+    source = _make_repo_with_main(tmp_path / "src")
+    clone = tmp_path / "clone"
+    git_ops.clone(str(source), clone)
+    payload = bytes(range(256))  # every byte value, incl. NUL/newline — not text
+    (source / "blob.bin").write_bytes(payload)
+    _git(source, "add", "blob.bin")
+    shutil.copy2(source / "blob.bin", clone / "blob.bin")
+
+    patch = git_ops.staged_patch(source)
+    assert patch  # nonempty bytes
+
+    git_ops.apply_staged_patch(clone, patch)
+    assert git_ops.staged_patch(clone) == git_ops.staged_patch(source)
+    assert _git(clone, "diff", "--", "blob.bin") == ""
+    assert (clone / "blob.bin").read_bytes() == payload
+
+
+def test_strict_enumeration_raises_where_soft_fails(tmp_path: Path) -> None:
+    """strict=True propagates a non-zero git exit; the soft default returns [].
+
+    The disposable read-only-checkout prep relies on strict enumeration so a
+    mid-prep git failure surfaces (its documented error-propagation contract)
+    instead of silently producing a clone missing tracked/untracked files.
+    """
+    not_a_repo = tmp_path / "not-a-repo"
+    not_a_repo.mkdir()
+
+    # Soft default: no crash, empty result.
+    assert git_ops.ls_files(not_a_repo) == []
+    assert git_ops.list_untracked(not_a_repo) == []
+
+    # Strict: the same failure raises GitError that callers wrap in CodexError.
+    with pytest.raises(git_ops.GitError):
+        git_ops.ls_files(not_a_repo, strict=True)
+    with pytest.raises(git_ops.GitError):
+        git_ops.list_untracked(not_a_repo, strict=True)
+
+    # On a real repo, strict returns the same paths as the soft call.
+    repo = _make_repo_with_main(tmp_path / "src")
+    (repo / "tracked.txt").write_text("x")
+    (repo / "untracked.txt").write_text("y")
+    _git(repo, "add", "tracked.txt")
+    assert git_ops.ls_files(repo, strict=True) == git_ops.ls_files(repo)
+    assert git_ops.list_untracked(repo, strict=True) == git_ops.list_untracked(repo)
+    assert "tracked.txt" in git_ops.ls_files(repo, strict=True)
+    assert "untracked.txt" in git_ops.list_untracked(repo, strict=True)
+
+
 def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
     """clone() raises GitError when the remote URL is invalid."""
     target = tmp_path / "nope"

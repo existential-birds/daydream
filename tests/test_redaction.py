@@ -8,10 +8,13 @@ REDA-05 fail-safe.
 
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
-from daydream.trajectory import Redactor, now_iso
+from daydream.trajectory import Redactor, now_iso, redact_value
 
 
 def _user_step(message: str) -> Step:
@@ -451,26 +454,54 @@ _PKCS8_PEM = (
     "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
     "-----END PRIVATE KEY-----"
 )
+_ENCRYPTED_PEM = (
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+    "MIIFCTBHBgkqhkiG9w0BBQ0wOjANBglghkgBZQMEAwEFENCRYPTEDKEYBODY\n"
+    "-----END ENCRYPTED PRIVATE KEY-----"
+)
+_OPENSSH_PEM = (
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAEAAABlOPENSSHKEYBODY\n"
+    "-----END OPENSSH PRIVATE KEY-----"
+)
+_EC_PEM = (
+    "-----BEGIN EC PRIVATE KEY-----\n"
+    "MHcCAQEEIBF8XZQ6ECKEYBODYwJ5fWx8+1FcQ2rY=\n"
+    "-----END EC PRIVATE KEY-----"
+)
+_DSA_PEM = (
+    "-----BEGIN DSA PRIVATE KEY-----\n"
+    "MIH3AgEAAkEA8qWq6Q2DSAKEYBODYB5QhJ9zQ2nLr3U=\n"
+    "-----END DSA PRIVATE KEY-----"
+)
+
+# Shared by the block and env-assignment redaction tests — one spec for the six
+# PEM variants so the parametrize lists cannot drift out of sync.
+_PEM_KEY_CASES: list[tuple[str, str]] = [
+    (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
+    (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
+    (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
+    (_OPENSSH_PEM, "OPENSSHKEYBODY"),
+    (_EC_PEM, "ECKEYBODY"),
+    (_DSA_PEM, "DSAKEYBODY"),
+]
+_PEM_KEY_IDS = ["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"]
 
 
 @pytest.mark.parametrize(
     ("pem", "body"),
-    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
-    ids=["pkcs1", "pkcs8"],
+    _PEM_KEY_CASES,
+    ids=_PEM_KEY_IDS,
 )
 def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
-    """-----BEGIN (RSA )PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
+    """PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA) replaced with [REDACTED_PEM_KEY]."""
     out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
     assert isinstance(out.message, str)
     assert body not in out.message
     assert "[REDACTED_PEM_KEY]" in out.message
 
 
-@pytest.mark.parametrize(
-    ("pem", "body"),
-    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
-    ids=["pkcs1", "pkcs8"],
-)
+@pytest.mark.parametrize(("pem", "body"), _PEM_KEY_CASES, ids=_PEM_KEY_IDS)
 def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> None:
     """VAR=<PEM> redacts fully — PEM rule must run before the env-var rule, no base64 body survives."""
     out = Redactor().redact_step(_user_step(f"DAYDREAM_APP_PRIVATE_KEY={pem}"))
@@ -490,3 +521,26 @@ def test_redactor_preserves_certificate_block() -> None:
     assert isinstance(out.message, str)
     assert "[REDACTED_PEM_KEY]" not in out.message
     assert "BEGIN CERTIFICATE" in out.message
+
+
+def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
+    """redact_value redacts string leaves AND string dict keys recursively, in
+    fresh containers, and never mutates its argument."""
+    sentinel = "ghp_" + "x" * 16
+    payload = {
+        "token": sentinel,
+        sentinel: "key-secret",
+        "nested": {"path": f"/Users/{sentinel}"},
+        "items": [sentinel, 42, None],
+        "flag": True,
+        1: "non-string-key",
+    }
+    original = copy.deepcopy(payload)
+    out = redact_value(payload)
+
+    assert payload == original                      # never mutates the argument
+    assert out is not payload and out["nested"] is not payload["nested"]  # fresh containers
+    assert sentinel not in json.dumps(out)          # redacted in values AND keys
+    assert "[REDACTED" in json.dumps(out)           # a marker replaced it
+    assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
+    assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched

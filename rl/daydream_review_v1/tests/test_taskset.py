@@ -114,6 +114,7 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
     dest = tmp_path / "occupied"
     dest.mkdir()
     subprocess.run(["git", "-C", str(dest), "init", "--quiet", "--initial-branch", "main"], check=True)
+    subprocess.run(["git", "-C", str(dest), "config", "commit.gpgsign", "false"], check=True)
     subprocess.run(["git", "-C", str(dest), "config", "user.name", "Caller"], check=True)
     subprocess.run(["git", "-C", str(dest), "config", "user.email", "caller@example.com"], check=True)
     (dest / "caller.txt").write_text("caller-owned", encoding="utf-8")

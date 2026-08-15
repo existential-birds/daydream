@@ -17,6 +17,7 @@ from daydream.benchmark.daydream_run import (
     _review_complete,
     run_daydream_review,
 )
+from daydream.trajectory import _PEM_KEY_REDACTED_MARKER
 
 # A real `PiError: terminated` Backend-Execution-Error panel as captured in
 # daydream's stdout when the z.ai/GLM provider drops the streaming connection.
@@ -217,20 +218,47 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     assert "[REDACTED_API_KEY]" in str(e.value)
 
 
-def test_streamed_failure_redacts_pem_block_spanning_lines(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("begin_line", "end_line", "body"),
+    [
+        (
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "PRIVATEKEYMATERIAL" * 20,
+        ),
+        ("-----BEGIN PRIVATE KEY-----\n", "-----END PRIVATE KEY-----\n", "PKCS8KEYMATERIAL" * 20),
+        (
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n",
+            "-----END ENCRYPTED PRIVATE KEY-----\n",
+            "ENCRYPTEDKEYMATERIAL" * 20,
+        ),
+        (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            "-----END OPENSSH PRIVATE KEY-----\n",
+            "OPENSSHKEYMATERIAL" * 20,
+        ),
+        ("-----BEGIN EC PRIVATE KEY-----\n", "-----END EC PRIVATE KEY-----\n", "ECKEYMATERIAL" * 20),
+        ("-----BEGIN DSA PRIVATE KEY-----\n", "-----END DSA PRIVATE KEY-----\n", "DSAKEYMATERIAL" * 20),
+    ],
+    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
+)
+def test_streamed_failure_redacts_pem_block_spanning_lines(
+    tmp_path, monkeypatch, begin_line: str, end_line: str, body: str
+):
     """A PEM block split across streamed lines (BEGIN/body/END on separate
     lines) must still be redacted whole before reaching on_line and the failure
     tail — per-line redaction would never present BEGIN and END together, so
-    the base64 body would leak raw."""
+    the base64 body would leak raw. Parametrized over every variant the
+    buffering anchors recognize, so EC/DSA/ENCRYPTED/PKCS8 blocks get the same
+    streamed coverage as RSA/OPENSSH."""
     lines: list[str] = []
-    body = "PRIVATEKEYMATERIAL" * 20
 
     class FakeProc:
         def __init__(self):
             self.stdout = iter([
-                "-----BEGIN RSA PRIVATE KEY-----\n",
+                begin_line,
                 body + "\n",
-                "-----END RSA PRIVATE KEY-----\n",
+                end_line,
             ])
             self.returncode = 1
 
@@ -249,9 +277,107 @@ def test_streamed_failure_redacts_pem_block_spanning_lines(tmp_path, monkeypatch
     with pytest.raises(DaydreamRunError) as e:
         run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
     assert body not in "".join(lines)   # live echo carries no raw PEM body
-    assert "[REDACTED_PEM_KEY]" in "".join(lines)
+    assert _PEM_KEY_REDACTED_MARKER in "".join(lines)
     assert body not in str(e.value)     # retained tail carries no raw PEM body
-    assert "[REDACTED_PEM_KEY]" in str(e.value)
+    assert _PEM_KEY_REDACTED_MARKER in str(e.value)
+
+
+def test_streamed_failure_redacts_pem_block_truncated_at_eof(tmp_path, monkeypatch):
+    """A stream that ends mid-PEM-block (BEGIN/body seen, END never arrives)
+    must still redact the held fragment before it reaches on_line and the
+    failure tail — per-line redaction could never match _PEM_KEY_PATTERN's
+    BEGIN+END anchors, so the buffered fragment must be redacted whole."""
+    lines: list[str] = []
+    body = "OPENSSHKEYMATERIAL" * 20
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([
+                "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+                body + "\n",
+            ])
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.Popen", lambda *a, **k: FakeProc())
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
+    assert body not in "".join(lines)   # live echo carries no raw PEM body
+    assert _PEM_KEY_REDACTED_MARKER in "".join(lines)
+    assert body not in str(e.value)     # retained tail carries no raw PEM body
+    assert _PEM_KEY_REDACTED_MARKER in str(e.value)
+
+
+def test_streamed_certificate_block_is_not_buffered(tmp_path, monkeypatch):
+    """A CERTIFICATE block (public material, not matched by the six-variant
+    _PEM_HEADER spec) must NOT be treated as handled by the streamed buffering:
+    every line passes through on_line individually and unredacted, and the
+    failure tail carries the raw body — buffering is anchored to what
+    _PEM_KEY_PATTERN can redact, nothing more."""
+    lines: list[str] = []
+    body = "CERTIFICATEBODY" * 20
+
+    class FakeProc:
+        def __init__(self):
+            self.stdout = iter([
+                "-----BEGIN CERTIFICATE-----\n",
+                body + "\n",
+                "-----END CERTIFICATE-----\n",
+            ])
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("daydream.benchmark.daydream_run.subprocess.Popen", lambda *a, **k: FakeProc())
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
+    # Emitted line-by-line, never buffered or collapsed: public material.
+    assert lines == [
+        "-----BEGIN CERTIFICATE-----\n",
+        body + "\n",
+        "-----END CERTIFICATE-----\n",
+    ]
+    assert _PEM_KEY_REDACTED_MARKER not in "".join(lines)
+    assert body in str(e.value)  # failure tail carries the raw cert body
+
+
+def test_captured_failure_redacts_pem_block_truncated_at_eof(tmp_path, monkeypatch):
+    """A captured stream that ends mid-PEM-block (BEGIN+body, no END anchor)
+    must not leak the truncated body to the failure tail — _PEM_KEY_PATTERN
+    needs both anchors, so the trailing fragment is collapsed by the same
+    fragment rule the streamed path's EOF flush uses."""
+    body = "PKCS8KEYMATERIAL" * 20
+    combined = "-----BEGIN PRIVATE KEY-----\n" + body  # BEGIN+body, no END
+    monkeypatch.setattr(
+        "daydream.benchmark.daydream_run.subprocess.run",
+        lambda *a, **k: SimpleNamespace(returncode=1, stdout=combined, stderr=""),
+    )
+    checkout = tmp_path / "co"
+    checkout.mkdir()
+    with pytest.raises(DaydreamRunError) as e:
+        run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json")
+    tail = str(e.value)
+    assert body not in tail
+    assert _PEM_KEY_REDACTED_MARKER in tail
 
 
 def test_captured_failure_redacts_before_tail_truncation(tmp_path, monkeypatch):
@@ -276,7 +402,7 @@ def test_captured_failure_redacts_before_tail_truncation(tmp_path, monkeypatch):
     tail = str(e.value)
     assert "PRIVATEKEYMATERIAL" not in tail
     assert "-----END RSA PRIVATE KEY-----" not in tail
-    assert "[REDACTED_PEM_KEY]" in tail
+    assert _PEM_KEY_REDACTED_MARKER in tail
 
 
 def test_streamed_timeout_kills_quiet_child_holding_stdout_open(tmp_path, monkeypatch):

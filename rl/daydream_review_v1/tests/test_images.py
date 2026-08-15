@@ -7,11 +7,14 @@ use. A **fast** tier — no Docker required — rejects ``--red`` invocations th
 cannot select the fixture repo, ensuring the guard fires before any build
 side-effect. A manifest/README tier asserts the locked-dependency policy: the
 itsdangerous manifest entry installs strictly from its committed uv.lock and the
-README documents the four mandatory setup rules. The three ``slow`` tests execute
+README documents the four mandatory setup rules. The four ``slow`` tests execute
 real Docker builds: the red baseline path plants a failing assertion and the
 build must die (enforcement IS the build failing), the green baseline path builds
 and bakes the checkout, and the reference-image build proves the itsdangerous
-image builds only when the locked setup plus the green baseline succeed.
+image builds only when the locked setup plus the green baseline succeed. The
+warm-host base build re-executes the gpg/checksum hardening on an already-warm
+host via ``docker build --no-cache`` instead of serving the present base's
+cached layers.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -340,6 +344,58 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
         capture_output=True, text=True, check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
+
+
+@pytest.mark.slow
+@DOCKER_REQUIRED
+def test_base_layer_hardening_executes_on_warm_host() -> None:
+    """Warm-host live coverage of the base-image hardening.
+
+    Builds a fresh base image with ``--no-cache`` and verifies the resulting
+    image actually contains the hardening layers (gpg-verify and checksum
+    verification) via ``docker image history``. The session ``base_image``
+    fixture short-circuits when the image exists (conftest.py:40-55) and every
+    repo build passes ``--no-base``, so on a warm host the hardening is
+    otherwise never re-run; this test forces the build to run and then probes
+    the produced image. The asserted observables (image-history markers and a
+    clean build return code) confirm the hardening layers are present and the
+    build succeeded, but they do not by themselves prove the layers were
+    re-executed rather than served from cache -- a log-text ``CACHED`` heuristic
+    is deliberately avoided because BuildKit logs ``CACHED`` for FROM steps
+    whose base images are already in the local store.
+    """
+    wheel = build_images.build_wheel(build_images.DIST_DIR)
+    tag = f"{build_images.BASE_REPOSITORY}:warmhost-{uuid.uuid4().hex[:8]}"
+    try:
+        result = subprocess.run(
+            build_images._base_build_cmd(wheel, [tag], no_cache=True),
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined[-4000:]
+        # Functional probe of the freshly built image, not the log: ``docker
+        # image history`` records the RUN steps docker actually executed, so the
+        # gpg-verify and checksum layers being present is the hardening having
+        # re-run (a failed gpg verify or checksum mismatch would have died the
+        # build).
+        probe = subprocess.run(
+            ["docker", "image", "history", tag, "--no-trunc", "--format", "{{.CreatedBy}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert probe.returncode == 0, f"throwaway image {tag} not produced"
+        assert "gpg --batch --verify" in probe.stdout, (
+            "built image lacks the gpg-verify hardening layer"
+        )
+        assert "sha256sum -c" in probe.stdout, (
+            "built image lacks the checksum-verification hardening layer"
+        )
+    finally:
+        subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
 
 
 def test_docker_required_gates_on_daemon_reachability() -> None:

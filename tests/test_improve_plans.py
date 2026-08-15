@@ -189,6 +189,32 @@ def test_recon_validation_retains_valid_siblings_when_one_is_invalid(repo: Path)
     ]
 
 
+def test_recon_working_directory_accepts_confined_absolute_and_rejects_outside(
+    repo: Path, tmp_path: Path
+) -> None:
+    abs_under = (repo / "apps" / "catalog").as_posix()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    abs_outside = outside.as_posix()
+    # Reuse the module's already-valid recon record (valid evidence, Makefile
+    # line 2 anchor) and only override working_directory.
+    base = deepcopy(_recon_commands()[0])
+
+    under = deepcopy(base)
+    under["working_directory"] = abs_under
+    accepted, errors = validate_recon_commands({"commands": [under]}, repo=repo)
+    assert errors == []
+    assert [c["id"] for c in accepted] == ["test-suite"]
+
+    rejected = deepcopy(base)
+    rejected["working_directory"] = abs_outside
+    accepted, errors = validate_recon_commands({"commands": [rejected]}, repo=repo)
+    assert accepted == []
+    assert errors == [
+        "RECON_WORKING_DIRECTORY_INVALID@/commands/0/working_directory"
+    ]
+
+
 @pytest.mark.parametrize(
     "model_excerpt",
     [

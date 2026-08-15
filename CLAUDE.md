@@ -132,7 +132,7 @@ recorder are backend-agnostic.
   backend raises `MaxTurnsError`, and the fix group lands in `fix-failures.json` and is reverted, throwing
   a real fix away rather than trimming it.
 - `run_agent` retries any `retryable` backend error with exponential backoff, **20 attempts**, all backends
-  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto, stalled stream,
+  (`DAYDREAM_PI_RETRY_ATTEMPTS` overrides). Never retried: tool-supervisor veto,
   non-transport logic error. A stall fires only on the *absence* of output, never on slow output.
 
 ### Config and per-phase model overrides
@@ -179,7 +179,7 @@ exploration pre-scan (cached across runs)
   else the `diff.patch` pointer. Small diffs skip the fan-out entirely.
 - Merge resumes the arbiter's session when both phases resolve to the same backend instance; the resumed
   prompt forces a re-read of the per-stack record files, rewritten after arbitration.
-- `.daydream/exploration/` survives the run, reused only on an **exact** key match (head SHA + diff + tier +
+- `.daydream/exploration/` survives the run, reused only on an **exact** key match (format version + head SHA + diff + tier +
   depth, in a sibling `cache-key` file) — a near-match hit would misground every prompt. Uncommitted edits
   are not in the key, so an exact hit on a dirty tree can serve pre-edit exploration. `--shallow`/`--review`
   delete the directory, so alternating flows always misses.
