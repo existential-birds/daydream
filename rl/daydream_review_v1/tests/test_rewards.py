@@ -122,22 +122,66 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
-def test_rundir_golden_contains_no_model_directed_trajectory_transcripts(rundir_golden: Path) -> None:
-    """Static fixture guard: no per-fork trajectory transcript may ship under
-    ``trajectories/``.
+def _walk_json_keys(node: object, targets: frozenset[str]) -> list[str]:
+    """Collect every JSON key path whose key is in *targets* (recursive)."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k in targets:
+                found.append(k)
+            found.extend(_walk_json_keys(v, targets))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_walk_json_keys(item, targets))
+    return found
 
-    The per-fork transcripts under ``trajectories/`` (deep-generic,
-    deep-structure, explore-dependency-tracer, fix-tests-test-calc-py) carried
-    real prompt/directive content and absolute machine paths, and nothing reads
-    them — they must not be reintroduced. The retained root ``trajectory.json``'s
-    user-message inertness is enforced separately by
-    ``test_rundir_golden_user_messages_are_inert``. This guard enforces only
-    transcript-file absence; it does not sanitize every internal field of the
-    retained root fixture (e.g. historical machine paths or embedded prompt
-    copies that no test reads).
+
+def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
+    """Static fixture guard: the rundir-golden fixture ships no dangling per-fork
+    trajectory refs, no machine-specific absolute paths, and no embedded
+    model-directed prompt copies in agent-step internals.
+
+    The per-fork transcripts under ``trajectories/`` are gone; the retained root
+    ``trajectory.json`` and ``manifest.json`` must not carry operational dirt
+    from the real run that produced them. This guard enforces the pruned state:
+    (1) no ``trajectory_path``/``sibling_trajectory_ref`` key references a
+    non-shipped transcript; (2) no ``/private/tmp/`` machine-specific absolute
+    path appears anywhere; (3) no ``reasoning_content``/``tool_calls`` field
+    carries model-directed prompt text. The runtime projection exclusion in
+    ``test_rundir.py`` remains the boundary that keeps this data out of model
+    context.
     """
     trajectories = rundir_golden / "trajectories"
     assert not trajectories.is_dir() or not next(trajectories.iterdir(), None)
+
+    trajectory = json.loads((rundir_golden / "trajectory.json").read_text(encoding="utf-8"))
+    manifest = json.loads((rundir_golden / "manifest.json").read_text(encoding="utf-8"))
+
+    # 1. no dangling per-fork transcript refs
+    dangling = _walk_json_keys(trajectory, {"trajectory_path", "sibling_trajectory_ref"})
+    assert not dangling, f"dangling per-fork trajectory refs: {dangling}"
+
+    # 2. no machine-specific absolute paths (trajectory.json + manifest.json)
+    for name, blob in (("trajectory.json", trajectory), ("manifest.json", manifest)):
+        assert "/private/tmp/" not in json.dumps(blob), (
+            f"{name} carries a machine-specific absolute path"
+        )
+    assert "/private/tmp/" not in json.dumps(manifest.get("git", {})), (
+        "manifest git fields carry a machine path"
+    )
+    assert "/private/tmp/" not in json.dumps(manifest.get("archive_path", "")), (
+        "manifest archive_path carries a machine path"
+    )
+
+    # 3. no embedded model-directed prompt copies in agent-step internals
+    for step in trajectory["steps"]:
+        rc = step.get("reasoning_content")
+        assert not rc, f"step {step.get('step_id')} carries reasoning_content prompt text"
+        tcs = step.get("tool_calls")
+        assert not tcs, f"step {step.get('step_id')} carries tool_calls prompt text"
+    subtrajectories = (trajectory.get("extra", {}) or {}).get("subtrajectories") or []
+    for sub in subtrajectories:
+        assert "sibling_trajectory_ref" not in sub, "subtrajectory carries a sibling ref"
 
 
 def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:
