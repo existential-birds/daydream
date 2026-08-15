@@ -54,25 +54,7 @@ class OutOfOrderAnthropicJson:
 
 
 def seed_benchmark_data(tmp_path, *, tool, body):
-    results = tmp_path / "results"
-    results.mkdir()
-    (results / "benchmark_data.json").write_text(
-        json.dumps(
-            {
-                URL: {
-                    "golden_comments": [{"comment": body, "severity": "medium"}],
-                    "reviews": [
-                        {
-                            "tool": tool,
-                            "repo_name": "repo",
-                            "pr_url": URL,
-                            "review_comments": [{"body": body}],
-                        }
-                    ]
-                }
-            }
-        )
-    )
+    seed_parallel_benchmark_data(tmp_path, tool=tool, reviews_by_url={URL: [body]})
 
 
 def seed_parallel_benchmark_data(tmp_path, *, tool, reviews_by_url):
@@ -96,11 +78,7 @@ def seed_parallel_benchmark_data(tmp_path, *, tool, reviews_by_url):
 
 
 def seed_candidates(tmp_path, *, model, tool, texts):
-    scores_dir = model_results_dir(tmp_path, model)
-    scores_dir.mkdir(parents=True)
-    (scores_dir / "candidates.json").write_text(
-        json.dumps({URL: {tool: [{"text": text, "path": None, "line": None} for text in texts]}})
-    )
+    seed_parallel_candidates(tmp_path, model=model, tool=tool, texts_by_url={URL: texts})
 
 
 def seed_parallel_candidates(tmp_path, *, model, tool, texts_by_url):
