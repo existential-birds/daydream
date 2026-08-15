@@ -871,7 +871,7 @@ async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
+async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypatch, make_work):
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
     from daydream import phases
 
@@ -893,7 +893,7 @@ async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
         {"id": 5, "file": "b.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
 
     assert failures == {}
     # Two file-groups -> two batched calls (NOT five per-finding calls).
@@ -903,7 +903,7 @@ async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(monkeypatch):
+async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp_path, monkeypatch, make_work):
     """When the batched turn raises, the group retries each finding via phase_fix."""
     from daydream import phases
 
@@ -925,7 +925,7 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(mon
         {"id": 4, "file": "boom.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
 
     # Fallback ran each finding in the failing group individually...
     assert sorted(fix_calls) == [3, 4]
@@ -933,6 +933,25 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(mon
     assert 1 not in fix_calls and 2 not in fix_calls
     # The fallback succeeded, so no failure was collected.
     assert failures == {}
+
+
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """An unconfined file reference aborts the whole parallel fix run before any dispatch."""
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    hostile = _unconfined_finding_file(tmp_path, path_kind)
+    items = [
+        {"id": 1, "file": hostile},
+        {"id": 2, "file": hostile},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_parallel(backend, make_work(tmp_path), items)
+    assert backend.prompts == []
 
 
 class TestBuildFixPrompt:
@@ -3199,7 +3218,7 @@ def test_group_items_by_file_preserves_order_within_and_across_groups():
     assert group_items_by_file([]) == []
 
 
-async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(monkeypatch):
+async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(tmp_path, monkeypatch, make_work):
     import anyio
 
     from daydream import phases
@@ -3232,7 +3251,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         {"id": 3, "file": "b.py"},
         {"id": 4, "file": "boom.py"},
     ]
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
     # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
     # each -> direct phase_fix (no batched prompt, no fallback retry).
     assert batched_calls == ["a.py"]

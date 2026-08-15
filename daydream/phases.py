@@ -2031,6 +2031,15 @@ async def phase_fix_parallel(
         full success.
 
     """
+    # Preflight confinement gate: validate EVERY item's file reference before
+    # grouping, progress, prompt construction, recovery, or dispatch. An
+    # unconfined (or missing/non-string) reference raises ValueError and aborts
+    # the whole run fast, so the unsafe path never becomes a grouping key,
+    # fork name, failures entry, or checkout recovery argument. The returned
+    # refs are discarded -- per-fix calls recompute them.
+    for item in items:
+        _resolve_finding_file_ref(work.repo, item.get("file"))
+
     raw_groups = group_items_by_file(items)
     # Assign stable 1-based counters by pairing each item with its number
     # directly, avoiding fragile id()-keyed dicts whose keys are memory
