@@ -33,6 +33,31 @@ def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
     return _structured_turn({"handoff_prompt": body})
 
 
+def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
+    """Return a finding ``file`` value that must be rejected as unconfined.
+
+    ``traversal`` escapes via parent-directory traversal; ``absolute`` points
+    outside the repo root; ``symlink`` is a repo-local path whose real file
+    lives outside the repo (crossed via a symlink the worktree contains).
+    File names are keyed to the test's unique ``tmp_path`` so parallel tests
+    never collide.
+    """
+    if path_kind == "traversal":
+        return "../outside.py"
+    if path_kind == "absolute":
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+        outside.write_bytes(b"x")
+        return str(outside.resolve())
+    if path_kind == "symlink":
+        src_dir = tmp_path / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        target = tmp_path.parent / f"{tmp_path.name}-target.py"
+        target.write_bytes(b"x")
+        (src_dir / "handler.py").symlink_to(target)
+        return "src/handler.py"
+    raise AssertionError(f"unknown path_kind: {path_kind!r}")
+
+
 class _HealBackend(ScriptedBackend):
     """``ScriptedBackend`` plus the per-call ``read_only`` flag the heal-loop tests assert on."""
 
@@ -663,6 +688,35 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make
 
     assert len(backend.prompts) == 1
     assert "File: src/nonexistent.py" in backend.prompts[0]
+
+
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_phase_fix_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """A finding file escaping the worktree raises ValueError and emits no prompt."""
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "Escape", "file": _unconfined_finding_file(tmp_path, path_kind), "line": 1}
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference is rejected, not silently delegated."""
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "No file", "line": 3}
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+    assert backend.prompts == []
 
 
 @pytest.mark.asyncio

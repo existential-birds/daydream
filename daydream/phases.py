@@ -1754,6 +1754,26 @@ def _build_verifier_suffix(item: dict[str, Any]) -> str:
     return out
 
 
+def _resolve_finding_file_ref(repo: Path, value: object) -> str:
+    """Resolve a finding ``file`` reference to the string used in fix prompts.
+
+    Confinement gate for every fix entry point: rejects non-string values
+    (including ``None``/absent) and any reference that escapes the repository
+    (lexical violations, absolute paths, parent traversal, or symlink escapes)
+    with a fixed, non-reflective ``ValueError``. An existing confined file
+    resolves to its canonical absolute path; a missing-but-confined path is
+    preserved unchanged (relative string).
+    """
+    if not isinstance(value, str):
+        raise ValueError("Finding file must be a confined repository-relative path")
+    if not path_is_confined(repo, value):
+        raise ValueError("Finding file must be a confined repository-relative path")
+    candidate = repo / value
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return value
+
+
 async def phase_fix(
     backend: Backend,
     work: WorkContext,
@@ -1788,9 +1808,7 @@ async def phase_fix(
             prose boundary still applies.
     """
     description = item.get("description", "No description")
-    file_path = item.get("file", "Unknown file")
-    resolved = work.repo / file_path
-    file_ref = str(resolved) if resolved.is_file() else file_path
+    file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
     line = item.get("line", "Unknown")
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
