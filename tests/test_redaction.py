@@ -451,12 +451,39 @@ _PKCS8_PEM = (
     "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC\n"
     "-----END PRIVATE KEY-----"
 )
+_ENCRYPTED_PEM = (
+    "-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+    "MIIFCTBHBgkqhkiG9w0BBQ0wOjANBglghkgBZQMEAwEFENCRYPTEDKEYBODY\n"
+    "-----END ENCRYPTED PRIVATE KEY-----"
+)
+_OPENSSH_PEM = (
+    "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+    "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAEAAABlOPENSSHKEYBODY\n"
+    "-----END OPENSSH PRIVATE KEY-----"
+)
+_EC_PEM = (
+    "-----BEGIN EC PRIVATE KEY-----\n"
+    "MHcCAQEEIBF8XZQ6ECKEYBODYwJ5fWx8+1FcQ2rY=\n"
+    "-----END EC PRIVATE KEY-----"
+)
+_DSA_PEM = (
+    "-----BEGIN DSA PRIVATE KEY-----\n"
+    "MIH3AgEAAkEA8qWq6Q2DSAKEYBODYB5QhJ9zQ2nLr3U=\n"
+    "-----END DSA PRIVATE KEY-----"
+)
 
 
 @pytest.mark.parametrize(
     ("pem", "body"),
-    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
-    ids=["pkcs1", "pkcs8"],
+    [
+        (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
+        (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
+        (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
+        (_OPENSSH_PEM, "OPENSSHKEYBODY"),
+        (_EC_PEM, "ECKEYBODY"),
+        (_DSA_PEM, "DSAKEYBODY"),
+    ],
+    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
 )
 def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
     """-----BEGIN (RSA )PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
@@ -468,8 +495,15 @@ def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
 
 @pytest.mark.parametrize(
     ("pem", "body"),
-    [(_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"), (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC")],
-    ids=["pkcs1", "pkcs8"],
+    [
+        (_PKCS1_PEM, "MIIEpAIBAAKCAQEA0Z3VS5JJcds3xfn"),
+        (_PKCS8_PEM, "MIIEvgIBADANBgkqhkiG9w0BAQEFAASC"),
+        (_ENCRYPTED_PEM, "ENCRYPTEDKEYBODY"),
+        (_OPENSSH_PEM, "OPENSSHKEYBODY"),
+        (_EC_PEM, "ECKEYBODY"),
+        (_DSA_PEM, "DSAKEYBODY"),
+    ],
+    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
 )
 def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> None:
     """VAR=<PEM> redacts fully — PEM rule must run before the env-var rule, no base64 body survives."""

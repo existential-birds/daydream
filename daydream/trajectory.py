@@ -116,10 +116,12 @@ _JWT_PATTERN = re.compile(
     r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b"
 )
 _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+)")
-# PEM private-key blocks (PKCS1 and PKCS8). Multi-line body collapsed before the
-# bare API-key rule scans it. CERTIFICATE blocks are public material — not matched.
+# PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA).
+# Multi-line body collapsed before the bare API-key rule scans it. CERTIFICATE
+# blocks are public material — not matched.
 _PEM_KEY_PATTERN = re.compile(
-    r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?-----END (?:RSA )?PRIVATE KEY-----",
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
+    r".*?-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
     re.DOTALL,
 )
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
