@@ -770,17 +770,22 @@ def test_improvements_derive_from_corpus_evidence(
     assert report["improvements"] == expected
 
 
-def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
-    args = _corpus(tmp_path)
-    out_dir = tmp_path / "report"
-    r = subprocess.run(  # noqa: S603 - args are paths/tool names from the fixture, not user-controlled
+def _run_main(args: argparse.Namespace, out_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Invoke the production entrypoint (build.py via subprocess) on a prepared corpus."""
+    return subprocess.run(  # noqa: S603 - args are fixture paths/tool names, not user-controlled
         [sys.executable, str(BUILD_PY), args.results_root,
          "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
          "--trajectories", args.trajectories, "--out", str(out_dir)],
         capture_output=True, text=True, cwd=BUILD_PY.parents[2],
     )
+
+
+def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path)
+    out_dir = tmp_path / "report"
+    r = _run_main(args, out_dir)
     assert r.returncode == 0, (r.stdout, r.stderr)
     data = json.loads((out_dir / "data.json").read_text())
     assert data["improvements"] == []
@@ -799,18 +804,12 @@ def test_main_writes_self_contained_report_without_htmx_sidecar(
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
     args = _corpus(tmp_path)
     out_dir = tmp_path / "report"
-    r = subprocess.run(  # noqa: S603 - args are fixture paths/tool names, not user-controlled
-        [sys.executable, str(BUILD_PY), args.results_root,
-         "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
-         "--trajectories", args.trajectories, "--out", str(out_dir)],
-        capture_output=True, text=True, cwd=BUILD_PY.parents[2],
-    )
+    r = _run_main(args, out_dir)
     assert r.returncode == 0, (r.stdout, r.stderr)
     # The observable contract: the report dir holds EXACTLY two files.
     assert sorted(p.name for p in out_dir.iterdir()) == ["data.json", "index.html"]
     html = (out_dir / "index.html").read_text()
     # No htmx asset is referenced by the generated HTML.
-    assert "htmx.min.js" not in html
     assert "htmx" not in html
 
 
