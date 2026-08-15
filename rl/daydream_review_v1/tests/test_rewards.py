@@ -11,6 +11,7 @@ in ``trace.info`` makes the reward path run real ``sh`` and real reads.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -122,17 +123,30 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
-def _walk_json_keys(node: object, targets: frozenset[str]) -> list[str]:
-    """Collect every JSON key path whose key is in *targets* (recursive)."""
+# Absolute Unix path shape (``/Users/...``, ``/private/tmp/...``, ``/home/...``):
+# a ``/`` after a string boundary, followed by a letter. The original capture
+# host's ``/private/tmp/`` prefix was one instance of this shape; the guard
+# rejects any match in either fixture blob, not just that one prefix.
+_ABS_PATH_RE = re.compile(r'(?:^|[\s"\'])/[A-Za-z]')
+
+
+def _walk_json_keys(node: object, targets: frozenset[str], prefix: str = "") -> list[str]:
+    """Collect every JSON key path whose key is in *targets* (recursive).
+
+    Each entry is a dot-joined path from the JSON root (e.g.
+    ``steps.0.reasoning_content``), so a failure message locates the offending
+    key instead of naming a bare key that may occur at many depths.
+    """
     found: list[str] = []
     if isinstance(node, dict):
         for k, v in node.items():
+            path = f"{prefix}.{k}" if prefix else k
             if k in targets:
-                found.append(k)
-            found.extend(_walk_json_keys(v, targets))
+                found.append(path)
+            found.extend(_walk_json_keys(v, targets, path))
     elif isinstance(node, list):
-        for item in node:
-            found.extend(_walk_json_keys(item, targets))
+        for index, item in enumerate(node):
+            found.extend(_walk_json_keys(item, targets, f"{prefix}.{index}"))
     return found
 
 
@@ -145,8 +159,8 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
     ``trajectory.json`` and ``manifest.json`` must not carry operational dirt
     from the real run that produced them. This guard enforces the pruned state:
     (1) no ``trajectory_path``/``sibling_trajectory_ref`` key references a
-    non-shipped transcript; (2) no ``/private/tmp/`` machine-specific absolute
-    path appears anywhere; (3) no ``reasoning_content``/``tool_calls`` field
+    non-shipped transcript; (2) no machine-specific absolute path shape
+    appears anywhere; (3) no ``reasoning_content``/``tool_calls`` field
     carries model-directed prompt text. The runtime projection exclusion in
     ``test_rundir.py`` remains the boundary that keeps this data out of model
     context.
@@ -163,15 +177,9 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
 
     # 2. no machine-specific absolute paths (trajectory.json + manifest.json)
     for name, blob in (("trajectory.json", trajectory), ("manifest.json", manifest)):
-        assert "/private/tmp/" not in json.dumps(blob), (
+        assert not _ABS_PATH_RE.search(json.dumps(blob)), (
             f"{name} carries a machine-specific absolute path"
         )
-    assert "/private/tmp/" not in json.dumps(manifest.get("git", {})), (
-        "manifest git fields carry a machine path"
-    )
-    assert "/private/tmp/" not in json.dumps(manifest.get("archive_path", "")), (
-        "manifest archive_path carries a machine path"
-    )
 
     # 3. no embedded model-directed prompt copies in agent-step internals
     for step in trajectory["steps"]:
@@ -179,9 +187,6 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
         assert not rc, f"step {step.get('step_id')} carries reasoning_content prompt text"
         tcs = step.get("tool_calls")
         assert not tcs, f"step {step.get('step_id')} carries tool_calls prompt text"
-    subtrajectories = (trajectory.get("extra", {}) or {}).get("subtrajectories") or []
-    for sub in subtrajectories:
-        assert "sibling_trajectory_ref" not in sub, "subtrajectory carries a sibling ref"
 
 
 def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:

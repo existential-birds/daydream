@@ -19,6 +19,7 @@ cached layers.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -358,19 +359,17 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
     host the hardening is otherwise never re-run. ``--no-cache`` defeats the
     layer cache regardless of the wheel being deterministic; build success is
     the observable signal because a failed gpg verify or checksum mismatch fails
-    the build's ``RUN`` step.
+    the build's ``RUN`` step. The built image is probed for its hardening RUN
+    markers rather than for the absence of ``CACHED`` in the build log: with
+    ``--no-cache`` BuildKit still logs ``CACHED`` for FROM steps whose base
+    images are already in the local store, so that log-text heuristic only holds
+    on a cold host.
     """
     wheel = build_images.build_wheel(build_images.DIST_DIR)
     tag = f"{build_images.BASE_REPOSITORY}:warmhost-{uuid.uuid4().hex[:8]}"
     try:
         result = subprocess.run(
-            [
-                "docker", "build", "--no-cache",
-                "-f", str(BASE_DOCKERFILE),
-                "--build-arg", f"DAYDREAM_WHEEL={wheel}",
-                "-t", tag,
-                str(build_images.IMAGES_DIR),
-            ],
+            build_images._base_build_cmd(wheel, [tag], no_cache=True),
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -378,15 +377,21 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         )
         combined = result.stdout + result.stderr
         assert result.returncode == 0, combined[-4000:]
-        # --no-cache means docker never marks a layer CACHED; its absence in the
-        # log is the discriminating signal that the hardening actually re-ran
-        # rather than being served from the already-present base's cache.
-        assert "CACHED" not in combined, "hardening layers were served from cache"
-        # The throwaway tag must exist: the build ran to completion and tagged.
+        # Functional probe of the freshly built image, not the log: the image
+        # config records the RUN steps docker executed, so the gpg-verify and
+        # checksum layers being present is the hardening having re-run (a failed
+        # gpg verify or checksum mismatch would have died the build).
         probe = subprocess.run(
             ["docker", "image", "inspect", tag], capture_output=True, text=True, check=False
         )
         assert probe.returncode == 0, f"throwaway image {tag} not produced"
+        history = json.loads(probe.stdout)[0]["History"]
+        assert any(
+            "gpg --batch --verify" in entry.get("created_by", "") for entry in history
+        ), "built image lacks the gpg-verify hardening layer"
+        assert any(
+            "sha256sum -c" in entry.get("created_by", "") for entry in history
+        ), "built image lacks the checksum-verification hardening layer"
     finally:
         subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
 
