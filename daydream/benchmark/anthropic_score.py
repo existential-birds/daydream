@@ -691,12 +691,13 @@ async def run_bounded(
 
     tasks = [asyncio.create_task(_bounded(call)) for _, call in jobs]
     metas = [meta for meta, _ in jobs]
+    task_index = {task: i for i, task in enumerate(tasks)}
     pending = set(tasks)
     try:
         while pending:
             done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
-                index = tasks.index(task)
+                index = task_index[task]
                 try:
                     result = task.result()
                 except BaseException as exc:

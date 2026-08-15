@@ -286,6 +286,77 @@ async def test_direct_judge_does_not_reuse_one_candidate_for_two_goldens(tmp_pat
     assert [fn["golden_comment"] for fn in leaf["false_negatives"]] == ["golden one"]
 
 
+@pytest.mark.asyncio
+async def test_direct_judge_records_per_pair_errors_in_source_order(tmp_path):
+    """Judge failures are recorded per golden-candidate pair and re-emitted in
+    source index order regardless of completion order; each errors entry carries
+    the verbatim golden/candidate/error for its own pair."""
+    (tmp_path / "results").mkdir()
+    (tmp_path / "results" / "benchmark_data.json").write_text(
+        json.dumps(
+            {
+                URL: {
+                    "golden_comments": [
+                        {"comment": "golden a", "severity": "medium"},
+                        {"comment": "golden b", "severity": "medium"},
+                    ],
+                    "reviews": [
+                        {
+                            "tool": "daydream",
+                            "repo_name": "repo",
+                            "pr_url": URL,
+                            "review_comments": [{"body": "the bug"}],
+                        }
+                    ],
+                }
+            }
+        )
+    )
+    seed_candidates(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                    texts=["cand a", "cand b", "cand c"])
+    seed_dedup_groups(tmp_path, model="claude-opus-4-5-20251101", tool="daydream",
+                      groups=[[0], [1], [2]])
+    # Judge tasks run in (gi, ci) order: (0,0) ok, (0,1) fails, (0,2) ok,
+    # (1,0) fails, (1,1) ok, (1,2) ok. OutOfOrderAnthropicJson completes them
+    # in reverse, so the recorded errors must be re-sorted by source index when
+    # persisted (2 errors / 6 comparisons stays under JUDGE_ERROR_RATIO_THRESHOLD).
+    client = OutOfOrderAnthropicJson(
+        [
+            {"issues": ["cand a", "cand b", "cand c"]},
+            {"groups": [[0], [1], [2]]},
+            {"reasoning": "a0", "match": True, "confidence": 0.9},
+            RuntimeError("judge failed for golden a x cand b"),
+            {"reasoning": "a2", "match": True, "confidence": 0.7},
+            RuntimeError("judge failed for golden b x cand a"),
+            {"reasoning": "b1", "match": True, "confidence": 0.8},
+            {"reasoning": "b2", "match": True, "confidence": 0.6},
+        ]
+    )
+
+    scores = await run_anthropic_scoring(
+        tmp_path,
+        "claude-opus-4-5-20251101",
+        golden_urls=[URL],
+        tool="daydream",
+        client=client,
+    )
+
+    leaf = json.loads(
+        (model_results_dir(tmp_path, "claude-opus-4-5-20251101") / "evaluations.json").read_text()
+    )[URL]["daydream"]
+    # Each failure is keyed to its own pair and re-emitted in source order.
+    assert leaf["errors"] == [
+        {"golden": "golden a", "candidate": "cand b", "error": "judge failed for golden a x cand b"},
+        {"golden": "golden b", "candidate": "cand a", "error": "judge failed for golden b x cand a"},
+    ]
+    assert leaf["errors_count"] == 2
+    # Failed pairs only record errors; successful pairs still count.
+    assert (leaf["tp"], leaf["fp"], leaf["fn"]) == (2, 1, 0)
+    assert [tp["golden_comment"] for tp in leaf["true_positives"]] == ["golden a", "golden b"]
+    assert leaf["false_positives"] == [{"candidate": "cand c"}]
+    assert scores.total_tp == 2
+
+
 @pytest.mark.parametrize(
     "case",
     [
