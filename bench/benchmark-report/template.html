@@ -169,7 +169,7 @@ svg{display:block;width:100%;height:auto;overflow:visible;}
 
   <section class="section" id="sec-kpi" data-nav="Standing">
     <div class="h2"><span class="glyph">◇</span>STANDING<span class="n" id="kpi-judgetag"></span></div>
-    <p class="subhead">Micro-averaged on the same PR subset daydream covered under the selected judge. Rank is among the SaaS field whose judge calls did not exceed the 50% error guard.</p>
+    <p class="subhead">Micro-averaged on one complete PR cohort for the selected judge. Every ranked row has a present leaf for every PR in that cohort. Rank is among the SaaS field whose judge calls did not exceed the 50% error guard.</p>
     <div class="kpis" id="kpis"></div>
   </section>
 
@@ -187,8 +187,8 @@ svg{display:block;width:100%;height:auto;overflow:visible;}
   </section>
 
   <section class="section" id="sec-lb" data-nav="Leaderboards">
-    <div class="h2"><span class="glyph">◇</span>PER-AXIS LEADERBOARDS<span class="n">same-subset · daydream row marked</span></div>
-    <p class="subhead">Top of each axis on the daydream subset for the selected judge. daydream's row is highlighted and pinned in view even when outside the top 8.</p>
+    <div class="h2"><span class="glyph">◇</span>PER-AXIS LEADERBOARDS<span class="n">complete-cohort · daydream row marked</span></div>
+    <p class="subhead">Top of each axis on the selected judge's complete PR cohort. daydream's row is highlighted and pinned in view even when outside the top 8.</p>
     <div class="grid3" id="leaderboards"></div>
   </section>
 
@@ -298,14 +298,14 @@ function renderLead(){
   const anchor=anchorJudge();
   const d=anchor?anchor.daydream:null;const rk=anchor?anchor.ranks:null;
   $("#leadcopy").innerHTML=d?
-    `On <b>${DATA.meta.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${esc(anchor.display)}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact subset; cost is synthesized from daydream's measured tokens.`
+    `On <b>${anchor.subset_pr_count} PRs</b> (of ${DATA.meta.total_daydream_attempts} attempted) judged by <b>${esc(anchor.display)}</b>, daydream lands <b class="mint">recall ${pct(d.recall)}%</b> (#${rk.recall[0]} of ${rk.recall[1]}) but <b>precision ${pct(d.precision)}%</b> (#${rk.precision[0]} of ${rk.precision[1]}) — <b>top-class recall, bottom-class precision</b>. The story is <b>${d.fp} false positives against ${d.tp} true positives</b>. Every SaaS competitor is recomputed on this exact cohort, drawn from daydream's ${DATA.meta.subset_pr_count}-PR anchor; cost is synthesized from daydream's measured tokens.`
     :"daydream has not been scored under any discovered judge.";
 }
 function renderJudgeNote(){
   const j=curJudge();
   $("#judgenote").textContent=j.has_daydream
-    ? `Selected judge ${j.display} scored daydream on ${j.subset_pr_count} PRs. Field of ${j.field.length} SaaS tools recomputed on the same subset.`
-    : `Selected judge ${j.display} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools is shown on the daydream PR subset; daydream panels render a placeholder until it is re-judged.`;
+    ? `Selected judge ${j.display} scored daydream on ${j.subset_pr_count} PRs. daydream is compared with ${j.field.length} SaaS tools on one complete ${j.subset_pr_count}-PR cohort.`
+    : `Selected judge ${j.display} has NOT yet scored daydream — the field of ${j.field.length} SaaS tools shares one complete ${j.subset_pr_count}-PR cohort drawn from the daydream anchor set; daydream panels render a placeholder until it is re-judged.`;
 }
 
 function rankClass(r,n){if(!r)return"";if(r<=Math.ceil(n*0.34))return"good";return"";}
@@ -314,7 +314,7 @@ function renderKPIs(){
   const host=$("#kpis");host.innerHTML="";
   if(!j.has_daydream||!j.daydream){
     host.innerHTML=`<div class="placeholder" style="grid-column:1/-1"><div class="big">daydream not yet scored under ${esc(j.display)}</div>
-      The ${j.field.length}-tool SaaS field below is computed on the ${DATA.meta.subset_pr_count}-PR daydream subset. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
+      The ${j.field.length}-tool SaaS field below is computed on its complete ${j.subset_pr_count}-PR cohort within the daydream anchor set. Re-judge daydream under this model and the same generator fills these KPIs in — no code change.</div>`;
     return;
   }
   const d=j.daydream,rk=j.ranks;
@@ -336,8 +336,8 @@ function renderKPIs(){
 
 function renderScatter(){
   const j=curJudge();
-  $("#scatter-sub").textContent=`Recall (x) vs precision (y) for ${j.field.length} SaaS tools${j.has_daydream?" + daydream":""}, ${j.display}, on the ${DATA.meta.subset_pr_count}-PR daydream subset.`;
-  $("#scatter-title").textContent=`${j.display} · same-subset precision–recall`;
+  $("#scatter-sub").textContent=`Recall (x) vs precision (y) for ${j.field.length} SaaS tools${j.has_daydream?" + daydream":""}, ${j.display}, on a ${j.subset_pr_count}-PR complete cohort.`;
+  $("#scatter-title").textContent=`${j.display} · complete-cohort precision–recall`;
   const W=860,H=440,m={l:54,r:18,t:18,b:46};
   const iw=W-m.l-m.r,ih=H-m.t-m.b;
   const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
@@ -610,7 +610,7 @@ function renderImprovements(){
 
 function renderFoot(){
   const m=DATA.meta;
-  $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${esc(m.metric_def)}. Daydream covers ${m.subset_pr_count} PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Every SaaS tool is recomputed on this exact subset per judge — never daydream's ${m.subset_pr_count}-PR numbers against a 50-PR field aggregate. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${esc(m.excluded_tool)}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${esc(DATA.economy.price_model)} price card (${esc(m.price_source)}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied. <br><br>
+  $("#foot").innerHTML=`<b>METHODOLOGY.</b> ${esc(m.metric_def)}. The daydream anchor set contains ${m.subset_pr_count} scored PRs (of ${m.total_daydream_attempts} attempted; ${m.total_daydream_attempts-m.subset_pr_count} failed runs absent). Each judge panel intersects that anchor with the PRs having a present leaf for every ranked row, and every row in a panel is recomputed on that panel's complete cohort — no rank compares different PR counts. Judges with &gt;${(m.judge_error_ratio_threshold*100)}% failed comparisons are flagged ⚠ERR and excluded from rank (guard from daydream/benchmark/score.py). Stale <b>${esc(m.excluded_tool)}</b> rows excluded. Cost synthesized from measured ATIF tokens @ ${esc(DATA.economy.price_model)} price card (${esc(m.price_source)}); the backend's $0 field is not used. SaaS latency shown only when a speed_analysis.json is supplied. <br><br>
   <b>SOURCES.</b> aggregates: ${esc(m.generated_from)} (auto-discovered ${DATA.judges.length} judge panels + ${DATA.skipped_judges.length} skipped). labels: results/pr_labels.json. tokens/wall: .daydream-bench/trajectories/*.json. tool names/colors: analysis/benchmark_dashboard.json. Generated by bench/benchmark-report/build.py — re-run against any corpus, judge, or price card.`;
 }
 
