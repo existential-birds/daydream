@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,10 @@ from daydream.training.reward import score_trajectory
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
     DaydreamReviewConfig,
+    DaydreamReviewState,
     DaydreamReviewTask,
     DaydreamReviewTaskset,
+    _review_state,
 )
 
 SESSION_ID = "9b36227a-9f80-41e5-a419-5cfed5a34b5b"
@@ -58,10 +61,57 @@ def _task(corpus_mini_dir: Path, fixture_manifest_path: Path, *, pr_number: int 
 
 
 def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> vf.Trace:
-    trace: vf.Trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace: vf.Trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data), state=DaydreamReviewState()
+    )
     trace.info["daydream_archive_root"] = str(archive_root)
     trace.info["daydream_repo_path"] = str(repo_path)
     return trace
+
+
+def test_review_state_guard_rejects_base_state(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """Scoring state must be a DaydreamReviewState, never the base State.
+
+    Production traces carry a DaydreamReviewState automatically (the rollout
+    resolves the task's StateT through the MRO); test helpers that score must
+    pass one explicitly. A base State must fail loudly rather than silently
+    dereference a missing run_dir.
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    base_trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    with pytest.raises(TypeError):
+        _review_state(base_trace)
+    good_trace = vf.Trace(
+        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+        state=DaydreamReviewState(),
+    )
+    assert _review_state(good_trace).run_dir is None
+
+
+async def test_score_without_runtime_records_nothing(
+    corpus_mini_dir: Path, fixture_manifest_path: Path
+) -> None:
+    """The offline replay path — ``score(trace, None)`` — completes and records nothing.
+
+    The verifiers replay CLI scores archived traces with no runtime; the base
+    then skips every runtime-dependent signal (all three handlers here require
+    ``runtime``) and this task stages no run dir. The trace deliberately carries
+    the base ``State`` — the load-bearing shape from the replay path — so
+    reaching ``_review_state`` would raise TypeError. Completing, with no
+    rewards/metrics recorded, is the proof the offline branch never touches the
+    state guard, the run-dir fetch, or the runtime.
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data))
+    trace.info["daydream_archive_root"] = "/does/not/exist"
+    trace.info["daydream_repo_path"] = "/does/not/exist"
+
+    await task.score(trace)  # runtime defaults to None — the offline replay path
+
+    assert trace.rewards == {}
+    assert trace.metrics == {}
 
 
 def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID) -> Path:
@@ -406,6 +456,56 @@ async def test_no_fixes_still_records_the_test_claim(
     assert trace.metrics["test_claim_passed_without_fix"] == float(claimed)
     # Observability only: recording the claim must not invent a verdict comparison.
     assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_score_reuses_one_archived_run_snapshot(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+    monkeypatch,
+) -> None:
+    """One score call fetches the archived run dir exactly once; all consumers share it.
+
+    A read-once wrapper over the real subprocess runtime rejects any repeated
+    ``runtime.read`` of an artifact path — the exact seam the refactor
+    consolidates. After the single score-level fetch, the three consumers must
+    read the shared host snapshot (via ``_read_json``), never re-enter the
+    runtime; ``trace.state.run_dir`` must be cleared once scoring returns.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    class ReadOnce:
+        def __init__(self, real: Callable[[str], Awaitable[bytes]]) -> None:
+            self._real = real
+            self._seen: set[str] = set()
+
+        async def __call__(self, path: str) -> bytes:
+            if path in self._seen:
+                raise AssertionError(
+                    f"archived artifact {path} read more than once in a single score call"
+                )
+            self._seen.add(path)
+            return await self._real(path)
+
+    real_read = runtime.read
+    monkeypatch.setattr(runtime, "read", ReadOnce(real_read))
+
+    await task.score(trace, runtime)
+
+    expected = score_trajectory(
+        assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
+    ).composite
+    assert expected is not None
+    assert trace.rewards["intrinsic_composite"] == expected
+    assert trace.metrics["test_claim_passed_without_fix"] == 1.0
+    assert trace.metrics["n_findings"] == 1.0
+    assert trace.state.run_dir is None
 
 
 @pytest.mark.parametrize("red, expected", [(True, 1.0), (False, 0.0)], ids=["mismatch", "agrees"])
