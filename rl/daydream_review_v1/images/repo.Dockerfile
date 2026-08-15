@@ -23,9 +23,9 @@ ARG TEST_COMMAND
 # Only the git/mirror layer is mirror-only: it clones from the in-container
 # mirror and never touches the network. The per-repo setup_cmds layer below,
 # however, runs `uv sync --locked` (manifest.toml) and fetches the locked
-# dependency set from the package index at build time — so the image does NOT
-# rebuild from a stale corpus with no index access. The in-container mirror
-# still needs no credentials and keeps rollouts from reaching the real repo.
+# dependency set from the package index at build time — so for images with
+# non-empty setup_cmds, the image does NOT rebuild from a stale corpus with
+# no index access.
 COPY mirror.git /srv/mirror.git
 
 # `origin` therefore points at the in-container mirror. That is deliberate:
