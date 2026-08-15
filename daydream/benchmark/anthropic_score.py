@@ -293,44 +293,29 @@ async def run_direct_scoring(
     extraction and dedup are restricted to the same selection as evaluation.
     """
     benchmark_repo = benchmark_repo.resolve()
-    if client is None:
-        api_key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
-        if not api_key:
-            raise BenchmarkStepError(f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run direct scoring.")
-        async with AsyncExitStack() as stack:
+    async with AsyncExitStack() as stack:
+        if client is None:
+            api_key = os.environ.get(ANTHROPIC_JUDGE_API_KEY_ENV)
+            if not api_key:
+                raise BenchmarkStepError(f"{ANTHROPIC_JUDGE_API_KEY_ENV} is not set; cannot run direct scoring.")
             http = await stack.enter_async_context(httpx.AsyncClient())
             client = AnthropicJsonClient(api_key=api_key, model=judge_model, http=http)
-            await run_anthropic_extraction(
-                benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
-            )
-            await run_anthropic_dedup(
-                benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
-            )
-            evals = await run_anthropic_evaluation(
-                benchmark_repo,
-                judge_model,
-                golden_urls=golden_urls,
-                tool=tool,
-                client=client,
-                judge_route=judge_route,
-            )
-            return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)
 
-    await run_anthropic_extraction(
-        benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
-    )
-    await run_anthropic_dedup(
-        benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
-    )
-    evals = await run_anthropic_evaluation(
-        benchmark_repo,
-        judge_model,
-        golden_urls=golden_urls,
-        tool=tool,
-        client=client,
-        judge_route=judge_route,
-    )
-    return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)
+        await run_anthropic_extraction(
+            benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
+        )
+        await run_anthropic_dedup(
+            benchmark_repo, judge_model, tool=tool, client=client, golden_urls=golden_urls
+        )
+        evals = await run_anthropic_evaluation(
+            benchmark_repo,
+            judge_model,
+            golden_urls=golden_urls,
+            tool=tool,
+            client=client,
+            judge_route=judge_route,
+        )
+        return parse_daydream_scores(evals, tool=tool, golden_urls=golden_urls)
 
 
 async def run_anthropic_scoring(
