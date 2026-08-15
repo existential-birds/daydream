@@ -770,18 +770,34 @@ def test_improvements_derive_from_corpus_evidence(
     assert report["improvements"] == expected
 
 
-def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
-    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
-    args = _corpus(tmp_path)
-    out_dir = tmp_path / "report"
-    r = subprocess.run(  # noqa: S603 - args are paths/tool names from the fixture, not user-controlled
+def _run_main(args: argparse.Namespace, out_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Invoke the production entrypoint (build.py via subprocess) on a prepared corpus."""
+    return subprocess.run(  # noqa: S603 - args are fixture paths/tool names, not user-controlled
         [sys.executable, str(BUILD_PY), args.results_root,
          "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
          "--trajectories", args.trajectories, "--out", str(out_dir)],
         capture_output=True, text=True, cwd=BUILD_PY.parents[2],
     )
+
+
+@pytest.fixture
+def built_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    """Run the production entrypoint on a fresh corpus; return (result, out_dir)."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _corpus(tmp_path)
+    out_dir = tmp_path / "report"
+    r = _run_main(args, out_dir)
     assert r.returncode == 0, (r.stdout, r.stderr)
+    return r, out_dir
+
+
+def test_report_entrypoint_omits_unsupported_recommendations(
+    built_report: tuple[subprocess.CompletedProcess[str], Path]
+) -> None:
+    """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
+    _, out_dir = built_report
     data = json.loads((out_dir / "data.json").read_text())
     assert data["improvements"] == []
     html = (out_dir / "index.html").read_text()
@@ -790,6 +806,18 @@ def test_report_entrypoint_omits_unsupported_recommendations(tmp_path: Path, mon
     for literal in _REMOVED_LITERALS:
         assert literal not in html
         assert literal not in template_text
+
+
+def test_main_writes_self_contained_report_without_htmx_sidecar(
+    built_report: tuple[subprocess.CompletedProcess[str], Path]
+) -> None:
+    """Generated report dir is self-contained: exactly data.json + index.html, no htmx asset."""
+    _, out_dir = built_report
+    # The observable contract: the report dir holds EXACTLY two files.
+    assert sorted(p.name for p in out_dir.iterdir()) == ["data.json", "index.html"]
+    html = (out_dir / "index.html").read_text()
+    # No htmx asset is referenced by the generated HTML.
+    assert "htmx" not in html
 
 
 def test_main_rejects_report_with_no_eligible_judge_panel(
