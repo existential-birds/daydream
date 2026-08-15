@@ -2,8 +2,9 @@
 """Benchmark report generator: daydream vs the SaaS field on the code-review-benchmark.
 
 Reads the benchmark corpus (read-only) ACROSS ALL JUDGE MODELS, recomputes every
-SaaS tool on the SAME PR subset daydream covered (per judge), synthesizes daydream
-cost from measured tokens, and emits a self-contained offline ``index.html``.
+SaaS tool on one complete PR cohort per judge — the PRs where every compared tool
+has a present (non-skipped) leaf — synthesizes daydream cost from measured tokens,
+and emits a self-contained offline ``index.html``.
 
 The judge model is NOT fixed: the generator DISCOVERS every
 ``<results>/<judge>/evaluations.json`` and normalizes the vendor prefix so the
@@ -299,7 +300,7 @@ def _build_improvements(
 
     # ── FP-burden (priority 1) ──
     anchor = next((j for j in judges_out if j.get("id") == anchor_id), None)
-    if anchor and anchor["daydream"]["fp"] > 0:
+    if anchor and anchor["daydream"] and anchor["daydream"]["fp"] > 0:
         d = anchor["daydream"]
         improvements.append({
             "priority": 1,
@@ -408,7 +409,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             continue
 
         comparison_tools = saas_tools + ([dd_tool] if has_dd else [])
-        cohort = _complete_cohort(evals, comparison_tools, dd_subset)
+        # An empty comparison list would make _complete_cohort's all() vacuously
+        # true over the whole subset; treat it as having no complete common cohort.
+        cohort = _complete_cohort(evals, comparison_tools, dd_subset) if comparison_tools else set()
         if not cohort:
             skipped_judges.append(_skip(canon, b, saas_tools,
                                         "no complete common PR cohort",
@@ -440,6 +443,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "display": judge_display(canon),
             "dirs": b["dirs"],
             "subset_pr_count": len(cohort),
+            # daydream's own scored PR count (present leaves), independent of the
+            # competitor-collapsed comparison cohort (subset_pr_count <= this).
+            "daydream_pr_count": len(daydream_prs),
+            # The judge's complete cohort: every PR in it has a present leaf for
+            # every comparison tool. Per-PR scores and label slices must trace to
+            # this same set so no panel contradicts the standing aggregate.
+            "cohort": sorted(cohort),
             "has_daydream": has_dd,
             "daydream": dd_agg,
             "ranks": ranks,
@@ -459,9 +469,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     anchor_judge = next((j for j in judges_out if j["id"] == anchor_judge_id), None)
     if anchor_judge is None:
         # The largest-subset judge may be panel-skipped (fails the SaaS-coverage
-        # gate), so it never reaches judges_out. Fall back to a retained judge that
-        # still carries daydream so the report-wide anchor, label slices, and
-        # priority-1 improvements don't silently vanish.
+        # gate or has no complete common PR cohort), so it never reaches judges_out.
+        # Fall back to a retained judge that still carries daydream so the
+        # report-wide anchor, label slices, and priority-1 improvements don't
+        # silently vanish.
         anchor_judge = next((j for j in judges_out if j.get("has_daydream")), None)
         if anchor_judge is not None:
             anchor_judge_id = anchor_judge["id"]
@@ -474,6 +485,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 pr for pr, t in judges_raw[anchor_judge_id]["evals"].items()
                 if _leaf_present(t.get(dd_tool))
             }
+        else:
+            # Every retained judge lacks a daydream leaf (e.g. the largest-subset
+            # judge was skipped for 'no complete common PR cohort' and no other
+            # retained judge has daydream). Point the report-wide anchor at a
+            # retained judge so meta.anchor_judge never references a skipped judge
+            # absent from judges_out; daydream panels render placeholders.
+            anchor_judge = judges_out[0]
+            anchor_judge_id = anchor_judge["id"]
     anchor_evals = judges_raw[anchor_judge_id]["evals"]
     per_pr_rows = []
     tot_prompt = tot_completion = tot_cached = 0
@@ -531,7 +550,10 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             continue
         jev = judges_raw[j["id"]]["evals"]
         scored_prs: dict[str, dict] = {}
-        for pr in dd_subset:
+        # The judge's own complete cohort, not the report-wide daydream subset: a
+        # PR outside the cohort has no complete leaf set and must not contribute
+        # rows or scores that contradict the panel's cohort claim.
+        for pr in j["cohort"]:
             leaf = jev.get(pr, {}).get(dd_tool)
             if not _leaf_present(leaf):
                 continue
@@ -568,7 +590,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     slices = []
     if anchor_judge:
         for title, dim in slice_dims:
-            rows = slice_daydream(anchor_evals, dd_subset, labels, dd_tool, dim)
+            # The anchor's complete cohort (not the report-wide dd_subset) so the
+            # label slices sum to the same PR set as the anchor's standing panel.
+            rows = slice_daydream(anchor_evals, anchor_judge["cohort"], labels, dd_tool, dim)
             if rows:
                 slices.append({"title": title, "rows": rows})
 
@@ -710,7 +734,7 @@ def main() -> None:
             print("     daydream: NOT YET SCORED under this judge (placeholder; re-judge to fill in)")
         top = j["field"][0] if j["field"] else None
         if top:
-            print(f"     field: {len(j['field'])} SaaS tools on same {j['subset_pr_count']}-PR subset; "
+            print(f"     field: {len(j['field'])} SaaS tools on one complete {j['subset_pr_count']}-PR cohort; "
                   f"best-F1 = {top['display']} (F1={top['f1']:.3f})")
         print()
     if data["skipped_judges"]:

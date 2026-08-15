@@ -305,14 +305,22 @@ def test_generated_report_ranks_one_complete_cohort(
     assert judge["daydream"] is not None
     assert len(judge["field"]) == 5
     assert judge["subset_pr_count"] == 2
+    # daydream's own scored count is independent of the competitor-collapsed cohort:
+    # the anchor scored daydream on all 3 PRs; only the comparison cohort is 2.
+    assert judge["daydream_pr_count"] == (2 if missing_tool == "daydream-owl-alpha" else 3)
     rows = [judge["daydream"]] + judge["field"]
     assert {r["n_prs"] for r in rows} == {2}
     # The third PR's tp=4 leaf must NOT be counted; every row sums tp 1+2 = 3.
     assert {r["tp"] for r in rows} == {3}
     assert all(rk[1] == 6 for rk in judge["ranks"].values())
+    # The excluded PR must not leak into the per-PR log either: per-PR scores trace
+    # to the judge's complete cohort, not the full report-wide anchor set.
+    assert set(data["per_pr_scores"][judge["id"]]) == {PR_URL, SECOND_PR_URL}
+    assert THIRD_PR_URL not in data["per_pr_scores"][judge["id"]]
 
     html = (out_dir / "index.html").read_text()
-    assert "On <b>${anchor.subset_pr_count} PRs</b>" in html
+    # Lead distinguishes daydream's own scored PR count from the collapsed cohort.
+    assert "daydream was scored on <b>${anchor.daydream_pr_count} PRs</b>" in html
     assert "present leaf for every ranked row" in html
     assert "Every SaaS tool is recomputed on this exact subset per judge" not in html
 
@@ -372,6 +380,9 @@ def test_build_collapses_field_to_complete_cohort_when_tool_incomplete(
     assert judge["daydream"] is not None and judge["daydream"]["n_prs"] == 1
     assert judge["ranks"]["f1"][1] == 7          # 6 SaaS + daydream
     assert report["meta"]["subset_pr_count"] == 2  # global anchor unchanged
+    # The collapsed cohort (PR 1 only) is the per-PR log's daydream scope too: the
+    # PR whose competitor leaf is missing must not show daydream scores.
+    assert set(report["per_pr_scores"][judge["id"]]) == {PR_URL}
 
 
 def test_build_skips_judge_with_no_complete_common_cohort(
@@ -396,6 +407,52 @@ def test_build_skips_judge_with_no_complete_common_cohort(
     assert "gpt-5.2" in skipped
     assert skipped["gpt-5.2"]["reason"] == "no complete common PR cohort"
     assert all(j["id"] != "gpt-5.2" for j in report["judges"])
+
+
+def test_report_anchor_falls_back_to_retained_judge_when_none_have_daydream(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anchor-orphan corner: the largest daydream-subset judge is panel-skipped AND no
+    retained judge carries any daydream leaf, so the has_daydream fallback finds
+    nothing. The anchor must still resolve to a retained judge so meta.anchor_judge
+    never references a skipped judge absent from judges_out; label slices stay empty
+    and the priority-3 re-judge improvement names the retained daydream-less judges."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    saas5 = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    skip_anchor = {"saas-0": _leaf(tp=1, fp=0), "saas-1": _leaf(tp=1, fp=0)}
+    evals = {
+        # Largest daydream subset (2 PRs) but only 2 SaaS tools -> SaaS-coverage skip.
+        "a-skip-anchor": {
+            PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=1, fp=2, fn=1)},
+            SECOND_PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+        },
+        # Retained judge (5 SaaS tools) with NO daydream leaf on either PR.
+        "z-retained": {
+            PR_URL: dict(saas5),
+            SECOND_PR_URL: dict(saas5),
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
+
+    # The skipped judge is not retained and no retained judge carries daydream, so
+    # the anchor falls back to a retained judge (never a skipped id).
+    assert [j["id"] for j in report["judges"]] == ["z-retained"]
+    assert [s["id"] for s in report["skipped_judges"]] == ["a-skip-anchor"]
+    assert report["judges"][0]["has_daydream"] is False
+    assert report["meta"]["anchor_judge"] == "z-retained"
+    assert "a-skip-anchor" not in {j["id"] for j in report["judges"]}
+
+    # No retained daydream -> no label slices; the economy still traces to the
+    # skipped judge's daydream subset (the fixed cross-judge anchor).
+    assert report["slices"] == []
+    assert report["meta"]["subset_pr_count"] == 2
+    assert report["economy"]["n_prs"] == 2
+
+    # No priority-1 (no retained anchor FP to cite); priority-3 names the retained
+    # daydream-less judge.
+    assert all(im["priority"] != 1 for im in report["improvements"])
+    p3 = next(im for im in report["improvements"] if im["priority"] == 3)
+    assert "z-retained" in p3["heading"]
 
 
 def test_complete_cohort_requires_present_leaf_across_all_tools(build_mod: ModuleType) -> None:
@@ -748,7 +805,7 @@ def test_template_consumers_resolve_anchor_judge_by_id(tmp_path: Path) -> None:
 
     assert "function anchorJudge(){return DATA.judges.find(j=>j.id===DATA.meta.anchor_judge);}" in template
     assert template.count("const anchor=anchorJudge();") == 2  # renderLead, renderSlices
-    assert "const ddtp=(anchorJudge()||{daydream:{tp:1}})" in template  # renderCost
+    assert "const ddtp=(anchorJudge()||{daydream:{tp:null}}).daydream?.tp;" in template  # renderCost
     assert "DATA.judges.find(j=>j.has_daydream)" not in template
 
 
