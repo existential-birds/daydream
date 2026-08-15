@@ -290,23 +290,17 @@ def test_redact_arguments_passthrough_when_no_secret() -> None:
     assert out["config"] == {"x": 1, "y": [1, 2, 3]}
 
 
-def test_redact_arguments_invalid_json_falls_back_to_redaction_failed() -> None:
-    """When regex breaks JSON syntax, value falls back to [REDACTION_FAILED]."""
+def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the recursive native walk raises, that key falls back to [REDACTION_FAILED]."""
 
-    class _PoisonPattern:
-        def sub(self, _repl: object, s: str) -> str:
-            return "{not valid json"
+    def _boom(self: object, value: object, sensitive: bool = False) -> object:
+        raise RuntimeError("boom")
 
-    from daydream import trajectory as traj_mod
-
-    original_rules = traj_mod._REDACTION_RULES
-    poison_rules = ((_PoisonPattern(), "ignored"), *original_rules[:0])
-    try:
-        traj_mod._REDACTION_RULES = poison_rules
-        out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
-        assert out["edits"] == "[REDACTION_FAILED]"
-    finally:
-        traj_mod._REDACTION_RULES = original_rules
+    monkeypatch.setattr(Redactor, "_redact_value", _boom, raising=True)
+    out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
+    assert out["edits"] == "[REDACTION_FAILED]"
 
 
 # ---- Regression: WR-03 (env-var pattern over-redacted via substring match) ----
@@ -544,3 +538,49 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     assert "[REDACTED" in json.dumps(out)           # a marker replaced it
     assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
     assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
+
+
+# ---- Recursive sensitive-key redaction (issue #455, Task 1) ----
+
+
+@pytest.mark.parametrize("sensitive_key", [
+    "apiKey",
+    "client-secret",
+    "Access_Token",
+    "dbPassword",
+    "AUTHORIZATION",
+    "awsSecretAccessKey",
+])
+def test_redactor_scrubs_sensitive_keys_recursively(sensitive_key: str) -> None:
+    """Sensitive-key values are replaced with [REDACTED_CREDENTIAL] at nested depth;
+    clean siblings survive."""
+    sentinel = "opaque-test-only-sentinel"
+    call = ToolCall(
+        tool_call_id="t1",
+        function_name="Bash",
+        arguments={sensitive_key: {"nested": {"token": sentinel}}, "displayName": "visible"},
+    )
+    out = Redactor().redact_step(_agent_step(tool_calls=[call]))
+    assert out.tool_calls is not None
+    args = out.tool_calls[0].arguments
+    blob = json.dumps(args)
+    assert sentinel not in blob
+    assert "[REDACTED_CREDENTIAL]" in blob
+    assert args["displayName"] == "visible"
+
+
+@pytest.mark.parametrize("non_secret_key", [
+    "tokenizer", "passwordless", "monkeyPatch", "keyStore", "max_tokens",
+])
+def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -> None:
+    """WR-03 guard: keys that merely contain a secret term as a substring are untouched."""
+    call = ToolCall(
+        tool_call_id="t1",
+        function_name="Bash",
+        arguments={non_secret_key: "opaque-test-only-sentinel"},
+    )
+    out = Redactor().redact_step(_agent_step(tool_calls=[call]))
+    assert out.tool_calls is not None
+    args = out.tool_calls[0].arguments
+    assert args[non_secret_key] == "opaque-test-only-sentinel"
+    assert "[REDACTED_CREDENTIAL]" not in json.dumps(args)

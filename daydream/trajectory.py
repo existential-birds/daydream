@@ -130,6 +130,10 @@ _PEM_KEY_PATTERN = re.compile(
 #: Replacement marker for PEM private-key blocks. Shared (imported) by the
 #: benchmark's buffering anchors so every redaction site emits one marker.
 _PEM_KEY_REDACTED_MARKER = "[REDACTED_PEM_KEY]"
+#: Replacement marker for credential values under sensitive keys (issue #455).
+#: Distinct from every existing [REDACTED_*] marker so consumers can tell a
+#: key-aware credential redaction from a flat regex hit.
+_REDACTED_CREDENTIAL = "[REDACTED_CREDENTIAL]"
 # Match env-var assignment where one of the underscore-separated SEGMENTS of
 # the var name is a secret keyword. Substring matching (the original) over-
 # redacted MONKEY_PATCH/KEYBOARD_LAYOUT/AUTHOR/TOKENIZED — segment-aware
@@ -277,47 +281,144 @@ class DaydreamRunFlow(str, Enum):
     IMPROVE = "improve"
 
 
+# Sensitive-key detection (issue #455): segment-aware, casing-agnostic.
+# A key is sensitive when the whole normalized key is a member of
+# _SENSITIVE_KEY_SUFFIXES, when it ends with "_" + member (compound members
+# like private_key / secret_access_key), or when any underscore-separated
+# segment is a member. Bare `key` is deliberately absent so keyStore/key_store
+# stay clean (WR-03), and a secret term must appear as a full segment — never
+# as a substring (tokenizer/passwordless pass through).
+_SENSITIVE_KEY_SUFFIXES: frozenset[str] = frozenset({
+    "api_key", "apikey", "auth", "authorization", "client_secret", "cookie",
+    "credential", "credentials", "password", "passwd", "private_key",
+    "secret", "secret_access_key", "set_cookie", "token",
+})
+# Insert a separator before an uppercase letter that follows a lowercase/digit
+# (camelCase → snake_case boundary): apiKey → api_Key, dbPassword → db_Password.
+_CAMEL_CASE_BOUNDARY_PATTERN = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+# Collapse any run of non-alphanumerics to a single underscore:
+# client-secret → client_secret, Access_Token → Access_Token.
+_NON_ALPHANUMERIC_KEY_PATTERN = re.compile(r"[^A-Za-z0-9]+")
+
+
+def _normalize_sensitive_key(key: str) -> str:
+    """Normalize *key* for sensitive-key matching (snake_case, lowercase).
+
+    Insert camelCase boundaries, lowercase, collapse non-alphanumeric runs to
+    ``_``, and strip edge separators: ``apiKey`` → ``api_key``,
+    ``client-secret`` → ``client_secret``, ``Access_Token`` → ``access_token``,
+    ``dbPassword`` → ``db_password``, ``AUTHORIZATION`` → ``authorization``,
+    ``awsSecretAccessKey`` → ``aws_secret_access_key``.
+    """
+    return (
+        _NON_ALPHANUMERIC_KEY_PATTERN.sub("_", _CAMEL_CASE_BOUNDARY_PATTERN.sub("_", key))
+        .lower()
+        .strip("_")
+    )
+
+
+def _is_sensitive_key(key: str) -> bool:
+    """Return True when *key* names a credential-bearing value (issue #455).
+
+    Segment-aware, casing-agnostic: True when the normalized key exactly
+    equals a ``_SENSITIVE_KEY_SUFFIXES`` member, ends with ``_<member>``, or
+    has some underscore-separated segment that is a member. The five WR-03
+    negatives (``tokenizer``, ``passwordless``, ``monkeyPatch``, ``keyStore``,
+    ``max_tokens``) all stay False — a secret term must appear as a full
+    segment, never as a substring.
+    """
+    normalized = _normalize_sensitive_key(key)
+    if normalized in _SENSITIVE_KEY_SUFFIXES:
+        return True
+    if any(normalized.endswith(f"_{member}") for member in _SENSITIVE_KEY_SUFFIXES):
+        return True
+    return any(segment in _SENSITIVE_KEY_SUFFIXES for segment in normalized.split("_"))
+
+
 class Redactor:
     """Regex-driven redactor (REDA-01..06).
 
     Applies ``_REDACTION_RULES`` uniformly to all four ATIF text surfaces:
     ``Step.message``, ``Step.reasoning_content``, every
     ``ToolCall.arguments`` value, and every ``ObservationResult.content``
-    string. Per D-04 the dispatch is flat regex on serialized text — no
-    JSON-aware deep walk. Per REDA-05 the failure mode is "redact-or-omit":
-    any internal exception replaces the offending value with
-    ``"[REDACTION_FAILED]"`` rather than letting the raw value through.
+    string. Tool-call arguments and other native structures are walked
+    recursively with key-aware sensitive-key detection
+    (``_redact_value`` / ``_is_sensitive_key``), so credentials under
+    lower/mixed/camel-case keys are replaced even at nested depth while the
+    surrounding shape is preserved; free-text surfaces compose the flat rules
+    with auth-header and structured key-value stages
+    (``_redact_structured_text``). Per REDA-05 the failure mode is
+    "redact-or-omit": any internal exception replaces the offending value
+    with ``"[REDACTION_FAILED]"`` rather than letting the raw value through.
     """
 
     def _redact_text(self, s: str) -> str:
-        """Apply every redaction rule to *s* and return the result."""
+        """Apply every flat redaction rule to *s* and return the result."""
         return redact_text(s)
+
+    def _redact_structured_text(self, s: str) -> str:
+        """Redact structured free-text surfaces (fail-closed).
+
+        Task 1 delegates to the module :func:`redact_text` (preserving the
+        existing flat coverage); the auth-header and structured key-value
+        stages land in Task 2. Any exception in any stage degrades the whole
+        field to ``"[REDACTION_FAILED]"`` — never raw pass-through.
+        """
+        try:
+            return redact_text(s)
+        except Exception:  # noqa: BLE001 - fail closed at every host boundary
+            return "[REDACTION_FAILED]"
 
     def _redact_optional_text(self, value: str | None) -> str | None:
         """Redact a possibly-None text field; degrade to [REDACTION_FAILED] on error."""
         if value is None:
             return None
-        return redact_text(value)
+        return self._redact_structured_text(value)
+
+    def _redact_value(self, value: Any, sensitive: bool = False) -> Any:
+        """Recursively redact *value*, key-aware, without mutating it.
+
+        String leaves under a sensitive key (their own key, or inherited from
+        a sensitive ancestor container) are replaced with ``_REDACTED_CREDENTIAL``;
+        other string leaves run through ``_redact_structured_text``. Dict
+        children are sensitive when the parent is sensitive OR their own key
+        is sensitive (``_is_sensitive_key``); list/tuple elements inherit the
+        container's sensitivity. Fresh containers are built at every level, so
+        the caller's object is never touched. Non-string scalars pass through
+        unchanged.
+        """
+        if isinstance(value, str):
+            return _REDACTED_CREDENTIAL if sensitive else self._redact_structured_text(value)
+        if isinstance(value, dict):
+            return {
+                key: self._redact_value(
+                    item,
+                    sensitive or (_is_sensitive_key(key) if isinstance(key, str) else False),
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._redact_value(item, sensitive) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact_value(item, sensitive) for item in value)
+        return value
 
     def _redact_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Redact every value inside a ToolCall.arguments dict.
+        """Redact every value inside a ToolCall.arguments dict (native walk).
 
-        Per D-04 the dispatch is flat regex on the serialized form of each
-        value. String values are redacted directly. Non-string values are
-        ``json.dumps``'d, redacted, then re-parsed back to their Python
-        structure so ``ToolCall.arguments`` keeps its declared shape. If
-        re-parse fails (regex broke JSON syntax) the value is replaced with
-        ``"[REDACTION_FAILED]"`` per REDA-05.
+        Each value is walked recursively with key-aware sensitive-key
+        detection (``_redact_value``) so nested credentials under
+        lower/mixed/camel-case keys are replaced without a JSON round-trip;
+        the output keeps its declared ``dict[str, Any]`` shape and preserves
+        nested structure (CR-01). A failure on any one key degrades only that
+        key to ``"[REDACTION_FAILED]"`` per REDA-05.
         """
         out: dict[str, Any] = {}
         for key, val in arguments.items():
             try:
-                if isinstance(val, str):
-                    out[key] = self._redact_text(val)
-                else:
-                    serialized = json.dumps(val)
-                    redacted = self._redact_text(serialized)
-                    out[key] = json.loads(redacted)
+                out[key] = self._redact_value(
+                    val, _is_sensitive_key(key) if isinstance(key, str) else False
+                )
             except Exception:  # noqa: BLE001 - REDA-05 redact-or-omit
                 out[key] = "[REDACTION_FAILED]"
         return out
