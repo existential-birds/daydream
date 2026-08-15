@@ -5,10 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from test_rewards import _stage_run
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
 from daydream_review_v1.rundir import RUN_DIR_FILES, fetch_run_dir
-from tests.test_rewards import _stage_run
 
 #: The RUN_DIR_FILES allowlist members the projection must include for the
 #: golden run. The deep/stack-*-records.json glob members are collected too,
