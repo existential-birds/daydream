@@ -7,22 +7,25 @@
 # separate privileged `daydream-post.yml` (workflow_run), per the locked
 # privilege split: no single job ever holds both PR code and the App key.
 #
-# Triggers:
-#   - pull_request (opened, ready_for_review): auto-review for same-repo PRs,
-#     unless the operator sets the repo variable DAYDREAM_AUTO_REVIEW=false.
-#   - workflow_dispatch (pr_number): on-demand review, dispatched by
-#     daydream-command.yml on `@<bot> review`. Dispatch runs sit on the
-#     default branch, so the PR head ref is fetched explicitly.
+# Triggered on demand by daydream-command.yml after a trusted maintainer
+# comments `@<bot> review`. The dispatch binds both the PR number and the
+# approved head SHA; this workflow rejects drift before checking out code.
 
 name: Daydream Review
 
 on:
-  pull_request:
-    types: [opened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
         description: Number of the pull request to review
+        required: true
+        type: string
+      approved_head_sha:
+        description: PR head SHA approved by the maintainer
+        required: true
+        type: string
+      approved_at:
+        description: ISO-8601 creation time of the approving review comment
         required: true
         type: string
 
@@ -32,53 +35,78 @@ permissions:
 jobs:
   analyze:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      vars.DAYDREAM_AUTO_REVIEW != 'false')
+    if: github.event_name == 'workflow_dispatch'
     steps:
-      - name: Check out PR head (pull_request)
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Check out repository (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-
-      # Dispatch runs sit on the default branch and the PR number arrives as
-      # an input, so the PR head must be fetched explicitly (via env, never
-      # inline interpolation).
-      - name: Check out PR head (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          git fetch origin "refs/pull/${PR_NUMBER}/head"
-          git checkout --detach FETCH_HEAD
-
       - name: Resolve PR number and base ref
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            PR_NUMBER="$INPUT_PR_NUMBER"
-            BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
-          else
-            PR_NUMBER="$EVENT_PR_NUMBER"
-            BASE_REF="$EVENT_BASE_REF"
-          fi
+          BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify approved PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
+          APPROVED_AT: ${{ inputs.approved_at }}
+        run: |
+          # Every drift rejection funnels through this helper: it records the
+          # failure context (pr_number + the instructive message) before exiting
+          # so the post workflow's surface-analyze-failure job can comment on
+          # the PR — the workflow_run event cannot identify a workflow_dispatch
+          # run's PR (issue #336). The console message carries the details for
+          # the log; the record message is the shorter text posted on the PR.
+          reject() {
+            local console_message="$1"
+            local record_message="$2"
+            echo "$console_message" >&2
+            mkdir -p findings
+            printf '{"pr_number": "%s", "message": "%s"}' "$PR_NUMBER" "$record_message" > findings/failure.json
+            exit 1
+          }
+          HEAD_INFO="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq '{sha: .head.sha, ref: .head.ref, repo: (.head.repo.full_name? // "")}')"
+          LIVE_HEAD_SHA="$(printf '%s' "$HEAD_INFO" | jq -r .sha)"
+          HEAD_REF="$(printf '%s' "$HEAD_INFO" | jq -r .ref)"
+          HEAD_REPO="$(printf '%s' "$HEAD_INFO" | jq -r .repo)"
+          if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
+            reject "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." \
+              "The PR head changed after approval. Comment the review command again to approve the new head"
+          fi
+          # The dispatch resolves the head at run time; the approving comment's
+          # creation time is the comment-time anchor. The approved commit's push
+          # time is the head repository's activity scoped to the PR's head ref —
+          # server-set by GitHub when a push is received, so it cannot be
+          # backdated like commit.committer.date, and scoped to this PR rather
+          # than the repo-wide pushed_at that every push to the repo bumps. The
+          # timestamps are second-granularity, so a push in the same wall-clock
+          # second as the comment is indistinguishable from one that landed
+          # before it: reject when the push is NOT strictly before the comment
+          # (equality fails closed), not only when it is strictly after. A
+          # deleted head repository cannot receive pushes — the approved head is
+          # frozen and the bound SHA cannot change — so there is no window to
+          # close and no push time to resolve.
+          if [ -n "$HEAD_REPO" ]; then
+            HEAD_PUSHED_AT="$(gh api "repos/$HEAD_REPO/activity?ref=refs/heads/$HEAD_REF&per_page=100" \
+              --jq '[.[] | select(.activity_type == "push" or .activity_type == "branch_creation" or .activity_type == "force_push") | .timestamp][0] // empty')"
+            if [ -z "$HEAD_PUSHED_AT" ]; then
+              reject "Could not resolve the push time for approved head $APPROVED_HEAD_SHA" \
+                "Could not verify the approved head push time. Comment the review command again to approve the new head"
+            fi
+            if ! [ "$HEAD_PUSHED_AT" \< "$APPROVED_AT" ]; then
+              reject "PR #$PR_NUMBER head was pushed ($HEAD_PUSHED_AT) at or after the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." \
+                "The approved head was pushed after the approving comment. Comment the review command again to approve the new head"
+            fi
+          fi
+
+      - name: Check out approved PR head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.approved_head_sha }}
+          fetch-depth: 0
 
       - name: Fetch base ref
         env:
@@ -92,7 +120,7 @@ jobs:
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
         # version: reproducible and immune to main-drift / uv-cache staleness.
         # Bump in lockstep with the package version on release (a test enforces this).
-        run: uv tool install git+https://github.com/existential-birds/daydream@v0.26.0
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.27.0
 
       # Codex backend: daydream spawns `codex exec` as a subprocess, so the CLI
       # must be on PATH. Pinned because the backend parses `codex exec
@@ -118,10 +146,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
         run: |
           mkdir -p findings
           daydream --review --backend codex --non-interactive --pr-number "$PR_NUMBER" \
+            --approved-head-sha "$APPROVED_HEAD_SHA" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
+
+      - name: Clean up Codex auth
+        if: always()
+        run: rm -f "${CODEX_HOME:-$HOME/.codex}/auth.json"
+
+      # Any analyze failure (drift or otherwise) leaves the PR number where the
+      # post workflow can resolve it: the workflow_run event cannot identify a
+      # workflow_dispatch run's PR, so surface-analyze-failure reads it from
+      # this artifact instead of silently skipping the comment.
+      - name: Record failure context
+        if: failure()
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          mkdir -p findings
+          if [ ! -f findings/failure.json ]; then
+            printf '{"pr_number": "%s"}' "$PR_NUMBER" > findings/failure.json
+          fi
+
+      - name: Upload failure context
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daydream-findings-failure
+          path: findings/failure.json
 
       - name: Upload findings artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

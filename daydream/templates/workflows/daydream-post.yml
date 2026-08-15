@@ -7,17 +7,13 @@
 # The artifact is passive data, validated by `daydream post-findings` against a strict schema before
 # anything is posted.
 #
-# Target derivation (Task 0 spike, Step 2 — the event payload is NOT uniform):
-#   - pull_request runs: `workflow_run.head_sha` IS the PR head.
-#     `pull_requests[0].number` is populated for same-repo PRs but EMPTY for
-#     fork PRs, where the open-PR list filtered by head SHA resolves it.
-#   - workflow_dispatch runs (the `@<bot> review` path): `pull_requests` is
-#     empty and `head_sha` is the default-branch tip (useless). The PR number
-#     travels in the findings artifact; the LIVE PR fetched from the GitHub
-#     API is the trust anchor — `daydream post-findings` validates the
-#     artifact's declared head_sha against that live value and aborts on
-#     mismatch, so a forged artifact can only point at the real current head
-#     of the PR it names.
+# Target derivation: "Daydream Review" only runs via workflow_dispatch (the
+# `@<bot> review` command), so `pull_requests` is always empty and `head_sha`
+# is the default-branch tip (useless). The PR number travels in the findings
+# artifact; the LIVE PR fetched from the GitHub API is the trust anchor —
+# `daydream post-findings` validates the artifact's declared head_sha against
+# that live value and aborts on mismatch, so a forged artifact can only point
+# at the real current head of the PR it names.
 #
 # Token (footgun 3): minted via actions/create-github-app-token with exactly
 # `pull-requests: write, contents: read, metadata: read`, reaches `gh` via
@@ -46,7 +42,7 @@ jobs:
         # Pinned to a release tag (not `main`) so the bot runs a known daydream
         # version: reproducible and immune to main-drift / uv-cache staleness.
         # Bump in lockstep with the package version on release (a test enforces this).
-        run: uv tool install git+https://github.com/existential-birds/daydream@v0.26.0
+        run: uv tool install git+https://github.com/existential-birds/daydream@v0.27.0
 
       - name: Mint posting token
         id: token
@@ -74,27 +70,13 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
-          RUN_EVENT: ${{ github.event.workflow_run.event }}
-          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
-          if [ "$RUN_EVENT" = "pull_request" ]; then
-            HEAD_SHA="$EVENT_HEAD_SHA"
-            PR_NUMBER="$EVENT_PR_NUMBER"
-            if [ -z "$PR_NUMBER" ]; then
-              # Fork PRs leave pull_requests empty (spike Shape 2); the
-              # open-PR list filtered by head SHA resolves both PR shapes.
-              PR_NUMBER="$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
-                --jq ".[] | select(.head.sha == \"${HEAD_SHA}\") | .number" | head -n 1)"
-            fi
-          else
-            # workflow_dispatch (spike Shape 3): the event cannot identify the
-            # PR — read pr_number from the artifact, then trust the LIVE PR
-            # head from the API; post-findings validates the artifact against
-            # it and aborts on mismatch.
-            PR_NUMBER="$(jq -r '.pr_number // empty' findings/findings.json)"
-            HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
-          fi
+          # The dispatch event cannot identify the PR — read pr_number from
+          # the artifact, then trust the LIVE PR head from the API;
+          # post-findings validates the artifact against it and aborts on
+          # mismatch.
+          PR_NUMBER="$(jq -r '.pr_number // empty' findings/findings.json || true)"
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha || true)"
           if [ -z "$PR_NUMBER" ] || [ -z "$HEAD_SHA" ]; then
             echo "could not resolve a target PR for this run" >&2
             exit 1
@@ -147,25 +129,35 @@ jobs:
           permission-contents: read
           permission-metadata: read
 
+      # A workflow_dispatch run's PR is not identifiable from the event
+      # (pull_requests is empty, head_sha is the default-branch tip), so the
+      # failed analyze run's failure-context artifact resolves it. GITHUB_TOKEN's
+      # actions: read (workflow-level) covers the cross-run download.
+      - name: Download failure context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daydream-findings-failure
+          path: findings
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+        # A failed run without the artifact (e.g. the runner died mid-step)
+        # falls through to the exit-0 guard below rather than failing the job.
+        continue-on-error: true
+
       - name: Comment on the PR
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
-          RUN_EVENT: ${{ github.event.workflow_run.event }}
-          EVENT_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          EVENT_PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
-          PR_NUMBER="$EVENT_PR_NUMBER"
-          if [ -z "$PR_NUMBER" ] && [ "$RUN_EVENT" = "pull_request" ]; then
-            PR_NUMBER="$(gh api "repos/${REPO}/pulls?state=open&per_page=100" \
-              --jq ".[] | select(.head.sha == \"${EVENT_HEAD_SHA}\") | .number" | head -n 1)"
-          fi
+          PR_NUMBER="$(jq -r '.pr_number // empty' findings/failure.json 2>/dev/null || true)"
           if [ -z "$PR_NUMBER" ]; then
-            # A failed dispatch run leaves no artifact and a default-branch
-            # head_sha, so there is nothing to resolve — log and stop.
+            # A failed dispatch run with no failure-context artifact — log and
+            # stop rather than posting blind.
             echo "no PR resolvable for the failed analyze run; skipping comment" >&2
             exit 0
           fi
+          FAILURE_MESSAGE="$(jq -r '.message // empty' findings/failure.json 2>/dev/null || true)"
+          BODY="${FAILURE_MESSAGE:-daydream review failed} — see run ${RUN_URL}"
           gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            -f body="daydream review failed — see run ${RUN_URL}"
+            -f body="${BODY}"

@@ -25,6 +25,7 @@ import webbrowser
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 from daydream import config, git_ops
@@ -46,11 +47,10 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 _ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
 _SETUP_BRANCH = "daydream/setup-bot"
 
-# Events the #147 workflow templates consume (daydream-review.yml →
-# pull_request, daydream-command.yml → issue_comment, daydream-post.yml →
-# workflow_run). Declared in the manifest so the App is subscribed to exactly
-# what the shipped workflows listen for.
-_MANIFEST_EVENTS = ("pull_request", "issue_comment", "workflow_run")
+# Events consumed by the approval-gated workflows: trusted review commands and
+# completed review runs. Credential-bearing review workflows are not subscribed
+# to pull_request events.
+_MANIFEST_EVENTS = ("issue_comment", "workflow_run")
 
 _APP_NAME_DEFAULT = "Daydream Review Bot"
 _GITHUB_NEW_APP_URL = "https://github.com/settings/apps/new"
@@ -339,7 +339,8 @@ _PR_BODY = (
     "GitHub App identity. Review the setup guide before merging:\n\n"
     "- Setup guide: `docs/self-hosted-bot-setup.md`\n"
     "- Security model: see the *Security model* section of that guide.\n\n"
-    "Merging this PR makes the bot live on this repository."
+    "After merging, a trusted maintainer can request a head-bound review by "
+    "commenting `@<bot> review` on a pull request."
 )
 
 
@@ -353,8 +354,10 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
     branch — the workflows always land via a reviewable PR.
 
     Idempotent: a template whose target file already exists with identical
-    content is skipped. When all three already match, no branch or PR is
-    created and the :data:`WORKFLOWS_ALREADY_INSTALLED` sentinel is returned
+    content is skipped. A target file that exists with divergent content (a
+    customized workflow) is replaced with a warning that workflow customization
+    is intentionally unsupported. When all three already match, no branch or PR
+    is created and the :data:`WORKFLOWS_ALREADY_INSTALLED` sentinel is returned
     (distinguishable from a PR URL).
 
     Args:
@@ -378,6 +381,12 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
         content = template.read_text()
         if target.exists() and target.read_text() == content:
             continue
+        if target.exists():
+            print_warning(
+                console,
+                f"{_WORKFLOWS_DIR}/{template.name} is a customized workflow — customization is "
+                "intentionally unsupported and it will be replaced by the packaged template.",
+            )
         target.write_text(content)
         copied.append(Path(_WORKFLOWS_DIR) / template.name)
 
@@ -581,8 +590,95 @@ def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
     )
 
 
+def _workflow_contract_intact(name: str, content: str) -> bool:
+    """True when *content* still satisfies the approval-gate security contract.
+
+    The gate era binds every credential-bearing review to an approved head, so
+    an installed workflow that drifts from the packaged template is acceptable
+    only while it keeps the contract:
+
+    - ``daydream-review.yml`` must require the ``approved_head_sha`` dispatch
+      input and must not auto-trigger on ``pull_request`` (a pre-gate workflow
+      triggers on PR open, re-opening the unapproved-review hole).
+    - ``daydream-command.yml`` must pass ``approved_head_sha`` — it is the
+      single approval point.
+    - ``daydream-post.yml`` must run off the review's ``workflow_run``
+      completion.
+
+    A drift that breaks the contract is a stale workflow and a hard doctor
+    failure; a drift that keeps it (e.g. a backend-variant customization such
+    as a Codex deployment) is reported as a warning: customization is
+    intentionally unsupported, and ``daydream setup`` replaces customized
+    files with the packaged templates.
+
+    The checks are structural (parsed YAML), mirroring the gate assertions in
+    ``tests/test_workflow_templates.py``: whole-file substring matching would
+    hard-fail a gate-intact workflow that merely mentions ``pull_request`` in
+    prose and could disagree with the test harness. Content that does not parse
+    to a workflow mapping is not gate-intact. A template with no explicit
+    contract below (a future non-review/command file) is treated as broken
+    rather than silently judged by a guess.
+    """
+    try:
+        import yaml  # lazy: pyyaml is a dev-only dependency (see pyproject.toml)
+    except ImportError:
+        return False
+    try:
+        wf = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(wf, dict):
+        return False
+    # PyYAML parses the bare ``on:`` key as boolean ``True``; normalize the
+    # trigger map the same way the test harness's ``_wf_triggers`` does.
+    on: Any = wf.get("on")
+    if on is None:
+        on = cast(dict[Any, Any], wf).get(True)
+    triggers = on if isinstance(on, dict) else {}
+
+    if name == "daydream-review.yml":
+        if "pull_request" in triggers:
+            return False
+        dispatch = triggers.get("workflow_dispatch")
+        inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+        return isinstance(inputs, dict) and "approved_head_sha" in inputs
+    if name == "daydream-command.yml":
+        # The single approval point: every review dispatch must bind the live
+        # PR head to the approved_head_sha input. Require the binding itself —
+        # the input set to the gh-api-resolved $HEAD_SHA variable (the test
+        # harness asserts the same) — so a drift that keeps the literal token
+        # in a hardcoded value, echo, or comment fails instead of passing as
+        # gate-intact.
+        dispatch_steps = [
+            step
+            for job in wf.get("jobs", {}).values()
+            if isinstance(job, dict)
+            for step in job.get("steps", [])
+            if isinstance(step, dict)
+            and "gh workflow run daydream-review.yml" in step.get("run", "")
+        ]
+        return bool(dispatch_steps) and all(
+            '-f approved_head_sha="$HEAD_SHA"' in step.get("run", "")
+            and "gh api" in step.get("run", "")
+            and ".head.sha" in step.get("run", "")
+            for step in dispatch_steps
+        )
+    if name == "daydream-post.yml":
+        return "workflow_run" in triggers
+    return False
+
+
 def _check_workflows(repo_dir: Path) -> Check:
-    """Check (4): the three workflow files exist on the default branch."""
+    """Check (4): installed workflows carry the approval gate on the default branch.
+
+    Byte-compares installed workflows against the packaged templates, but a
+    byte drift is only a hard failure when it breaks the gate contract (see
+    :func:`_workflow_contract_intact`) — e.g. a stale pre-gate workflow that
+    auto-triggers on ``pull_request`` would re-open the unapproved-review hole.
+    A contract-intact drift (a customized variant, such as a different model
+    backend) passes with a warning that customization is intentionally
+    unsupported; missing files always fail.
+    """
     try:
         base = git_ops.default_branch(repo_dir)
     except git_ops.BranchNotFoundError as exc:
@@ -593,21 +689,48 @@ def _check_workflows(repo_dir: Path) -> Check:
         )
 
     missing: list[str] = []
+    outdated: list[str] = []
+    customized: list[str] = []
     for template in workflow_template_files():
         path = f"{_WORKFLOWS_DIR}/{template.name}"
         try:
-            git_ops.show(repo_dir, f"origin/{base}", path)
+            installed = git_ops.show(repo_dir, f"origin/{base}", path)
         except GitError:
             missing.append(path)
-    if not missing:
-        return Check(name="workflows", passed=True, detail=f"All workflow files present on '{base}'.")
+            continue
+        if installed == template.read_bytes():
+            continue
+        if _workflow_contract_intact(template.name, installed.decode("utf-8", errors="replace")):
+            customized.append(path)
+        else:
+            outdated.append(path)
+
+    if not missing and not outdated:
+        if customized:
+            return Check(
+                name="workflows",
+                passed=True,
+                detail=(
+                    f"Workflow file(s) on '{base}' are customized variants: "
+                    + ", ".join(customized)
+                    + ". Customization is intentionally unsupported — `daydream setup` "
+                    "replaces them with the packaged templates."
+                ),
+            )
+        return Check(name="workflows", passed=True, detail=f"All workflow files match on '{base}'.")
+
+    problems: list[str] = []
+    if missing:
+        problems.append("Missing workflow file(s): " + ", ".join(missing))
+    if outdated:
+        problems.append("Out of date workflow file(s): " + ", ".join(outdated))
     return Check(
         name="workflows",
         passed=False,
         detail=(
-            f"Missing workflow file(s) on '{base}': "
-            + ", ".join(missing)
-            + " — run `daydream setup` (or merge the setup PR) to land them."
+            f"Workflow check failed on '{base}': "
+            + "; ".join(problems)
+            + " — run `daydream setup` (or merge the setup PR) to install the packaged versions."
         ),
     )
 
@@ -631,8 +754,10 @@ def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
        and the :data:`config.BOT_HANDLE_VAR` variable exist at the scope.
     3. **Permissions** — the App grants a superset of
        :data:`config.APP_PERMISSIONS` (skipped, non-required, without creds).
-    4. **Workflows** — the three packaged workflow files exist on the default
-       branch.
+    4. **Workflows** — the installed workflow files carry the approval gate on
+       the default branch: they byte-match the packaged templates, or diverge
+       only as contract-intact customizations (warned, not failed). Stale
+       gate-less workflows and missing files fail.
 
     This is strictly read-only: it never sets a secret, variable, or file. Each
     failed required check's ``detail`` names the exact missing element and the
@@ -862,5 +987,8 @@ def run_setup(
         print_info(console, "Workflow files already present on this repository; nothing to land.")
     else:
         print_success(console, f"Opened workflow PR: {pr_url}")
-        print_info(console, "Merge the PR to go live — the bot reviews PRs once it lands on the default branch.")
+        print_info(
+            console,
+            "Merge the PR, then request reviews with a trusted `@<bot> review` comment.",
+        )
     return 0

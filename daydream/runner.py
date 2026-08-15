@@ -223,6 +223,7 @@ class RunConfig:
     quiet: bool = True
     start_at: str = "review"
     pr_number: int | None = None
+    approved_head_sha: str | None = None
     bot: str | None = None
     backend: str | None = None
     model: str | None = None
@@ -801,8 +802,21 @@ async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
     return await _run_custom_flow(work, config)
 
 
+def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
+    """Reject a checkout that has drifted from a maintainer-approved PR head."""
+    approved = config.approved_head_sha
+    if approved is None or work.head_sha == approved:
+        return 0
+    print_error(
+        console,
+        "Head Mismatch",
+        f"Approved PR head is {approved}, but the checked-out head is {work.head_sha}. Re-approve the current head.",
+    )
+    return 1
+
+
 async def _dispatch(work: WorkContext, config: RunConfig) -> int:
-    """Route the resolved workspace + config to the single deep flow.
+    """Verify the approved head, then route to the resolved flow.
 
     Every PR-process mode routes to :func:`_run_loop_deep` (which delegates to
     :func:`daydream.deep.orchestrator.run_deep`): feedback mode (``bot`` set by
@@ -819,6 +833,10 @@ async def _dispatch(work: WorkContext, config: RunConfig) -> int:
         config: Run configuration (``config.identity`` carries the resolved
             GitHub identity set by :func:`run`).
     """
+    head_status = _verify_approved_head(work, config)
+    if head_status != 0:
+        return head_status
+
     if config.bot is not None:
         return await _run_loop_deep(work, config)
 

@@ -1,9 +1,9 @@
 # Daydream review bot — workflow templates
 
 Three GitHub Actions workflows that turn daydream into a self-hosted PR review
-bot: a PR gets reviewed automatically on open (or on demand via
-`@<bot> review`) and the findings are posted as inline comments by your own
-GitHub App identity — no maintainer server, no third-party service.
+bot: a trusted maintainer requests a review with `@<bot> review`, and the
+findings are posted as inline comments by your own GitHub App identity — no
+maintainer server, no third-party service.
 
 | File | Workflow | Role |
 |---|---|---|
@@ -36,14 +36,17 @@ download). The sections below document what these workflows *do* once installed.
 
 | Trigger | Path | Notes |
 |---|---|---|
-| PR `opened` / `ready_for_review` | auto: Review → Post | Same-repo PRs only; disabled when `DAYDREAM_AUTO_REVIEW` is `false` |
-| `@<bot> review` PR comment | on demand: Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored |
-| Fork PRs | `@<bot> review` only by default | Auto-review is gated to same-repo PRs (fork runs get no secrets, so the reviewer cannot run) |
+| `@<bot> review` PR comment | Command → Review → Post | Comment author must be OWNER / MEMBER / COLLABORATOR; bot comments are ignored; the PR head current at comment time is bound as the approved target |
+| New commit after approval | Review rejects head drift | Comment `@<bot> review` again to approve the new head |
+| Fork PRs | Same trusted-comment path | The review remains approval-gated and checks out only the approved head |
 
-**Private-repo limitation:** on private repositories GitHub runs **no
-workflows at all** for fork PRs (the "run workflows from fork pull requests"
-policy is off by default), so fork PRs there get no auto-review of any kind —
-only the `@<bot> review` command path can serve them.
+There is no automatic PR-open trigger. A credential-bearing review runs only
+after a trusted comment explicitly approves the current head.
+
+**Private-repo limitation:** on private repositories GitHub may run no
+workflows for fork PRs when the "run workflows from fork pull requests" policy
+is disabled. Enable the applicable repository policy before using the trusted
+`@<bot> review` path for those forks.
 
 ## Security model — the privilege split
 
