@@ -875,6 +875,27 @@ async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_batched_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference rejects the whole batch, not just that item.
+
+    The missing ref lives in the second item so the batched preflight loop
+    ``for item in items[1:]`` actually runs past index 0 before raising.
+    """
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        {"id": 2, "description": "No file", "line": 2},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
 async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypatch, make_work):
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
     from daydream import phases
@@ -955,6 +976,27 @@ async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make
     items = [
         {"id": 1, "file": "src/ok.py"},
         {"id": 2, "file": hostile},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_parallel(backend, make_work(tmp_path), items)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference aborts the whole run before any dispatch.
+
+    The missing ref lives in the second item so the parallel preflight loop
+    actually runs past index 0 before raising -- no grouping happens.
+    """
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [
+        {"id": 1, "file": "src/ok.py"},
+        {"id": 2, "description": "No file"},
     ]
 
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
