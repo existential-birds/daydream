@@ -334,9 +334,10 @@ def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str)
 
     An exact key match is reused even with uncommitted worktree edits: the key
     intentionally excludes uncommitted edits because reuse is exact-match-only
-    on head SHA + diff + tier + depth. The generating code is versioned into the
-    key too, so an upgrade that changes artifact rendering (``_CACHE_VERSION``)
-    never serves stale pre-upgrade artifacts on an exact match.
+    on format version + head SHA + diff + tier + depth. The generating code is
+    versioned into the key too, so an upgrade that changes artifact rendering
+    (``_CACHE_VERSION``) never serves stale pre-upgrade artifacts on an exact
+    match.
     """
     payload = f"{_CACHE_VERSION}\n{head_sha}\n{diff}\n{tier}\n{depth}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
