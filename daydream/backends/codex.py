@@ -113,11 +113,14 @@ class CodexBackend:
             agents: Optional subagent mapping. Codex does not support non-empty
                 subagent maps and will raise if provided.
             read_only: When True, run under ``--sandbox read-only`` so the agent
-                can inspect history (read-only git, cat, ls) but cannot mutate
-                the working tree, index, or refs. Accepted residual (Task 0
-                spike): ``--sandbox read-only`` does not block ``git commit``;
-                the working tree — the failure-handoff incident's danger — is
-                fully protected. Default False keeps ``danger-full-access``.
+                can inspect history (read-only git, cat, ls) but cannot modify
+                the working tree. Accepted residual (Task 0 spike): the sandbox
+                does not reliably block ``git commit`` — a commit can still
+                advance a branch inside the sandbox. That residual is why the
+                improve flow isolates model turns in a detached audit worktree:
+                the worktree confines any such commit away from the target's
+                HEAD, named refs, and staged index by construction. Default
+                False keeps ``danger-full-access``.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 
@@ -135,8 +138,9 @@ class CodexBackend:
                 "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        # Read-only sandbox blocks working-tree/index/ref mutation but (accepted
-        # residual, Task 0 spike) not `git commit`; the working tree is protected.
+        # Read-only sandbox protects the working tree but (accepted residual,
+        # Task 0 spike) does not reliably block `git commit`; the audit worktree
+        # is the defense that confines any such commit.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
         args = [
             "codex",

@@ -42,8 +42,14 @@ async def test_claude_read_only_guard_blocks_write_tool():
 
 
 @pytest.mark.asyncio
-async def test_codex_read_only_profile_refuses_mutation():
-    """Codex passes --sandbox read-only (never danger-full-access) under read_only."""
+async def test_codex_read_only_profile_selects_read_only_sandbox():
+    """Codex passes --sandbox read-only (never danger-full-access) under read_only.
+
+    This is the argv-selection contract test: read_only=True must select the
+    read-only sandbox. It does NOT assert ref-integrity -- ``--sandbox read-only``
+    has an accepted residual where ``git commit`` still succeeds; worktree
+    isolation (the audit worktree) is the defense, not this sandbox flag.
+    """
     from daydream.backends.codex import CodexBackend
 
     backend = CodexBackend(model="gpt-x")
