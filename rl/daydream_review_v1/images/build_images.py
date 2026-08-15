@@ -24,6 +24,11 @@ Usage::
 
 ``--red`` is the gate's own test: it plants a failing assertion in the fixture
 repository's head commit and expects the build to die at the final layer.
+
+Exit codes:
+    0 — all requested images built successfully.
+    1 — one or more images failed to build (Docker, test suite, or setup error).
+    2 — invalid arguments or configuration (refused to run).
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from daydream_review_v1.fixture import (
     FIXTURE_BASE_SHA,
     FIXTURE_PR1_HEAD_SHA,
     FIXTURE_PR2_HEAD_SHA,
+    FIXTURE_SLUG,
     build_fixture_repo,
 )
 
@@ -187,6 +193,31 @@ def materialize_mirror(entry: _ManifestEntry, ctx: Path, *, red: bool) -> dict[s
     }
 
 
+def _validate_red_flags(*, red: bool, base_only: bool, manifest: dict[str, _ManifestEntry], prs: list) -> int | None:
+    """Validate ``--red`` constraints before any build starts.
+
+    Returns ``None`` when the flags are valid, or an exit code (2) when
+    a constraint is violated.
+    """
+    if red and base_only:
+        print("--red cannot be combined with --base-only", file=sys.stderr)
+        return 2
+
+    if red:
+        fixture_selected = (
+            FIXTURE_SLUG in manifest
+            and manifest[FIXTURE_SLUG].clone_url == FIXTURE_CLONE_URL
+            and any(_repo_slug(pr.clone_url) == FIXTURE_SLUG for pr in prs)
+        )
+        if not fixture_selected:
+            print(
+                "--red requires at least one selected fixture PR backed by " + FIXTURE_CLONE_URL,
+                file=sys.stderr,
+            )
+            return 2
+    return None
+
+
 def build_repo_image(entry: _ManifestEntry, *, head_sha: str, base_sha: str, base_image: str, red: bool) -> str:
     """Build one PR-snapshot image and return the tag it was given.
 
@@ -239,6 +270,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if args.red and args.base_only:
+        print("--red cannot be combined with --base-only", file=sys.stderr)
+        return 2
+
     if args.base_only:
         return _build_base()
 
@@ -249,6 +284,10 @@ def main(argv: list[str] | None = None) -> int:
         if not prs:
             print(f"no PR in {args.corpus} belongs to {args.only}", file=sys.stderr)
             return 2
+
+    red_status = _validate_red_flags(red=args.red, base_only=args.base_only, manifest=manifest, prs=prs)
+    if red_status is not None:
+        return red_status
 
     if args.no_base:
         print(f"skipping base build; reusing {BASE_LATEST}")
