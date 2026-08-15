@@ -275,7 +275,9 @@ def test_golden_comment_rejects_unknown_key() -> None:
     silently ignored.
     """
     with pytest.raises(ValidationError) as excinfo:
-        GoldenComment(comment="looks good", typo_field="nope")
+        GoldenComment.model_validate(
+            {"comment": "looks good", "typo_field": "nope"}
+        )
     assert ("extra_forbidden", ("typo_field",)) in [
         (err["type"], err["loc"]) for err in excinfo.value.errors()
     ]
