@@ -469,6 +469,13 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     assert "`apps/svc00`" in prompt and "`frontend`" in prompt
     assert "Return the per-subtree build, test, and lint commands" in prompt
     assert "`in-scope-paths`" in prompt
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index("Existing repository scan:")
+    # The exploration summary embedded below the recon header already opened with
+    # the boundary; dedup must leave exactly one occurrence in the full prompt.
+    assert prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
     # Roots only: the recon prompt never inlines an individual tracked file.
     assert "apps/svc00/api.py" not in prompt
 

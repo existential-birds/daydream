@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import pytest
 
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.exploration import FileInfo
@@ -21,9 +22,13 @@ from daydream.prompts.exploration_subagents import (
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
     build_pattern_scanner_prompt,
+    build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -39,6 +44,8 @@ def test_pattern_scanner_prompt_includes_guideline_files():
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in dynamic
     # Regression guard: raw diff text must never be embedded.
     assert "<diff>" not in dynamic
+    # git diff must be Bash-conditional -- read_only backends (Pi) have no Bash.
+    assert "If a Bash tool is available, you may also run `git diff" in dynamic
 
 
 def test_dependency_tracer_prompt_mentions_affected_files():
@@ -51,6 +58,7 @@ def test_dependency_tracer_prompt_mentions_affected_files():
     assert "```json" in prompt
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
+    assert "If a Bash tool is available, you may also run `git diff" in prompt
 
 
 def test_test_mapper_prompt_instructs_mapping():
@@ -63,6 +71,7 @@ def test_test_mapper_prompt_instructs_mapping():
     assert "```json" in prompt
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
+    assert "If a Bash tool is available, you may also run `git diff" in prompt
 
 
 def test_schemas_are_valid_objects():
@@ -115,7 +124,9 @@ class _SpecialistMockBackend:
         max_turns=None,
         read_only=False,
     ) -> AsyncIterator[AgentEvent]:
-        self.execute_calls.append({"prompt": prompt, "schema": output_schema, "agents": agents})
+        self.execute_calls.append(
+            {"prompt": prompt, "schema": output_schema, "agents": agents, "read_only": read_only}
+        )
         result: dict[str, Any] = {}
         if output_schema == PATTERN_SCANNER_SCHEMA:
             result = self._results.get("pattern_scanner", {})
@@ -177,6 +188,7 @@ def test_single_tier_dependency_tracer_only(tmp_path):
 
     assert len(backend.execute_calls) == 1
     assert backend.execute_calls[0]["schema"] == DEPENDENCY_TRACER_SCHEMA
+    assert all(call["read_only"] is True for call in backend.execute_calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
 
@@ -192,6 +204,7 @@ def test_parallel_tier_launches_three_agents(tmp_path):
     assert len(backend.execute_calls) == 3
     schemas = {call["schema"]["type"] for call in backend.execute_calls}
     assert len(schemas) >= 1  # All are "object" type
+    assert all(call["read_only"] is True for call in backend.execute_calls)
     # No agents= passed and no raw diff leaked into specialist prompts.
     for call in backend.execute_calls:
         assert call["agents"] is None
@@ -315,6 +328,41 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
     for p in paths:
         assert str(tmp_path / p) in joined
         assert f"- {p} (" not in joined
+
+
+@pytest.mark.parametrize(
+    ("builder", "marker"),
+    [
+        pytest.param(
+            lambda: build_pattern_scanner_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="pattern-scanner",
+        ),
+        pytest.param(
+            lambda: build_repo_survey_prompt(["a.py", "b.py"], 10, cwd=Path("/repo")),
+            "<tracked_file_sample>",
+            id="repo-survey",
+        ),
+        pytest.param(
+            lambda: build_dependency_tracer_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="dependency-tracer",
+        ),
+        pytest.param(
+            lambda: build_test_mapper_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="test-mapper",
+        ),
+    ],
+)
+def test_exploration_prompts_mark_repository_content_untrusted(builder, marker):
+    prompt = builder()
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    # Placement: boundary precedes cwd-grounding (the shared prompt fragment
+    # present in all four builders) AND the repo-controlled file-list marker.
+    grounding = CWD_GROUNDING_INSTRUCTION.format(cwd=Path("/repo"))
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index(grounding)
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index(marker)
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):

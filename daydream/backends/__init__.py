@@ -313,8 +313,10 @@ class Backend(Protocol):
                 history but cannot write/edit/delete or mutate the working
                 tree. Callers select this flag explicitly per call site: the
                 diagnostic subagents (setup-investigator,
-                recommendation-verifier) and the failure summarizer pass True,
-                while mutating phases keep the False default.
+                recommendation-verifier), the failure summarizer, and the
+                exploration and repository reconnaissance specialists
+                (pre_scan, repo_scan, improve recon) pass True, while mutating
+                phases keep the False default.
 
                 **Per-backend semantics diverge**: the Claude backend blocks
                 git commits (the PreToolUse hook denies the Bash tool when the

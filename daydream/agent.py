@@ -457,8 +457,10 @@ async def run_agent(
             at the tool layer (Claude PreToolUse guard hook; Codex
             ``--sandbox read-only``). Callers select this explicitly per call
             site; the diagnostic subagents (setup-investigator,
-            recommendation-verifier) and the failure summarizer pass True,
-            while mutating phases keep the False default.
+            recommendation-verifier), the failure summarizer, and the
+            exploration and repository reconnaissance specialists (pre_scan,
+            repo_scan, improve recon) pass True, while mutating phases keep
+            the False default.
         persist_session: When False, request an ephemeral backend invocation.
             The default preserves existing continuation behavior.
         wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded

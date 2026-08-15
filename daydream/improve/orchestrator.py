@@ -25,6 +25,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.deep.detection import StackAssignment, detect_stacks
 from daydream.deep.orchestrator import _diff_changed_files
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
+from daydream.exploration import EXPLORATION_SECTION_PREFIX
 from daydream.exploration_runner import repo_scan
 from daydream.extensions.api import FlowStep, Stop
 from daydream.improve.artifacts import (
@@ -84,6 +85,7 @@ from daydream.improve.render import markdown_cell
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
     DaydreamPhase,
     get_current_recorder,
@@ -207,7 +209,16 @@ def _build_recon_prompt(
         {root for group in groups for root in group.roots if root != "."}
     )
     root_list = ", ".join(f"`{root}`" for root in audited_roots)
+    # `exploration_summary` (ExplorationContext.to_prompt_section()) opens with
+    # the same boundary emitted below (exploration.EXPLORATION_SECTION_PREFIX);
+    # strip it so the untrusted-content warning appears exactly once in the
+    # recon prompt.
+    summary_prefix = EXPLORATION_SECTION_PREFIX
+    if exploration_summary.startswith(summary_prefix):
+        exploration_summary = exploration_summary.removeprefix(summary_prefix)
     return f"""IMPROVE_RECON
+
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
 Read the repository at {repo} without modifying it. Return structured
 reconnaissance facts only:

@@ -1561,6 +1561,7 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         build_alternative_review_prompt,
         build_intent_prompt,
     )
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -1572,6 +1573,18 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         prompt = builder(exploration_dir=exploration_dir)
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
+        assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+
+
+def test_exploration_pointer_marks_results_untrusted(tmp_path):
+    from daydream.phases import _exploration_pointer
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+
+    exploration_dir = tmp_path / "exploration"
+    pointer = _exploration_pointer(exploration_dir)
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in pointer
+    assert pointer.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < pointer.index("summary.md")
+    assert _exploration_pointer(None) == ""
 
 
 def test_issue_producing_builders_use_shared_instructions(tmp_path):
@@ -3183,6 +3196,7 @@ def test_intent_prompt_pointer_branch_is_byte_identical_to_pre_change() -> None:
 
 def test_alternatives_prompt_inlines_small_diff() -> None:
     from daydream.phases import build_alternative_review_prompt
+    from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 
     prompt = build_alternative_review_prompt(
         intent_summary="does a thing", diff_path=".daydream/diff.patch",
@@ -3191,6 +3205,9 @@ def test_alternatives_prompt_inlines_small_diff() -> None:
     assert "+++ b/x.py" in prompt
     assert "in the diff at .daydream/diff.patch" not in prompt
     assert "do NOT re-Read" in prompt
+    # No exploration pointer to carry the boundary; the inlined diff is
+    # repository-controlled content, so it must be guarded directly.
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
 
 
 def test_alternatives_prompt_pointer_when_diff_is_none() -> None:

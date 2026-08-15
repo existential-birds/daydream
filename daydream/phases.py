@@ -46,6 +46,7 @@ from daydream.generated_files import (
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1126,6 +1127,7 @@ def _exploration_pointer(exploration_dir: Path | None) -> str:
     if exploration_dir is None:
         return ""
     return (
+        f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Pre-scan exploration results are available in {exploration_dir}/.\n"
         f"Read {exploration_dir}/summary.md for an index of what was found.\n"
         f"Reference individual files as needed during your review — "
@@ -1191,6 +1193,10 @@ def build_intent_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    elif inline_diff is not None:
+        # No exploration pointer to carry the untrusted boundary; the inlined
+        # diff is itself repository-controlled content, so guard it directly.
+        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     if pr_description and pr_description.strip():
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:
@@ -1253,6 +1259,10 @@ def build_alternative_review_prompt(
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
         parts.append(pointer)
+    elif inline_diff is not None:
+        # No exploration pointer to carry the untrusted boundary; the inlined
+        # diff is itself repository-controlled content, so guard it directly.
+        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     parts.append(_confidence_and_convention_instructions())
     if inline_diff is not None:
         diff_clause = (

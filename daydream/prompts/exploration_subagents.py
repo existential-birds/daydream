@@ -22,7 +22,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -127,6 +130,14 @@ def _files_block(affected_files: list[FileInfo]) -> str:
     return "\n".join(f"- {f.path} ({f.role})" for f in affected_files) or "- (none yet)"
 
 
+def _inspect_changes_block(diff_ref: str) -> str:
+    """Render the shared ``To inspect changes`` instruction block."""
+    return f"""To inspect changes, Read or Grep any file listed in <affected_files> directly.
+If a Bash tool is available, you may also run `git diff {diff_ref} -- <file>`
+to see exactly what changed. Do NOT dump the full diff — work file-by-file so
+your context stays small."""
+
+
 # Dynamic prompt builders (per-run prompts injecting diff + affected files)
 def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, *, cwd: Path) -> str:
     """Build the per-run pattern-scanner prompt.
@@ -144,6 +155,8 @@ def build_pattern_scanner_prompt(affected_files: list[FileInfo], diff_ref: str, 
     return f"""You are the **pattern-scanner** specialist. Detect codebase conventions
 and read guideline files relevant to the changes below.
 
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
+
 Instructions:
 - Read CLAUDE.md at the repo root if it exists.
 - Read any other house-style config files you find (ruff.toml, .editorconfig, tsconfig.json, go.mod, Cargo.toml).
@@ -155,9 +168,7 @@ Instructions:
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(PATTERN_SCANNER_SCHEMA)}
 """
@@ -185,6 +196,8 @@ def build_repo_survey_prompt(sample_paths: list[str], total_tracked: int, *, cwd
 and report the conventions an implementation plan would have to preserve. There
 is no change set here — you are describing the repository's steady state, not
 reviewing edits.
+
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 
 Instructions:
 - Read CLAUDE.md / AGENTS.md at the repo root if they exist.
@@ -224,15 +237,15 @@ list beyond the static-resolved imports by grepping for call sites and
 reading the implementations. For every import or call edge you confirm,
 emit a Dependency record.
 
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
+
 {CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
 <affected_files>
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(DEPENDENCY_TRACER_SCHEMA)}
 """
@@ -256,15 +269,15 @@ source file using conventional path mapping (tests/test_X.py, *.test.ts,
 *_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for
 each test file you find.
 
+{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
+
 {CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}
 
 <affected_files>
 {files_block}
 </affected_files>
 
-To inspect changes, run `git diff {diff_ref} -- <file>` for any file listed in
-<affected_files>, or Read/Grep the file directly. Do NOT dump the full diff —
-work file-by-file so your context stays small.
+{_inspect_changes_block(diff_ref)}
 
 {_schema_block(TEST_MAPPER_SCHEMA)}
 """
