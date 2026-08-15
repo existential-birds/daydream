@@ -190,3 +190,36 @@ async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
         await harness.launch(_ctx(), trace, FakeRuntime(exit_code=0), ENDPOINT, SECRET, {})
     assert "no model calls" in str(excinfo.value)
     assert ENDPOINT in str(excinfo.value)
+
+
+class _DockerLikeRuntime(FakeRuntime):
+    """A FakeRuntime shaped like the docker runtime (wrapper-prefix contract)."""
+
+    def __init__(self, *, exit_code: int = 0) -> None:
+        from verifiers.v1.runtimes.docker import DockerConfig, DockerRuntimeInfo
+
+        super().__init__(exit_code=exit_code)
+        self.config = DockerConfig()
+        self.info = DockerRuntimeInfo(**self.config.model_dump())
+
+
+async def test_launch_uses_run_as_agent_wrapper_under_docker(
+    corpus_mini_dir, fixture_manifest_path
+) -> None:
+    """Container launches drop to the non-root agent identity via run-as-agent.
+
+    The image's default user is root and the root-owned run-as-agent wrapper is
+    the single privilege-drop seam, so a container rollout must launch daydream
+    through it — every backend CLI subprocess then inherits the agent uid. The
+    local subprocess smoke path has no wrapper (no root boundary to cross).
+    """
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
+    runtime = _DockerLikeRuntime(exit_code=0)
+
+    await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
+
+    (argv, _), = runtime.programs
+    assert argv[0] == "run-as-agent"
+    assert argv[1] == "daydream"
+    assert argv[argv.index("--backend") + 1] == "claude"

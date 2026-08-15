@@ -335,6 +335,49 @@ def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
         return None
     return bool(verdict["passed"])
 
+
+async def _verifier_identity_available(runtime: vf.Runtime) -> bool:
+    """Whether the sandbox carries the distinct read-only verifier identity.
+
+    The container image provides ``setpriv`` and a non-root ``verifier`` user;
+    the local subprocess smoke path has neither, so it keeps the pre-identity
+    re-run shape against the staged repo.
+    """
+    result = await runtime.run(
+        ["sh", "-c", "command -v setpriv >/dev/null 2>&1 && id verifier >/dev/null 2>&1"], {}
+    )
+    return result.exit_code == 0
+
+
+async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str) -> str | None:
+    """Build a separate root-owned read-only checkout with only the candidate diff applied.
+
+    The manifest ``test_command`` must never run against the agent-mutable tree.
+    This clones the current tree, detaches at the baked head, applies the
+    candidate product diff (the rollout's own committed diff against
+    ``head_sha``), and makes the result root-owned and read-only — the reward
+    re-runs the suite there under the distinct non-root verifier identity.
+
+    Returns:
+        The checkout path, or ``None`` when construction failed. A checkout the
+        verifier cannot trust is an explicit zero, never a fallback to the
+        mutable tree.
+    """
+    verify_dir = f"{repo}-verify"
+    script = (
+        f"rm -rf {shlex.quote(verify_dir)} && "
+        f"git clone -q {shlex.quote(repo)} {shlex.quote(verify_dir)} && "
+        f"git -C {shlex.quote(verify_dir)} checkout -q --detach {shlex.quote(head_sha)} && "
+        f"git -C {shlex.quote(repo)} diff {shlex.quote(head_sha)} HEAD "
+        f"| git -C {shlex.quote(verify_dir)} apply - && "
+        f"chown -R root:root {shlex.quote(verify_dir)} && "
+        f"chmod -R a-w {shlex.quote(verify_dir)}"
+    )
+    result = await runtime.run(["sh", "-c", script], {})
+    if result.exit_code != 0:
+        return None
+    return verify_dir
+
 #: Wall-clock ceilings per rollout stage, in seconds. ``harness`` bounds the whole
 #: deep loop (daydream's own per-phase wall budget is 1800s); ``scoring`` must fit a
 #: full re-run of the repository's test suite.
@@ -426,7 +469,9 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     online reward and an offline label can never disagree about the same run.
 
     ``suite_non_regression`` is the ground truth the intrinsic composite cannot
-    supply: the repository's own suite, re-run inside the still-live sandbox.
+    supply: the repository's own suite, re-run inside the sandbox against a
+    separate root-owned read-only checkout with only the candidate product diff
+    applied (never the agent-mutable tree).
     daydream's own test verdict is a regex over agent prose
     (``daydream/agent.py:252-300``), so it is recorded as a claim and compared
     against the re-run — never trusted as reward. The suite result is a metric,
@@ -579,9 +624,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         if not unchanged:
             return {"suite_non_regression": 0.0}
 
-        result = await runtime.run(
-            ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
-        )
+        result = await self._run_test_command(runtime, repo)
         passed = result.exit_code == 0
 
         # Reward-hack tripwire: daydream's own prose-derived verdict versus what
@@ -595,6 +638,28 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             trace.record_metric("test_claim_mismatch", float(claimed != passed))
 
         return {"suite_non_regression": float(passed)}
+
+    async def _run_test_command(self, runtime: vf.Runtime, repo: str) -> vf.ProgramResult:
+        """Run the manifest ``test_command`` against a trustworthy tree.
+
+        In the container the re-run executes against a separate root-owned
+        read-only checkout with only the candidate product diff applied, under a
+        distinct non-root verifier identity (``setpriv``) — never against the
+        agent-mutable ``/work/repo``. A checkout the verifier cannot trust is an
+        explicit non-zero result, never a fallback to the mutable tree. On the
+        local subprocess smoke path (no ``setpriv``/``verifier`` identity) the
+        re-run keeps the pre-identity shape against the staged repo.
+        """
+        if not await _verifier_identity_available(runtime):
+            return await runtime.run(
+                ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
+            )
+        verify_dir = await _prepare_verify_checkout(runtime, repo, self.data.head_sha)
+        if verify_dir is None:
+            return vf.ProgramResult(exit_code=1, stdout="", stderr="verify checkout construction failed")
+        command = f"cd {shlex.quote(verify_dir)} && {self.data.test_command}"
+        runner = f"setpriv --reuid=verifier --regid=verifier --clear-groups sh -c {shlex.quote(command)}"
+        return await runtime.run(["sh", "-c", runner], {})
 
     @vf.metric
     async def review_shape(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:

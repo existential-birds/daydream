@@ -186,6 +186,25 @@ RUN if [ "${INSTALL_PI}" = "1" ]; then \
       pi --version; \
     fi
 
+# Read-only verifier identity: the container default user stays root, and the
+# harness launches daydream through the root-owned images/run-as-agent wrapper,
+# which setprivs down to the non-root `agent` user. Every backend CLI subprocess
+# inherits that uid, so no rollout process can write the sealed surfaces. The
+# archive dir is the agent's own write target during the run (daydream archives
+# in-process); the supervisor re-chowns the sealed run dir root-owned read-only
+# at seal time (rundir.seal_archived_run), which is what makes the sealed
+# artifacts agent-inaccessible.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends gosu \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --create-home agent \
+ && chown -R agent:agent /rollout \
+ && chmod 0755 /rollout/archive
+
+COPY run-as-agent /usr/local/bin/run-as-agent
+RUN chown root:root /usr/local/bin/run-as-agent \
+ && chmod 0755 /usr/local/bin/run-as-agent
+
 # The checkout in the repo image is created by root during the build and read by
 # whatever uid the rollout runs as; git refuses a repository it does not own, and
 # that refusal would surface as an unreviewable empty diff rather than an error.

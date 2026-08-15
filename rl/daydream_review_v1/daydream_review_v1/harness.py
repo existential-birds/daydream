@@ -137,6 +137,14 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             *self.config.extra_args,
             self.config.repo_path,
         ]
+        if runtime.type == "docker":
+            # Container launches drop from the container default user (root) to
+            # the non-root agent identity through the image's root-owned
+            # run-as-agent wrapper, so every daydream process and backend CLI
+            # subprocess it spawns runs as the agent uid — never root, and never
+            # able to write the sealed surfaces. The local subprocess smoke path
+            # has no wrapper (there is no root boundary to cross).
+            argv = ["run-as-agent", *argv]
         result = await runtime.run_program(argv, env)
 
         # A deep run always talks to a model. Zero captured turns means the CLI

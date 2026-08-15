@@ -674,3 +674,22 @@ def test_reference_probe_quotes_the_work_repo_path() -> None:
     probe_src = src[probe_start : probe_end]
     assert quoted in probe_src, "python -c body must receive a quoted path literal"
     assert bare not in probe_src, "a single-quoted path would break the sh -c region"
+
+
+def test_run_as_agent_wrapper_is_root_owned_and_drops_privilege() -> None:
+    """The wrapper is root-owned and setprivs down to the agent identity (image contract)."""
+    wrapper = PROJECT_ROOT / "images" / "run-as-agent"
+    assert wrapper.is_file(), "run-as-agent wrapper missing"
+    mode = wrapper.stat().st_mode & 0o777
+    assert mode & 0o400 and mode & 0o100, "wrapper must be root-executable (0755)"
+    text = wrapper.read_text(encoding="utf-8")
+    assert "setpriv" in text or "gosu" in text, "wrapper must drop privileges via setpriv/gosu"
+    assert "agent" in text, "wrapper must target the non-root agent user"
+
+
+def test_base_image_has_distinct_agent_identity() -> None:
+    """base.Dockerfile declares a non-root agent user and root-owned archive."""
+    dockerfile = (PROJECT_ROOT / "images" / "base.Dockerfile").read_text(encoding="utf-8")
+    assert "gosu" in dockerfile
+    assert "useradd" in dockerfile or "adduser" in dockerfile
+    assert "chmod" in dockerfile and "archive" in dockerfile  # archive made agent-inaccessible
