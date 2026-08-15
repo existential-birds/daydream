@@ -11,6 +11,7 @@ in ``trace.info`` makes the reward path run real ``sh`` and real reads.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Awaitable, Callable
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 import verifiers.v1 as vf
+from daydream.atif import validate
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
 
@@ -146,22 +148,89 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
-def test_rundir_golden_contains_no_model_directed_trajectory_transcripts(rundir_golden: Path) -> None:
-    """Static fixture guard: no per-fork trajectory transcript may ship under
-    ``trajectories/``.
+# Absolute Unix path shape (``/Users/...``, ``/private/tmp/...``, ``/home/...``):
+# a ``/`` after a string boundary, followed by a letter. The original capture
+# host's ``/private/tmp/`` prefix was one instance of this shape; the guard
+# rejects any match in either fixture blob, not just that one prefix.
+#
+# NOTE: this runs over ``json.dumps(blob)``, where embedded newlines are escaped
+# to ``\n``, so a path whose leading ``/`` sits at the start of a line *inside* a
+# content string (rather than at a JSON value boundary) is invisible to it. That
+# shape is not present in today's fixtures -- every real machine path sat at a
+# JSON value boundary -- so the guard is a first-line check, not a proof that no
+# absolute-path shape exists anywhere.
+_ABS_PATH_RE = re.compile(r'(?:^|[\s"\'])/[A-Za-z]')
 
-    The per-fork transcripts under ``trajectories/`` (deep-generic,
-    deep-structure, explore-dependency-tracer, fix-tests-test-calc-py) carried
-    real prompt/directive content and absolute machine paths, and nothing reads
-    them — they must not be reintroduced. The retained root ``trajectory.json``'s
-    user-message inertness is enforced separately by
-    ``test_rundir_golden_user_messages_are_inert``. This guard enforces only
-    transcript-file absence; it does not sanitize every internal field of the
-    retained root fixture (e.g. historical machine paths or embedded prompt
-    copies that no test reads).
+
+def _walk_json_keys(node: object, targets: set[str], prefix: str = "") -> list[str]:
+    """Collect every JSON key path whose key is in *targets* (recursive).
+
+    Each entry is a dot-joined path from the JSON root (e.g.
+    ``steps.0.reasoning_content``), so a failure message locates the offending
+    key instead of naming a bare key that may occur at many depths.
+    """
+    found: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            path = f"{prefix}.{k}" if prefix else k
+            if k in targets:
+                found.append(path)
+            found.extend(_walk_json_keys(v, targets, path))
+    elif isinstance(node, list):
+        for index, item in enumerate(node):
+            found.extend(_walk_json_keys(item, targets, f"{prefix}.{index}"))
+    return found
+
+
+def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
+    """Static fixture guard: the rundir-golden fixture ships no dangling per-fork
+    trajectory refs, no machine-specific absolute paths, and no embedded
+    model-directed prompt copies in agent-step internals.
+
+    The per-fork transcripts under ``trajectories/`` are gone; the retained root
+    ``trajectory.json`` and ``manifest.json`` must not carry operational dirt
+    from the real run that produced them. This guard enforces the pruned state:
+    (1) no ``trajectory_path``/``sibling_trajectory_ref`` key references a
+    non-shipped transcript; (2) no machine-specific absolute path shape
+    appears anywhere; (3) no ``reasoning_content``/``tool_calls`` field
+    carries model-directed prompt text. The runtime projection exclusion in
+    ``test_rundir.py`` remains the boundary that keeps this data out of model
+    context.
     """
     trajectories = rundir_golden / "trajectories"
     assert not trajectories.is_dir() or not next(trajectories.iterdir(), None)
+
+    trajectory = json.loads((rundir_golden / "trajectory.json").read_text(encoding="utf-8"))
+    manifest = json.loads((rundir_golden / "manifest.json").read_text(encoding="utf-8"))
+
+    # 1. no dangling per-fork transcript refs
+    dangling = _walk_json_keys(trajectory, {"trajectory_path", "sibling_trajectory_ref"})
+    assert not dangling, f"dangling per-fork trajectory refs: {dangling}"
+
+    # 2. no machine-specific absolute paths (all shipped golden fixtures)
+    evaluation = json.loads((rundir_golden / "evaluation.json").read_text(encoding="utf-8"))
+    for name, blob in (
+        ("trajectory.json", trajectory),
+        ("manifest.json", manifest),
+        ("evaluation.json", evaluation),
+    ):
+        assert not _ABS_PATH_RE.search(json.dumps(blob)), (
+            f"{name} carries a machine-specific absolute path"
+        )
+
+    # 2b. the shipped trajectory must satisfy the codebase's own ATIF validator
+    #     (daydream.atif.validate, the primary guard): a prune must not leave
+    #     dangling observation source_call_id refs that hard-fail validation.
+    assert validate(trajectory) is True, (
+        "trajectory.json fails daydream.atif.validate (dangling tool-call refs)"
+    )
+
+    # 3. no embedded model-directed prompt copies in agent-step internals
+    for step in trajectory["steps"]:
+        rc = step.get("reasoning_content")
+        assert not rc, f"step {step.get('step_id')} carries reasoning_content prompt text"
+        tcs = step.get("tool_calls")
+        assert not tcs, f"step {step.get('step_id')} carries tool_calls prompt text"
 
 
 def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:

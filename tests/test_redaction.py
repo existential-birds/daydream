@@ -14,7 +14,7 @@ import json
 import pytest
 
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
-from daydream.trajectory import Redactor, now_iso, redact_value
+from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value
 
 
 def _user_step(message: str) -> Step:
@@ -234,7 +234,7 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(
         def sub(self, *_args: object, **_kwargs: object) -> str:
             raise RuntimeError("boom")
 
-    # Replace the first rule so _redact_text raises on the first call.
+    # Replace the first rule so redact_structured_text raises on the first call.
     original_rules = traj_mod._REDACTION_RULES
     boom_rules = ((_BoomPattern(), "[REDACTED_API_KEY]"), *original_rules[1:])
     monkeypatch.setattr(traj_mod, "_REDACTION_RULES", boom_rules)
@@ -290,23 +290,18 @@ def test_redact_arguments_passthrough_when_no_secret() -> None:
     assert out["config"] == {"x": 1, "y": [1, 2, 3]}
 
 
-def test_redact_arguments_invalid_json_falls_back_to_redaction_failed() -> None:
-    """When regex breaks JSON syntax, value falls back to [REDACTION_FAILED]."""
-
-    class _PoisonPattern:
-        def sub(self, _repl: object, s: str) -> str:
-            return "{not valid json"
-
+def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the recursive native walk raises, that key falls back to [REDACTION_FAILED]."""
     from daydream import trajectory as traj_mod
 
-    original_rules = traj_mod._REDACTION_RULES
-    poison_rules = ((_PoisonPattern(), "ignored"), *original_rules[:0])
-    try:
-        traj_mod._REDACTION_RULES = poison_rules
-        out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
-        assert out["edits"] == "[REDACTION_FAILED]"
-    finally:
-        traj_mod._REDACTION_RULES = original_rules
+    def _boom(value: object, sensitive: bool = False) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(traj_mod, "redact_value", _boom, raising=True)
+    out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
+    assert out["edits"] == "[REDACTION_FAILED]"
 
 
 # ---- Regression: WR-03 (env-var pattern over-redacted via substring match) ----
@@ -544,3 +539,179 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     assert "[REDACTED" in json.dumps(out)           # a marker replaced it
     assert out["items"] == ["[REDACTED_API_KEY]", 42, None]  # scalars preserved
     assert out["flag"] is True and out[1] == "non-string-key"  # non-string keys untouched
+
+
+# ---- Recursive sensitive-key redaction (issue #455, Task 1) ----
+
+
+@pytest.mark.parametrize("sensitive_key", [
+    "apiKey",
+    "client-secret",
+    "Access_Token",
+    "dbPassword",
+    "AUTHORIZATION",
+    "awsSecretAccessKey",
+])
+def test_redactor_scrubs_sensitive_keys_recursively(sensitive_key: str) -> None:
+    """Sensitive-key values are replaced with [REDACTED_CREDENTIAL] at nested depth;
+    clean siblings survive."""
+    sentinel = "opaque-test-only-sentinel"
+    call = ToolCall(
+        tool_call_id="t1",
+        function_name="Bash",
+        arguments={sensitive_key: {"nested": {"token": sentinel}}, "displayName": "visible"},
+    )
+    out = Redactor().redact_step(_agent_step(tool_calls=[call]))
+    assert out.tool_calls is not None
+    args = out.tool_calls[0].arguments
+    blob = json.dumps(args)
+    assert sentinel not in blob
+    assert "[REDACTED_CREDENTIAL]" in blob
+    assert args["displayName"] == "visible"
+
+
+@pytest.mark.parametrize("non_secret_key", [
+    "tokenizer", "passwordless", "monkeyPatch", "keyStore", "max_tokens",
+])
+def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -> None:
+    """WR-03 guard: keys that merely contain a secret term as a substring are untouched."""
+    call = ToolCall(
+        tool_call_id="t1",
+        function_name="Bash",
+        arguments={non_secret_key: "opaque-test-only-sentinel"},
+    )
+    out = Redactor().redact_step(_agent_step(tool_calls=[call]))
+    assert out.tool_calls is not None
+    args = out.tool_calls[0].arguments
+    assert args[non_secret_key] == "opaque-test-only-sentinel"
+    assert "[REDACTED_CREDENTIAL]" not in json.dumps(args)
+
+
+# ---- Structured key-value text + auth headers (issue #455, Task 2) ----
+
+
+@pytest.mark.parametrize("text", [
+    '{"credentials": {"apiKey": "opaque-test-only-sentinel"}}',
+    "{'client_secret': 'opaque-test-only-sentinel'}",
+    "apiKey: opaque-test-only-sentinel",
+    "client-secret = opaque-test-only-sentinel",
+])
+def test_redactor_scrubs_sensitive_key_value_text_formats(text: str) -> None:
+    """The same leak is caught in JSON, Python-repr, YAML-like, and assignment text."""
+    out = Redactor().redact_step(_user_step(text))
+    assert isinstance(out.message, str)
+    assert "opaque-test-only-sentinel" not in out.message
+    assert "[REDACTED_CREDENTIAL]" in out.message
+
+
+@pytest.mark.parametrize(("header", "value", "scheme"), [
+    ("Authorization", "opaque-test-only-sentinel", None),
+    ("authorization", "Bearer opaque-test-only-sentinel", "Bearer"),
+    ("Proxy-Authorization", "opaque-test-only-sentinel", None),
+    ("X-Api-Key", "opaque-test-only-sentinel", None),
+    ("X-Auth-Token", "opaque-test-only-sentinel", None),
+    ("Cookie", "session=opaque-test-only-sentinel", None),
+    ("Set-Cookie", "opaque-test-only-sentinel", None),
+])
+def test_redactor_scrubs_authorization_header_values(
+    header: str, value: str, scheme: str | None,
+) -> None:
+    """Auth header values are redacted case-insensitively; name + scheme preserved;
+    nothing past end of line consumed."""
+    line = f"{header}: {value}\nnext line stays"
+    out = Redactor().redact_step(_user_step(line))
+    assert isinstance(out.message, str)
+    assert "opaque-test-only-sentinel" not in out.message
+    assert "[REDACTED_CREDENTIAL]" in out.message
+    assert f"{header}: " in out.message
+    assert "next line stays" in out.message
+    if scheme is not None:
+        assert f"{header}: {scheme} " in out.message
+
+
+# ---- Follow-up regressions (mid-line headers, nested pairs, prose) ----
+
+
+def test_redactor_scrubs_mid_line_authorization_header() -> None:
+    """A header embedded mid-line (curl -H, tool output) redacts the whole token,
+    not just the Bearer scheme word."""
+    text = 'curl -H "Authorization: Bearer opaque-token-xyz" https://api'
+    out = Redactor().redact_step(_user_step(text))
+    assert isinstance(out.message, str)
+    assert "opaque-token-xyz" not in out.message
+    assert "Authorization: Bearer [REDACTED_CREDENTIAL]" in out.message
+
+
+def test_redactor_scrubs_indented_and_embedded_headers() -> None:
+    """Indented (curl -v / httpie / YAML) and prose-embedded headers fire the
+    header stage instead of leaking the opaque token after the scheme word."""
+    indented = "  authorization: Bearer opaque-token-xyz"
+    embedded = "saw Authorization: Bearer opaque-token-xyz in the log"
+    for text in (indented, embedded):
+        out = Redactor().redact_step(_user_step(text))
+        assert isinstance(out.message, str)
+        assert "opaque-token-xyz" not in out.message
+        assert "Bearer [REDACTED_CREDENTIAL]" in out.message
+
+
+@pytest.mark.parametrize("text", [
+    "apiKey:\n  nested: opaque-test-only-sentinel",
+    '{\n  "apiKey": {\n    "nested": "opaque-test-only-sentinel"\n  }\n}',
+    '{"apiKey": {"nested": "opaque-test-only-sentinel"}}',
+])
+def test_redactor_scrubs_multi_line_block_values(text: str) -> None:
+    """Block-style YAML and pretty-printed JSON under a sensitive key are consumed
+    wholesale instead of passing through the line-scoped scan unredacted."""
+    out = redact_structured_text(text)
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+
+
+@pytest.mark.parametrize("text", [
+    "text: apiKey: opaque-test-only-sentinel",
+    "config: token=opaque-test-only-sentinel",
+    '{"description": "use token=opaque-test-only-sentinel here"}',
+])
+def test_redactor_scrubs_pairs_nested_inside_non_sensitive_values(text: str) -> None:
+    """A sensitive pair embedded in a non-sensitive pair's value is re-scanned
+    and redacted rather than skipped when the outer pair is consumed."""
+    out = redact_structured_text(text)
+    assert "opaque-test-only-sentinel" not in out
+    assert "[REDACTED_CREDENTIAL]" in out
+
+
+def test_redactor_preserves_structural_separator_after_bare_value() -> None:
+    """Redacting a bare value must not swallow the following ',' — the JSON
+    keeps its structure (issue: '{"token": null, "count": 3}' lost its comma)."""
+    out = redact_structured_text('{"token": null, "count": 3}')
+    assert out == '{"token": "[REDACTED_CREDENTIAL]", "count": 3}'
+    import json as _json
+
+    assert _json.loads(out)  # still parseable as JSON
+
+
+@pytest.mark.parametrize("text", [
+    "the token: is now available",
+    "The authorization: feature is enabled now",
+])
+def test_redactor_preserves_prose_with_sensitive_word_colon(text: str) -> None:
+    """A sensitive word followed by a colon in ordinary prose is not a key-value
+    pair — the following prose word is left untouched."""
+    out = redact_structured_text(text)
+    assert out == text
+    assert "[REDACTED_CREDENTIAL]" not in out
+
+
+def test_redactor_keeps_comma_in_bare_yaml_pair() -> None:
+    """'token: abc, other: 1' keeps its comma: the bare value stops at the
+    separator instead of swallowing it and merging the next pair."""
+    out = redact_structured_text("token: abc, other: 1")
+    assert out == 'token: "[REDACTED_CREDENTIAL]", other: 1'
+
+
+def test_redactor_scrubs_scheme_pair_under_sensitive_key() -> None:
+    """A bare 'Bearer|Basic|Token <opaque>' pair under a sensitive key redacts
+    the opaque token, not just the scheme word."""
+    out = redact_structured_text("token: Bearer opaque-token-xyz")
+    assert "opaque-token-xyz" not in out
+    assert "token: Bearer [REDACTED_CREDENTIAL]" in out

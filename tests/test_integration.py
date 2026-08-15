@@ -233,10 +233,10 @@ class _WorktreeMutatingBackend(PhaseDispatchBackend):
     ):
         if prompt.startswith("Fix this issue") or prompt.startswith("Fix these"):
             (cwd / "main.py").write_text("def hello() -> str:\n    return 'world'\n")
-        elif prompt.startswith("Stage all changes and commit"):
+        elif prompt.startswith("The daydream changes are already staged"):
             run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
             version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
-            _git(cwd, "add", "main.py")
+            # The index is pre-staged by _do_commit (issue #543) — commit it.
             _commit(
                 cwd,
                 f"fix: add type hints\n\nDaydream-Run: {run_id}\nDaydream-Version: {version}",

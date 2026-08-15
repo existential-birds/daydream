@@ -877,8 +877,10 @@ def _count_decision_nodes(node: Any) -> int:
     return total
 
 
-def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
-    """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel)``.
+def _scoped_python_files(
+    workspace: Path, need_lines: bool = False
+) -> list[tuple[Path, str, list[str]]]:
+    """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel, lines)``.
 
     Excluded directories are matched on exact path components so a nested
     ``node_modules_extra/`` or a sibling ``.worktrees`` checkout never shadows
@@ -889,8 +891,17 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
     generated-file header marker are both applied via ``is_generated_file``,
     so vendor/third_party trees and generated artifacts never reach the
     metric denominators (Finding #8).
+
+    The third element is the file's raw decoded lines, decoded from the same
+    ``content`` bytes already read for ``is_generated_file`` with the same
+    ``utf-8`` + ``errors="replace"`` decode ``_parse_python_file`` uses, so
+    candidate-scoped analysis (issue #457) can index a non-candidate peer's
+    text for cross-file clone attribution without parsing it. It is only
+    populated when *need_lines* is set (candidate-scoped analysis); the default
+    whole-workspace path never consumes it, so the redundant decode+splitlines
+    is skipped there and no dead third element is materialized.
     """
-    files: list[tuple[Path, str]] = []
+    files: list[tuple[Path, str, list[str]]] = []
     for path in workspace.rglob("*.py"):
         try:
             rel = path.relative_to(workspace)
@@ -904,7 +915,11 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
             continue
         if is_generated_file(str(rel), content):
             continue
-        files.append((path, str(rel)))
+        if need_lines:
+            raw_lines = content.decode("utf-8", errors="replace").splitlines()
+        else:
+            raw_lines = []
+        files.append((path, str(rel), raw_lines))
     return sorted(files, key=lambda item: item[1])
 
 
@@ -1391,6 +1406,7 @@ def _clone_flagged_lines(lines: list[str]) -> set[int]:
 
 def _cross_file_clone_flagged_lines(
     file_lines: list[tuple[Path, list[str]]],
+    target_paths: set[Path] | None = None,
 ) -> dict[Path, set[int]]:
     """Line rows whose block also appears verbatim in another scoped file.
 
@@ -1401,9 +1417,17 @@ def _cross_file_clone_flagged_lines(
     ``_clone_flagged_lines``'s job and are still counted per file, so the two
     passes compose — a block duplicated twice inside ``a.py`` and once in
     ``b.py`` is flagged in both, once per occurrence.
+
+    *target_paths* (issue #457) restricts which indexed files can be flagged:
+    when provided, a block flags a path ONLY if that path is a target, while
+    the ≥2-distinct-files gate still counts every indexed file (targets and
+    peers) as a distinct source; blocks present in no target flag nothing. The
+    returned dict still keys every indexed path (empty sets for non-flagged).
+    ``None`` keeps the flag-every-file behavior.
     """
     stripped_lines = {path: [line.strip() for line in lines] for path, lines in file_lines}
     flagged: dict[Path, set[int]] = {path: set() for path in stripped_lines}
+    target_set = target_paths if target_paths is not None else set(stripped_lines)
 
     for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
         by_first: dict[str, list[tuple[Path, int]]] = {}
@@ -1425,64 +1449,31 @@ def _cross_file_clone_flagged_lines(
                 if len({path for path, _ in occurrences}) < 2:
                     continue
                 for path, i in occurrences:
+                    if path not in target_set:
+                        continue
                     flagged[path].update(range(i, i + length))
     return flagged
 
 
-def analyze_quality(daydream_dir: str | Path) -> dict:
-    """Structural erosion and verbosity of the post-fix workspace (issue #316).
+def _aggregate_per_file(
+    candidates: list[tuple[Path, str, list[str]]],
+    parsed: dict[Path, Any],
+    parsed_lines: dict[Path, list[str]],
+    cross_file_flagged: dict[Path, set[int]],
+) -> tuple[dict[str, dict], float, float, int, int]:
+    """Terminal per-file aggregation over the parsed candidates.
 
-    Computes SlopCodeBench-style metrics (arXiv:2603.24755) over every scoped
-    ``*.py`` file in ``daydream_dir.parent`` — the live reviewed tree at eval
-    time, after daydream's fix phase ran. Pure and deterministic: no backend,
-    no network, no randomness. A file whose tree-sitter parse fails is counted
-    in ``scoped_files`` but excluded from the aggregates and from the
-    cross-file clone index, so malformed source never shifts valid files'
-    verbosity (Finding #1).
-
-    Returns:
-        ``{erosion, verbosity, per_file, calibration, scoped_files}``.
-        ``erosion``/``verbosity`` are ``None`` only when no functions / no
-        lines are in scope; per-file entries use ``None`` for a ratio whose
-        denominator is zero (no functions / no non-blank lines). ``per_file``
-        keys are workspace-relative paths.
+    Walks the candidate list once, folding each successfully parsed file's
+    quality entry and mass/flagged/loc totals; a candidate whose parse failed
+    stays in ``scoped_files`` but contributes nothing here (Finding #1).
+    Returns ``(per_file, total_mass, high_mass, total_flagged, total_loc)``.
     """
-    daydream_dir = Path(daydream_dir)
-    workspace = daydream_dir.parent
-
-    scoped_files = _scoped_python_files(workspace)
-    scoped = len(scoped_files)
-
-    # Parse and validate every scoped file ONCE. Only successfully parsed
-    # files feed the cross-file clone index and the per-file aggregates; a
-    # malformed file stays in ``scoped_files`` but its lines can no longer
-    # flag matching blocks in valid files (Finding #1). The parse results are
-    # reused below, so no file is ever parsed twice.
-    parsed: dict[Path, Any] = {}
-    parsed_lines: dict[Path, list[str]] = {}
-    file_lines: list[tuple[Path, list[str]]] = []
-    for path, _rel in scoped_files:
-        result = _parse_python_file(path)
-        if result is None:
-            continue
-        root, lines = result
-        parsed[path] = root
-        parsed_lines[path] = lines
-        file_lines.append((path, lines))
-
-    # Cross-file clone pass over successfully parsed files only: find blocks
-    # duplicated verbatim across >=2 files, then feed each file's cross-file
-    # line rows into its per-file verbosity below (Finding #6). Within-file
-    # duplicates are still handled per file inside _file_quality_from_tree.
-    cross_file_flagged = _cross_file_clone_flagged_lines(file_lines)
-
     per_file: dict[str, dict] = {}
     total_mass = 0.0
     high_mass = 0.0
     total_flagged = 0
     total_loc = 0
-
-    for path, rel in scoped_files:
+    for path, rel, _raw in candidates:
         root = parsed.get(path)
         if root is None:
             continue
@@ -1496,6 +1487,114 @@ def analyze_quality(daydream_dir: str | Path) -> dict:
         high_mass += quality["high_mass"]
         total_flagged += quality["flagged"]
         total_loc += quality["loc"]
+    return per_file, total_mass, high_mass, total_flagged, total_loc
+
+
+def analyze_quality(
+    daydream_dir: str | Path, candidate_paths: set[str] | None = None
+) -> dict:
+    """Structural erosion and verbosity of the post-fix workspace (issue #316).
+
+    Computes SlopCodeBench-style metrics (arXiv:2603.24755) over every scoped
+    ``*.py`` file in ``daydream_dir.parent`` — the live reviewed tree at eval
+    time, after daydream's fix phase ran. Pure and deterministic: no backend,
+    no network, no randomness. A file whose tree-sitter parse fails is counted
+    in ``scoped_files`` but excluded from the aggregates and from the
+    cross-file clone index, so malformed source never shifts valid files'
+    verbosity (Finding #1).
+
+    *candidate_paths* (issue #457) opt-in scopes the parse, per-file metrics,
+    totals, and scoped-file count to the exact workspace-relative ``*.py``
+    paths listed (a candidate that fails the eligibility rules is absent from
+    ``_scoped_python_files`` and so is simply not a candidate). ``None`` (the
+    default) preserves the whole-workspace behavior above. An explicitly empty
+    set returns a zero-count empty report without enumerating the workspace.
+
+    A candidate is still checked for cross-file clone duplication against every
+    scoped peer, so a candidate's verbosity verdict still reflects clones in any
+    peer file — candidate-scoped reporting does not weaken verdict meaning. A
+    peer that fails to parse is excluded from the clone index (Finding #1 holds
+    in candidate mode too), so malformed source never flags a valid candidate.
+
+    Returns:
+        ``{erosion, verbosity, per_file, calibration, scoped_files}``.
+        ``erosion``/``verbosity`` are ``None`` only when no functions / no
+        lines are in scope; per-file entries use ``None`` for a ratio whose
+        denominator is zero (no functions / no non-blank lines). ``per_file``
+        keys are workspace-relative paths.
+    """
+    daydream_dir = Path(daydream_dir)
+    workspace = daydream_dir.parent
+
+    # An explicitly empty candidate set is a zero-count empty report: never
+    # walk (or parse) the workspace (issue #457).
+    if candidate_paths is not None and not candidate_paths:
+        return {
+            "erosion": None,
+            "verbosity": None,
+            "per_file": {},
+            "calibration": dict(_QUALITY_CALIBRATION),
+            "scoped_files": 0,
+        }
+
+    scoped_files = _scoped_python_files(workspace, need_lines=candidate_paths is not None)
+    if candidate_paths is None:
+        candidates = scoped_files
+        candidate_path_set: set[Path] | None = None
+    else:
+        # Exact workspace-relative match: a candidate that fails eligibility is
+        # absent from ``scoped_files`` and so is not a candidate (issue #457).
+        candidates = [t for t in scoped_files if t[1] in candidate_paths]
+        candidate_path_set = {path for path, _rel, _raw in candidates}
+    scoped = len(candidates)
+
+    # Parse and validate each candidate ONCE. Only successfully parsed files
+    # feed the per-file aggregates; a malformed file stays in ``scoped`` but is
+    # omitted from the aggregates (Finding #1). In whole-workspace mode every
+    # candidate is a scoped file (byte-identical to today). In candidate mode
+    # non-candidate peers join the clone index via their raw decoded ``lines``
+    # (3rd tuple element) without being parsed, so a candidate's cross-file
+    # clone attribution still sees every peer (issue #457). The parse results
+    # are reused below, so no file is ever parsed twice.
+    parsed: dict[Path, Any] = {}
+    parsed_lines: dict[Path, list[str]] = {}
+    file_lines: list[tuple[Path, list[str]]] = []
+    for path, _rel, raw_lines in scoped_files:
+        if candidate_path_set is not None and path not in candidate_path_set:
+            # Non-candidate peer: index it only if it parses, so a malformed
+            # peer never enters the clone index and cannot flag a valid
+            # candidate (Finding #1 holds in candidate mode too). The parsed
+            # lines are byte-identical to the raw lines for a valid file, so
+            # indexing is unchanged for well-formed peers.
+            peer = _parse_python_file(path)
+            if peer is None:
+                continue
+            file_lines.append((path, peer[1]))
+            continue
+        result = _parse_python_file(path)
+        if result is None:
+            continue
+        root, lines = result
+        parsed[path] = root
+        parsed_lines[path] = lines
+        file_lines.append((path, lines))
+
+    # Cross-file clone pass over the index (parsed candidates + raw peers):
+    # find blocks duplicated verbatim across >=2 files, then feed each target's
+    # cross-file line rows into its per-file verbosity below (Finding #6). In
+    # candidate mode only parsed candidate paths are flagged (``target_paths``),
+    # so peers stay unmeasured while still contributing clone sources, and an
+    # unparseable candidate stays out of both the index and the flag targets.
+    # Within-file duplicates are still handled per file inside
+    # _file_quality_from_tree.
+    cross_file_flagged = _cross_file_clone_flagged_lines(
+        file_lines,
+        target_paths=set(parsed) if candidate_paths is not None else None,
+    )
+
+    per_file, total_mass, high_mass, total_flagged, total_loc = _aggregate_per_file(
+        candidates, parsed, parsed_lines, cross_file_flagged
+    )
 
     return {
         "erosion": round(high_mass / total_mass, 4) if total_mass > 0 else None,

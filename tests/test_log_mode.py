@@ -140,7 +140,7 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
                 )
             ],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[result]", "[REDACTED_API_KEY]"),
+            ("[result]", "[REDACTED_CREDENTIAL]"),
             (),
             id="result-event",
         ),
@@ -224,6 +224,39 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     assert "[REDACTED" in out
 
 
+def test_log_mode_summaries_redact_structured_credentials() -> None:
+    """Log-mode summaries must use the structured redactor, not the flat one.
+
+    Issue #455 broadens structured credential redaction. Flat ``redact_text``
+    leaks structured credentials that ``redact_structured_text`` catches -- e.g.
+    a nested ``key=value`` assignment (``token=opaque-test-12345``) and a Basic
+    auth header's base64 credential. These flow through the real agent summary
+    paths (``_summarize_input`` / ``_summarize_output`` / ``_print_log``), so a
+    flat-only redactor would print the secret in --log mode.
+    """
+    from daydream.agent import _print_log, _summarize_input, _summarize_output
+
+    # Nested assignment under a sensitive key: flat redaction leaks the token.
+    out = _summarize_input({"command": "the config: token=opaque-test-12345"})
+    assert "opaque-test-12345" not in out
+    assert "[REDACTED" in out
+
+    # Basic auth header value (base64): flat redaction leaks it.
+    out = _summarize_output("Authorization: Basic dXNlcjpwYXNzd29yZA== more")
+    assert "dXNlcjpwYXNzd29yZA==" not in out
+    assert "[REDACTED" in out
+
+    # And the direct _print_log emitter on a command with a structured pair.
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        _print_log("run: token=opaque-test-12345 done")
+    assert "opaque-test-12345" not in buf.getvalue()
+    assert "[REDACTED" in buf.getvalue()
+
+
 def test_log_mode_console_redacts_string_payloads() -> None:
     """phases.py imports agent's module-level console; in --log mode that
     console redacts string payloads, so phase/UI output (e.g. the failure
@@ -251,6 +284,65 @@ def test_log_mode_console_redacts_string_payloads() -> None:
         # exact bracketed string.
         assert "REDACTED_API_KEY" in out
         assert sentinel not in out
+    finally:
+        set_log_mode(False)
+
+
+class _CredentialSummarizerBackend(ScriptedBackend):
+    """Failure-summarizer stub: yields the credential-bearing handoff_prompt.
+
+    Mirrors the real summarizer contract (``FAILURE_SUMMARIZER_SCHEMA`` in
+    phases.py: structured ``handoff_prompt`` in the ResultEvent) so the REAL
+    ``run_agent`` + ``_run_failure_summarizer`` path consumes it. Reuses
+    ``ScriptedBackend``'s shared four-member Backend surface; only the script
+    differs (one turn: blank text, then the credential-bearing ResultEvent).
+    """
+
+    def __init__(self, body: str) -> None:
+        super().__init__(
+            events=[
+                TextEvent(text=""),
+                ResultEvent(
+                    structured_output={"handoff_prompt": body}, continuation=None
+                ),
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_log_mode_failure_handoff_redacts_credential_body(
+    git_repo: Path, make_work, capsys, monkeypatch,
+) -> None:
+    """Integration regression (issue #547): driving the REAL _emit_failure_handoff
+    with a credential-bearing summarizer body under --log mode must not leak the
+    raw token to stdout. The console-level _LogRedactingConsole boundary is the
+    mechanism (RD-1); this proves it on the real handoff path."""
+    from daydream.agent import set_log_mode
+    from daydream.phases import _emit_failure_handoff
+    from daydream.phases import console as phases_console
+
+    # False-pass trap: the module console phases.py binds MUST be the redacting
+    # console, otherwise a passing test would mean nothing.
+    assert type(phases_console).__name__ == "_LogRedactingConsole", (
+        "phases.py no longer binds the log-redacting console — the redaction "
+        "boundary for issue #547 is broken"
+    )
+
+    sentinel = "ghp_" + "A" * 12   # matches _API_KEY_PATTERN (ghp_ + >=6 alnum)
+    work = make_work(git_repo)
+    # Stub backend returns the credential-bearing summarizer body as structured
+    # handoff_prompt (real run_agent path, backend mocked only).
+    backend = _CredentialSummarizerBackend(f"token {sentinel}")
+
+    set_log_mode(True)
+    try:
+        await _emit_failure_handoff(
+            backend, work, "failing test output", offer_clipboard=False,
+        )
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert sentinel not in out   # raw token never reaches stdout
+        assert "REDACTED" in out     # redaction marker present
     finally:
         set_log_mode(False)
 

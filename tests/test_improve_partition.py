@@ -8,6 +8,7 @@ from daydream.improve.partition import (
     PARTITION_MAX_FILES,
     Partition,
     PartitionGroup,
+    PartitionStackOmission,
     build_partitions,
     group_partitions,
     stack_by_path,
@@ -110,8 +111,8 @@ def test_grouping_is_stack_homogeneous_and_bounded() -> None:
         ],
     )
     stack_of = {"apps/s1/a.py": "python", "apps/s2/b.py": "python", "web/c.tsx": "react"}
-    groups, skipped = group_partitions(parts, stack_of, max_files=10, max_groups=None)
-    assert skipped == []
+    groups, omissions = group_partitions(parts, stack_of, max_files=10, max_groups=None)
+    assert omissions == []
     assert [(g.name, g.stack, tuple(p.name for p in g.partitions)) for g in groups] == [
         ("group-01", "generic", ("residue",)),
         ("group-02", "python", ("s1", "s2")),
@@ -128,25 +129,51 @@ def test_mixed_stack_partition_is_routed_to_each_stack_specialist() -> None:
         files=("app/main.py", "app/view.tsx"),
     )
 
-    groups, skipped = group_partitions(
+    groups, omissions = group_partitions(
         [partition],
         {"app/main.py": "python", "app/view.tsx": "react"},
     )
 
-    assert skipped == []
+    assert omissions == []
     assert [(group.stack, group.partitions) for group in groups] == [
         ("python", (partition,)),
         ("react", (partition,)),
     ]
 
 
+def test_group_ceiling_preserves_stack_for_partially_retained_partition() -> None:
+    app = Partition(
+        name="app",
+        root="app",
+        source="directory",
+        service=None,
+        files=("app/main.py", "app/view.tsx"),
+    )
+    web = Partition(
+        name="web",
+        root="web",
+        source="directory",
+        service=None,
+        files=("web/index.tsx",),
+    )
+    stack_of = {"app/main.py": "python", "app/view.tsx": "react", "web/index.tsx": "react"}
+
+    groups, omissions = group_partitions([app, web], stack_of, max_groups=1)
+
+    assert len(omissions) == 1
+    assert omissions[0].partition == app
+    assert omissions[0].stack == "python"
+    assert {g.stack for g in groups} == {"react"}
+    assert app in groups[0].partitions
+
+
 def test_group_ceiling_keeps_largest_groups_and_reports_the_rest() -> None:
     parts = build_partitions([f"apps/s{i}/f{j}.py" for i in range(3) for j in range(i + 1)], [], max_files=2)
     stack_of = {f: "python" for p in parts for f in p.files}
-    groups, skipped = group_partitions(parts, stack_of, max_files=2, max_groups=1)
+    groups, omissions = group_partitions(parts, stack_of, max_files=2, max_groups=1)
     assert len(groups) == 1
     assert groups[0].file_count == max(2, groups[0].file_count)  # largest kept
-    assert {p.name for p in skipped} and all(isinstance(p, Partition) for p in skipped)
+    assert omissions and all(isinstance(o, PartitionStackOmission) for o in omissions)
 
 
 def test_empty_and_single_file_repos() -> None:
@@ -161,8 +188,8 @@ def test_sibling_partitions_stay_in_one_group() -> None:
     files += [f"lib/f{i}.ts" for i in range(6)]
     partitions = build_partitions(files, [], max_files=6)
     stack_of = dict.fromkeys(files, "ts")
-    groups, skipped = group_partitions(partitions, stack_of, max_files=8, max_groups=None)
-    assert skipped == []
+    groups, omissions = group_partitions(partitions, stack_of, max_files=8, max_groups=None)
+    assert omissions == []
     by_group = {group.name: set(group.roots) for group in groups}
     # Packing by size alone would fill the first bin with lib + two web children
     # and strand the rest; the siblings must travel together instead.

@@ -9,10 +9,11 @@ the seam used by the deep-orchestrator exemplar in ``test_deep_orchestrator.py``
 
 The mock backend dispatches on prompt content to behave like the skill agents
 would: it writes ``.review-output.md``, returns parsed issues, applies a REAL
-edit to ``api.py``, runs REAL ``git add``/``git commit``, and records the
-respond-pr-feedback invocation. Assertions are on observable outcomes only:
-exit code, the marker written into the real file, a new git commit carrying the
-Daydream trailer, and the recorded respond invocation carrying the right pr/bot.
+edit to ``api.py``, commits the index ``_do_commit`` pre-staged (REAL
+``git commit``, no re-staging), and records the respond-pr-feedback invocation.
+Assertions are on observable outcomes only: exit code, the marker written into
+the real file, a new git commit carrying the Daydream trailer, and the recorded
+respond invocation carrying the right pr/bot.
 """
 
 from __future__ import annotations
@@ -102,11 +103,11 @@ class _PRFeedbackStubBackend:
 
         # Phase 4: commit -> run REAL git in cwd. Include the two Daydream
         # trailers so the prompt's amend path is not exercised (we assert on
-        # what the agent itself committed).
-        if "stage all changes and commit" in pl:
+        # what the agent itself committed). The index is pre-staged by
+        # _do_commit (deterministic staging, issue #543) — commit it as-is.
+        if "the daydream changes are already staged" in pl:
             run_id = self._extract_trailer(prompt, "Daydream-Run")
             version = self._extract_trailer(prompt, "Daydream-Version")
-            _git(cwd, "add", "-A")
             _git(
                 cwd,
                 "commit",
@@ -133,7 +134,15 @@ class _PRFeedbackStubBackend:
     @staticmethod
     def _extract_trailer(prompt: str, key: str) -> str:
         m = re.search(rf"{re.escape(key)}:\s*(\S+)", prompt)
-        return m.group(1) if m else "unknown"
+        if m is None:
+            # Fail closed: if the production prompt ever drops the trailer
+            # lines while keeping the "already staged" phrase, committing
+            # "Daydream-Run: unknown" would still satisfy the substring
+            # assert — raise instead so the regression surfaces.
+            raise AssertionError(
+                f"commit prompt dropped the {key} trailer line"
+            )
+        return m.group(1)
 
     async def cancel(self) -> None:
         pass
@@ -184,6 +193,12 @@ async def test_pr_feedback_real_path(
     assert head_after != head_before
     commit_msg = _git(multi_stack_target, "log", "-1", "--format=%B")
     assert "Daydream-Run:" in commit_msg
+
+    # Observable 3b: the committed TREE carries the api.py fix, not just the
+    # working tree. A staging regression that commits wrong paths while
+    # omitting api.py must fail here.
+    committed_api = _git(multi_stack_target, "show", "HEAD:api.py")
+    assert FIX_MARKER.strip() in committed_api
 
     # Observable 4: the reply path ran with the right pr/bot.
     assert len(stub.respond_calls) == 1

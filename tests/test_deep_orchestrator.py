@@ -719,7 +719,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     )
     commit_calls: list[int] = []
 
-    async def _spy_commit(backend: Any, work: Any) -> None:
+    async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         commit_calls.append(1)
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
@@ -1027,6 +1027,40 @@ class _SecondaryEditBackend(_StubBackend):
             self._secondary.write_text(self._secondary.read_text() + self._secondary_edit)
 
 
+class _NewFileSecondaryEditBackend(_StubBackend):
+    """Fix stub that ALSO creates a NEW untracked *.py file outside the diff.
+
+    The fix pass may create files outside the reviewed diff (e.g. a new
+    module). Such a file survives the post-fix residual net (only TRACKED
+    edits are reverted) and lands in the gate's ``changed_after_fix``
+    candidate set -- but it was never in the pre-fix snapshot, which is scoped
+    to the reviewed ``*.py`` set (#457). This is the missing-baseline shape
+    the gate must flag explicitly.
+    """
+
+    def __init__(self, target: Path, new_file: Path, content: str) -> None:
+        super().__init__(target)
+        self._new_file = new_file
+        self._content = content
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        async for event in super().execute(
+            cwd, prompt, output_schema, continuation, agents, max_turns, read_only
+        ):
+            yield event
+        if prompt.lower().startswith(("fix this issue", "fix these")):
+            self._new_file.write_text(self._content)
+
+
 class _ScopeCreepBackend(_StubBackend):
     """Fix stub that ALSO edits a tracked file OUTSIDE the reviewed diff (#336).
 
@@ -1035,9 +1069,10 @@ class _ScopeCreepBackend(_StubBackend):
     reviewed diff. This is the issue #336 post-fix residual shape: without the
     residual check the creep edit would be committed alongside the fix.
 
-    The commit prompt is answered with a REAL ``git add -u`` + ``git commit``
-    (tracked changes only — the stub's untracked sentinels must not leak into
-    the committed tree), so the test can assert the commit step's actual output.
+    The commit agent now commits the index that ``_do_commit`` deterministically
+    pre-staged (issue #543) — it only commits, never re-stages — so this stub
+    commits the already-staged index and lets the test assert the commit step's
+    actual output.
     """
 
     def __init__(self, target: Path, creep: Path, creep_edit: str) -> None:
@@ -1055,7 +1090,7 @@ class _ScopeCreepBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ):
-        if prompt.startswith("Stage all changes and commit"):
+        if prompt.startswith("The daydream changes are already staged"):
             run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
             version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
             assert run_id is not None
@@ -1065,7 +1100,6 @@ class _ScopeCreepBackend(_StubBackend):
                 f"Daydream-Run: {run_id.group(1)}\n"
                 f"Daydream-Version: {version.group(1)}"
             )
-            _git(cwd, "add", "-u")
             _git(cwd, "commit", "-m", message)
             yield TextEvent(text="Committed.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -1435,8 +1469,8 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
 
     real_analyze = analyzer_mod.analyze_quality
 
-    def _stub(daydream_dir: Any) -> dict[str, Any]:
-        result = real_analyze(daydream_dir)
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
+        result = real_analyze(daydream_dir, candidate_paths)
         if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {
                 rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
@@ -1625,6 +1659,113 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     assert "api.py" in per_file, (
         "a finding target must stay covered even when unchanged on disk"
     )
+    assert per_file["api.py"]["flagged"] is False
+
+
+async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#457): both gate captures call analyze_quality with the reviewed *.py set only.
+
+    The reviewed diff names only ``api.py``; ``unrelated.py`` is a tracked python
+    file outside the diff. Before this fix the analyzer parsed the whole workspace
+    on every gate capture. Now the pre-fix and post-fix captures both receive
+    ``candidate_paths == {"api.py"}`` -- ``unrelated.py`` is neither parsed as a
+    candidate nor reported.
+    """
+    from daydream.eval import analyzer as analyzer_mod
+
+    target = _build_scope_creep_target(tmp_path, "gate_scoped")
+    real_analyze = analyzer_mod.analyze_quality
+    calls: list[set[str] | None] = []
+
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
+        calls.append(candidate_paths)
+        return real_analyze(daydream_dir, candidate_paths)
+
+    monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
+
+    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects)
+    assert exit_code == 0
+    # The two GATE captures come first; the archive step's ``analyze_session``
+    # adds a trailing argument-free ``analyze_quality`` call (a pinned
+    # invariant — standalone evaluation stays whole-workspace), so pin only
+    # the first two calls.
+    assert len(calls) >= 2, f"expected pre-fix + post-fix captures, got {calls}"
+    assert calls[0] == {"api.py"}, f"pre-fix capture must be scoped to reviewed .py, got {calls[0]}"
+    assert calls[1] == {"api.py"}, f"post-fix capture must be scoped to reviewed .py, got {calls[1]}"
+
+
+async def test_fix_quality_gate_flags_missing_baseline_secondary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#329/#457): an out-of-diff *.py created by the fix pass is flagged.
+
+    The pre-fix snapshot is scoped to the reviewed ``*.py`` set (#457), while
+    the post-fix candidate set unions ``changed_after_fix`` (#329/Finding 6). A
+    ``*.py`` file the fix pass creates OUTSIDE the reviewed diff (it survives
+    the residual net, which reverts only TRACKED edits) therefore has no
+    before baseline. The old gate recorded ``delta=None`` with only the
+    absolute fallback, so a delta regression in such a secondary file was
+    invisible. The gate now records it explicitly flagged with a
+    missing-baseline reason and surfaces a warning -- still fail-open (exit 0).
+    """
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import run
+
+    target = _build_scope_creep_target(tmp_path, "gate_missing_baseline")
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _NewFileSecondaryEditBackend(
+        target, target / "new_module.py", "def extra():\n    return 1\n"
+    )
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.get_installed_skills", lambda: None)
+    monkeypatch.setattr("daydream.deep.orchestrator.EXPLORATION_AVAILABLE", False)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+
+    exit_code = await run(
+        make_config(
+            target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            file_config=DaydreamFileConfig(
+                quality_gate_erosion_absolute=100.0,
+                quality_gate_verbosity_absolute=100.0,
+            ),
+        )
+    )
+    assert exit_code == 0
+
+    gate = _read_quality_gate(target)
+    assert gate["enabled"] is True
+    per_file = gate["rounds"][0]["per_file"]
+    entry = per_file["new_module.py"]
+    # Absolute fallbacks are raised out of the way (100.0): only the explicit
+    # missing-baseline flag can mark this file -- the old undefined-delta path
+    # would have left it unflagged and invisible.
+    assert entry["erosion_before"] is None
+    assert entry["erosion_after"] is not None
+    assert entry["erosion_delta"] is None
+    assert entry["flagged"] is True
+    assert "baseline" in entry["reason"]
+    assert any("new_module.py" in w for w in warnings), (
+        "a missing-baseline file must be named in a warning, never silently pass"
+    )
+    # The reviewed file stays covered and clean.
     assert per_file["api.py"]["flagged"] is False
 
 
@@ -1855,7 +1996,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     seen_at_commit: list[bool] = []
 
-    async def _spy_commit(backend: Any, work: Any) -> None:
+    async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         seen_at_commit.append(
             all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
         )
@@ -1884,7 +2025,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
       1. unrelated.py is reverted to its pre-fix content (git shows no change);
       2. ``gh_issue_create`` was called with unrelated.py in the body;
-      3. the commit step lands a commit whose tree contains ONLY api.py;
+      3. the commit step lands a commit whose tree contains the fix (api.py)
+         and NOT unrelated.py;
       4. the committed tree contains zero files outside ``changed_files``.
 
     Discriminating: without the residual check, unrelated.py's edit survives to
@@ -1899,7 +2041,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     # Commit runs for real (the scope-creep backend answers the commit prompt
-    # with a real `git add -u` + commit); heal is stubbed to pass.
+    # with a real commit of the pre-staged index); heal is stubbed to pass.
     mute_side_effects(commit=False)
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
@@ -1936,9 +2078,14 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
     assert "unrelated.py" in issues[0][2]
 
-    # 3/4. The commit's tree contains zero files outside the reviewed diff.
+    # 3/4. The commit's tree contains the fix but zero out-of-scope files: the
+    # creep edit to unrelated.py must never survive. The commit tree may carry
+    # test-stub sentinels and .daydream/ artifacts (untracked files created
+    # mid-run, pre-staged by _do_commit deterministically), so the invariant is
+    # inclusion + absence, not exact equality.
     committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
-    assert committed_paths == ["api.py"], (
+    assert "api.py" in committed_paths
+    assert "unrelated.py" not in committed_paths, (
         f"commit tree leaks out-of-scope files: {committed_paths}"
     )
     # The fix itself landed (api.py carries the daydream edit).
@@ -6235,8 +6382,7 @@ class _CommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("Stage all changes and commit"):
-            _git(cwd, "add", "--all")
+        if prompt.startswith("The daydream changes are already staged"):
             _git(cwd, "commit", "-m", "fix: align greeting copy")
             yield TextEvent(text="Committed.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -6267,7 +6413,7 @@ class _PushingCommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("Stage all changes and commit"):
+        if prompt.startswith("The daydream changes are already staged"):
             run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
             version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
             assert run_id is not None
@@ -6277,7 +6423,6 @@ class _PushingCommittingStubBackend(_StubBackend):
                 f"Daydream-Run: {run_id.group(1)}\n"
                 f"Daydream-Version: {version.group(1)}"
             )
-            _git(cwd, "add", "--all")
             _git(cwd, "commit", "-m", message)
             branch = _git(cwd, "branch", "--show-current")
             _git(cwd, "push", "-u", "origin", branch)

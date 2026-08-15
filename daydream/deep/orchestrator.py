@@ -20,7 +20,7 @@ import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Iterable
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -2251,7 +2251,9 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
-async def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+async def _capture_quality_before(
+    daydream_dir: Path, candidate_paths: set[str] | None
+) -> tuple[dict[str, Any] | None, str | None]:
     """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
 
     ``analyze_quality`` is pure and deterministic (no backend, no network), but
@@ -2260,12 +2262,17 @@ async def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | 
     reason is returned so the gate can persist an auditable unavailable entry
     instead of leaving a silent blank (#329). The sync tree-walk runs off the
     event loop so parallel fix fan-out is never blocked by the analyzer
-    (#329 / CodeRabbit Finding D).
+    (#329 / CodeRabbit Finding D). *candidate_paths* (issue #457) scopes the
+    snapshot's parse/aggregate to the reviewed ``*.py`` set resolved by
+    ``_step_fix`` before the capture; ``None`` keeps the whole-workspace
+    snapshot (e.g. a resume that lost the diff context).
     """
     try:
         from daydream.eval.analyzer import analyze_quality
 
-        return await anyio.to_thread.run_sync(analyze_quality, daydream_dir), None
+        return await anyio.to_thread.run_sync(
+            analyze_quality, daydream_dir, candidate_paths
+        ), None
     except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -2451,9 +2458,13 @@ async def _evaluate_quality_gate(
     clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
     (keyed by the flow's loop iteration when present, else the next sequence
     number), so a resume or loop preserves the per-round trend. Flagged files
-    are surfaced as warnings with their before/after numbers. The post-fix
-    sync tree-walk runs off the event loop so parallel fix fan-out is never
-    blocked by the analyzer (#329 / CodeRabbit Finding D).
+    are surfaced as warnings with their before/after numbers. A candidate the
+    pre-fix snapshot did not cover -- the snapshot is scoped to the reviewed
+    ``*.py`` set (#457), so an out-of-diff secondary edit the fix pass made has
+    no baseline -- is recorded as flagged with a missing-baseline reason: an
+    unverifiable edit must not read as a clean pass. The post-fix sync
+    tree-walk runs off the event loop so parallel fix fan-out is never blocked
+    by the analyzer (#329 / CodeRabbit Finding D).
     """
     session_id = _current_session_id()
     try:
@@ -2496,7 +2507,11 @@ async def _evaluate_quality_gate(
         try:
             from daydream.eval.analyzer import analyze_quality
 
-            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir)
+            # Issue #457: scope the post-fix capture to the candidate set
+            # (reviewed *.py + files changed by the fix pass). ``candidates``
+            # is always a set here -- the ``candidates is None`` branch above
+            # returned already.
+            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir, candidates)
         except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -2538,6 +2553,31 @@ async def _evaluate_quality_gate(
                     "unparseable": True,
                     "flagged": True,
                     "reason": "file missing from post-fix analyzer output (unparseable?)",
+                }
+                continue
+            # Issue #329 / #457: the pre-fix snapshot is scoped to the reviewed
+            # diff's ``*.py`` set, so a candidate the fix pass edited that was
+            # NOT in the reviewed diff -- a secondary edit that survived the
+            # residual net, e.g. a newly-created untracked ``*.py`` -- has no
+            # before baseline. A missing baseline must not read as a clean
+            # pass: the delta is unknowable, so record the file explicitly
+            # flagged with its reason instead of silently falling into the
+            # absolute-only fallback, which can miss the exact delta regression
+            # #329 added changed_after_fix for. Still fail-open: never raises,
+            # never stops the run.
+            if before_entry is None and after_entry is not None:
+                per_file[rel] = {
+                    "erosion_before": None,
+                    "erosion_after": after_entry.get("erosion"),
+                    "erosion_delta": None,
+                    "verbosity_before": None,
+                    "verbosity_after": after_entry.get("verbosity"),
+                    "verbosity_delta": None,
+                    "flagged": True,
+                    "reason": (
+                        "missing pre-fix baseline: file edited by the fix pass but not "
+                        "covered by the pre-fix quality snapshot"
+                    ),
                 }
                 continue
             erosion_before = before_entry.get("erosion") if before_entry is not None else None
@@ -2583,7 +2623,10 @@ async def _evaluate_quality_gate(
             lines = []
             for rel in flagged:
                 entry = per_file[rel]
-                if entry.get("unparseable"):
+                # Unparseable and missing-baseline entries carry a ``reason``
+                # naming the failure; surface it instead of before/after
+                # numbers that would read like a normal regression.
+                if entry.get("reason"):
                     lines.append(f"  - {rel}: {entry['reason']}")
                 else:
                     lines.append(
@@ -2658,6 +2701,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         pre_fix_snapshot_captured = False
     else:
         pre_fix_snapshot_captured = True
+    # Issue #543: thread the pre-fix untracked snapshot into the commit steps so
+    # _do_commit can exclude user scratch files from the daydream commit instead
+    # of sweeping them in via the commit agent's ``git add --all``.
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
     # Pre-fix HEAD is the recommended-patch base only when the tree was
     # clean (stash_create returns None then) -- otherwise the snapshot is
     # the base and HEAD is unused, so skip the rev-parse. Captured now
@@ -2690,17 +2737,33 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     quality_gate_verbosity_absolute = _quality_gate_threshold(
         config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
     )
-    if quality_gate_enabled:
-        quality_before, quality_before_unavailable = await _capture_quality_before(daydream_dir)
-    else:
-        quality_before, quality_before_unavailable = None, None
     # Issue #336 — fix-loop scope bound. Thread the reviewed diff's file set
     # into every fix prompt as an explicit "Allowed files" clause. ``None``
     # (no diff context, e.g. a resume that lost ctx.data["diff"]) leaves the
     # prompt unchanged; the prose scope boundary still applies. Resolved via
     # _resolve_changed_files (shared with the gate) so a missing key never
     # crashes and the gate and post-fix residual net agree on the allowed set.
+    # Issue #457: resolved BEFORE the pre-fix quality capture so the same
+    # reviewed set scopes both gate captures (parsing only reviewed ``*.py``)
+    # and the residual net.
     changed_files = _resolve_changed_files(ctx)
+
+    def _py_only(paths: Iterable[str]) -> set[str]:
+        return {p for p in paths if p.endswith(".py")}
+
+    if quality_gate_enabled:
+        # Issue #457: scope the pre-fix snapshot to the reviewed ``*.py`` set.
+        # ``None`` (no diff context, e.g. a resume that lost ctx.data["diff"])
+        # keeps the whole-workspace capture, exactly today's behavior on that
+        # resume path.
+        quality_before_paths: set[str] | None = (
+            _py_only(changed_files) if changed_files is not None else None
+        )
+        quality_before, quality_before_unavailable = await _capture_quality_before(
+            daydream_dir, quality_before_paths
+        )
+    else:
+        quality_before, quality_before_unavailable = None, None
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2828,14 +2891,22 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # Fail-open: if enumeration raises, candidates stay ``None`` and the gate
     # persists an explicit ``unavailable`` verdict rather than gating on a
     # partial candidate set.
+    #
+    # The PRE-FIX snapshot, by contrast, is scoped to the reviewed ``*.py``
+    # set only (#457), so a candidate that survived the residual net outside
+    # the reviewed diff (e.g. a newly-created untracked ``*.py``) has no
+    # before baseline; ``_evaluate_quality_gate`` records those explicitly as
+    # flagged missing-baseline entries rather than computing an undefined delta.
     quality_candidates: set[str] | None
     if quality_gate_enabled:
         try:
             changed_after_fix = git_ops.changed_files_against(
                 work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
             )
-            quality_candidates = {path for path in changed_after_fix if path.endswith(".py")}
-            quality_candidates |= {item["file"] for item in ctx.data["items"] if item.get("file")}
+            quality_candidates = _py_only(changed_after_fix)
+            quality_candidates |= _py_only(
+                item["file"] for item in ctx.data["items"] if item.get("file")
+            )
         except git_ops.GitError:
             quality_candidates = None
     else:
@@ -2874,11 +2945,35 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     return None
 
 
-async def _step_commit(ctx: FlowContext) -> None:
+async def _commit_push_or_stop(coro: Awaitable[None]) -> Stop | None:
+    """Await a commit/push phase, mapping failure to a clean Stop(1).
+
+    Shared by _step_commit and _step_commit_push so the try/except ->
+    print_error("Commit/Push Failed") -> Stop(1) guard lives in one place.
+    The phase coroutine is created by the caller but only awaited here, so a
+    synchronous GitError from staging still surfaces inside the guard.
+    """
+    try:
+        await coro
+    except Exception as e:
+        print_error(console, "Commit/Push Failed", str(e))
+        return Stop(1)
+    return None
+
+
+async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Commit-and-push the applied fixes."""
     # phase_commit_push runs as part of the fix/commit cycle — reuse
     # the fix backend (no separate "commit" phase identifier).
-    await phase_commit_push(ctx.backend_for("fix"), ctx.work)
+    # stage_paths can raise GitError synchronously before the agent turn;
+    # _commit_push_or_stop surfaces that as a clean Stop(1) instead of
+    # an unhandled traceback terminating the deep run.
+    return await _commit_push_or_stop(
+        phase_commit_push(
+            ctx.backend_for("fix"), ctx.work,
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+        )
+    )
 
 
 async def _perform_cleanup(ctx: FlowContext) -> None:
@@ -2943,8 +3038,17 @@ async def _step_parse_feedback(ctx: FlowContext) -> Stop | None:
 
 async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     """Apply a fix per feedback item; abort before commit when all fail."""
+    from daydream import git_ops
+
     feedback_items = ctx.data["feedback_items"]
     fix_backend = ctx.backend_for("fix")
+
+    # Issue #543: snapshot the pre-fix untracked set so the feedback commit step
+    # can exclude user scratch files from the daydream commit. list_untracked
+    # soft-fails to [] on GitError, so set(...) is already the fail-open empty
+    # snapshot (deterministic stage = all untracked), mirroring _step_fix.
+    pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
+    ctx.data["pre_fix_untracked"] = pre_fix_untracked
 
     # Fix sequentially to avoid concurrent access to one mutable backend.
     results: list[FixResult] = []
@@ -2977,14 +3081,13 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
 async def _step_commit_push(ctx: FlowContext) -> Stop | None:
     """Commit and push the applied fixes (feedback mode)."""
     results: list[FixResult] = ctx.data["results"]
-    try:
-        await phase_commit_push_auto(
-            ctx.backend_for("review"), ctx.work, items=[item for item, _ok, _err in results if _ok],
+    return await _commit_push_or_stop(
+        phase_commit_push_auto(
+            ctx.backend_for("review"), ctx.work,
+            items=[item for item, _ok, _err in results if _ok],
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
-    except Exception as e:
-        print_error(console, "Commit/Push Failed", str(e))
-        return Stop(1)
-    return None
+    )
 
 
 async def _step_respond_feedback(ctx: FlowContext) -> Stop:

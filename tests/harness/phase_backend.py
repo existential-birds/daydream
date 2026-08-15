@@ -144,7 +144,7 @@ class PhaseDispatchBackend:
             else:
                 yield TextEvent(text="1 test failed.")
             yield ResultEvent(structured_output=None, continuation=None)
-        elif "stage all changes and commit" in prompt_lower and "do not push" in prompt_lower:
+        elif "the daydream changes are already staged" in prompt_lower and "do not push" in prompt_lower:
             self.commit_calls.append(prompt_lower)
             yield TextEvent(text="Committed iteration changes.")
             yield ResultEvent(structured_output=None, continuation=None)
