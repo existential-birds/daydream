@@ -11,9 +11,10 @@ mirror.
 
 **The baseline must be green.** The last layer of ``repo.Dockerfile`` runs the
 repository's own test suite at the head commit, so a red suite fails the build and
-produces no image. That is not a nicety — the ``fix_tests_pass`` reward pays a
-rollout for a suite that passes after its fix, so a baseline that was already red
-makes that reward pure noise. This script never catches, retries or downgrades that
+produces no image. That is not a nicety — the ``suite_non_regression`` metric
+records a rollout for a suite that passes after its fix, so a baseline that was
+already red makes that signal pure noise. This script never catches, retries or
+downgrades that
 failure; a failed build exits non-zero and the image simply does not exist.
 
 Usage::

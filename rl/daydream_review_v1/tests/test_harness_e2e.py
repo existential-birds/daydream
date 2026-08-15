@@ -6,7 +6,8 @@ useless sentence, so the rewards are meaningless — what it proves is the
 plumbing, and it proves all of it at once. Env injection reaches the CLI, the CLI
 speaks the Anthropic dialect to the interception server and authenticates with
 the rollout secret, every turn lands in the trace DAG, daydream archives a run,
-the run dir comes back out of the sandbox, and both reward axes score.
+the run dir comes back out of the sandbox, and the single intrinsic reward
+scores alongside the suite_non_regression metric.
 
 ``test_live_rollout`` is the only test that needs a real model, and it is the
 only one whose reward values mean anything.
@@ -25,7 +26,7 @@ from conftest import PROJECT_ROOT
 
 from daydream_review_v1.fixture import build_fixture_repo
 
-REQUIRED_REWARDS = {"intrinsic_composite", "fix_tests_pass"}
+REQUIRED_REWARDS = {"intrinsic_composite"}
 
 
 def _stage(root: Path) -> dict[str, Path]:
@@ -132,5 +133,6 @@ def test_live_rollout(tmp_path: Path) -> None:
 
     trace = _sole_trace(paths)
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
-    assert trace["rewards"]["fix_tests_pass"] in (0.0, 1.0)
+    assert trace["rewards"]["intrinsic_composite"] in (0.0, 1.0)
+    assert trace["metrics"]["suite_non_regression"] in (0.0, 1.0)
     assert trace["info"]["daydream_backend"] == backend

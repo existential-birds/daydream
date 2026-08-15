@@ -18,7 +18,7 @@
 # nonempty (a missing or empty list is a manifest-load error), and every entry must
 # be a literal path — no git pathspec syntax (``*``/``?``/``[`` globs, a leading
 # ``:`` magic), which the manifest loader rejects: at scoring time
-# `fix_tests_pass` compares these paths against the baked head SHA, fail-closed:
+# `suite_non_regression` compares these paths against the baked head SHA, fail-closed:
 # any tracked difference (committed, staged, unstaged, deleted, renamed), any
 # non-ignored untracked file under a protected path, or any Git error means the
 # oracle changed and the rollout earns zero test reward without running

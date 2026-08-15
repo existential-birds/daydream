@@ -168,7 +168,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         # deep flow stops non-zero when the suite is still red after the fix pass
         # (orchestrator.py:1389). Setting a stop condition makes the framework
         # return quietly instead of raising HarnessError (harness.py:99-118), so the
-        # rollout SCORES — a red suite is exactly the signal fix_tests_pass wants.
+        # rollout SCORES — a red suite is exactly the signal suite_non_regression wants.
         # A non-zero exit with no artifacts is left to raise: that is infrastructure
         # failure and belongs to the retry budget, not to the gradient.
         if result.exit_code != 0 and await daydream_completed(runtime, self.config.archive_root):

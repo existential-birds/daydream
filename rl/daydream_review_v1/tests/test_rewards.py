@@ -73,7 +73,7 @@ def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> 
 
 
 def _assert_gate_held(trace: vf.Trace) -> None:
-    """A test-oracle change must earn a literal zero, never the w_tests reward.
+    """A test-oracle change must zero suite_non_regression, never pay a reward.
 
     The staged ``deep/test-verdict.json`` claim (passed=True) makes the tripwire
     load-bearing: any execution of test_command records ``test_claim_mismatch``,
@@ -82,7 +82,8 @@ def _assert_gate_held(trace: vf.Trace) -> None:
     """
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0
+    assert "fix_tests_pass" not in trace.rewards
     assert "test_claim_mismatch" not in trace.metrics
 
 
@@ -446,7 +447,7 @@ async def test_fix_tests_pass_green(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
@@ -462,7 +463,44 @@ async def test_fix_tests_pass_red(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0
+
+
+async def test_suite_result_is_telemetry_not_reward(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A green suite no longer sums into the reward: only intrinsic_composite remains."""
+    archive_root = tmp_path / "archive"
+    (archive_root / "runs").mkdir(parents=True)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, patch=_REAL_PATCH)
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert set(trace.rewards) == {"intrinsic_composite"}
+    assert "fix_tests_pass" not in trace.rewards
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 1.0
+
+
+async def test_tampered_suite_never_records_honest_non_regression(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A gutted test oracle records suite_non_regression 0.0 and no suite reward."""
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert "fix_tests_pass" not in trace.rewards
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.metrics["suite_non_regression"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -488,7 +526,7 @@ async def test_fix_tests_pass_rejects_protected_test_path_changes(
     corpus_mini_dir: Path,
     fixture_manifest_path: Path,
 ) -> None:
-    """A changed test oracle earns a literal zero, never the w_tests reward.
+    """A changed test oracle records suite_non_regression 0.0, never an honest reading.
 
     Every tamper row is deliberately green-if-run: a vulnerable impl that
     executes the tampered oracle gets exit 0 -> reward 1.0. The gate must
@@ -563,7 +601,7 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
     _stage_run(archive_root, rundir_golden)
     task = _task(corpus_mini_dir, fixture_manifest_path)
     # A real fix (calc.py) plus a flagged, gutted tracked test: diff is fooled,
-    # so only the flag probe stands between this and a free w_tests.
+    # so only the flag probe stands between this and a free green reading.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
     subprocess.run(
@@ -680,7 +718,7 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
     The untracked probe lists every untracked file under a protected path (no
     ``--exclude-standard``), so the ``__pycache__/`` and ``*.py[cod]`` files a
     legitimate test run drops while importing ``tests/`` would otherwise read as
-    an oracle change and withhold ``w_tests`` from a genuinely fixed tree. Those
+    an oracle change and withhold a green non-regression reading from a genuinely fixed tree. Those
     artifacts are excluded explicitly via ``ORACLE_BENIGN_PATHSPECS`` — never
     loaded by the runner, so excluding them cannot hide a real oracle file.
     """
@@ -698,7 +736,7 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
-    assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 1.0
 
 
 async def test_oracle_gate_rejects_root_sitecustomize(
@@ -740,14 +778,14 @@ async def test_oracle_gate_rejects_root_sitecustomize(
 async def test_no_fixes_returns_no_fix_reward(
     patch: str | None, commit: bool, tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
-    """An untouched tree earns no_fix_reward however recommended.patch looks.
+    """An untouched tree records suite_non_regression 0.0 however recommended.patch looks.
 
     The third case is the one that matters. daydream writes `.daydream/` INTO the
     repository under review, and `capture_recommended_patch` appends a creation
     hunk for every untracked non-ignored file — so on any repository that does not
     gitignore that directory (i.e. every real repository), the patch is non-empty
     after a rollout that changed nothing. Reading it as "a fix landed" would hand
-    out the full w_tests off the still-green baseline, for free, forever.
+    out a free green non-regression reading off the still-green baseline, for free, forever.
     """
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -758,7 +796,7 @@ async def test_no_fixes_returns_no_fix_reward(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["suite_non_regression"] == 0.0
     assert "test_claim_mismatch" not in trace.metrics
     # No archived run at all, so there is no claim to record either.
     assert "test_claim_passed_without_fix" not in trace.metrics
@@ -773,7 +811,7 @@ async def test_unresolvable_head_sha_scores_no_fix(
     `git diff --quiet <head_sha> HEAD` exits 128 when the head object is absent
     from the object store (the documented `exit_code != 1` branch in
     `_fixes_applied`). Unlike a string comparison on `rev-parse`, that must not
-    be scored as a fix: every non-1 exit is `no_fix_reward`, honoring the
+    be scored as a fix: every non-1 exit records suite_non_regression 0.0, honoring the
     deliberate false-negative bias.
     """
     archive_root = tmp_path / "archive"
@@ -788,7 +826,7 @@ async def test_unresolvable_head_sha_scores_no_fix(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["suite_non_regression"] == 0.0
 
 
 @pytest.mark.parametrize("claimed", [True, False], ids=["claimed-green", "claimed-red"])
@@ -820,7 +858,7 @@ async def test_no_fixes_still_records_the_test_claim(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["suite_non_regression"] == 0.0
     assert trace.metrics["test_claim_passed_without_fix"] == float(claimed)
     # Observability only: recording the claim must not invent a verdict comparison.
     assert "test_claim_mismatch" not in trace.metrics
@@ -904,7 +942,7 @@ async def test_metric_claim_mismatch_fires(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.rewards["fix_tests_pass"] == (0.0 if red else 1.0)
+    assert trace.metrics["suite_non_regression"] == (0.0 if red else 1.0)
     assert trace.metrics["test_claim_mismatch"] == expected
 
 
@@ -978,7 +1016,7 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 1.0
-    assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["suite_non_regression"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
@@ -991,9 +1029,9 @@ async def test_committed_daydream_artifacts_not_a_fix(
     ``.daydream/`` (only the fixture does), so a no-fix rollout whose agent
     commits daydream's own untracked artifacts produces a tree that differs from
     the baked snapshot — which ``git diff --quiet <head_sha> HEAD`` would read as
-    a fix and pay the full ``w_tests`` off a still-green baseline. Committing the
-    artifacts (force-added, since the fixture ignores them) must score
-    ``no_fix_reward``.
+    a fix and pay a free green non-regression reading off a still-green baseline. Committing the
+    artifacts (force-added, since the fixture ignores them) must record
+    ``suite_non_regression`` 0.0.
     """
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -1006,7 +1044,7 @@ async def test_committed_daydream_artifacts_not_a_fix(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["suite_non_regression"] == 0.0
     assert "test_claim_mismatch" not in trace.metrics
 
 
@@ -1015,11 +1053,11 @@ async def test_unresolvable_snapshot_sha_reads_as_no_fix(
 ) -> None:
     """A fix signal that cannot be evaluated reads as no-fix, not a free win.
 
-    ``fix_tests_pass`` stays deliberately false-negative biased: any ``git diff
+    ``suite_non_regression`` stays deliberately false-negative biased: any ``git diff
     --quiet`` exit other than 1 (0 = identical trees, 128 = unresolvable baked
     SHA, 127 = missing sh/git) means "no fix found". Here the baked snapshot SHA
     is not present in the repository at all, so the diff exits 128 — the reward
-    must be ``no_fix_reward``, never the full ``w_tests`` for nothing.
+    must record ``suite_non_regression`` 0.0, never a free green reading for nothing.
     """
     archive_root = tmp_path / "archive"
     (archive_root / "runs").mkdir(parents=True)
@@ -1040,24 +1078,31 @@ async def test_unresolvable_snapshot_sha_reads_as_no_fix(
     await task.score(trace, runtime)
 
     assert trace.metrics["fixes_applied"] == 0.0
-    assert trace.rewards["fix_tests_pass"] == task.config.no_fix_reward
+    assert trace.metrics["suite_non_regression"] == 0.0
 
 
 async def test_reward_version_is_pinned(
     tmp_path: Path, runtime, rundir_golden: Path, corpus_mini_dir: Path, fixture_manifest_path: Path
 ) -> None:
-    """AC-3: pin the scorer version the parity test cannot see move.
+    """AC-3: pin the scorer version the parity test cannot see move — both stamps.
 
     `test_intrinsic_composite_parity` runs the same `score_trajectory` on both
     sides, so a REWARD_VERSION bump moves expectation and actual together and the
     parity assertion stays green through a semantic change. This is the assertion
-    that actually fails when the offline scorer changes under us.
+    that actually fails when the offline scorer changes under us. Since the
+    demotion, the aggregate rollout contract carries its own version: the
+    breakdown stamps both the rollout boundary (``reward_version``) and the
+    intrinsic scorer it was evaluated against (``intrinsic_reward_version``).
     """
     from daydream.training.reward import REWARD_VERSION
+    from daydream_review_v1.taskset import ROLLOUT_REWARD_VERSION
 
     assert REWARD_VERSION == "2026.05.28-2", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
         "rollout reward's expected values before trusting any run scored across the boundary."
+    )
+    assert ROLLOUT_REWARD_VERSION == "2026.08.15-1", (
+        f"the rollout reward contract version moved to {ROLLOUT_REWARD_VERSION!r}"
     )
 
     archive_root = tmp_path / "archive"
@@ -1067,7 +1112,9 @@ async def test_reward_version_is_pinned(
 
     await task.score(trace, runtime)
 
-    assert trace.info["reward_breakdown"]["reward_version"] == REWARD_VERSION
+    breakdown = trace.info["reward_breakdown"]
+    assert breakdown["reward_version"] == ROLLOUT_REWARD_VERSION
+    assert breakdown["intrinsic_reward_version"] == REWARD_VERSION
 
 
 async def test_reward_breakdown_carries_dual_version_stamps(

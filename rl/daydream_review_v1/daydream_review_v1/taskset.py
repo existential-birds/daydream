@@ -102,7 +102,8 @@ ORACLE_IGNORE_PATHSPECS = ["sitecustomize.py", ":(glob)**/.gitignore"]
 #: every untracked file under a protected path — including the ``__pycache__/``
 #: and ``*.py[cod]`` files a green suite itself drops while importing the test
 #: modules. Without this explicit exclusion a genuinely fixed tree would trip
-#: the probe on its own legitimate test runs and be withheld ``w_tests``. The
+#: the probe on its own legitimate test runs and be withheld a green
+#: non-regression reading. The
 #: benign exclusions are baked into the probe rather than delegated to the
 #: repo's ignore rules, whose decisions this gate deliberately no longer trusts.
 ORACLE_BENIGN_PATHSPECS = [":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[cod]"]
@@ -136,16 +137,17 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     own ``.daydream/`` directory inside the repository under review. On any
     repository that does not gitignore that directory — which is every repository
     except our own fixture — the patch is non-empty after a rollout that changed
-    nothing, and the still-green baseline would hand out a free ``w_tests``.
+    nothing, and the still-green baseline would hand out a free green
+    non-regression reading.
 
     Deliberately biased toward false negatives: a fix consisting ONLY of new,
-    never-committed files reads as "no fix" and scores ``no_fix_reward``. That
+    never-committed files reads as "no fix" (``suite_non_regression`` 0.0). That
     direction costs a gradient; the other direction corrupts one.
 
     A clean tree at a moved HEAD counts as a fix only when the *committed
     contents differ* from the snapshot. HEAD advancing on its own — e.g. an
     `--allow-empty` commit that leaves the tree byte-identical — is not a fix
-    and scores ``no_fix_reward``. Either way the decision is read from the
+    and scores ``suite_non_regression`` 0.0. Either way the decision is read from the
     tracked tree, never from daydream's own ``.daydream/`` directory.
     """
     dirty = await runtime.run(
@@ -197,8 +199,9 @@ async def _protected_test_paths_unchanged(
 
     The oracle is the repository's own mutable test infrastructure — test
     sources, runner config, package config — so a rollout could otherwise earn
-    ``w_tests`` by rewriting it into a trivial suite. The baked head SHA is the
-    trustworthy baseline: the image build proved the suite green at exactly that
+    an honest green non-regression reading by rewriting it into a trivial suite;
+    the demoted ``suite_non_regression`` metric must never record a gutted
+    suite as honest telemetry. The baked head SHA is the trustworthy baseline: the image build proved the suite green at exactly that
     commit before any agent touched the tree.
 
     Fail-closed by design, with every ambiguity reading as "changed". The probe
@@ -248,7 +251,7 @@ async def _protected_test_paths_unchanged(
       oracle changed.
 
     There is deliberately no case that defaults to pass on an error — an
-    unverifiable oracle never earns the test reward.
+    unverifiable oracle never records an honest non-regression value.
     """
     oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
 
@@ -378,8 +381,6 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
     """Reward weights, overridable as ``--taskset.task.*``."""
 
     w_composite: float = 1.0
-    w_tests: float = 1.0
-    no_fix_reward: float = 0.0
 
 
 class DaydreamReviewState(vf.State):
@@ -411,18 +412,20 @@ def _review_state(trace: vf.Trace) -> DaydreamReviewState:
 
 
 class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, DaydreamReviewTaskConfig]):
-    """Two reward axes: daydream's own intrinsic composite, and the test suite.
+    """One reward axis: daydream's own intrinsic composite; the suite is telemetry.
 
     ``intrinsic_composite`` replays the archived run through
     :func:`daydream.training.reward.score_trajectory` — the exact scorer the
     offline training pipeline uses, imported rather than reimplemented, so an
     online reward and an offline label can never disagree about the same run.
 
-    ``fix_tests_pass`` is the ground truth the intrinsic composite cannot supply:
-    the repository's own suite, re-run inside the still-live sandbox. daydream's
-    own test verdict is a regex over agent prose
+    ``suite_non_regression`` is the ground truth the intrinsic composite cannot
+    supply: the repository's own suite, re-run inside the still-live sandbox.
+    daydream's own test verdict is a regex over agent prose
     (``daydream/agent.py:252-300``), so it is recorded as a claim and compared
-    against the re-run — never trusted as reward.
+    against the re-run — never trusted as reward. The suite result is a metric,
+    never a reward: a green suite proves the tree did not regress, not that the
+    reported defect was repaired, so it earns no training signal of its own.
 
     Important: ``verifier_verdicts`` exist only when the fix gate was accepted
     (``deep/recommendation-verdicts.json`` is written at
@@ -496,23 +499,28 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         }
         return self.config.w_composite * (breakdown.composite or 0.0)
 
-    @vf.reward(weight=1.0)
-    async def fix_tests_pass(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
-        """Re-run the repository's pinned suite against the fixed tree.
+    @vf.metric
+    async def suite_non_regression(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
+        """Re-run the repository's pinned suite against the fixed tree; telemetry, never a reward.
 
         Deterministic because the image build proved the same command green at
         the same commit before any agent touched it (D6). A rollout that applied
-        no fix is not evidence either way, so it takes ``no_fix_reward`` rather
-        than a free 1.0 for leaving the tree alone.
+        no fix is not evidence either way, so it records ``suite_non_regression``
+        0.0 rather than a free 1.0 for leaving the tree alone.
 
         The declared ``protected_test_paths`` oracle must still match the baked
         head before ``test_command`` is trusted: any oracle change — a tracked
         difference, an untracked file under a protected path or a root
         ``sitecustomize.py``, a ``skip-worktree``/``assume-unchanged`` flag, an
         ignore-rule change (``.gitignore`` files or ``.git/info/exclude``), or a
-        Git error — returns a literal ``0.0`` without running the repository's
-        mutable ``test_command``, so a rollout can never pay itself the test
-        reward by gutting its own suite.
+        Git error — records a literal ``0.0`` without running the repository's
+        mutable ``test_command``, so a gutted suite is never recorded as an
+        honest non-regression value.
+
+        The suite result is deliberately NOT a reward: a rollout that starts
+        from an already-green commit and makes only an unrelated or test-only
+        edit earns no suite-derived credit. The value stays in ``trace.metrics``
+        for analysis.
         """
         repo = _repo_path(trace)
         if not await _fixes_applied(runtime, repo, self.data.head_sha):
@@ -523,21 +531,21 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             claimed = _claimed_test_verdict(_review_state(trace).run_dir)
             if claimed is not None:
                 trace.record_metric("test_claim_passed_without_fix", float(claimed))
-            return self.config.no_fix_reward
+            return {"suite_non_regression": 0.0}
 
         trace.record_metric("fixes_applied", 1.0)
         # Security boundary: the test oracle must match the baked head before the
         # repository's own mutable test_command is trusted. A changed oracle
         # (committed/staged/unstaged/deleted/renamed, an untracked protected
         # file or root sitecustomize.py, a skip-worktree/assume-unchanged flag,
-        # an ignore-rule change, or a Git error) earns a literal zero WITHOUT
+        # an ignore-rule change, or a Git error) records a literal zero WITHOUT
         # running test_command.
         unchanged = await _protected_test_paths_unchanged(
             runtime, repo, self.data.head_sha, self.data.protected_test_paths
         )
         trace.record_metric("test_oracle_unchanged", float(unchanged))
         if not unchanged:
-            return 0.0
+            return {"suite_non_regression": 0.0}
 
         result = await runtime.run(
             ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
@@ -545,14 +553,16 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         passed = result.exit_code == 0
 
         # Reward-hack tripwire: daydream's own prose-derived verdict versus what
-        # the suite actually does. Recorded here rather than as a @vf.metric
+        # the suite actually does. Recorded here (inside this metric handler,
+        # which performs the re-run) rather than as a separate @vf.metric,
         # because metrics run BEFORE rewards (verifiers task.py:299-306), so a
-        # metric cannot see this re-run without paying for a second one.
+        # standalone metric could not see this re-run without paying for a
+        # second one.
         claimed = _claimed_test_verdict(_review_state(trace).run_dir)
         if claimed is not None:
             trace.record_metric("test_claim_mismatch", float(claimed != passed))
 
-        return self.config.w_tests * float(passed)
+        return {"suite_non_regression": float(passed)}
 
     @vf.metric
     async def review_shape(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
@@ -690,7 +700,7 @@ class DaydreamReviewTaskset(vf.Taskset[DaydreamReviewTask, DaydreamReviewConfig]
         if not config.use_images:
             logger.warning(
                 "use_images is off: tasks carry no image, so nothing guarantees a green baseline "
-                "and fix_tests_pass is not deterministic. This is the local smoke path only."
+                "and suite_non_regression is not deterministic. This is the local smoke path only."
             )
 
         source = harvested_corpus(config.corpus_dir)

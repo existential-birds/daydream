@@ -334,7 +334,7 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
     # test deps; a pip-based setup would leave it absent, so this fails a regression.
     # It also pins the editable-install invariant: the package under test must
     # resolve from the baked /work/repo checkout, not a venv copy, so the rollout
-    # re-run in fix_tests_pass exercises the agent's edits rather than stale code.
+    # re-run in suite_non_regression exercises the agent's edits rather than stale code.
     probe = subprocess.run(
         ["docker", "run", "--rm", REFERENCE_TAG, "sh", "-c",
          "test -x /opt/repo-venv/bin/python && /opt/repo-venv/bin/python -c '"
