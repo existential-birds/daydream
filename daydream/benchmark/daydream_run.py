@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 from daydream.agent import console
 from daydream.backends.pi import STREAM_DROP_SIGNATURES
 from daydream.github_app import APP_ID_ENV, APP_PRIVATE_KEY_ENV
-from daydream.trajectory import redact_text
+from daydream.trajectory import _PEM_HEADER, redact_text
 from daydream.ui import print_warning
 
 if TYPE_CHECKING:
@@ -61,14 +61,19 @@ _ERROR_CONTEXT_MARKERS = (
     "fatal error",
 )
 
-#: PEM private-key block anchors, mirroring trajectory._PEM_KEY_PATTERN's
+#: PEM private-key block anchors, sharing trajectory._PEM_HEADER's
 #: six-variant spec (RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA). Only blocks
 #: whose anchors match that spec are buffered for whole-block redaction, so
 #: every variant the pattern can redact is held until its END anchor and
 #: redacted whole before reaching on_line or the failure tail. A block the
 #: pattern cannot match (e.g. CERTIFICATE) must not be treated as handled.
-_PEM_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----")
-_PEM_END_RE = re.compile(r"-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----")
+_PEM_BEGIN_RE = re.compile(rf"-----BEGIN {_PEM_HEADER}-----")
+_PEM_END_RE = re.compile(rf"-----END {_PEM_HEADER}-----")
+#: A BEGIN anchor plus everything to end-of-text: matches the held fragment
+#: when the stream dies mid-block, where no END anchor exists to pair with
+#: _PEM_KEY_PATTERN. Shares _PEM_HEADER so the six-variant spec stays in sync
+#: with the buffering anchors.
+_PEM_FRAGMENT_RE = re.compile(rf"-----BEGIN {_PEM_HEADER}-----.*", re.DOTALL)
 
 
 def _is_transient(stdout: str) -> bool:
@@ -214,11 +219,11 @@ def _run_streamed(
             else:
                 _emit(line)
         if pem_buffer:  # stream ended mid-block: no END anchor was seen, so
-            # _PEM_KEY_PATTERN cannot match the fragment; redact the held lines
-            # individually so the BEGIN-only fragment and its body never reach
-            # on_line or the failure tail raw.
-            for held in pem_buffer:
-                _emit(held)
+            # _PEM_KEY_PATTERN cannot match the fragment (it needs both
+            # anchors); redact the whole held fragment at once — BEGIN marker
+            # through end of stream — so the BEGIN-only fragment and its body
+            # never reach on_line or the failure tail raw.
+            _emit(_PEM_FRAGMENT_RE.sub("[REDACTED_PEM_KEY]", "".join(pem_buffer)))
         returncode = proc.wait()
     return returncode, "\n".join(tail)
 

@@ -119,9 +119,12 @@ _USERNAME_PATH_PATTERN = re.compile(r"(/Users/|/home/|[A-Z]:\\Users\\)([^/\\\s]+
 # PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA).
 # Multi-line body collapsed before the bare API-key rule scans it. CERTIFICATE
 # blocks are public material — not matched.
+# The header fragment is shared (imported) by the benchmark's buffering
+# anchors, so a variant addition needs one edit here, not four.
+_PEM_HEADER = r"(?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY"
 _PEM_KEY_PATTERN = re.compile(
-    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
-    r".*?-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----",
+    rf"-----BEGIN {_PEM_HEADER}-----"
+    rf".*?-----END {_PEM_HEADER}-----",
     re.DOTALL,
 )
 # Match env-var assignment where one of the underscore-separated SEGMENTS of

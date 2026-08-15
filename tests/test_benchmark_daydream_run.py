@@ -217,20 +217,47 @@ def test_streams_lines_and_keeps_tail_on_failure(tmp_path, monkeypatch):
     assert "[REDACTED_API_KEY]" in str(e.value)
 
 
-def test_streamed_failure_redacts_pem_block_spanning_lines(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("begin_line", "end_line", "body"),
+    [
+        (
+            "-----BEGIN RSA PRIVATE KEY-----\n",
+            "-----END RSA PRIVATE KEY-----\n",
+            "PRIVATEKEYMATERIAL" * 20,
+        ),
+        ("-----BEGIN PRIVATE KEY-----\n", "-----END PRIVATE KEY-----\n", "PKCS8KEYMATERIAL" * 20),
+        (
+            "-----BEGIN ENCRYPTED PRIVATE KEY-----\n",
+            "-----END ENCRYPTED PRIVATE KEY-----\n",
+            "ENCRYPTEDKEYMATERIAL" * 20,
+        ),
+        (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            "-----END OPENSSH PRIVATE KEY-----\n",
+            "OPENSSHKEYMATERIAL" * 20,
+        ),
+        ("-----BEGIN EC PRIVATE KEY-----\n", "-----END EC PRIVATE KEY-----\n", "ECKEYMATERIAL" * 20),
+        ("-----BEGIN DSA PRIVATE KEY-----\n", "-----END DSA PRIVATE KEY-----\n", "DSAKEYMATERIAL" * 20),
+    ],
+    ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
+)
+def test_streamed_failure_redacts_pem_block_spanning_lines(
+    tmp_path, monkeypatch, begin_line: str, end_line: str, body: str
+):
     """A PEM block split across streamed lines (BEGIN/body/END on separate
     lines) must still be redacted whole before reaching on_line and the failure
     tail — per-line redaction would never present BEGIN and END together, so
-    the base64 body would leak raw."""
+    the base64 body would leak raw. Parametrized over every variant the
+    buffering anchors recognize, so EC/DSA/ENCRYPTED/PKCS8 blocks get the same
+    streamed coverage as RSA/OPENSSH."""
     lines: list[str] = []
-    body = "PRIVATEKEYMATERIAL" * 20
 
     class FakeProc:
         def __init__(self):
             self.stdout = iter([
-                "-----BEGIN RSA PRIVATE KEY-----\n",
+                begin_line,
                 body + "\n",
-                "-----END RSA PRIVATE KEY-----\n",
+                end_line,
             ])
             self.returncode = 1
 
@@ -254,11 +281,11 @@ def test_streamed_failure_redacts_pem_block_spanning_lines(tmp_path, monkeypatch
     assert "[REDACTED_PEM_KEY]" in str(e.value)
 
 
-def test_streamed_failure_redacts_openssh_pem_block_spanning_lines(tmp_path, monkeypatch):
-    """An OPENSSH PEM block split across streamed lines (BEGIN/body/END on
-    separate lines) must also be buffered and redacted whole before reaching
-    on_line and the failure tail — the BEGIN anchor must recognize the
-    OPENSSH variant or the base64 body leaks raw."""
+def test_streamed_failure_redacts_pem_block_truncated_at_eof(tmp_path, monkeypatch):
+    """A stream that ends mid-PEM-block (BEGIN/body seen, END never arrives)
+    must still redact the held fragment before it reaches on_line and the
+    failure tail — per-line redaction could never match _PEM_KEY_PATTERN's
+    BEGIN+END anchors, so the buffered fragment must be redacted whole."""
     lines: list[str] = []
     body = "OPENSSHKEYMATERIAL" * 20
 
@@ -267,7 +294,6 @@ def test_streamed_failure_redacts_openssh_pem_block_spanning_lines(tmp_path, mon
             self.stdout = iter([
                 "-----BEGIN OPENSSH PRIVATE KEY-----\n",
                 body + "\n",
-                "-----END OPENSSH PRIVATE KEY-----\n",
             ])
             self.returncode = 1
 
@@ -285,9 +311,9 @@ def test_streamed_failure_redacts_openssh_pem_block_spanning_lines(tmp_path, mon
     checkout.mkdir()
     with pytest.raises(DaydreamRunError) as e:
         run_daydream_review(checkout, base_sha="d" * 40, trajectory_path=tmp_path / "t.json", on_line=lines.append)
-    assert body not in "".join(lines)   # live echo carries no raw OPENSSH body
+    assert body not in "".join(lines)   # live echo carries no raw PEM body
     assert "[REDACTED_PEM_KEY]" in "".join(lines)
-    assert body not in str(e.value)     # retained tail carries no raw body
+    assert body not in str(e.value)     # retained tail carries no raw PEM body
     assert "[REDACTED_PEM_KEY]" in str(e.value)
 
 

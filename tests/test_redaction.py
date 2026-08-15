@@ -489,7 +489,7 @@ _DSA_PEM = (
     ids=["pkcs1", "pkcs8", "encrypted", "openssh", "ec", "dsa"],
 )
 def test_redactor_scrubs_private_key_block(pem: str, body: str) -> None:
-    """-----BEGIN (RSA )PRIVATE KEY----- blocks replaced with [REDACTED_PEM_KEY]."""
+    """PEM private-key blocks (PKCS1/RSA, PKCS8, ENCRYPTED, OPENSSH, EC, DSA) replaced with [REDACTED_PEM_KEY]."""
     out = Redactor().redact_step(_user_step(f"key is {pem} ok"))
     assert isinstance(out.message, str)
     assert body not in out.message
