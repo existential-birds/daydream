@@ -344,7 +344,7 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
          "test -x /opt/repo-venv/bin/python && /opt/repo-venv/bin/python -c '"
          "import pytest, freezegun; "
          "import itsdangerous; "
-         "assert '/work/repo' in itsdangerous.__file__, itsdangerous.__file__'"],
+         "assert \"/work/repo\" in itsdangerous.__file__, itsdangerous.__file__'"],
         capture_output=True, text=True, check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
