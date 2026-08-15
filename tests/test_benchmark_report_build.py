@@ -32,7 +32,6 @@ PR_URL = "https://github.com/calcom/cal.com/pull/10600"
 
 SECOND_PR_URL = "https://github.com/calcom/cal.com/pull/10601"
 THIRD_PR_URL = "https://github.com/calcom/cal.com/pull/10602"
-PR_URLS = (PR_URL, SECOND_PR_URL, THIRD_PR_URL)
 _COMPLETE_SAAS_TOOLS = ("saas-alpha", "saas-beta", "saas-delta", "saas-gamma", "saas-zeta")
 _JUDGE_DIRNAME = "anthropic_claude-opus-4-5-20251101"
 

@@ -130,6 +130,12 @@ def _complete_cohort(evals: dict[str, dict], tools: list[str], candidate_prs: se
             if all(_leaf_present(evals.get(pr, {}).get(t)) for t in tools)}
 
 
+def _skip(canon: str, b: dict[str, Any], saas_tools: list[str], reason: str, daydream_overlap: int) -> dict[str, Any]:
+    """Record one skipped judge; both skip paths share this single dict shape."""
+    return {"id": canon, "dirs": b["dirs"], "saas_tools": len(saas_tools),
+            "reason": reason, "daydream_overlap": daydream_overlap}
+
+
 def aggregate_tool(evals: dict[str, dict], tool: str, subset: set[str]) -> dict[str, Any] | None:
     """Micro-aggregate one tool over ``subset`` PRs. Mirrors score.parse_daydream_scores.
 
@@ -390,32 +396,29 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         all_tools: set[str] = set()
         for t in evals.values():
             all_tools.update(t.keys())
-        daydream_prs = {pr for pr in dd_subset if _leaf_present(evals.get(pr, {}).get(dd_tool))}
+        daydream_prs = _complete_cohort(evals, [dd_tool], dd_subset)
         has_dd = bool(daydream_prs)
-        saas_tools = sorted(
-            t for t in all_tools if t != dd_tool
-            and any(_leaf_present(evals.get(pr, {}).get(t)) for pr in dd_subset)
-        )
-        if len(saas_tools) < _MIN_SAAS_TOOLS_FOR_PANEL:
+        raw_saas_tools = sorted(t for t in all_tools if t != dd_tool)
+        saas_tools = [t for t in raw_saas_tools if bool(_complete_cohort(evals, [t], dd_subset))]
+        if len(raw_saas_tools) < _MIN_SAAS_TOOLS_FOR_PANEL:
             # Verify daydream-subset overlap so future re-judges still anchor cleanly.
-            skipped_judges.append({"id": canon, "dirs": b["dirs"], "saas_tools": len(saas_tools),
-                                   "reason": "no SaaS field (superseded or partial run)",
-                                   "daydream_overlap": len(daydream_prs)})
+            skipped_judges.append(_skip(canon, b, raw_saas_tools,
+                                        "no SaaS field (superseded or partial run)",
+                                        len(daydream_prs)))
             continue
 
         comparison_tools = saas_tools + ([dd_tool] if has_dd else [])
         cohort = _complete_cohort(evals, comparison_tools, dd_subset)
         if not cohort:
-            skipped_judges.append({"id": canon, "dirs": b["dirs"], "saas_tools": len(saas_tools),
-                                   "reason": "no complete common PR cohort",
-                                   "daydream_overlap": len(daydream_prs)})
+            skipped_judges.append(_skip(canon, b, saas_tools,
+                                        "no complete common PR cohort",
+                                        len(daydream_prs)))
             continue
 
         field = []
         for tool in saas_tools:
             agg = aggregate_tool(evals, tool, cohort)
-            if agg is None or agg["n_prs"] != len(cohort):
-                continue
+            assert agg is not None  # cohort guarantees a present leaf for every comparison tool
             agg["display"] = display_names.get(tool, tool)
             agg["color"] = tool_colors.get(tool, "#5B7C99")
             field.append(agg)
@@ -445,7 +448,8 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
 
     if not judges_out:
         lines = [
-            f"no eligible judge panel: every judge lacks a {_MIN_SAAS_TOOLS_FOR_PANEL}-SaaS-tool comparison field",
+            f"no eligible judge panel: every judge lacks a {_MIN_SAAS_TOOLS_FOR_PANEL}-SaaS-tool "
+            "comparison field or a complete common PR cohort",
         ]
         for s in skipped_judges:
             lines.append(f"  - {s['id']} ({s['saas_tools']} saas tools): {s['reason']}")
