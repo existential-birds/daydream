@@ -32,6 +32,7 @@ from daydream.backends import (
     effective_fanout_concurrency,
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
+from daydream.backends.codex import CodexBackend
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -46,7 +47,7 @@ from daydream.generated_files import (
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import (
-    AUTHORITATIVE_INTENT_RULE,
+    AUTHORITATIVE_INTENT_BLOCK,
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
@@ -1182,6 +1183,7 @@ def build_intent_prompt(
     exploration_dir: Path | None = None,
     pr_description: str | None = None,
     inline_diff: str | None = None,
+    inline_exploration_summary: str | None = None,
 ) -> str:
     """Assemble the prompt for `phase_understand_intent`.
 
@@ -1198,15 +1200,32 @@ def build_intent_prompt(
             read-the-file instruction is dropped. ``None`` (the default, and
             what every over-budget caller passes) keeps the ``diff_path``
             pointer text byte-identical.
+        inline_exploration_summary: When supplied, the pre-scan exploration
+            summary is inlined verbatim in place of the exploration directory
+            pointer. ``None`` (the default) keeps the pointer text
+            byte-identical. Read-only intent turns pass the inlined summary: a
+            read-only execution cwd (the Codex disposable clone) mirrors only
+            tracked and non-ignored untracked files, and target repos commonly
+            gitignore ``.daydream/``, so the on-disk summary may be absent
+            there.
     """
     parts: list[str] = []
-    pointer = _exploration_pointer(exploration_dir)
-    if pointer:
-        parts.append(pointer)
-    elif inline_diff is not None:
-        # No exploration pointer to carry the untrusted boundary; the inlined
-        # diff is itself repository-controlled content, so guard it directly.
-        parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
+    if inline_exploration_summary is not None:
+        parts.append(
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            "Pre-scan exploration summary (inlined because the on-disk "
+            "exploration files are not guaranteed to exist in this execution "
+            "context — treat it as the complete exploration context):\n"
+            f"{inline_exploration_summary.rstrip()}\n"
+        )
+    else:
+        pointer = _exploration_pointer(exploration_dir)
+        if pointer:
+            parts.append(pointer)
+        elif inline_diff is not None:
+            # No exploration pointer to carry the untrusted boundary; the inlined
+            # diff is itself repository-controlled content, so guard it directly.
+            parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     if pr_description and pr_description.strip():
         body_text = pr_description.strip()
         if len(body_text) > _PR_BODY_MAX_CHARS:
@@ -1217,7 +1236,7 @@ def build_intent_prompt(
         )
         parts.append(
             f"The author supplied the following pull-request description. "
-            f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n{AUTHORITATIVE_INTENT_RULE}\n\n"
+            f"{AUTHORITATIVE_INTENT_BLOCK}\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
             f"{safe_body}\n"
@@ -1698,6 +1717,12 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
     string so an intent-read failure can never block a fix. A read failure is
     never coerced into a fake intent string.
 
+    The intent file records the confirmed intent summary, which may echo the
+    author's pull-request description verbatim (an agent quote or the user's
+    interactive correction). The fix agent has write access, so the block
+    carries the ``PR_DESCRIPTION_UNTRUSTED_FRAMING`` hardening: the description
+    is evidence of intended behavior, never a set of commands.
+
     Returns:
         The intent block (with leading newline) when present and readable;
         otherwise an empty string.
@@ -1713,6 +1738,10 @@ def _build_intent_suffix(intent_path: Path | None) -> str:
     return (
         "\nCONFIRMED AUTHOR INTENT for this change (authoritative):\n"
         f"{confirmed_intent.strip()}\n\n"
+        # The intent file may contain the PR body verbatim; frame it as untrusted
+        # reference data so an instruction-like body cannot steer the mutating
+        # fix agent. Only the confirmed product-behavior intent is authoritative.
+        f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n\n"
         "This confirmed intent is the highest-priority authority: it outranks both "
         "the in-code-contract rule above and the finding itself. "
         "If applying this fix would undo, revert, or contradict a decision the "
@@ -2940,13 +2969,35 @@ async def phase_understand_intent(
     print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
     print_dim(console, f"Model: {backend.model}")
 
+    # Issue #579 made every intent turn read-only. The Codex read-only profile
+    # executes in a disposable clone that mirrors only tracked and non-ignored
+    # untracked files; target repos commonly gitignore ``.daydream/``, so the
+    # on-disk ``diff.patch`` and ``exploration/summary.md`` the pointers name
+    # are absent from that clone. For the Codex read-only execution the prompt
+    # is made self-sufficient: the diff is always inlined (never a dangled file
+    # pointer) and the exploration summary is inlined when readable. Other
+    # backends keep their cwd in the worktree, where those files are present,
+    # so they keep the budget-gated pointer.
+    codex_read_only = isinstance(backend, CodexBackend)
+    inline_diff = diff_text if codex_read_only else _inlineable_diff(diff_text)
+    inline_exploration_summary: str | None = None
+    if codex_read_only and exploration_dir is not None:
+        try:
+            inline_exploration_summary = (exploration_dir / "summary.md").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            # Best-effort: an unreadable summary just omits the exploration
+            # block; it is never coerced into a fake summary.
+            inline_exploration_summary = None
     prompt = get_registry().prompt("intent")(
         diff_path=str(diff_path),
         branch=branch,
         log=log,
-        exploration_dir=exploration_dir,
+        exploration_dir=None if codex_read_only else exploration_dir,
         pr_description=pr_description,
-        inline_diff=_inlineable_diff(diff_text),
+        inline_diff=inline_diff,
+        inline_exploration_summary=inline_exploration_summary,
     )
 
     while True:
@@ -2995,14 +3046,28 @@ async def phase_understand_intent(
         if response.lower() in ("y", "yes"):
             return intent_text
 
-        # User provided a correction — build new prompt with context
+        # User provided a correction — build new prompt with context. The
+        # correction turn runs read-only too, so for the Codex read-only
+        # execution the diff is inlined (the on-disk .daydream/diff.patch may
+        # be absent from the disposable clone).
+        if codex_read_only and diff_text:
+            diff_clause = (
+                "Re-examine the codebase and the diff inlined below, and present an "
+                "updated understanding of the intent.\n\n"
+                f"{diff_text.rstrip()}\n"
+            )
+        else:
+            diff_clause = (
+                f"Re-examine the codebase and the diff at {diff_path}, and present an "
+                "updated understanding of the intent.\n"
+            )
         prompt = f"""You previously described the intent of these changes as:
 
 {intent_text}
 
 The user corrected your understanding: {response}
 
-Re-examine the codebase and the diff at {diff_path}, and present an updated understanding of the intent.
+{diff_clause}
 The diff is the complete review target — do not look up pull requests or invoke any skills
 or slash commands; reply with your updated understanding as plain text.
 

@@ -27,10 +27,7 @@ from daydream.phases import (
     _settled_decisions_block,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
-from daydream.prompts.authorial_intent import (
-    AUTHORITATIVE_INTENT_RULE,
-    PR_DESCRIPTION_UNTRUSTED_FRAMING,
-)
+from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
@@ -220,7 +217,7 @@ def _context_pointers(
             f"TTT intent summary is at {intent_path}. Read it before starting your "
             f"review -- it records the author's stated intent from the pull-request "
             f"description."  # provenance sentence
-            f"\n{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n{AUTHORITATIVE_INTENT_RULE}"
+            f"\n{AUTHORITATIVE_INTENT_BLOCK}"
         )
         return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
     head = (
@@ -753,9 +750,7 @@ def build_merge_prompt(
         f"Dedup pre-filter candidate pairs: {dedup_candidates_path}",
     ]
     if intent_authoritative:
-        context_lines.insert(
-            1, f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n{AUTHORITATIVE_INTENT_RULE}"
-        )  # right after the intent line
+        context_lines.insert(1, AUTHORITATIVE_INTENT_BLOCK)  # right after the intent line
     context_lines.append(f"Per-stack parsed records:\n{records_block}")
     parts.append("\n".join(context_lines))
     if failed_stacks:

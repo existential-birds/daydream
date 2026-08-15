@@ -2428,9 +2428,16 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
 
 
+def _intent_calls(stub: _StubBackend) -> list[dict]:
+    """Recover the intent-phase calls by their stable instruction text."""
+    return [
+        c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
+    ]
+
+
 def _intent_prompt(stub: _StubBackend) -> str:
     """Recover the intent-phase prompt by its stable instruction text."""
-    return next(c["prompt"] for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower())
+    return next(c["prompt"] for c in _intent_calls(stub))
 
 
 def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
@@ -2654,9 +2661,7 @@ async def test_non_interactive_instruction_like_pr_body_stays_framed_and_read_on
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in intent  # ...but framed as untrusted
     _assert_authoritative_rule_gated(stub, expect_present=True)  # findings not suppressed
     # NEW #579: the intent turn ran against the read-only backend profile.
-    intent_calls = [
-        c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()
-    ]
+    intent_calls = _intent_calls(stub)
     assert intent_calls, "expected at least one intent call"
     assert all(c["read_only"] is True for c in intent_calls), intent_calls
 
