@@ -25,6 +25,7 @@ from daydream.improve.command_contract import (
     valid_repository_file_path,
     validate_applicability,
 )
+from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
 from tests.harness.improve_backend import install_improve_stub
 
@@ -290,6 +291,29 @@ def test_path_is_confined_allow_absolute_symlinked_ancestor(
     assert path_is_confined(repo, "improve")
     # The resolved spelling of the same path is confined too.
     assert path_is_confined(repo, (real / "repo" / "improve").as_posix(), allow_absolute=True)
+
+
+def test_canonicalize_working_directory_relative_and_dot(tmp_path: Path) -> None:
+    """Must-have #2: relative / ./ / trailing-slash / root spellings collapse."""
+    assert canonicalize_working_directory(tmp_path, ".") == "."
+    assert canonicalize_working_directory(tmp_path, "sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "./sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "sub/") == "sub"
+
+
+def test_canonicalize_working_directory_absolute_collapses_to_relative(tmp_path: Path) -> None:
+    """Must-have #1: an absolute in-repo spelling maps to its repo-relative form."""
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}") == "."
+
+
+def test_canonicalize_working_directory_all_spellings_share_one_key(tmp_path: Path) -> None:
+    """Discriminating: the SAME directory in every accepted spelling yields ONE key."""
+    spelled = {
+        canonicalize_working_directory(tmp_path, wd)
+        for wd in ("sub", "./sub", "sub/", f"{tmp_path}/sub")
+    }
+    assert spelled == {"sub"}
 
 
 def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(

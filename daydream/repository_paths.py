@@ -164,6 +164,28 @@ def canonicalize_directory_scope(value: str) -> str:
     return stripped
 
 
+def canonicalize_working_directory(repo: Path, value: str) -> str:
+    """Return ``value`` as the repo-relative posix form (``"."`` for the root).
+
+    Absolute, ``./``-prefixed, and plain relative spellings of the same
+    directory collapse to one repo-relative key. Accepted values are already
+    confinement-checked (``path_is_confined``), so the transform is lossless.
+    """
+    if value.startswith("/"):
+        parts = PurePosixPath(value.rstrip("/")).parts
+        for base in (
+            PurePosixPath(repo).parts,
+            PurePosixPath(str(repo.resolve())).parts,
+        ):
+            remainder = _strip_prefix(parts, base)
+            if remainder is not None:
+                return "/".join(remainder) or "."
+        # Not-under-repo absolute spellings are unreachable for
+        # confinement-checked callers; return unchanged as a defensive identity.
+        return value
+    return canonicalize_directory_scope(value)
+
+
 __all__ = [
     "DIRECTORY_SCOPE_PATTERN",
     "DIRECTORY_SCOPE_SCHEMA",
@@ -171,6 +193,7 @@ __all__ = [
     "REPOSITORY_FILE_PATH_SCHEMA",
     "REPOSITORY_FILE_PATH_SEGMENTS",
     "canonicalize_directory_scope",
+    "canonicalize_working_directory",
     "path_is_confined",
     "valid_directory_scope_lexical",
     "valid_repository_file_path",
