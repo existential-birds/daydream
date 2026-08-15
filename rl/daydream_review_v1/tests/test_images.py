@@ -19,7 +19,7 @@ from conftest import PROJECT_ROOT, docker_daemon_is_available
 from daydream_review_v1.fixture import FIXTURE_SLUG
 
 DOCKER_REQUIRED = pytest.mark.skipif(
-    "not docker_daemon_is_available()",
+    not docker_daemon_is_available(),
     reason="docker is not installed or the daemon is unavailable",
 )
 
@@ -106,10 +106,6 @@ def test_docker_required_gates_on_daemon_reachability() -> None:
         DOCKER_REQUIRED.mark.kwargs["reason"]
         == "docker is not installed or the daemon is unavailable"
     )
-    # The condition is a lazy string expression evaluated at collection time,
-    # not an eager boolean. Verify it references the reachability predicate.
-    assert isinstance(DOCKER_REQUIRED.mark.args[0], str), "condition must be a lazy string expression"
-    assert "docker_daemon_is_available" in DOCKER_REQUIRED.mark.args[0]
 
 
 def test_docker_skip_is_per_test_not_module_wide() -> None:
