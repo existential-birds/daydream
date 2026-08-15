@@ -36,6 +36,7 @@ from typing import Any
 import pytest
 
 from daydream import cli
+from daydream.phases import UnconfinedFindingError
 
 # Reuse the deep-pipeline stub from the exemplar instead of duplicating it.
 from tests.test_deep_orchestrator import (
@@ -158,18 +159,19 @@ def test_cli_main_wrong_branch_exits_1(
 def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A confinement ValueError that reaches cli.main renders actionably.
+    """A confinement rejection that reaches cli.main renders actionably.
 
     Defense-in-depth fallback: the primary fix routes the rejection through
     ``_step_fix`` before it reaches this handler, but if it ever escapes, the
     operator must see which class of finding is at fault, not a bare
-    "Fatal Error".
+    "Fatal Error". The handler matches by type (``UnconfinedFindingError``),
+    not by message string.
     """
     _silence(monkeypatch)
     _silence_cli_and_runner(monkeypatch)
 
     async def _raising_run(*a: Any, **k: Any) -> int:
-        raise ValueError("Finding file must be a confined repository-relative path")
+        raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
 
     monkeypatch.setattr("daydream.cli.run", _raising_run)
     monkeypatch.setattr(sys, "argv", ["daydream", str(git_repo)])
@@ -177,7 +179,8 @@ def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     with pytest.raises(SystemExit) as excinfo:
         cli.main()
     assert excinfo.value.code == 1
-    out = capsys.readouterr().out + capsys.readouterr().err
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
     assert "Finding file must be a confined repository-relative path" in out
     assert "Fatal Error" not in out  # actionable, not the bare generic string
 

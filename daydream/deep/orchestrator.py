@@ -101,6 +101,8 @@ from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
     CrossStackMergeError,
     FixResult,
+    UnconfinedFindingError,
+    _record_fix_failure,
     _resolve_finding_file_ref,
     _write_single_stack_merged_items,
     phase_alternative_review,
@@ -2640,7 +2642,7 @@ def _first_unconfined_finding(
     for item in items:
         try:
             _resolve_finding_file_ref(repo, item.get("file"))
-        except ValueError:
+        except UnconfinedFindingError:
             return item
     return None
 
@@ -2727,7 +2729,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     changed_files = _resolve_changed_files(ctx)
     async with phase_scope(DaydreamPhase.FIX):
         try:
-            fix_failures = await phase_fix_parallel(
+            fix_failures: dict[str, str] = await phase_fix_parallel(
                 ctx.backend_for("fix"),
                 work,
                 items,
@@ -2736,24 +2738,25 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 group_max_serial_items=group_serial,
                 changed_files=changed_files,
             )
-        except ValueError as exc:
+        except UnconfinedFindingError as exc:
             # Issue #574: the phase's preflight confinement gate raises on an
             # unconfined/missing/non-string finding ``file`` ref. Route it
             # through the same exception-failure recovery below (patch capture,
             # fix_failures persistence, tree restore, generated-file reject,
             # Stop(1)) instead of letting it escape to cli.py's generic
-            # handler. The failure entry is keyed by the finding's STABLE id --
-            # never the unconfined path -- so the unsafe ref cannot become a
-            # grouping key or restore argument.
+            # handler. Only this exact type is caught so a ValueError from
+            # elsewhere inside phase_fix_parallel (e.g. a parser) is never
+            # misattributed to an unconfined finding. The failure entry is
+            # keyed by the finding's STABLE id -- never the unconfined path --
+            # so the unsafe ref cannot become a grouping key or restore
+            # argument.
             offender = _first_unconfined_finding(work.repo, items)
             offender_id = offender.get("id") if offender else None
             offender_file = offender.get("file") if offender else None
-            fix_failures = {
-                str(offender_id) if offender_id is not None else "<unconfined-finding>": (
-                    f"{type(exc).__name__}: {exc} (finding {offender_id}, "
-                    f"file {offender_file!r})"
-                )
-            }
+            fix_failures = {}
+            fix_key = str(offender_id) if offender_id is not None else "<unconfined-finding>"
+            _record_fix_failure(fix_failures, fix_key, exc)
+            fix_failures[fix_key] += f" (finding {offender_id}, file {offender_file!r})"
             print_warning(
                 console,
                 f"Fix preflight rejected an unconfined finding "

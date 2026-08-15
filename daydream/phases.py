@@ -1755,20 +1755,47 @@ def _build_verifier_suffix(item: dict[str, Any]) -> str:
     return out
 
 
+class UnconfinedFindingError(ValueError):
+    """A finding's ``file`` reference failed the fix preflight confinement gate.
+
+    Raised by ``_resolve_finding_file_ref`` (via the fix preflight) when a
+    finding's ``file`` value is missing/non-string or escapes the repository
+    (lexical violations, absolute paths, parent traversal, or symlink
+    escapes). Matched by type -- never by message -- so a ``ValueError`` from
+    elsewhere (e.g. a parser) is never misattributed to an unconfined finding
+    (issue #574). Callers either route it through the fix-failure recovery in
+    ``_step_fix`` or render it actionably in ``cli.main``.
+    """
+
+
+def _record_fix_failure(
+    fix_failures: dict[str, str],
+    fix_key: str,
+    exc: BaseException,
+) -> None:
+    """Record one exception-failed fix group in ``fix_failures``.
+
+    Writes ``"<ExceptionType>: <message>"`` under ``fix_key``, matching the
+    exception-entry format produced inside ``phase_fix_parallel`` so callers
+    can distinguish exception entries from budget stops by the prefix.
+    """
+    fix_failures[fix_key] = f"{type(exc).__name__}: {exc}"
+
+
 def _resolve_finding_file_ref(repo: Path, value: object) -> str:
     """Resolve a finding ``file`` reference to the string used in fix prompts.
 
     Confinement gate for every fix entry point: rejects non-string values
     (including ``None``/absent) and any reference that escapes the repository
     (lexical violations, absolute paths, parent traversal, or symlink escapes)
-    with a fixed, non-reflective ``ValueError``. An existing confined file
-    resolves to its canonical absolute path; a missing-but-confined path is
-    preserved unchanged (relative string).
+    with a fixed, non-reflective :class:`UnconfinedFindingError`. An existing
+    confined file resolves to its canonical absolute path; a missing-but-
+    confined path is preserved unchanged (relative string).
     """
     if not isinstance(value, str):
-        raise ValueError("Finding file must be a confined repository-relative path")
+        raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
     if not path_is_confined(repo, value):
-        raise ValueError("Finding file must be a confined repository-relative path")
+        raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
     candidate = repo / value
     if candidate.is_file():
         return str(candidate.resolve())
@@ -1780,9 +1807,10 @@ def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str
 
     Shared preflight for the batched and parallel fix entry points: rejects
     the whole batch when ANY item's reference is missing/non-string or
-    unconfined (fixed, non-reflective ``ValueError``), before any grouping,
-    progress output, or prompt construction. All batch items target the same
-    file, so the first item's canonical resolution is the group's.
+    unconfined (fixed, non-reflective :class:`UnconfinedFindingError`), before
+    any grouping, progress output, or prompt construction. All batch items
+    target the same file, so the first item's canonical resolution is the
+    group's.
     """
     file_ref = _resolve_finding_file_ref(repo, items[0].get("file"))
     for item in items[1:]:
@@ -2047,10 +2075,11 @@ async def phase_fix_parallel(
     """
     # Preflight confinement gate: validate EVERY item's file reference before
     # grouping, progress, prompt construction, recovery, or dispatch. An
-    # unconfined (or missing/non-string) reference raises ValueError and aborts
-    # the whole run fast, so the unsafe path never becomes a grouping key,
-    # fork name, failures entry, or checkout recovery argument. The returned
-    # refs are discarded -- per-fix calls recompute them.
+    # unconfined (or missing/non-string) reference raises
+    # UnconfinedFindingError and aborts the whole run fast, so the unsafe path
+    # never becomes a grouping key, fork name, failures entry, or checkout
+    # recovery argument. The returned refs are discarded -- per-fix calls
+    # recompute them.
     _preflight_finding_file_refs(work.repo, items)
 
     raw_groups = group_items_by_file(items)

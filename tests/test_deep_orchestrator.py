@@ -816,11 +816,12 @@ async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
 
     The ``src/handler.py`` finding is confined *lexically* (so it passes the
     ``_step_fix_gate`` changed_files partition) but escapes via a symlink, so
-    ``phase_fix_parallel``'s preflight raises ``ValueError``. The guarded
-    caller must run the recovery machinery, leave no dangling pre-fix stash,
-    archive ``recommended.patch``, mark the run partial, name the offending
-    item, and return ``Stop(1)`` (exit 1) rather than let the ValueError reach
-    cli.py's generic handler.
+    ``phase_fix_parallel``'s preflight raises ``UnconfinedFindingError``. The
+    guarded
+    caller must run the recovery machinery, avoid creating the fix-group
+    sentinel for the aborted group, archive ``recommended.patch``, mark the run
+    partial, name the offending item, and return ``Stop(1)`` (exit 1) rather
+    than let the exception reach cli.py's generic handler.
     """
     from daydream.runner import run
 
@@ -871,7 +872,7 @@ async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
     assert not (multi_stack_target / ".fixed-src_handler_py").exists()
 
     # (c) the CLI output names the offending item by id and/or file ref.
-    assert any("src/handler.py" in m or "1" in m for m in warnings), warnings
+    assert any("src/handler.py" in m for m in warnings), warnings
 
 
 async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
