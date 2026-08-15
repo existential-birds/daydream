@@ -564,6 +564,30 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED
 
 
+async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
+    corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """_prepare_verify_checkout must derive its candidate diff through
+    rundir._candidate_diff_cmd (the single source) and apply it behind an
+    empty-guard, so an empty diff is a clean no-op and a failed diff never
+    pipes raw/partial output into git apply.
+    """
+    from daydream_review_v1 import taskset
+    from daydream_review_v1.rundir import _candidate_diff_cmd
+    from conftest import FakeRuntime
+    import shlex
+
+    rt = FakeRuntime(exit_code=0)
+    repo, head_sha = "/work/repo", "deadbeef"
+    await taskset._prepare_verify_checkout(rt, repo, head_sha)
+
+    script = rt.commands[0][2]  # the single sh -c script
+    # (a) single derivation site: the script embeds the helper's argv
+    assert shlex.join(_candidate_diff_cmd(repo, head_sha)) in script
+    # (b) empty-guard: the apply is skipped when the diff is empty
+    assert "[ ! -s " in script and "apply" in script
+
+
 async def test_green_unrelated_edit_gets_no_suite_reward(
     tmp_path: Path, runtime, corpus_mini_dir: Path, fixture_manifest_path: Path,
 ) -> None:

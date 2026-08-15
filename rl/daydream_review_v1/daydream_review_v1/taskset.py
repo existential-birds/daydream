@@ -31,7 +31,12 @@ from daydream.training.reward import score_trajectory
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from verifiers.v1.errors import boundary
 
-from daydream_review_v1.rundir import DEFAULT_ARCHIVE_ROOT, fetch_run_dir, verify_seal
+from daydream_review_v1.rundir import (
+    DEFAULT_ARCHIVE_ROOT,
+    _candidate_diff_cmd,
+    fetch_run_dir,
+    verify_seal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,12 +369,23 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
         mutable tree.
     """
     verify_dir = f"{repo}-verify"
+    patch = f"{verify_dir}.candidate.patch"
+    # The candidate diff must come from the shared single source
+    # (rundir._candidate_diff_cmd), never a second hardcoded spelling, or the
+    # load-bearing `exit != 0 -> empty` contract drifts between sites. It runs
+    # as a separate step into a patch file and applies behind an empty-guard:
+    # a genuinely empty diff (review-only rollout, no committed fix) is a clean
+    # no-op, while a failed diff short-circuits the && chain to None — raw or
+    # partial output is never piped into git apply.
+    diff_cmd = shlex.join(_candidate_diff_cmd(repo, head_sha))
     script = (
         f"rm -rf {shlex.quote(verify_dir)} && "
         f"git clone -q {shlex.quote(repo)} {shlex.quote(verify_dir)} && "
         f"git -C {shlex.quote(verify_dir)} checkout -q --detach {shlex.quote(head_sha)} && "
-        f"git -C {shlex.quote(repo)} diff {shlex.quote(head_sha)} HEAD "
-        f"| git -C {shlex.quote(verify_dir)} apply - && "
+        f"{diff_cmd} > {shlex.quote(patch)} && "
+        f"( [ ! -s {shlex.quote(patch)} ] || "
+        f"git -C {shlex.quote(verify_dir)} apply {shlex.quote(patch)} ) && "
+        f"rm -f {shlex.quote(patch)} && "
         f"chown -R root:root {shlex.quote(verify_dir)} && "
         f"chmod -R a-w {shlex.quote(verify_dir)}"
     )
