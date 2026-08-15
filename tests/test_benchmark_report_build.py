@@ -793,7 +793,9 @@ def built_report(
     return r, out_dir
 
 
-def test_report_entrypoint_omits_unsupported_recommendations(built_report: tuple[subprocess.CompletedProcess[str], Path]) -> None:
+def test_report_entrypoint_omits_unsupported_recommendations(
+    built_report: tuple[subprocess.CompletedProcess[str], Path]
+) -> None:
     """Real entrypoint on a no-evidence corpus: empty improvements, neutral placeholder, no hardcoded advice."""
     _, out_dir = built_report
     data = json.loads((out_dir / "data.json").read_text())
