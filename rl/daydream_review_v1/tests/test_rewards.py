@@ -197,6 +197,18 @@ _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@
 
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
 
+# A gutted suite that PASSES if run: a vulnerable impl that executes the
+# tampered oracle gets exit 0 -> reward 1.0. The gate must return 0.0 instead.
+_TAMPER_PASSING = (
+    "import unittest\n\n"
+    "class TestCalc(unittest.TestCase):\n"
+    "    def test_placeholder(self) -> None:\n"
+    "        pass\n"
+)
+
+# Overwriting the tracked tests/__init__.py to skip discovery: suite still exits 0.
+_TAMPER_SKIPALL = 'import unittest\nraise unittest.SkipTest("gutted")\n'
+
 
 def test_rundir_golden_user_messages_are_inert(rundir_golden: Path) -> None:
     """Defensive regression guard only: every user-authored step in the
@@ -342,6 +354,7 @@ async def test_fix_tests_pass_green(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
 async def test_fix_tests_pass_red(
@@ -357,6 +370,291 @@ async def test_fix_tests_pass_red(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("edit", "tamper_rel", "tamper_content"),
+    [
+        # test-source-tamper: overwrite a tracked test with a passing suite
+        (None, "tests/test_calc.py", _TAMPER_PASSING),
+        # test-package-config: overwrite tracked tests/__init__.py to skip discovery
+        (None, "tests/__init__.py", _TAMPER_SKIPALL),
+        # untracked oracle file: a real fix (calc.py) plus a NEW non-ignored
+        # tests/pytest.ini — ls-files --others must catch it
+        (_CALC_FIXED, "tests/pytest.ini", "[pytest]\n"),
+    ],
+    ids=["test-source-tamper", "test-package-config-tamper", "untracked-oracle-file"],
+)
+async def test_fix_tests_pass_rejects_protected_test_path_changes(
+    edit: str | None,
+    tamper_rel: str,
+    tamper_content: str,
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A changed test oracle earns a literal zero, never the w_tests reward.
+
+    Every tamper row is deliberately green-if-run: a vulnerable impl that
+    executes the tampered oracle gets exit 0 -> reward 1.0. The gate must
+    return 0.0 without running test_command. Staging a real
+    ``deep/test-verdict.json`` claim makes the tripwire load-bearing: any
+    execution of test_command records ``test_claim_mismatch`` (0.0 on this
+    green tampered suite, 1.0 if it ran red), so its absence below proves the
+    gate held rather than passing vacuously over an empty archive.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=edit)
+    (repo / tamper_rel).write_text(tamper_content, encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    # The staged claim (passed=True) means ANY test_command execution would
+    # record test_claim_mismatch; its absence proves the gate held.
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_fails_closed_on_git_error(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A Git error in the oracle comparison must read as 'changed' (zero reward).
+
+    The staged ``deep/test-verdict.json`` claim makes the tripwire assertion
+    load-bearing: a gate that ran test_command (on this green fixed repo) would
+    record ``test_claim_mismatch``, so its absence proves the fail-closed branch
+    returned 0.0 without running the suite.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    # The uncommitted calc.py fix makes _fixes_applied return True via the
+    # dirty-tree check (no head_sha resolution); the gate then diff's an
+    # unresolvable baked SHA -> exit 128 -> fail closed.
+    task.data = task.data.model_copy(update={"head_sha": "0" * 40})
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+@pytest.mark.parametrize(
+    "flag",
+    ["--skip-worktree", "--assume-unchanged"],
+    ids=["skip-worktree", "assume-unchanged"],
+)
+async def test_oracle_gate_rejects_flag_tampered_tracked_file(
+    flag: str,
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A skip-worktree/assume-unchanged flag hides tamper from the diff probe.
+
+    git reads a file carrying either flag from the INDEX, not the worktree, so a
+    tampered tracked protected file reads as clean to ``git diff`` (exit 0). The
+    flag probe (``git ls-files -v``) must fail closed: setting the flag on any
+    protected file is itself tampering with the oracle's verifiability.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    # A real fix (calc.py) plus a flagged, gutted tracked test: diff is fooled,
+    # so only the flag probe stands between this and a free w_tests.
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "update-index", flag, "tests/test_calc.py"],
+        check=True,
+    )
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_rejects_tracked_gitignore_edit(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A tracked .gitignore edit masking a new oracle file must fail closed.
+
+    ``git ls-files --exclude-standard`` honors the repo's own ignore rules, so a
+    rollout that edits the tracked ``.gitignore`` to ignore a new untracked
+    tests/pytest.ini hides that file from the untracked probe. The diff probe
+    covers those ignore files (``:(glob)**/.gitignore``), so the edit itself
+    must read as an oracle change.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    gitignore = repo / ".gitignore"
+    gitignore.write_text(gitignore.read_text(encoding="utf-8") + "tests/pytest.ini\n", encoding="utf-8")
+    (repo / "tests/pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_rejects_info_exclude_rule(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A rule written to .git/info/exclude must fail closed.
+
+    ``--exclude-standard`` reads the rollout-controlled ``.git/info/exclude``,
+    so a rule written there can mask an untracked oracle file with zero tracked
+    changes. A fresh clone's file is comments-only; any real rule means the
+    oracle changed.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    info_exclude = repo / ".git/info/exclude"
+    info_exclude.write_text(info_exclude.read_text(encoding="utf-8") + "tests/conftest.py\n", encoding="utf-8")
+    (repo / "tests/conftest.py").write_text("", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A core.excludesFile rule masking an untracked oracle file must fail closed.
+
+    ``git ls-files --exclude-standard`` honors the repo-local ``core.excludesFile``
+    set in the untracked ``.git/config`` — a file the gate never probes — so a
+    rollout could otherwise hide an untracked tests/pytest.ini behind it and pass
+    every probe. The untracked probe runs with ``-c core.excludesFile=``, which
+    also neutralizes the global excludes file (``$HOME/.config/git/ignore``), so
+    the file is listed and the oracle reads as changed.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    ignores = repo.parent / "excludes"
+    ignores.write_text("tests/pytest.ini\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.excludesFile", str(ignores)],
+        check=True,
+    )
+    (repo / "tests/pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
+
+
+async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """A green suite's own bytecode under protected paths must not trip the gate.
+
+    The untracked probe lists every untracked file under a protected path (no
+    ``--exclude-standard``), so the ``__pycache__/`` and ``*.py[cod]`` files a
+    legitimate test run drops while importing ``tests/`` would otherwise read as
+    an oracle change and withhold ``w_tests`` from a genuinely fixed tree. Those
+    artifacts are excluded explicitly via ``ORACLE_BENIGN_PATHSPECS`` — never
+    loaded by the runner, so excluding them cannot hide a real oracle file.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    pycache = repo / "tests" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "test_calc.cpython-312.pyc").write_bytes(b"x")
+    (repo / "tests" / "test_calc.pyc").write_bytes(b"x")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
+    assert trace.rewards["fix_tests_pass"] == 1.0
+
+
+async def test_oracle_gate_rejects_root_sitecustomize(
+    tmp_path: Path,
+    runtime,
+    rundir_golden: Path,
+    corpus_mini_dir: Path,
+    fixture_manifest_path: Path,
+) -> None:
+    """An untracked root sitecustomize.py that exits 0 must fail closed.
+
+    ``sitecustomize.py`` is imported from the repository root by every ``python``
+    invocation ``test_command`` runs (cwd is on ``sys.path``), so one that calls
+    ``sys.exit(0)`` makes a suite that never ran look green. It sits outside the
+    declared protected paths, so the untracked probe must cover it explicitly.
+    """
+    archive_root = tmp_path / "archive"
+    _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
+    (repo / "sitecustomize.py").write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+    trace = _trace(task, archive_root=archive_root, repo_path=repo)
+
+    await task.score(trace, runtime)
+
+    assert trace.metrics["fixes_applied"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 0.0
+    assert trace.rewards["fix_tests_pass"] == 0.0
+    assert "test_claim_mismatch" not in trace.metrics
 
 
 @pytest.mark.parametrize(
@@ -611,6 +909,7 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.rewards["fix_tests_pass"] == 1.0
+    assert trace.metrics["test_oracle_unchanged"] == 1.0
 
 
 async def test_committed_daydream_artifacts_not_a_fix(
