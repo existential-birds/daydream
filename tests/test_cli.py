@@ -43,6 +43,14 @@ def test_backend_flag_codex(monkeypatch, flag):
     assert config.backend == "codex"
 
 
+@pytest.mark.parametrize("flag", ["--backend", "-b"], ids=["long", "short"])
+def test_backend_flag_osprey(monkeypatch, flag):
+    """Accept each backend flag spelling and select the Osprey backend."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", flag, "osprey"])
+    config = _parse_args()
+    assert config.backend == "osprey"
+
+
 def test_invalid_backend_rejected(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/project", "--backend", "invalid"])
     with pytest.raises(SystemExit):
