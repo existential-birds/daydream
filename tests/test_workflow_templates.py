@@ -150,6 +150,21 @@ def test_command_workflows_dispatch_approved_head() -> None:
     )
 
 
+def test_template_command_workflow_dispatches_approved_head() -> None:
+    """The packaged command template binds the PR head at approval time."""
+    path = TEMPLATES_DIR / "daydream-command.yml"
+    wf = load_workflow(path)
+    dispatch = next(
+        step
+        for step in job_steps(wf, "dispatch")
+        if "gh workflow run daydream-review.yml" in step.get("run", "")
+    )
+    assert "approved_head_sha" in dispatch["run"]
+    assert "gh api" in dispatch["run"] and ".head.sha" in dispatch["run"]
+    assert "PR_NUMBER" in dispatch["env"]
+    assert "actions/checkout" not in path.read_text(encoding="utf-8")
+
+
 def test_review_workflow_head_bound_gate() -> None:
     """The live Codex review workflow requires an approved head and cleans up auth."""
     wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
