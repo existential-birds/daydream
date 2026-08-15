@@ -223,6 +223,34 @@ def test_template_review_workflow_head_bound_gate() -> None:
     assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
 
 
+def test_single_workflow_head_bound_gate() -> None:
+    """The single-file setup is comment-only and enforces the approved head."""
+    path = TEMPLATES_DIR / "single" / "daydream.yml"
+    wf = load_workflow(path)
+
+    assert "pull_request" not in _wf_triggers(wf)
+
+    gate = wf["jobs"]["gate"]
+    assert "approved_head_sha" in gate["outputs"]
+    decide = next(step for step in gate["steps"] if step.get("name") == "Decide and resolve PR")
+    assert "approved_head_sha" in decide.get("outputs", {}) or "head.sha" in decide.get("run", "")
+
+    steps = wf["jobs"]["analyze"]["steps"]
+    verify = next(
+        step
+        for step in steps
+        if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
+    )
+    checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
+    assert steps.index(verify) < checkout_idx
+    review = next(
+        step
+        for step in steps
+        if "daydream" in step.get("run", "") and "--approved-head-sha" in step.get("run", "")
+    )
+    assert "APPROVED_HEAD_SHA" in review["env"]
+
+
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
 def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
     wf = load_workflow(wf_path)

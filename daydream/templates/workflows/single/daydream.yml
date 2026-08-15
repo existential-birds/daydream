@@ -26,76 +26,76 @@
 name: Daydream
 
 on:
-  pull_request:
-    types: [opened, ready_for_review]
   issue_comment:
     types: [created]
 
 permissions: {}
 
 jobs:
-  # Decides whether to proceed and resolves the PR number. Holds the App key for
-  # the 👀 acknowledgement but never checks out code, so it may be privileged.
+  # Accepts a trusted review command and resolves its immutable target head.
+  # Holds the App key for API reads and the acknowledgement, but never checks
+  # out code, so it may be privileged.
   gate:
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    # Auto-review a same-repo PR on open (unless disabled), OR a trusted, non-bot
-    # `@<bot> review` comment on a PR. Fork auto-review is intentionally excluded
-    # (fork PRs get no secrets); forks are served by the comment path.
     if: >-
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       vars.DAYDREAM_AUTO_REVIEW != 'false') ||
-      (github.event_name == 'issue_comment' &&
-       github.event.issue.pull_request &&
-       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
-       github.event.comment.user.type != 'Bot')
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) &&
+      github.event.comment.user.type != 'Bot'
     permissions: {}
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
+      approved_head_sha: ${{ steps.decide.outputs.approved_head_sha }}
     steps:
-      # For pull_request the event carries the PR number directly. For a comment,
-      # match the exact `@<handle> review` command (body via env only, footgun 2);
-      # a non-matching comment sets proceed=false and the downstream jobs skip.
-      - name: Decide and resolve PR
-        id: decide
+      - name: Match review command
+        id: match
         env:
-          EVENT_NAME: ${{ github.event_name }}
           BODY: ${{ github.event.comment.body }}
           BOT_HANDLE: ${{ vars.DAYDREAM_BOT_HANDLE }}
-          PR_EVENT_NUMBER: ${{ github.event.pull_request.number }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            echo "proceed=true" >> "$GITHUB_OUTPUT"
-            echo "pr_number=${PR_EVENT_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Single-quoted sed script holds literal regex metacharacters, not shell expansions.
+          # shellcheck disable=SC2016
+          ESCAPED_HANDLE=$(printf '%s' "$BOT_HANDLE" | sed 's/[].[\*^$()+?{}|\\]/\\&/g')
+          if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
+            echo "matched=true" >> "$GITHUB_OUTPUT"
           else
-            # Single-quoted sed script holds literal regex metacharacters, not shell expansions.
-            # shellcheck disable=SC2016
-            ESCAPED_HANDLE=$(printf '%s' "$BOT_HANDLE" | sed 's/[].[\*^$()+?{}|\\]/\\&/g')
-            if printf '%s' "$BODY" | grep -Eq "(^|[[:space:]])@${ESCAPED_HANDLE}[[:space:]]+review([[:space:]]|$)"; then
-              echo "proceed=true" >> "$GITHUB_OUTPUT"
-              echo "pr_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
-            else
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-            fi
+            echo "matched=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Mint the App token so the 👀 reaction is signed by the bot identity rather
-      # than github-actions[bot]. Scoped to pull-requests: write only — no
-      # actions: write, because nothing is dispatched. The token never appears in
-      # a run: body.
+      # Mint the App token before resolving the trusted target and acknowledging
+      # the command. The token never appears in a run: body.
       - name: Mint ack token
         id: token
-        if: github.event_name == 'issue_comment' && steps.decide.outputs.proceed == 'true'
+        if: steps.match.outputs.matched == 'true'
         uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
         with:
           app-id: ${{ secrets.DAYDREAM_APP_ID }}
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
           permission-pull-requests: write
 
+      - name: Decide and resolve PR
+        id: decide
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          MATCHED: ${{ steps.match.outputs.matched }}
+        run: |
+          if [ "$MATCHED" != "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HEAD_SHA="$(gh api "repos/$REPO/pulls/$ISSUE_NUMBER" --jq .head.sha)"
+          if [ -z "$HEAD_SHA" ]; then
+            echo "Unable to resolve the head SHA for PR #$ISSUE_NUMBER" >&2
+            exit 1
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "approved_head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Acknowledge with eyes reaction
-        if: github.event_name == 'issue_comment' && steps.decide.outputs.proceed == 'true'
+        if: steps.decide.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPO: ${{ github.repository }}
@@ -114,28 +114,34 @@ jobs:
       pull-requests: read
     env:
       PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
+      APPROVED_HEAD_SHA: ${{ needs.gate.outputs.approved_head_sha }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-          # This job handles untrusted PR code; don't leave the GITHUB_TOKEN in .git/config.
-          persist-credentials: false
-
-      # Resolve the base ref, then fetch and detach the PR head. `refs/pull/N/head`
-      # resolves the same for same-repo and fork PRs. PR number via env, never
-      # inline interpolation (footgun 2).
-      - name: Fetch PR head and base ref
+      - name: Verify approved PR head and resolve base ref
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
+          LIVE_HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
+            echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
+            exit 1
+          fi
           BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq .baseRefName)"
-          git fetch origin "refs/pull/${PR_NUMBER}/head"
-          git checkout --detach FETCH_HEAD
-          git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out approved PR head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.gate.outputs.approved_head_sha }}
+          fetch-depth: 0
+          # This job handles untrusted PR code; don't leave the GITHUB_TOKEN in .git/config.
+          persist-credentials: false
+
+      - name: Fetch base ref
+        env:
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
 
       - name: Set up uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
@@ -154,9 +160,11 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GH_TOKEN: ${{ github.token }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          APPROVED_HEAD_SHA: ${{ needs.gate.outputs.approved_head_sha }}
         run: |
           mkdir -p findings
           daydream --non-interactive --pr-number "$PR_NUMBER" \
+            --approved-head-sha "$APPROVED_HEAD_SHA" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
 
       - name: Upload findings artifact
