@@ -1,7 +1,7 @@
 """Container image contracts: immutable base inputs and the green-baseline gate.
 
-Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
-no Docker at all — they assert the build pins every remote input to an immutable
+Two kinds of contract live here. The static ``base.Dockerfile`` and ``repo.Dockerfile`` checks run
+with no Docker at all — they assert the build pins every remote input to an immutable
 version and verifies it for integrity before use. A **fast** tier — no Docker
 required — rejects ``--red`` invocations that cannot select the fixture repo,
 ensuring the guard fires before any build side-effect. The two ``slow`` tests
@@ -33,10 +33,10 @@ FIXTURE_IMAGE = "daydream-rl/fixture"
 BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
 
 
-def _build(*args: str) -> subprocess.CompletedProcess[str]:
+def _build(base_image: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
     return subprocess.run(
-        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", *args],
+        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", base_image, *args],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -79,7 +79,7 @@ def test_red_rejects_invocations_without_fixture(
     argv: list[str], expected_stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """--red must fail fast (status 2) when no fixture PR is selected, before any build."""
-    monkeypatch.setattr(build_images, "_build_base", lambda: 0)
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, None))
     monkeypatch.setattr(build_images, "_stream", lambda *args, **kwargs: None)
 
     status = build_images.main(argv)
@@ -90,11 +90,136 @@ def test_red_rejects_invocations_without_fixture(
     assert captured.err == f"{expected_stderr}\n"
 
 
+def test_no_base_requires_immutable_base_identity() -> None:
+    """A --no-base snapshot build needs an explicit immutable base identity (status 2)."""
+    # Missing value: argparse refuses the invocation before any build.
+    with pytest.raises(SystemExit) as exc:
+        build_images.main(["--no-base"])
+    assert exc.value.code == 2
+
+    # The mutable latest alias is not an accepted immutable identity.
+    status = build_images.main(["--no-base", build_images.BASE_LATEST])
+    assert status == 2
+
+
+def test_no_base_requires_the_base_image_to_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A well-formed but locally absent --no-base identity fails fast (status 2).
+
+    It must never reach a per-repo build: the failure is a configuration error
+    (exit 2), not a per-PR build failure (exit 1).
+    """
+    built: list[str] = []
+    monkeypatch.setattr(build_images, "_base_image_present", lambda _: False)
+    monkeypatch.setattr(build_images, "build_repo_image", lambda *a, **k: built.append("built"))
+
+    status = build_images.main(["--only", FIXTURE_SLUG, "--no-base", "daydream-rl/base:v1.2.3"])
+    assert status == 2
+    assert not built, "an absent base image must be refused before any repo build"
+
+
+def test_immutable_base_image_accepts_only_versioned_identities() -> None:
+    """The validator accepts versioned tags/digests; aliases and junk are refused."""
+    digest_hex = "a" * 64
+    accepted = [
+        "daydream-rl/base:v1.2.3",
+        "daydream-rl/base:1.2.3",
+        "daydream-rl/base:v0.1.2-3-g5ce4c0e-dirty",  # git describe output
+        f"daydream-rl/base@sha256:{digest_hex}",
+        "daydream-rl/base:r2d2",  # Docker-grammar tag containing a digit
+        "daydream-rl/base:deadbeef",  # digit-free git describe --always fallback (untagged clone)
+        "daydream-rl/base:deadbeef-dirty",  # ...with a dirty tree
+    ]
+    rejected = [
+        build_images.BASE_LATEST,           # the mutable alias
+        "daydream-rl/base:stable",          # unversioned aliases
+        "daydream-rl/base:dev",
+        "daydream-rl/base:nightly",
+        "daydream-rl/base:main",
+        "daydream-rl/base:-foo",            # docker grammar: leading dash
+        "daydream-rl/base:foo/bar",         # docker grammar: slash
+        "daydream-rl/base:has space",       # docker grammar: whitespace
+        "daydream-rl/base:",                # empty tag
+        "daydream-rl/base:v1.2.3\n",        # trailing newline is not part of the identity
+        f"daydream-rl/base@sha256:{'x' * 64}",  # not hex
+        f"daydream-rl/base@sha256:{digest_hex[:-1]}",  # 63 hex, not 64
+        f"daydream-rl/base@sha256:{digest_hex}\n",  # trailing newline
+    ]
+    for value in accepted:
+        assert build_images._immutable_base_image(value) == value, value
+    for value in rejected:
+        assert build_images._immutable_base_image(value) is None, value
+
+
+def test_build_base_selects_the_versioned_tag_not_the_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_build_base returns the immutable versioned tag by shape, never by position."""
+    versioned = "daydream-rl/base:v1.2.3-3-g5ce4c0e"
+
+    # Versioned tag first, as build_base_image emits it today.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [versioned, build_images.BASE_LATEST])
+    assert build_images._build_base() == (0, versioned)
+
+    # Alias first: the selection must not depend on the tag-list order.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [build_images.BASE_LATEST, versioned])
+    assert build_images._build_base() == (0, versioned)
+
+    # No immutable identity in the tags at all: a failure, never a bare alias.
+    monkeypatch.setattr(build_images, "build_base_image", lambda: [build_images.BASE_LATEST])
+    assert build_images._build_base() == (1, None)
+
+
+def test_main_uses_immutable_base_for_repository_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fresh and --no-base paths both pass exactly one immutable base to every repo build."""
+    versioned = "daydream-rl/base:v1.2.3"
+    digest = "daydream-rl/base@sha256:" + "a" * 64
+
+    received: list[str] = []
+
+    def _record(entry, *, head_sha, base_sha, base_image, red):
+        received.append(base_image)
+        return f"{entry.image}:{head_sha[:12]}"
+
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, versioned))
+    monkeypatch.setattr(build_images, "build_repo_image", _record)
+    monkeypatch.setattr(build_images, "_base_image_present", lambda _: True)
+
+    # Fresh path (no --no-base): every build uses the versioned tag from the base build.
+    assert build_images.main(["--only", FIXTURE_SLUG]) == 0
+    assert received, "fresh path built no repo image"
+    assert received == [versioned] * len(received)
+
+    # --no-base path: every build uses the explicit immutable identity.
+    received.clear()
+    assert build_images.main(["--only", FIXTURE_SLUG, "--no-base", digest]) == 0
+    assert received == [digest] * len(received)
+
+    # The mutable alias is never selected for a snapshot build.
+    assert build_images.BASE_LATEST not in received
+
+
+def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
+    """repo.Dockerfile must declare ARG BASE_IMAGE with no mutable default."""
+    text = (PROJECT_ROOT / "images" / "repo.Dockerfile").read_text(encoding="utf-8")
+    arg_line = next(line for line in text.splitlines() if line.startswith("ARG BASE_IMAGE"))
+    assert "=" not in arg_line, f"ARG BASE_IMAGE must have no default: {arg_line!r}"
+    assert "latest" not in arg_line
+    # The base is still consumed via FROM, declared after the ARG.
+    assert text.find("FROM ${BASE_IMAGE}") > text.find("ARG BASE_IMAGE")
+    assert "daydream-rl/base:latest" not in text
+    # The comment spelling the accepted identity grammar must stay in sync with
+    # the single source of truth in build_images.py, so a grammar change cannot
+    # leave this Dockerfile silently out of date.
+    assert build_images.IMMUTABLE_BASE_FORMAT in text
+
+
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
-    result = _build("--red")
+    result = _build(base_image, "--red")
     combined = result.stdout + result.stderr
 
     assert result.returncode != 0, "a red baseline built successfully — the gate is not enforcing"
@@ -122,8 +247,9 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
 @DOCKER_REQUIRED
 def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     """The happy path, end to end: image builds, suite green, origin is local."""
-    result = _build()
+    result = _build(base_image)
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
+    assert f"skipping base build; reusing {base_image}" in result.stdout
 
     tag = f"{FIXTURE_IMAGE}:{'9b92381663058612621b186545f91bfb3a54079c'[:12]}"
     assert tag in _tags(), f"{tag} not built; have {_tags()}"

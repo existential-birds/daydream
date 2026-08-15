@@ -17,10 +17,9 @@ from verifiers.v1.runtimes.subprocess import SubprocessConfig, SubprocessRuntime
 
 from daydream_review_v1.fixture import FixtureRepo, build_fixture_repo
 from daydream_review_v1.stub_upstream import serve
+from images import build_images
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-BASE_IMAGE = "daydream-rl/base:latest"
 
 
 def docker_daemon_is_available() -> bool:
@@ -39,21 +38,21 @@ def docker_daemon_is_available() -> bool:
 
 @pytest.fixture(scope="session")
 def base_image() -> str:
-    """The shared base image every PR-snapshot image is ``FROM``, built if absent.
+    """The versioned base image every PR-snapshot image is ``FROM``, built if absent.
 
-    Without it a repository build on a clean docker host dies at the first layer,
-    nowhere near the green-baseline gate the image tests exist to prove. An
-    existing base is reused rather than rebuilt: rebuilding costs a wheel build
-    plus three CLI installs, and the tests below are about the repo image.
+    The versioned tag (``base_tag()``, e.g. ``daydream-rl/base:v0.1.2-3-g5ce4c0e``)
+    is returned rather than the mutable ``latest`` alias, so every snapshot build
+    the slow tests drive pins an explicit immutable base identity.
     """
-    present = subprocess.run(["docker", "image", "inspect", BASE_IMAGE], capture_output=True, check=False)
+    tag = build_images.base_tag()
+    present = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, check=False)
     if present.returncode != 0:
         subprocess.run(
             ["uv", "run", "python", "images/build_images.py", "--base-only"],
             cwd=PROJECT_ROOT,
             check=True,
         )
-    return BASE_IMAGE
+    return tag
 
 
 @pytest.fixture
