@@ -114,7 +114,7 @@ class AgentState:
             ``"no"`` (a future ``--no``), or ``None`` (no assumption). Orthogonal to
             ``non_interactive``: ``non_interactive`` controls *whether* we may block on
             stdin; ``assume`` supplies a *pre-decided answer* regardless of TTY.
-        log_mode: When True, bypass Rich UI and emit raw agent events as plain text
+        log_mode: When True, bypass Rich UI and emit redacted agent events as plain text
             to stdout (for CI log capture). Default False.
     """
 
