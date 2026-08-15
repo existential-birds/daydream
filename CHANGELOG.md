@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **security:** Restrict archive upload destinations to the operator-controlled `--trajectory-hub-repo` / `DAYDREAM_TRAJECTORY_HUB_REPO` sources; a `trajectory_hub_repo` key in the target checkout's file config is now ignored.
+- **rl:** Verify untracked-oracle caveat for protected test-oracle paths (issue #571) — confirmed the fail-closed docstring and README manifest caveat are present and accurate at HEAD (b824946), landed by commit df1fd3f (#558); no code or behavior change.
 
 ## [0.26.0] - 2026-08-12
 
