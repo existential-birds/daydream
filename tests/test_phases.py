@@ -854,15 +854,19 @@ async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, make_work,
 @pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
 async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
-    """A multi-item batch with any unconfined file reference rejects the whole batch."""
+    """A single unconfined reference at any position rejects the whole batch.
+
+    The hostile value lives only in the second item so the batched preflight
+    loop ``for item in items[1:]`` actually runs past index 0 before raising.
+    """
     from daydream.phases import phase_fix_batched
 
     silence_console("daydream.phases")
     backend = ScriptedBackend()
     hostile = _unconfined_finding_file(tmp_path, path_kind)
     items = [
-        {"id": 1, "description": "Escape A", "file": hostile, "line": 1},
-        {"id": 2, "description": "Escape B", "file": hostile, "line": 2},
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        {"id": 2, "description": "Escape", "file": hostile, "line": 2},
     ]
 
     with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
@@ -938,14 +942,18 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp
 @pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
-    """An unconfined file reference aborts the whole parallel fix run before any dispatch."""
+    """A single unconfined reference at any position aborts the whole run.
+
+    The hostile value lives only in the second item so the parallel preflight
+    loop actually runs past index 0 before raising -- no dispatch happens.
+    """
     from daydream.phases import phase_fix_parallel
 
     silence_console("daydream.phases")
     backend = ScriptedBackend()
     hostile = _unconfined_finding_file(tmp_path, path_kind)
     items = [
-        {"id": 1, "file": hostile},
+        {"id": 1, "file": "src/ok.py"},
         {"id": 2, "file": hostile},
     ]
 

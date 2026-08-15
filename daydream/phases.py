@@ -44,15 +44,15 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.improve.command_contract import (
-    REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
-)
-from daydream.improve.command_contract import (
-    path_is_confined,
-)
 from daydream.prompt_budget import fits_inline_diff_budget
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.repository_paths import (
+    REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
+)
+from daydream.repository_paths import (
+    path_is_confined,
+)
 from daydream.trajectory import (
     DaydreamPhase,
     TrajectoryRecorder,
@@ -1774,6 +1774,21 @@ def _resolve_finding_file_ref(repo: Path, value: object) -> str:
     return value
 
 
+def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str:
+    """Validate every item's ``file`` ref; return the first's canonical value.
+
+    Shared preflight for the batched and parallel fix entry points: rejects
+    the whole batch when ANY item's reference is missing/non-string or
+    unconfined (fixed, non-reflective ``ValueError``), before any grouping,
+    progress output, or prompt construction. All batch items target the same
+    file, so the first item's canonical resolution is the group's.
+    """
+    file_ref = _resolve_finding_file_ref(repo, items[0].get("file"))
+    for item in items[1:]:
+        _resolve_finding_file_ref(repo, item.get("file"))
+    return file_ref
+
+
 async def phase_fix(
     backend: Backend,
     work: WorkContext,
@@ -1903,11 +1918,9 @@ async def phase_fix_batched(
     count = len(items)
     # Validate EVERY item's file reference before any progress output or prompt
     # construction: a single unconfined (or missing/non-string) reference
-    # rejects the whole batch. All items target the same file, so the first
-    # item's canonical resolution is the group's.
-    file_ref = _resolve_finding_file_ref(work.repo, items[0].get("file"))
-    for item in items[1:]:
-        _resolve_finding_file_ref(work.repo, item.get("file"))
+    # rejects the whole batch. All items target the same file, so the returned
+    # first item's canonical resolution is the group's.
+    file_ref = _preflight_finding_file_refs(work.repo, items)
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
@@ -2037,8 +2050,7 @@ async def phase_fix_parallel(
     # the whole run fast, so the unsafe path never becomes a grouping key,
     # fork name, failures entry, or checkout recovery argument. The returned
     # refs are discarded -- per-fix calls recompute them.
-    for item in items:
-        _resolve_finding_file_ref(work.repo, item.get("file"))
+    _preflight_finding_file_refs(work.repo, items)
 
     raw_groups = group_items_by_file(items)
     # Assign stable 1-based counters by pairing each item with its number

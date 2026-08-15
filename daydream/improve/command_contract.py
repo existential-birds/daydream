@@ -7,31 +7,22 @@ import shlex
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
-_PATH_SEGMENT = (
-    r"(?:[A-Za-z0-9_+@$-][A-Za-z0-9._+@$-]*|"
-    r"\.[A-Za-z0-9_+@$-][A-Za-z0-9._+@$-]*|"
-    r"\.\.[A-Za-z0-9._+@$-]+)"
+from daydream.repository_paths import (
+    DIRECTORY_SCOPE_PATTERN,
+    DIRECTORY_SCOPE_SCHEMA,
+    REPOSITORY_FILE_PATH_PATTERN,
+    REPOSITORY_FILE_PATH_SCHEMA,
+    canonicalize_directory_scope,
+    path_is_confined,
+    valid_directory_scope_lexical,
+    valid_repository_file_path,
 )
-REPOSITORY_FILE_PATH_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*$"
-DIRECTORY_SCOPE_PATTERN = rf"^{_PATH_SEGMENT}(?:/{_PATH_SEGMENT})*/?$"
 
-REPOSITORY_FILE_PATH_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": 512,
-    "pattern": REPOSITORY_FILE_PATH_PATTERN,
-}
-DIRECTORY_SCOPE_SCHEMA: dict[str, Any] = {
-    "type": "string",
-    "minLength": 1,
-    "maxLength": 512,
-    "pattern": DIRECTORY_SCOPE_PATTERN,
-}
 WORKING_DIRECTORY_SCHEMA: dict[str, Any] = {
     "type": "string",
     "minLength": 1,
@@ -190,8 +181,6 @@ HOST_RECON_COMMAND_SCHEMA: dict[str, Any] = {
     },
 }
 
-_REPOSITORY_FILE_PATH = re.compile(REPOSITORY_FILE_PATH_PATTERN)
-_DIRECTORY_SCOPE = re.compile(DIRECTORY_SCOPE_PATTERN)
 _COMMAND_ARROW = re.compile(
     r"[\u2190-\u21ff\u27f0-\u27ff\u2900-\u297f]|->|=>"
 )
@@ -212,53 +201,6 @@ class ContractRejection:
 
     def render(self, prefix: str) -> str:
         return f"{self.code}@{prefix}{self.pointer}"
-
-
-def valid_repository_file_path(value: str) -> bool:
-    """Return whether ``value`` has the safe repository-file grammar."""
-    return bool(_REPOSITORY_FILE_PATH.fullmatch(value))
-
-
-def valid_directory_scope_lexical(value: str) -> bool:
-    """Return whether ``value`` is a safe file-or-directory scope."""
-    return bool(_DIRECTORY_SCOPE.fullmatch(value))
-
-
-def path_is_confined(
-    repo: Path,
-    value: str,
-    *,
-    directory_scope: bool = False,
-) -> bool:
-    """Return whether a lexical repository path crosses no symlink/root edge."""
-    validator = (
-        valid_directory_scope_lexical
-        if directory_scope
-        else valid_repository_file_path
-    )
-    if value != "." and not validator(value):
-        return False
-    root = repo.resolve()
-    candidate = repo
-    if value != ".":
-        for part in PurePosixPath(value.rstrip("/")).parts:
-            candidate /= part
-            try:
-                if candidate.is_symlink():
-                    return False
-                if not candidate.exists():
-                    break
-            except OSError:
-                return False
-    try:
-        return candidate.resolve(strict=False).is_relative_to(root)
-    except OSError:
-        return False
-
-
-def canonicalize_directory_scope(value: str) -> str:
-    """Canonicalize the sole lossless scope spelling difference."""
-    return value.rstrip("/")
 
 
 def _json_pointer(parts: list[object]) -> str:
