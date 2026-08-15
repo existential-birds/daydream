@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import tempfile
@@ -54,7 +55,8 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     untracked files into a fresh clone with no source remote. Uses only
     :mod:`daydream.git_ops` primitives plus shutil/pathlib — never
     ``git rev-parse --git-common-dir``, ``git worktree list``, or the source
-    ``.git`` file (the linked-worktree #221 trap).
+    ``.git`` file (the linked-worktree #221 trap). Unstaged deletions and
+    submodule gitlink entries are skipped: they have no copyable worktree file.
 
     Returns:
         The clone path.
@@ -66,13 +68,14 @@ def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
     git_ops.clone(str(source), destination)
     git_ops.checkout_detach(destination, git_ops.head_sha(source))
     git_ops.remove_remote(destination)
-    for rel in git_ops.ls_files(source):
+    for rel in [*git_ops.ls_files(source), *git_ops.list_untracked(source)]:
         src = source / rel
-        dst = destination / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    for rel in git_ops.list_untracked(source):
-        src = source / rel
+        # ls-files and ls-files --others --exclude-standard are disjoint by
+        # construction, so one loop covers both. Skip index entries whose
+        # worktree file is missing (unstaged deletion) or a directory
+        # (submodule gitlink) — neither is copyable.
+        if not src.exists() or src.is_dir():
+            continue
         dst = destination / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -158,11 +161,14 @@ class CodexBackend:
                 the clone is the hard boundary that makes any commit, ref, or
                 index change land only in the disposable clone's metadata and
                 die with it — the caller's HEAD, staged index, refs, and
-                remotes are physically unreachable. A non-Git *cwd* keeps the
-                read-only sandbox in place (no clone). If the disposable
-                checkout cannot be created or prepared, the call raises
-                ``CodexError`` — never a fallback to the caller's cwd.
-                Default False keeps ``danger-full-access`` in the caller's cwd.
+                remotes are unreachable via any path the subprocess is given
+                (its argv, stdin, env, and cwd); a model that independently
+                discovers the source path could still write to its refs. A
+                non-Git *cwd* keeps the read-only sandbox in place (no clone).
+                If the disposable checkout cannot be created or prepared, the
+                call raises ``CodexError`` — never a fallback to the caller's
+                cwd. Default False keeps ``danger-full-access`` in the
+                caller's cwd.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 
@@ -266,6 +272,30 @@ class CodexBackend:
             if continuation and continuation.backend == "codex":
                 args.extend(["resume", continuation.data["thread_id"]])
 
+            # When running in the disposable clone, the spawned subprocess must
+            # not inherit a path to the caller's repo: strip $PWD (and the
+            # GIT_* overrides that could redirect the clone's git ops back at
+            # the source) from the child environment, and start the child in the
+            # clone so its own cwd is never the source path. The isolation is
+            # path-hiding, not physical — a model that independently discovers
+            # the source path could still write to its refs.
+            child_env: dict[str, str] | None = None
+            if execution_cwd != cwd:
+                child_env = os.environ.copy()
+                for var in (
+                    "PWD",
+                    "OLDPWD",
+                    "GIT_DIR",
+                    "GIT_WORK_TREE",
+                    "GIT_INDEX_FILE",
+                    "GIT_OBJECT_DIRECTORY",
+                    "GIT_COMMON_DIR",
+                    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                    "GIT_CEILING_DIRECTORIES",
+                    "GIT_PREFIX",
+                ):
+                    child_env.pop(var, None)
+
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
@@ -273,6 +303,8 @@ class CodexBackend:
                 stderr=asyncio.subprocess.STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
                 start_new_session=True,
+                env=child_env,
+                cwd=str(execution_cwd) if execution_cwd != cwd else None,
             )
             self._processes.append(proc)
 

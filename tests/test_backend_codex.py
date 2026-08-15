@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -222,7 +223,7 @@ async def test_codex_read_only_uses_read_only_sandbox(
     source_head = git_ops.head_sha(source)
     source_patch = git_ops.staged_patch(source)
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
     async def fake_exec(*args, **kwargs):
