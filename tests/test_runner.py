@@ -212,6 +212,52 @@ async def test_run_dispatches_to_expected_flow(
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_head_mismatch_before_dispatch(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,
+):
+    """Head drift: run() returns 1 and no flow is dispatched."""
+    called: list[str] = []
+
+    def _record(name: str):
+        async def stub(work, config):
+            called.append(name)
+            return 0
+
+        return stub
+
+    for name in _DISPATCH_TARGETS:
+        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+
+    config = make_config(tmp_path, approved_head_sha="DEADBEEF")
+    exit_code = await runner.run(config)
+    assert exit_code == 1
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_run_allows_matching_approved_head(
+    monkeypatch, patch_workspace, silence_runner_ui, tmp_path, make_config,
+):
+    """Matching approved head: run() proceeds to the expected flow."""
+    called: list[str] = []
+
+    def _record(name: str):
+        async def stub(work, config):
+            called.append(name)
+            return 0
+
+        return stub
+
+    for name in _DISPATCH_TARGETS:
+        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+
+    config = make_config(tmp_path, approved_head_sha="CAFEBABE")
+    exit_code = await runner.run(config)
+    assert exit_code == 0
+    assert called == ["_run_loop_deep"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
 async def test_deep_run_mints_app_identity_before_posting_path(
     flow_name: str | None,
