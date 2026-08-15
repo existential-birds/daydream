@@ -106,6 +106,19 @@ baseline against a pi-scaffold trained run moves two variables at once.
    An unavailable or stale lock is an **image-build failure** — never permission
    to **fall back to unconstrained pip**.
 
+   Every manifest entry must also declare a **required, nonempty
+   `protected_test_paths`** array: the literal repository-relative files or
+   directories that constitute the repository's test oracle. A missing or empty
+   inventory is a manifest-load error, never a silently unprotected task.
+   Coverage must include the test sources **and every runner-config file
+   `test_command` can load** — including absent filenames whose later creation
+   could alter collection (e.g. `conftest.py`, `pytest.ini`, `pyproject.toml`,
+   `setup.cfg`, `tox.ini`). At scoring time `fix_tests_pass` compares these
+   paths against the image's baked head SHA, fail-closed: a changed or
+   unverifiable oracle (any tracked difference, any non-ignored untracked file
+   under a protected path, or a Git error) earns **zero test reward** and the
+   repository's mutable `test_command` is not executed.
+
 3. **Build the images.** The last layer runs the repository's own suite at the
    head commit; a red baseline fails the build and produces nothing, because
    `fix_tests_pass` would otherwise be rewarding noise.
