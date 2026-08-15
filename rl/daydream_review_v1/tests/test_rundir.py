@@ -43,7 +43,7 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
     through the run-dir collector.
     """
     archive = tmp_path / "archive"
-    staged = _stage_run(archive, rundir_golden)
+    staged = _stage_run(archive, rundir_golden, session_id="session-1")
     assert staged.name == "session-1"
 
     # The sole remaining untrusted trajectory shape in the fixture is staged.
