@@ -178,8 +178,9 @@ def _render_bash_allowlist() -> str:
     """Render the read-only Bash allowlist as a comma-separated back-ticked list.
 
     Single source for the ``READ_ONLY_BASH_ALLOWLIST`` render so the setup-
-    investigator and failure-summarizer prompts stay word-for-word in sync with
-    the commands the backend guard hook actually enforces.
+    investigator, failure-summarizer, and recommendation-verifier prompts stay
+    word-for-word in sync with the commands the backend guard hook actually
+    enforces.
     """
     return ", ".join(f"`{cmd}`" for cmd in READ_ONLY_BASH_ALLOWLIST)
 

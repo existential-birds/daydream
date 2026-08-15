@@ -23,6 +23,7 @@ from daydream.phases import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
+    _render_bash_allowlist,
     _settled_decisions_block,
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
@@ -847,7 +848,7 @@ def build_verification_prompt(
 
     Hard contract:
       - Read-only tools only: Read, Grep, Glob, and Bash restricted to
-        non-mutating commands (git, cat, ls). The verifier writes nothing —
+        non-mutating commands (see `_render_bash_allowlist()`). The verifier writes nothing —
         the host persists the verdicts it returns as structured output.
       - The non-structural finding list is rendered inline below.
       - Empty issue list yields an empty verdict list (no error).
@@ -882,7 +883,7 @@ def build_verification_prompt(
     parts.append(
         "Read-only contract (MANDATORY):\n"
         "  - Allowed tools: Read, Grep, Glob, Bash.\n"
-        "  - Bash is restricted to non-mutating commands only: `git`, `cat`, `ls`.\n"
+        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
         "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
         "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
         "state-changing command."
@@ -907,8 +908,8 @@ def build_verification_prompt(
         "  1. Locate the `impl` / interface / protocol declaration the changed "
         "code participates in. If absent, set `verdict=consistent` only if no "
         "sibling implementations exist.\n"
-        "  2. Locate every sibling implementation "
-        "(`grep -rn \"impl <Trait> for\"` / `class X(<Iface>)`).\n"
+        "  2. Locate every sibling implementation using the Grep tool "
+        "(e.g. search for `impl <Trait> for` or `class X(<Iface>)`).\n"
         "  3. Locate the trait/interface doc-comment that specifies the behavior "
         "being changed.\n"
         "  4. Compare the recommendation against those. Verdicts:\n"

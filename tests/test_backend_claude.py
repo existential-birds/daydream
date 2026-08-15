@@ -2,7 +2,7 @@
 """Tests for ClaudeBackend."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -439,6 +439,34 @@ async def test_read_only_guard_denies_mutation_allows_inspection():
     # Malformed input → fail closed (deny)
     deny_malformed = await _read_only_guard({"tool_name": "Bash"}, None, {})
     assert deny_malformed["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+@pytest.mark.asyncio
+async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
+    """The guard is shared (diagnostic subagents, failure summarizer, exploration
+    specialists), so its deny reasons must say 'read-only guard', not the stale
+    'read-only summarizer'."""
+    from daydream.backends.claude import _read_only_guard
+
+    deny_bash = cast(
+        dict[str, Any],
+        await _read_only_guard(
+            {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}, None, {},
+        ),
+    )
+    bash_reason = deny_bash["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "read-only guard" in bash_reason
+    assert "read-only summarizer" not in bash_reason
+
+    deny_tool = cast(
+        dict[str, Any],
+        await _read_only_guard(
+            {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
+        ),
+    )
+    tool_reason = deny_tool["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "read-only guard" in tool_reason
+    assert "read-only summarizer" not in tool_reason
 
 
 @pytest.mark.asyncio
