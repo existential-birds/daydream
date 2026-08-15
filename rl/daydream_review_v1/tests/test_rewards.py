@@ -1496,3 +1496,38 @@ async def test_git_failure_at_verify_time_fails_closed(
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
+
+
+async def test_verify_checkout_failed_diff_fails_closed(tmp_path, runtime) -> None:
+    """A failed candidate-diff derivation must not pipe raw/partial output into
+    git apply: _prepare_verify_checkout returns None, never a partially-built
+    checkout. Mirrors the rundir fail-closed contract on the unified path.
+    """
+    from daydream_review_v1 import taskset
+
+    not_a_repo = tmp_path / "not-a-repo"  # no .git -> git diff exits non-zero
+    result = await taskset._prepare_verify_checkout(runtime, str(not_a_repo), "deadbeef")
+    assert result is None
+    assert not (tmp_path / "not-a-repo-verify").exists(), "a failed diff must not build a checkout"
+
+
+async def test_verify_checkout_empty_diff_is_clean_noop(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A review-only rollout (no committed fix) has an empty candidate diff; it
+    must apply cleanly as a no-op, never failing _prepare_verify_checkout.
+    """
+    import os
+    from daydream_review_v1 import taskset
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)  # --allow-empty commit: HEAD advances, tree identical -> empty diff
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
+    if os.geteuid() == 0:
+        assert result == str(tmp_path / "repo-verify"), "an empty diff must not fail construction"
+    else:
+        # non-root host: the trailing chown root:root fails, so construction
+        # returns None regardless of the diff; pin the on-disk invariant that
+        # the diff/apply step did not fail the checkout.
+        verify_dir = tmp_path / "repo-verify"
+        assert verify_dir.exists(), "the empty diff must not abort the checkout build"
