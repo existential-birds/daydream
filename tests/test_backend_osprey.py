@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from daydream.backends import (
+    AgentEvent,
     ContinuationToken,
     MetricsEvent,
     ResultEvent,
@@ -89,15 +91,32 @@ async def _collect(
     lines: list[dict[str, object]],
     *,
     returncode: int = 0,
-    **kwargs: object,
-) -> tuple[list[object], MagicMock]:
+    output_schema: dict[str, Any] | None = None,
+    continuation: ContinuationToken | None = None,
+    agents: dict[str, Any] | None = None,
+    max_turns: int | None = None,
+    read_only: bool = False,
+    persist_session: bool = True,
+) -> tuple[list[AgentEvent], AsyncMock]:
     process = _FakeProcess(lines, returncode=returncode)
     exec_mock = AsyncMock(return_value=process)
     with (
         patch("daydream.backends.osprey.asyncio.create_subprocess_exec", exec_mock),
         patch("daydream.backends.osprey.terminate_process", new=AsyncMock()),
     ):
-        events = [event async for event in backend.execute(Path("/repo"), "prompt", **kwargs)]
+        events = [
+            event
+            async for event in backend.execute(
+                Path("/repo"),
+                "prompt",
+                output_schema=output_schema,
+                continuation=continuation,
+                agents=agents,
+                max_turns=max_turns,
+                read_only=read_only,
+                persist_session=persist_session,
+            )
+        ]
     return events, exec_mock
 
 
@@ -107,6 +126,7 @@ def test_factory_builds_verified_osprey_jsonl_command() -> None:
         model="test-model",
         osprey_binary="fake-osprey",
     )
+    assert isinstance(backend, OspreyBackend)
 
     assert backend.model == "test-model"
     assert backend.build_command("hello") == [
@@ -158,11 +178,13 @@ async def test_translates_text_thinking_tool_identity_metrics_and_result() -> No
         TurnEndEvent,
         ResultEvent,
     ]
-    assert events[2].name == "tool_search"
-    assert events[2].id == "c-1"
-    assert events[3].id == "c-1"
-    assert events[3].output == "payload"
-    assert events[3].is_error is False
+    tool_start = next(event for event in events if isinstance(event, ToolStartEvent))
+    tool_result = next(event for event in events if isinstance(event, ToolResultEvent))
+    assert tool_start.name == "tool_search"
+    assert tool_start.id == "c-1"
+    assert tool_result.id == "c-1"
+    assert tool_result.output == "payload"
+    assert tool_result.is_error is False
     assert not any(isinstance(event, MetricsEvent) for event in events)
 
 
@@ -229,7 +251,7 @@ async def test_protocol_version_and_unknown_events_fail_closed() -> None:
     with pytest.raises(Exception, match="unsupported Osprey JSONL protocol version"):
         await _collect(backend, bad_version)
 
-    unknown = [
+    unknown: list[dict[str, object]] = [
         {"event": "protocol", "version": 2},
         {
             "event": "session_start",

@@ -571,6 +571,8 @@ class OspreyBackend:
                     continue
                 if saw_session_end:
                     raise OspreyProtocolError("JSONL event appeared after session_end")
+                if session_id is None:
+                    raise OspreyProtocolError("session_start did not provide a session_id")
 
                 if event_name == "session_end":
                     outcome = _required_string(event, "outcome")
