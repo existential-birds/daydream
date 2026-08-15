@@ -74,8 +74,8 @@ jobs:
           # the artifact, then trust the LIVE PR head from the API;
           # post-findings validates the artifact against it and aborts on
           # mismatch.
-          PR_NUMBER="$(jq -r '.pr_number // empty' findings/findings.json)"
-          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          PR_NUMBER="$(jq -r '.pr_number // empty' findings/findings.json || true)"
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha || true)"
           if [ -z "$PR_NUMBER" ] || [ -z "$HEAD_SHA" ]; then
             echo "could not resolve a target PR for this run" >&2
             exit 1
@@ -161,10 +161,6 @@ jobs:
             exit 0
           fi
           FAILURE_MESSAGE="$(jq -r '.message // empty' findings/failure.json 2>/dev/null || true)"
-          if [ -n "$FAILURE_MESSAGE" ]; then
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -f body="${FAILURE_MESSAGE} — see run ${RUN_URL}"
-          else
-            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-              -f body="daydream review failed — see run ${RUN_URL}"
-          fi
+          BODY="${FAILURE_MESSAGE:-daydream review failed} — see run ${RUN_URL}"
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="${BODY}"

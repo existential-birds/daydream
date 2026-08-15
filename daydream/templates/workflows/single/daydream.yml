@@ -132,19 +132,25 @@ jobs:
           LIVE_HEAD_SHA="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
           if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
             echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
+            # Record the failure context before exiting so surface-failure can
+            # comment on the PR with the instructive message (issue #336).
+            mkdir -p findings
+            printf '{"pr_number": "%s", "message": "The PR head changed after approval. Comment the review command again to approve the new head"}' "$PR_NUMBER" > findings/failure.json
             exit 1
           fi
           # The gate resolves the head at run time; the approving comment's
-          # creation time is the comment-time anchor. A head whose commit is
-          # newer than that comment was pushed after approval, so it is not
-          # reviewable without a fresh command.
-          HEAD_COMMIT_DATE="$(gh api "repos/$REPO/commits/$APPROVED_HEAD_SHA" --jq .commit.committer.date)"
-          if [ -z "$HEAD_COMMIT_DATE" ]; then
-            echo "Could not resolve the commit date for approved head $APPROVED_HEAD_SHA" >&2
+          # creation time is the comment-time anchor. The head repository's
+          # pushed_at is server-set by GitHub when a push is received, so it
+          # cannot be backdated like commit.committer.date; a head pushed after
+          # the comment has pushed_at newer than it and is not reviewable
+          # without a fresh command.
+          HEAD_PUSHED_AT="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.repo.pushed_at)"
+          if [ -z "$HEAD_PUSHED_AT" ]; then
+            echo "Could not resolve the head repository push time for approved head $APPROVED_HEAD_SHA" >&2
             exit 1
           fi
-          if [ "$HEAD_COMMIT_DATE" \> "$APPROVED_AT" ]; then
-            echo "PR #$PR_NUMBER approved head commit ($HEAD_COMMIT_DATE) is newer than the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
+          if [ "$HEAD_PUSHED_AT" \> "$APPROVED_AT" ]; then
+            echo "PR #$PR_NUMBER head repository was pushed ($HEAD_PUSHED_AT) after the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
             exit 1
           fi
           BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json baseRefName --jq .baseRefName)"
@@ -186,6 +192,24 @@ jobs:
           daydream --non-interactive --pr-number "$PR_NUMBER" \
             --approved-head-sha "$APPROVED_HEAD_SHA" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
+
+      # Any analyze failure (drift or otherwise) leaves the PR number where
+      # surface-failure can resolve it: the drift branches write an
+      # instructive message, everything else falls back to the bare number.
+      - name: Record failure context
+        if: failure()
+        run: |
+          mkdir -p findings
+          if [ ! -f findings/failure.json ]; then
+            printf '{"pr_number": "%s"}' "$PR_NUMBER" > findings/failure.json
+          fi
+
+      - name: Upload failure context
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: daydream-findings-failure
+          path: findings/failure.json
 
       - name: Upload findings artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -271,6 +295,16 @@ jobs:
           private-key: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
           permission-pull-requests: write
 
+      # Same-run download needs no GITHUB_TOKEN scope (that is only required to
+      # reach across runs). A failed run without the artifact (e.g. the runner
+      # died mid-step) falls through to the generic-message comment below.
+      - name: Download failure context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: daydream-findings-failure
+          path: findings
+        continue-on-error: true
+
       - name: Comment on the PR
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}
@@ -278,5 +312,11 @@ jobs:
           PR_NUMBER: ${{ needs.gate.outputs.pr_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
-            -f body="daydream review failed — see run ${RUN_URL}"
+          FAILURE_MESSAGE="$(jq -r '.message // empty' findings/failure.json 2>/dev/null || true)"
+          if [ -n "$FAILURE_MESSAGE" ]; then
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              -f body="${FAILURE_MESSAGE} — see run ${RUN_URL}"
+          else
+            gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+              -f body="daydream review failed — see run ${RUN_URL}"
+          fi

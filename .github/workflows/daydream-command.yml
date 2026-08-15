@@ -70,14 +70,6 @@ jobs:
           permission-actions: write
           permission-pull-requests: write
 
-      - name: Acknowledge with eyes reaction
-        if: steps.match.outputs.matched == 'true'
-        env:
-          GH_TOKEN: ${{ steps.token.outputs.token }}
-          REPO: ${{ github.repository }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes
-
       # Dispatch binds the PR head (resolved at run time) plus the approving
       # comment's creation time as the comment-time anchor: the review gate
       # rejects any approved head whose commit postdates that comment, so a
@@ -99,3 +91,16 @@ jobs:
             -f pr_number="$PR_NUMBER" \
             -f approved_head_sha="$HEAD_SHA" \
             -f approved_at="$COMMENT_CREATED_AT"
+
+      # Acknowledge only after the dispatch's head resolution succeeds: the
+      # `gh api` above is fallible, and a transient error must not leave the
+      # maintainer with a 👀 reaction and no review, comment, or explanation —
+      # the failed run surfaces on the PR instead of the reaction mis-signalling
+      # success.
+      - name: Acknowledge with eyes reaction
+        if: steps.match.outputs.matched == 'true'
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: gh api -X POST "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -f content=eyes

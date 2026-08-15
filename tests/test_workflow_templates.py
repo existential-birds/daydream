@@ -169,9 +169,18 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
 
-def test_review_workflow_head_bound_gate() -> None:
-    """The live Codex review workflow requires an approved head and cleans up auth."""
-    wf = load_workflow(REPO_WORKFLOWS_DIR / "daydream-review.yml")
+@pytest.mark.parametrize(
+    "wf_path",
+    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+    ids=["template", "live"],
+)
+def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
+    """The review workflow is comment-only and enforces the approved head;
+    backend-specific auth handling differs between the packaged Anthropic
+    template and the repo's live Codex workflow.
+    """
+    wf = load_workflow(wf_path)
+    text = wf_path.read_text(encoding="utf-8")
 
     assert "pull_request" not in _wf_triggers(wf)
     inputs = _wf_triggers(wf)["workflow_dispatch"]["inputs"]
@@ -184,7 +193,7 @@ def test_review_workflow_head_bound_gate() -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    assert "commit.committer.date" in verify["run"]
+    assert "head.repo.pushed_at" in verify["run"]
     assert "APPROVED_AT" in verify["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
@@ -193,44 +202,23 @@ def test_review_workflow_head_bound_gate() -> None:
     assert "--approved-head-sha" in review["run"]
     assert "APPROVED_HEAD_SHA" in review["env"]
 
-    cleanup = next(step for step in steps if "auth.json" in step.get("run", ""))
-    assert steps.index(review) < steps.index(cleanup)
-    assert cleanup.get("if", "") == "always()"
+    if wf_path == REPO_WORKFLOWS_DIR / "daydream-review.yml":
+        # Live Codex workflow: persisted codex auth is cleaned up after the review.
+        cleanup = next(step for step in steps if "auth.json" in step.get("run", ""))
+        assert steps.index(review) < steps.index(cleanup)
+        assert cleanup.get("if", "") == "always()"
+        assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
+    else:
+        # Packaged template: nothing persists auth, and the model credential is
+        # the only secret.
+        assert not any("auth.json" in step.get("run", "") for step in steps)
+        assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
 
 
 def test_review_workflow_uses_only_model_credential() -> None:
     """The live review gate adds no secret beyond the model credential."""
     text = (REPO_WORKFLOWS_DIR / "daydream-review.yml").read_text(encoding="utf-8")
     assert set(_SECRET_REF_RE.findall(text)) == {"OPENAI_API_KEY"}
-
-
-def test_template_review_workflow_head_bound_gate() -> None:
-    """The packaged Anthropic review workflow enforces the head-bound gate."""
-    path = TEMPLATES_DIR / "daydream-review.yml"
-    wf = load_workflow(path)
-    text = path.read_text(encoding="utf-8")
-
-    assert "pull_request" not in _wf_triggers(wf)
-    inputs = _wf_triggers(wf)["workflow_dispatch"]["inputs"]
-    assert "approved_head_sha" in inputs
-    assert "approved_at" in inputs
-
-    steps = job_steps(wf, "analyze")
-    verify = next(
-        step
-        for step in steps
-        if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
-    )
-    assert "commit.committer.date" in verify["run"]
-    assert "APPROVED_AT" in verify["env"]
-    checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
-    assert steps.index(verify) < checkout_idx
-
-    review = next(step for step in steps if "daydream --review" in step.get("run", ""))
-    assert "--approved-head-sha" in review["run"]
-    assert "APPROVED_HEAD_SHA" in review["env"]
-    assert not any("auth.json" in step.get("run", "") for step in steps)
-    assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
 
 
 @pytest.mark.parametrize(
@@ -249,14 +237,34 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     steps = job_steps(wf, "analyze")
 
     # The drift gate records the failure context (pr_number + the instructive
-    # message) before exiting, so the rejection can be surfaced on the PR.
+    # message) before exiting in EVERY rejection branch — head changed,
+    # unresolvable commit date, commit newer than the approving comment — so
+    # surface-analyze-failure comments the instructive message on the PR
+    # (issue #336). A rejection that exits without the write would degrade the
+    # comment to the generic fallback body.
     verify = next(
         step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    assert "failure.json" in verify["run"]
-    assert "message" in verify["run"]
+    lines = verify["run"].splitlines()
+    write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
+    exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
+    assert len(exit_idx) >= 3, (
+        f"{wf_path.name}: drift gate must reject head changes, unresolvable "
+        "commit dates, and commits newer than the approving comment"
+    )
+    assert len(write_idx) == len(exit_idx), (
+        f"{wf_path.name}: every drift-rejection branch must record the failure "
+        "context before exiting (issue #336)"
+    )
+    assert all('"message"' in lines[i] for i in write_idx), (
+        f"{wf_path.name}: each recorded failure context must carry the "
+        "instructive message (issue #336)"
+    )
+    assert all(wi < ei for wi, ei in zip(write_idx, exit_idx)), (
+        f"{wf_path.name}: the failure context must be recorded before the branch exits"
+    )
 
     # Any other failure still records the PR number via the job-level handler.
     record = next(step for step in steps if step.get("name") == "Record failure context")
@@ -328,7 +336,7 @@ def test_single_workflow_head_bound_gate() -> None:
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    assert "commit.committer.date" in verify["run"]
+    assert "head.repo.pushed_at" in verify["run"]
     assert "APPROVED_AT" in wf["jobs"]["analyze"]["env"]
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx

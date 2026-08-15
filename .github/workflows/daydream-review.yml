@@ -65,16 +65,28 @@ jobs:
             exit 1
           fi
           # The dispatch resolves the head at run time; the approving comment's
-          # creation time is the comment-time anchor. A head whose commit is
-          # newer than that comment was pushed after approval, so it is not
-          # reviewable without a fresh command.
-          HEAD_COMMIT_DATE="$(gh api "repos/$GITHUB_REPOSITORY/commits/$APPROVED_HEAD_SHA" --jq .commit.committer.date)"
-          if [ -z "$HEAD_COMMIT_DATE" ]; then
-            echo "Could not resolve the commit date for approved head $APPROVED_HEAD_SHA" >&2
+          # creation time is the comment-time anchor. The head repository's
+          # pushed_at is server-set by GitHub when a push is received, so it
+          # cannot be backdated like commit.committer.date; a head pushed after
+          # the comment has pushed_at newer than it and is not reviewable
+          # without a fresh command.
+          HEAD_PUSHED_AT="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.repo.pushed_at)"
+          if [ -z "$HEAD_PUSHED_AT" ]; then
+            echo "Could not resolve the head repository push time for approved head $APPROVED_HEAD_SHA" >&2
+            # Record the failure context before exiting, like the head-change
+            # branch, so the rejection surfaces on the PR with the instructive
+            # message (issue #336).
+            mkdir -p findings
+            printf '{"pr_number": "%s", "message": "Could not verify the approved head push time. Comment the review command again to approve the new head"}' "$PR_NUMBER" > findings/failure.json
             exit 1
           fi
-          if [ "$HEAD_COMMIT_DATE" \> "$APPROVED_AT" ]; then
-            echo "PR #$PR_NUMBER approved head commit ($HEAD_COMMIT_DATE) is newer than the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
+          if [ "$HEAD_PUSHED_AT" \> "$APPROVED_AT" ]; then
+            echo "PR #$PR_NUMBER head repository was pushed ($HEAD_PUSHED_AT) after the approving comment ($APPROVED_AT). Comment the review command again to approve the new head." >&2
+            # Record the failure context before exiting, like the head-change
+            # branch, so the rejection surfaces on the PR with the instructive
+            # message (issue #336).
+            mkdir -p findings
+            printf '{"pr_number": "%s", "message": "The approved head was pushed after the approving comment. Comment the review command again to approve the new head"}' "$PR_NUMBER" > findings/failure.json
             exit 1
           fi
 

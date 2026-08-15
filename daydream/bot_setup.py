@@ -27,6 +27,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import yaml
+
 from daydream import config, git_ops
 from daydream.agent import console
 from daydream.git_ops import GitError
@@ -609,12 +611,52 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
     as a Codex deployment) is reported as a warning: customization is
     intentionally unsupported, and ``daydream setup`` replaces customized
     files with the packaged templates.
+
+    The checks are structural (parsed YAML), mirroring the gate assertions in
+    ``tests/test_workflow_templates.py``: whole-file substring matching would
+    hard-fail a gate-intact workflow that merely mentions ``pull_request`` in
+    prose and could disagree with the test harness. Content that does not parse
+    to a workflow mapping is not gate-intact. A template with no explicit
+    contract below (a future non-review/command file) is treated as broken
+    rather than silently judged by a guess.
     """
+    try:
+        wf = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(wf, dict):
+        return False
+    # PyYAML parses the bare ``on:`` key as boolean ``True``; normalize the
+    # trigger map the same way the test harness's ``_wf_triggers`` does.
+    on = wf.get("on")
+    if on is None:
+        on = wf.get(True)
+    triggers = on if isinstance(on, dict) else {}
+
     if name == "daydream-review.yml":
-        return "approved_head_sha" in content and "pull_request" not in content
+        if "pull_request" in triggers:
+            return False
+        dispatch = triggers.get("workflow_dispatch")
+        inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+        return isinstance(inputs, dict) and "approved_head_sha" in inputs
     if name == "daydream-command.yml":
-        return "approved_head_sha" in content
-    return "workflow_run" in content
+        # The single approval point: every review dispatch must bind the
+        # approved head (the test harness asserts the same on the dispatch
+        # step's run).
+        dispatch_steps = [
+            step
+            for job in wf.get("jobs", {}).values()
+            if isinstance(job, dict)
+            for step in job.get("steps", [])
+            if isinstance(step, dict)
+            and "gh workflow run daydream-review.yml" in step.get("run", "")
+        ]
+        return bool(dispatch_steps) and all(
+            "approved_head_sha" in step.get("run", "") for step in dispatch_steps
+        )
+    if name == "daydream-post.yml":
+        return "workflow_run" in triggers
+    return False
 
 
 def _check_workflows(repo_dir: Path) -> Check:
