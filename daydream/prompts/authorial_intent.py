@@ -1,15 +1,15 @@
 """The author-intent precedence rule.
 
 This module holds one shared definition of the PR-description "authoritative"
-precedence rule. Both consumers reference it by import rather than duplicating
+precedence rule. Consumers reference it by import rather than duplicating
 the text inline:
 
 - ``daydream.phases.build_intent_prompt`` composes it into the intent-phase
   prompt after the ``"The author supplied the following pull-request description"``
   opener.
-- ``daydream.deep.prompts._context_pointers`` injects it into the four
-  finding-producing review prompts (per-stack, structural, generic-fallback,
-  arbiter) when a fresh PR body was ingested.
+- ``daydream.deep.prompts._context_pointers`` and
+  ``daydream.deep.prompts.build_merge_prompt`` inject it into the
+  finding-producing review prompts when a fresh PR body was ingested.
 
 The rule is worded to be context-neutral: it reads correctly whether it
 follows the "author supplied" opener in the intent prompt or a pointer to

@@ -2464,10 +2464,11 @@ def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
 
 
 def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
-    """Assert the precedence rule is present/absent in every finding-producing prompt."""
+    """Assert the precedence rule AND the #579 untrusted framing are present/absent
+    in every finding-producing prompt."""
+    from daydream.prompts.authorial_intent import PR_DESCRIPTION_UNTRUSTED_FRAMING
+
     by_kind = _review_prompts_by_kind(stub)
-    # Arbiter only runs when parse emits high/contested; tests that call this
-    # helper set parse_severity="high" so all five kinds are exercised.
     missing = [k for k, prompts in by_kind.items() if not prompts]
     assert not missing, f"expected prompts for all five kinds, missing: {missing}"
     for kind, prompts in by_kind.items():
@@ -2475,9 +2476,15 @@ def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool
             assert all(AUTHORITATIVE_INTENT_RULE in p for p in prompts), (
                 f"{kind}: expected AUTHORITATIVE_INTENT_RULE in every prompt"
             )
+            assert all(PR_DESCRIPTION_UNTRUSTED_FRAMING in p for p in prompts), (
+                f"{kind}: expected PR_DESCRIPTION_UNTRUSTED_FRAMING in every prompt"
+            )
         else:
             assert all(AUTHORITATIVE_INTENT_RULE not in p for p in prompts), (
                 f"{kind}: expected AUTHORITATIVE_INTENT_RULE absent from every prompt"
+            )
+            assert all(PR_DESCRIPTION_UNTRUSTED_FRAMING not in p for p in prompts), (
+                f"{kind}: expected PR_DESCRIPTION_UNTRUSTED_FRAMING absent from every prompt"
             )
 
 
