@@ -289,7 +289,6 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             finally:
                 state.run_dir = None
 
-
     @vf.reward(weight=1.0)
     async def intrinsic_composite(self, trace: vf.Trace, runtime: vf.Runtime) -> float:
         """daydream's own trajectory composite over the archived run."""
