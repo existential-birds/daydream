@@ -7,22 +7,21 @@
 # separate privileged `daydream-post.yml` (workflow_run), per the locked
 # privilege split: no single job ever holds both PR code and the App key.
 #
-# Triggers:
-#   - pull_request (opened, ready_for_review): auto-review for same-repo PRs,
-#     unless the operator sets the repo variable DAYDREAM_AUTO_REVIEW=false.
-#   - workflow_dispatch (pr_number): on-demand review, dispatched by
-#     daydream-command.yml on `@<bot> review`. Dispatch runs sit on the
-#     default branch, so the PR head ref is fetched explicitly.
+# Triggered on demand by daydream-command.yml after a trusted maintainer
+# comments `@<bot> review`. The dispatch binds both the PR number and the
+# approved head SHA; this workflow rejects drift before checking out code.
 
 name: Daydream Review
 
 on:
-  pull_request:
-    types: [opened, ready_for_review]
   workflow_dispatch:
     inputs:
       pr_number:
         description: Number of the pull request to review
+        required: true
+        type: string
+      approved_head_sha:
+        description: PR head SHA approved by the maintainer
         required: true
         type: string
 
@@ -32,53 +31,35 @@ permissions:
 jobs:
   analyze:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.head.repo.full_name == github.repository &&
-      vars.DAYDREAM_AUTO_REVIEW != 'false')
+    if: github.event_name == 'workflow_dispatch'
     steps:
-      - name: Check out PR head (pull_request)
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - name: Check out repository (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-
-      # Dispatch runs sit on the default branch and the PR number arrives as
-      # an input, so the PR head must be fetched explicitly (via env, never
-      # inline interpolation).
-      - name: Check out PR head (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-        run: |
-          git fetch origin "refs/pull/${PR_NUMBER}/head"
-          git checkout --detach FETCH_HEAD
-
       - name: Resolve PR number and base ref
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            PR_NUMBER="$INPUT_PR_NUMBER"
-            BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
-          else
-            PR_NUMBER="$EVENT_PR_NUMBER"
-            BASE_REF="$EVENT_BASE_REF"
-          fi
+          BASE_REF="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json baseRefName --jq .baseRefName)"
           echo "number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "base_ref=${BASE_REF}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify approved PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
+        run: |
+          LIVE_HEAD_SHA="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" --jq .head.sha)"
+          if [ "$LIVE_HEAD_SHA" != "$APPROVED_HEAD_SHA" ]; then
+            echo "PR #$PR_NUMBER head changed after approval: approved_head_sha=$APPROVED_HEAD_SHA, live=$LIVE_HEAD_SHA. Comment the review command again to approve the new head." >&2
+            exit 1
+          fi
+
+      - name: Check out approved PR head
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.approved_head_sha }}
+          fetch-depth: 0
 
       - name: Fetch base ref
         env:
@@ -100,9 +81,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          APPROVED_HEAD_SHA: ${{ inputs.approved_head_sha }}
         run: |
           mkdir -p findings
           daydream --review --non-interactive --pr-number "$PR_NUMBER" \
+            --approved-head-sha "$APPROVED_HEAD_SHA" \
             --findings-out findings/findings.json --base "origin/$BASE_REF" .
 
       - name: Upload findings artifact
