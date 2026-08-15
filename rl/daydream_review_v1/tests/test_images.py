@@ -7,11 +7,14 @@ use. A **fast** tier — no Docker required — rejects ``--red`` invocations th
 cannot select the fixture repo, ensuring the guard fires before any build
 side-effect. A manifest/README tier asserts the locked-dependency policy: the
 itsdangerous manifest entry installs strictly from its committed uv.lock and the
-README documents the four mandatory setup rules. The three ``slow`` tests execute
+README documents the four mandatory setup rules. The four ``slow`` tests execute
 real Docker builds: the red baseline path plants a failing assertion and the
 build must die (enforcement IS the build failing), the green baseline path builds
 and bakes the checkout, and the reference-image build proves the itsdangerous
-image builds only when the locked setup plus the green baseline succeed.
+image builds only when the locked setup plus the green baseline succeed. The
+warm-host base build re-executes the gpg/checksum hardening on an already-warm
+host via ``docker build --no-cache`` instead of serving the present base's
+cached layers.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -340,6 +344,51 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
         capture_output=True, text=True, check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
+
+
+@pytest.mark.slow
+@DOCKER_REQUIRED
+def test_base_layer_hardening_executes_on_warm_host() -> None:
+    """Warm-host live coverage: a real --no-cache base build re-executes the gpg
+    verify chain and the three checksummed download sequences instead of serving
+    the already-present base's cached layers.
+
+    The session ``base_image`` fixture short-circuits when the image exists
+    (conftest.py:40-55) and every repo build passes ``--no-base``, so on a warm
+    host the hardening is otherwise never re-run. ``--no-cache`` defeats the
+    layer cache regardless of the wheel being deterministic; build success is
+    the observable signal because a failed gpg verify or checksum mismatch fails
+    the build's ``RUN`` step.
+    """
+    wheel = build_images.build_wheel(build_images.DIST_DIR)
+    tag = f"{build_images.BASE_REPOSITORY}:warmhost-{uuid.uuid4().hex[:8]}"
+    try:
+        result = subprocess.run(
+            [
+                "docker", "build", "--no-cache",
+                "-f", str(BASE_DOCKERFILE),
+                "--build-arg", f"DAYDREAM_WHEEL={wheel}",
+                "-t", tag,
+                str(build_images.IMAGES_DIR),
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+        assert result.returncode == 0, combined[-4000:]
+        # --no-cache means docker never marks a layer CACHED; its absence in the
+        # log is the discriminating signal that the hardening actually re-ran
+        # rather than being served from the already-present base's cache.
+        assert "CACHED" not in combined, "hardening layers were served from cache"
+        # The throwaway tag must exist: the build ran to completion and tagged.
+        probe = subprocess.run(
+            ["docker", "image", "inspect", tag], capture_output=True, text=True, check=False
+        )
+        assert probe.returncode == 0, f"throwaway image {tag} not produced"
+    finally:
+        subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
 
 
 def test_docker_required_gates_on_daemon_reachability() -> None:
