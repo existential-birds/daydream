@@ -1760,6 +1760,26 @@ def checkout_branch(repo: Path, name: str) -> None:
         raise GitError(f"git checkout {name} failed in {repo}: {proc.stderr.strip()}")
 
 
+def stage_paths(repo: Path, paths: list[Path]) -> None:
+    """Stage exactly *paths* into the index — never ``-A`` / ``--all``.
+
+    Runs ``git add <paths…>`` so only the named files enter the index; any
+    other working-tree changes (including pre-existing untracked files) stay
+    unstaged.
+
+    Args:
+        paths: Repo-relative paths to stage. Must be non-empty.
+
+    Raises:
+        GitError: If *paths* is empty, or the ``git add`` call fails.
+    """
+    if not paths:
+        raise GitError("stage_paths requires at least one path")
+    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
+    if add.returncode != 0:
+        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+
+
 def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     """Stage only *paths* and commit them with *message*.
 
@@ -1776,9 +1796,7 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> None:
     """
     if not paths:
         raise GitError("commit_paths requires at least one path")
-    add = _run_git(repo, ["add", "--", *(str(p) for p in paths)], timeout=30, retries=0)
-    if add.returncode != 0:
-        raise GitError(f"git add {paths} failed in {repo}: {add.stderr.strip()}")
+    stage_paths(repo, paths)
     # git commit fails "Author identity unknown" with no user.email/user.name
     # (common in fresh CI). Inject fallback values via -c only when none is set.
     identity_ok = (
