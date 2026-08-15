@@ -848,7 +848,7 @@ def build_verification_prompt(
 
     Hard contract:
       - Read-only tools only: Read, Grep, Glob, and Bash restricted to
-        non-mutating commands (git, cat, ls). The verifier writes nothing —
+        non-mutating commands (see `_render_bash_allowlist()`). The verifier writes nothing —
         the host persists the verdicts it returns as structured output.
       - The non-structural finding list is rendered inline below.
       - Empty issue list yields an empty verdict list (no error).
