@@ -613,6 +613,33 @@ def _coverage_ledger(
     skipped: list[PartitionStackOmission],
 ) -> dict[str, Any]:
     """Build the coverage ledger recording what the audit did and did not cover."""
+    retained = {partition for group in groups for partition in group.partitions}
+    omitted_by_partition: dict[Partition, list[str]] = {}
+    for omission in skipped:
+        omitted_by_partition.setdefault(omission.partition, []).append(omission.stack)
+
+    not_audited: list[dict[str, Any]] = []
+    partially_audited: list[dict[str, Any]] = []
+    for partition, omitted_stacks in omitted_by_partition.items():
+        entry = {
+            "partition": partition.name,
+            "root": partition.root,
+            "file_count": len(partition.files),
+            "reason": "group-ceiling",
+        }
+        if partition in retained:
+            partially_audited.append(
+                {
+                    **entry,
+                    "audited_stacks": sorted(
+                        {group.stack for group in groups if partition in group.partitions}
+                    ),
+                    "omitted_stacks": sorted(omitted_stacks),
+                }
+            )
+        else:
+            not_audited.append({**entry, "omitted_stacks": sorted(omitted_stacks)})
+
     return {
         "artifact_type": "daydream.improve-coverage",
         "partitions": [
@@ -630,15 +657,8 @@ def _coverage_ledger(
             }
             for group in groups
         ],
-        "not_audited": [
-            {
-                "partition": omission.partition.name,
-                "root": omission.partition.root,
-                "file_count": len(omission.partition.files),
-                "reason": "group-ceiling",
-            }
-            for omission in skipped
-        ],
+        "not_audited": not_audited,
+        "partially_audited": partially_audited,
     }
 
 

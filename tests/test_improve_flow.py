@@ -566,7 +566,7 @@ async def test_partition_bound_splits_oversized_trees_via_config(
 
 
 @pytest.mark.anyio
-async def test_group_ceiling_skips_smallest_groups_and_reports_them(
+async def test_group_ceiling_reports_full_and_partial_stack_coverage(
     improve_scaled_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -593,8 +593,15 @@ async def test_group_ceiling_skips_smallest_groups_and_reports_them(
     assert len(audit_calls) == len(AUDIT_CATEGORIES)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01"}
     coverage = json.loads(improve_artifact(improve_scaled_monorepo_target, "coverage.json").read_text())
-    skipped = {entry["partition"]: entry["reason"] for entry in coverage["not_audited"]}
-    assert skipped == {"frontend": "group-ceiling", "residue": "group-ceiling"}
+    not_audited = {entry["partition"]: entry for entry in coverage["not_audited"]}
+    assert set(not_audited) == {"frontend"}
+    assert not_audited["frontend"]["reason"] == "group-ceiling"
+    assert not_audited["frontend"]["omitted_stacks"] == ["react"]
+    partially = {entry["partition"]: entry for entry in coverage["partially_audited"]}
+    assert set(partially) == {"residue"}
+    assert partially["residue"]["reason"] == "group-ceiling"
+    assert partially["residue"]["audited_stacks"] == ["python"]
+    assert partially["residue"]["omitted_stacks"] == ["generic"]
 
 
 @pytest.mark.anyio
