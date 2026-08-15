@@ -96,8 +96,13 @@ baseline against a pi-scaffold trained run moves two variables at once.
    ```bash
    uv run python images/build_images.py --corpus ./corpus-train
    uv run python images/build_images.py --only OWNER/REPO      # one repo
-   uv run python images/build_images.py --red                  # prove the gate fails
+   uv run python images/build_images.py --red --only existential-birds/daydream-rl-fixture  # prove the gate fails (requires a fixture PR selected)
    ```
+
+   ``--red`` requires at least one selected fixture PR (``fixture://daydream-rl-fixture``)
+   and refuses ``--base-only``; both refusals exit status 2 before any build. Mixed
+   selections are accepted but non-fixture repositories in them are never mutated
+   by ``--red``.
 
 ## Running an eval
 

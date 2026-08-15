@@ -155,6 +155,51 @@ def test_aggregate_tool_uses_shared_judge_error_ratio_threshold(
     assert build_mod.JUDGE_ERROR_RATIO_THRESHOLD == JUDGE_ERROR_RATIO_THRESHOLD
 
 
+def test_zero_candidate_leaf_builds_daydream_panel(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A zero-candidate daydream leaf (tp=0, fp=0) reaches a real judge panel with a
+    non-null, finite-zero daydream aggregate; build() is unchanged. Regression #418."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    zero_leaf = _leaf(tp=0, fp=0, fn=1, total_candidates=0, total_golden=1)
+    report = build_mod.build(_corpus(tmp_path, judges={_ANCHOR: _tools(5, zero_leaf)}))
+
+    panels = [j for j in report["judges"] if j["has_daydream"]]
+    assert len(panels) == 1
+    d = panels[0]["daydream"]
+    assert d is not None
+    assert (d["tp"], d["fp"], d["fn"]) == (0, 0, 1)
+    assert d["precision"] == 0.0
+    assert d["recall"] == 0.0
+    assert d["fp_per_tp"] == 0.0
+    assert d["invalid"] is False
+    assert report["per_pr_scores"][panels[0]["id"]][PR_URL]["candidates"] == 0
+
+
+def test_template_guards_zero_findings_before_ratio_rendering() -> None:
+    """renderKPIs and renderFP must handle a zero-total (tp+fp==0) daydream aggregate
+    before any ratio division or SVG construction. Static source contract — no DOM.
+    Regression #418."""
+    template = TEMPLATE_HTML.read_text()
+
+    kpi_body = template.split("function renderKPIs(){", 1)[1].split("function renderScatter(){", 1)[0]
+    assert "const totalFindings=d.tp+d.fp;" in kpi_body
+    assert 'const fpRatioText=totalFindings===0?"0 findings flagged":' in kpi_body
+    assert "sub:fpRatioText" in kpi_body
+
+    fp_body = template.split("function renderFP(){", 1)[1].split("function renderJudgeSens(){", 1)[0]
+    assert "const totalFindings=d.tp+d.fp;" in fp_body
+    assert "const tot=" not in fp_body
+    assert "if(totalFindings===0){" in fp_body
+    assert 'Under ${esc(j.display)}, daydream flagged no findings, so an FP:TP ratio is not defined.' in fp_body
+    assert '<div class="placeholder">0 findings flagged</div>' in fp_body
+    assert '<div class="placeholder">No FP:TP ratio when no findings are flagged</div>' in fp_body
+    # guard index must precede every ratio division in the FP renderer
+    assert fp_body.index("if(totalFindings===0){") < fp_body.index("(d.fp/d.tp).toFixed(1)")
+    assert fp_body.index("if(totalFindings===0){") < fp_body.index("d.tp/totalFindings")
+    assert fp_body.index("if(totalFindings===0){") < fp_body.index("d.fp/totalFindings")
+
+
 def test_price_card_comes_from_shared_pricing_table(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

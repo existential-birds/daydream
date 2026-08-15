@@ -23,6 +23,20 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BASE_IMAGE = "daydream-rl/base:latest"
 
 
+def docker_daemon_is_available() -> bool:
+    """Whether the Docker daemon is reachable, determined by ``docker info``.
+
+    Returns ``True`` only when ``docker info`` exits with return code 0.
+    If the client binary cannot be launched (``OSError``) or the daemon is
+    unreachable (non-zero exit), returns ``False``.
+    """
+    try:
+        result = subprocess.run(["docker", "info"], capture_output=True, check=False)
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
 @pytest.fixture(scope="session")
 def base_image() -> str:
     """The shared base image every PR-snapshot image is ``FROM``, built if absent.

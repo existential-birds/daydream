@@ -318,11 +318,13 @@ function renderKPIs(){
     return;
   }
   const d=j.daydream,rk=j.ranks;
+  const totalFindings=d.tp+d.fp;
+  const fpRatioText=totalFindings===0?"0 findings flagged":`${d.n_prs} PRs · ${(d.fp/d.tp).toFixed(1)}× FP:TP`;
   const cards=[
     {cls:"",label:"Precision",val:pct(d.precision)+"%",rank:`rank #${rk.precision[0]} / ${rk.precision[1]}`,rc:rankClass(rk.precision[0],rk.precision[1]),sub:`${d.tp} TP / ${d.tp+d.fp} flagged`},
     {cls:"mint",label:"Recall",val:pct(d.recall)+"%",rank:`rank #${rk.recall[0]} / ${rk.recall[1]}`,rc:rankClass(rk.recall[0],rk.recall[1]),sub:`${d.tp} of ${d.tp+d.fn} golden found`},
     {cls:"steel",label:"F1",val:pct(d.f1)+"%",rank:`rank #${rk.f1[0]} / ${rk.f1[1]}`,rc:rankClass(rk.f1[0],rk.f1[1]),sub:"harmonic mean"},
-    {cls:"rust",label:"FP / TP / FN",val:`${d.fp}<span class="unit"> fp</span>`,rank:`${d.tp} tp · ${d.fn} fn`,rc:"",sub:`${d.n_prs} PRs · ${(d.fp/d.tp).toFixed(1)}× FP:TP`},
+    {cls:"rust",label:"FP / TP / FN",val:`${d.fp}<span class="unit"> fp</span>`,rank:`${d.tp} tp · ${d.fn} fn`,rc:"",sub:fpRatioText},
   ];
   cards.forEach(c=>{
     const div=document.createElement("div");div.className="kpi "+c.cls;
@@ -419,15 +421,22 @@ function renderFP(){
     $("#fp-ratio").innerHTML="";return;
   }
   const d=j.daydream;
+  const totalFindings=d.tp+d.fp;
+  if(totalFindings===0){
+    $("#fp-sub").innerHTML=`Under ${esc(j.display)}, daydream flagged no findings, so an FP:TP ratio is not defined.`;
+    $("#fp-stack").innerHTML='<div class="placeholder">0 findings flagged</div>';
+    $("#fp-ratio").innerHTML='<div class="placeholder">No FP:TP ratio when no findings are flagged</div>';
+    return;
+  }
   $("#fp-sub").innerHTML=`Under ${esc(j.display)}, daydream emits <b style="color:var(--rust)">${d.fp} false positives</b> for <b style="color:var(--mint)">${d.tp} true positives</b> — a ${(d.fp/d.tp).toFixed(1)}× FP:TP ratio. The field's median FP:TP is far lower; this is the single biggest lever on daydream's score.`;
   const W=420,H=130;const svg=el("svg",{viewBox:`0 0 ${W} ${H}`});
-  const tot=d.tp+d.fp;const bx=20,bw=W-40,by=48,bh=34;
-  const tpw=bw*d.tp/tot;
+  const bx=20,bw=W-40,by=48,bh=34;
+  const tpw=bw*d.tp/totalFindings;
   svg.appendChild(el("rect",{x:bx,y:by,width:tpw,height:bh,fill:C.mintDeep,rx:4}));
   svg.appendChild(el("rect",{x:bx+tpw,y:by,width:bw-tpw,height:bh,fill:C.rust,rx:4}));
-  svg.appendChild(txt(bx,by-10,`${d.tp} true positive (${pct(d.tp/tot)}%)`,{fill:C.mint,"font-size":"11","font-family":"var(--mono)"}));
-  svg.appendChild(txt(bx+bw,by+bh+18,`${d.fp} false positive (${pct(d.fp/tot)}%)`,{fill:C.rust,"font-size":"11","font-family":"var(--mono)","text-anchor":"end"}));
-  svg.appendChild(txt(bx,by+bh+18,`${tot} findings flagged`,{fill:C.dim,"font-size":"10","font-family":"var(--mono)"}));
+  svg.appendChild(txt(bx,by-10,`${d.tp} true positive (${pct(d.tp/totalFindings)}%)`,{fill:C.mint,"font-size":"11","font-family":"var(--mono)"}));
+  svg.appendChild(txt(bx+bw,by+bh+18,`${d.fp} false positive (${pct(d.fp/totalFindings)}%)`,{fill:C.rust,"font-size":"11","font-family":"var(--mono)","text-anchor":"end"}));
+  svg.appendChild(txt(bx,by+bh+18,`${totalFindings} findings flagged`,{fill:C.dim,"font-size":"10","font-family":"var(--mono)"}));
   $("#fp-stack").innerHTML="";$("#fp-stack").appendChild(svg);
   let rows=j.field.filter(t=>!t.invalid&&t.tp>0).map(t=>({n:t.display,v:t.fp/t.tp,c:t.color}));
   rows.push({n:"daydream",v:d.fp/d.tp,c:C.orange,dd:true});

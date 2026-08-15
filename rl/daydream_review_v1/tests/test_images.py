@@ -2,26 +2,31 @@
 
 Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
 no Docker at all — they assert the build pins every remote input to an immutable
-version and verifies it for integrity before use. The two ``slow`` tests execute
-real Docker builds for the red and green baseline paths: a repo whose suite is
-red at the head commit must produce no image, while a green one builds and bakes
-the checkout.
+version and verifies it for integrity before use. A **fast** tier — no Docker
+required — rejects ``--red`` invocations that cannot select the fixture repo,
+ensuring the guard fires before any build side-effect. The two ``slow`` tests
+execute real Docker builds for the red and green baseline paths: the red path
+plants a failing assertion and the build must die (enforcement IS the build
+failing), while a green one builds and bakes the checkout.
 """
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
-from conftest import PROJECT_ROOT
+from conftest import PROJECT_ROOT, docker_daemon_is_available
 
 from daydream_review_v1.fixture import FIXTURE_SLUG, build_fixture_repo
+from images import build_images
 
-DOCKER_REQUIRED = pytest.mark.skipif(shutil.which("docker") is None, reason="docker is not installed")
+DOCKER_REQUIRED = pytest.mark.skipif(
+    not docker_daemon_is_available(),
+    reason="docker is not installed or the daemon is unavailable",
+)
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
 
@@ -47,6 +52,42 @@ def _tags() -> set[str]:
         check=False,
     )
     return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
+
+
+@pytest.mark.parametrize(
+    "argv,expected_stderr",
+    [
+        pytest.param(
+            ["--red", "--base-only"],
+            "--red cannot be combined with --base-only",
+            id="base-only",
+        ),
+        pytest.param(
+            [
+                "--red",
+                "--corpus",
+                str(PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"),
+                "--only",
+                "pallets/itsdangerous",
+            ],
+            "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
+            id="non-fixture-only",
+        ),
+    ],
+)
+def test_red_rejects_invocations_without_fixture(
+    argv: list[str], expected_stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--red must fail fast (status 2) when no fixture PR is selected, before any build."""
+    monkeypatch.setattr(build_images, "_build_base", lambda: 0)
+    monkeypatch.setattr(build_images, "_stream", lambda *args, **kwargs: None)
+
+    status = build_images.main(argv)
+    captured = capsys.readouterr()
+
+    assert status == 2
+    assert captured.out == ""
+    assert captured.err == f"{expected_stderr}\n"
 
 
 @pytest.mark.slow
@@ -103,6 +144,19 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     assert "/srv/mirror.git" in probe.stdout
 
 
+def test_docker_required_gates_on_daemon_reachability() -> None:
+    """The per-test Docker skip must gate on daemon reachability, not client presence."""
+    module = sys.modules[__name__]
+    # The skip condition keys on the reachability predicate imported from conftest...
+    assert "docker_daemon_is_available" in vars(module), "reachability predicate import missing"
+    # ...and the stale client-presence probe is gone.
+    assert "shutil" not in vars(module), "stale shutil.which probe remains"
+    assert (
+        DOCKER_REQUIRED.mark.kwargs["reason"]
+        == "docker is not installed or the daemon is unavailable"
+    )
+
+
 def test_docker_skip_is_per_test_not_module_wide() -> None:
     """M8 regression: the Docker skip is per-test, not module-wide, so the static
     build-contract tests (added in the next task) collect in a Docker-less CI."""
@@ -110,9 +164,18 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
     assert "pytestmark" not in vars(module), "module-wide Docker skip would gate the static tests"
     assert "DOCKER_REQUIRED" in vars(module), "per-test DOCKER_REQUIRED marker missing"
     # Both slow integration tests must carry the skip; neither may rely on a
-    # module-level marker that would also skip the static tests.
-    assert getattr(test_green_baseline_gate_fails_the_build_on_a_red_suite, "pytestmark", None)
-    assert getattr(test_green_baseline_builds_and_bakes_the_checkout, "pytestmark", None)
+    # module-level marker that would also skip the static tests.  Check for
+    # actual skipif marker content, not just pytestmark attribute existence.
+    for name in (
+        "test_green_baseline_gate_fails_the_build_on_a_red_suite",
+        "test_green_baseline_builds_and_bakes_the_checkout",
+    ):
+        test_func = getattr(module, name)
+        marks = getattr(test_func, "pytestmark", [])
+        assert marks, f"{name} has no pytestmark (would not skip)"
+        assert any(getattr(m, "name", None) == "skipif" for m in marks), (
+            f"{name} missing a skipif marker"
+        )
 
 
 @pytest.mark.parametrize(
