@@ -8,7 +8,11 @@
 # and the run is unusable as a gradient. Better to lose the image than to ship a
 # task whose reward means nothing.
 
-ARG BASE_IMAGE=daydream-rl/base:latest
+# BASE_IMAGE is supplied as a build-arg by images/build_images.py and must be an
+# immutable identity (daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 hex>).
+# There is deliberately no default: a snapshot build that omits it must fail, not
+# silently fall back to a mutable alias that can move under the image.
+ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG HEAD_SHA

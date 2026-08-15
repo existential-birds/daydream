@@ -132,6 +132,17 @@ def test_main_uses_immutable_base_for_repository_builds(
     assert build_images.BASE_LATEST not in received
 
 
+def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
+    """repo.Dockerfile must declare ARG BASE_IMAGE with no mutable default."""
+    text = (PROJECT_ROOT / "images" / "repo.Dockerfile").read_text(encoding="utf-8")
+    arg_line = next(line for line in text.splitlines() if line.startswith("ARG BASE_IMAGE"))
+    assert "=" not in arg_line, f"ARG BASE_IMAGE must have no default: {arg_line!r}"
+    assert "latest" not in arg_line
+    # The base is still consumed via FROM, declared after the ARG.
+    assert text.find("FROM ${BASE_IMAGE}") > text.find("ARG BASE_IMAGE")
+    assert "daydream-rl/base:latest" not in text
+
+
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
