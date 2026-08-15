@@ -20,7 +20,7 @@ import os
 import shutil
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -2711,13 +2711,17 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # reviewed set scopes both gate captures (parsing only reviewed ``*.py``)
     # and the residual net.
     changed_files = _resolve_changed_files(ctx)
+
+    def _py_only(paths: Iterable[str]) -> set[str]:
+        return {p for p in paths if p.endswith(".py")}
+
     if quality_gate_enabled:
         # Issue #457: scope the pre-fix snapshot to the reviewed ``*.py`` set.
         # ``None`` (no diff context, e.g. a resume that lost ctx.data["diff"])
         # keeps the whole-workspace capture, exactly today's behavior on that
         # resume path.
         quality_before_paths: set[str] | None = (
-            {f for f in changed_files if f.endswith(".py")} if changed_files is not None else None
+            _py_only(changed_files) if changed_files is not None else None
         )
         quality_before, quality_before_unavailable = await _capture_quality_before(
             daydream_dir, quality_before_paths
@@ -2857,12 +2861,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             changed_after_fix = git_ops.changed_files_against(
                 work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
             )
-            quality_candidates = {path for path in changed_after_fix if path.endswith(".py")}
-            quality_candidates |= {
-                item["file"]
-                for item in ctx.data["items"]
-                if item.get("file") and item["file"].endswith(".py")
-            }
+            quality_candidates = _py_only(changed_after_fix)
+            quality_candidates |= _py_only(
+                item["file"] for item in ctx.data["items"] if item.get("file")
+            )
         except git_ops.GitError:
             quality_candidates = None
     else:

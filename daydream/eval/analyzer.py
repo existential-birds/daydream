@@ -877,7 +877,9 @@ def _count_decision_nodes(node: Any) -> int:
     return total
 
 
-def _scoped_python_files(workspace: Path) -> list[tuple[Path, str, list[str]]]:
+def _scoped_python_files(
+    workspace: Path, need_lines: bool = False
+) -> list[tuple[Path, str, list[str]]]:
     """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel, lines)``.
 
     Excluded directories are matched on exact path components so a nested
@@ -894,7 +896,10 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str, list[str]]]:
     ``content`` bytes already read for ``is_generated_file`` with the same
     ``utf-8`` + ``errors="replace"`` decode ``_parse_python_file`` uses, so
     candidate-scoped analysis (issue #457) can index a non-candidate peer's
-    text for cross-file clone attribution without parsing it.
+    text for cross-file clone attribution without parsing it. It is only
+    populated when *need_lines* is set (candidate-scoped analysis); the default
+    whole-workspace path never consumes it, so the redundant decode+splitlines
+    is skipped there and no dead third element is materialized.
     """
     files: list[tuple[Path, str, list[str]]] = []
     for path in workspace.rglob("*.py"):
@@ -910,7 +915,11 @@ def _scoped_python_files(workspace: Path) -> list[tuple[Path, str, list[str]]]:
             continue
         if is_generated_file(str(rel), content):
             continue
-        files.append((path, str(rel), content.decode("utf-8", errors="replace").splitlines()))
+        if need_lines:
+            raw_lines = content.decode("utf-8", errors="replace").splitlines()
+        else:
+            raw_lines = []
+        files.append((path, str(rel), raw_lines))
     return sorted(files, key=lambda item: item[1])
 
 
@@ -1446,6 +1455,41 @@ def _cross_file_clone_flagged_lines(
     return flagged
 
 
+def _aggregate_per_file(
+    candidates: list[tuple[Path, str, list[str]]],
+    parsed: dict[Path, Any],
+    parsed_lines: dict[Path, list[str]],
+    cross_file_flagged: dict[Path, set[int]],
+) -> tuple[dict[str, dict], float, float, int, int]:
+    """Terminal per-file aggregation over the parsed candidates.
+
+    Walks the candidate list once, folding each successfully parsed file's
+    quality entry and mass/flagged/loc totals; a candidate whose parse failed
+    stays in ``scoped_files`` but contributes nothing here (Finding #1).
+    Returns ``(per_file, total_mass, high_mass, total_flagged, total_loc)``.
+    """
+    per_file: dict[str, dict] = {}
+    total_mass = 0.0
+    high_mass = 0.0
+    total_flagged = 0
+    total_loc = 0
+    for path, rel, _raw in candidates:
+        root = parsed.get(path)
+        if root is None:
+            continue
+        quality = _file_quality_from_tree(
+            root,
+            parsed_lines[path],
+            cross_file_flagged=cross_file_flagged.get(path),
+        )
+        per_file[rel] = quality["entry"]
+        total_mass += quality["mass"]
+        high_mass += quality["high_mass"]
+        total_flagged += quality["flagged"]
+        total_loc += quality["loc"]
+    return per_file, total_mass, high_mass, total_flagged, total_loc
+
+
 def analyze_quality(
     daydream_dir: str | Path, candidate_paths: set[str] | None = None
 ) -> dict:
@@ -1492,7 +1536,7 @@ def analyze_quality(
             "scoped_files": 0,
         }
 
-    scoped_files = _scoped_python_files(workspace)
+    scoped_files = _scoped_python_files(workspace, need_lines=candidate_paths is not None)
     if candidate_paths is None:
         candidates = scoped_files
         candidate_path_set: set[Path] | None = None
@@ -1540,26 +1584,9 @@ def analyze_quality(
         target_paths=set(parsed) if candidate_paths is not None else None,
     )
 
-    per_file: dict[str, dict] = {}
-    total_mass = 0.0
-    high_mass = 0.0
-    total_flagged = 0
-    total_loc = 0
-
-    for path, rel, _raw in candidates:
-        root = parsed.get(path)
-        if root is None:
-            continue
-        quality = _file_quality_from_tree(
-            root,
-            parsed_lines[path],
-            cross_file_flagged=cross_file_flagged.get(path),
-        )
-        per_file[rel] = quality["entry"]
-        total_mass += quality["mass"]
-        high_mass += quality["high_mass"]
-        total_flagged += quality["flagged"]
-        total_loc += quality["loc"]
+    per_file, total_mass, high_mass, total_flagged, total_loc = _aggregate_per_file(
+        candidates, parsed, parsed_lines, cross_file_flagged
+    )
 
     return {
         "erosion": round(high_mass / total_mass, 4) if total_mass > 0 else None,
