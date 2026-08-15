@@ -156,6 +156,7 @@ class GoldenComment(BaseModel):
     Used only for the non-summed ``golden_overlap`` metric — never a reward.
     """
 
+    model_config = ConfigDict(extra="forbid")
     comment: str
     path: str | None = None
     line: int | None = None
