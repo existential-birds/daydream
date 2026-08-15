@@ -19,7 +19,6 @@ cached layers.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 import tempfile
@@ -377,21 +376,24 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         )
         combined = result.stdout + result.stderr
         assert result.returncode == 0, combined[-4000:]
-        # Functional probe of the freshly built image, not the log: the image
-        # config records the RUN steps docker executed, so the gpg-verify and
-        # checksum layers being present is the hardening having re-run (a failed
-        # gpg verify or checksum mismatch would have died the build).
+        # Functional probe of the freshly built image, not the log: ``docker
+        # image history`` records the RUN steps docker actually executed, so the
+        # gpg-verify and checksum layers being present is the hardening having
+        # re-run (a failed gpg verify or checksum mismatch would have died the
+        # build).
         probe = subprocess.run(
-            ["docker", "image", "inspect", tag], capture_output=True, text=True, check=False
+            ["docker", "image", "history", tag, "--no-trunc", "--format", "{{.CreatedBy}}"],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         assert probe.returncode == 0, f"throwaway image {tag} not produced"
-        history = json.loads(probe.stdout)[0]["History"]
-        assert any(
-            "gpg --batch --verify" in entry.get("created_by", "") for entry in history
-        ), "built image lacks the gpg-verify hardening layer"
-        assert any(
-            "sha256sum -c" in entry.get("created_by", "") for entry in history
-        ), "built image lacks the checksum-verification hardening layer"
+        assert "gpg --batch --verify" in probe.stdout, (
+            "built image lacks the gpg-verify hardening layer"
+        )
+        assert "sha256sum -c" in probe.stdout, (
+            "built image lacks the checksum-verification hardening layer"
+        )
     finally:
         subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
 

@@ -21,6 +21,7 @@ import pytest
 import verifiers.v1 as vf
 from daydream.training.harvest import assemble_scoring_inputs
 from daydream.training.reward import score_trajectory
+from daydream.atif import validate
 
 from daydream_review_v1.fixture import build_fixture_repo
 from daydream_review_v1.taskset import (
@@ -175,11 +176,23 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
     dangling = _walk_json_keys(trajectory, {"trajectory_path", "sibling_trajectory_ref"})
     assert not dangling, f"dangling per-fork trajectory refs: {dangling}"
 
-    # 2. no machine-specific absolute paths (trajectory.json + manifest.json)
-    for name, blob in (("trajectory.json", trajectory), ("manifest.json", manifest)):
+    # 2. no machine-specific absolute paths (all shipped golden fixtures)
+    evaluation = json.loads((rundir_golden / "evaluation.json").read_text(encoding="utf-8"))
+    for name, blob in (
+        ("trajectory.json", trajectory),
+        ("manifest.json", manifest),
+        ("evaluation.json", evaluation),
+    ):
         assert not _ABS_PATH_RE.search(json.dumps(blob)), (
             f"{name} carries a machine-specific absolute path"
         )
+
+    # 2b. the shipped trajectory must satisfy the codebase's own ATIF validator
+    #     (daydream.atif.validate, the primary guard): a prune must not leave
+    #     dangling observation source_call_id refs that hard-fail validation.
+    assert validate(trajectory) is True, (
+        "trajectory.json fails daydream.atif.validate (dangling tool-call refs)"
+    )
 
     # 3. no embedded model-directed prompt copies in agent-step internals
     for step in trajectory["steps"]:

@@ -5,7 +5,7 @@
     "version": "0.25.0",
     "model_name": "claude-sonnet-5"
   },
-  "daydream_dir": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream",
+  "daydream_dir": "[REDACTED]",
   "trajectory_count": 5,
   "cost": {
     "total_cost_usd": 1.7691,
@@ -127,22 +127,22 @@
     "redundant_reads": [
       {
         "agent": "main",
-        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/exploration/summary.md",
+        "file": "[REDACTED]",
         "read_count": 2
       },
       {
         "agent": "main",
-        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/diff.patch",
+        "file": "[REDACTED]",
         "read_count": 2
       },
       {
         "agent": "main",
-        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/.daydream/exploration/affected_files.md",
+        "file": "[REDACTED]",
         "read_count": 2
       },
       {
         "agent": "main",
-        "file": "/private/tmp/claude-501/-Users-[REDACTED_USER]-github-existential-birds-daydream-worktrees-verifiers-env-164/40a4cc89-03d2-444e-852c-08f192058c7d/scratchpad/golden2/repo/calc.py",
+        "file": "[REDACTED]",
         "read_count": 2
       }
     ]
