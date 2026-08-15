@@ -361,10 +361,27 @@ def _open_recorder(
     """
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    # Backend identity mirrors archive/manifest.py: the representative backend is
-    # resolved via the review phase, plus per-phase fix/test resolutions, all
-    # resolved here in the single construction site.
-    backend_name = _resolved_backend_name(config, "review")
+    # Backend identity mirrors archive/manifest.py, but the representative
+    # backend resolves through the phase that actually governs the flow's
+    # review: the deep flow's review fan-out runs on ``per_stack_review``
+    # (loop/shallow/review/comment modes), while ``review`` only powers
+    # feedback-mode commit-push and the PR-feedback banner — so resolving via
+    # "review" would mislabel deep-flow runs under per-phase backend overrides.
+    # Per-phase fix/test resolutions are recorded only for flows that run those
+    # phases: review-only (TTT) and improve flows stop before the fix cycle,
+    # and feedback (PR) runs fix but never test, so their keys stay omitted.
+    review_phase = (
+        "per_stack_review"
+        if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT)
+        else "review"
+    )
+    backend_name = _resolved_backend_name(config, review_phase)
+    fix_backend_name = _resolved_backend_name(config, "fix") if flow_kind not in (
+        DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE,
+    ) else ""
+    test_backend_name = _resolved_backend_name(config, "test") if flow_kind not in (
+        DaydreamRunFlow.TTT, DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE,
+    ) else ""
     return TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
@@ -376,8 +393,8 @@ def _open_recorder(
         pr_repo=config.pr_repo,
         backend_name=backend_name,
         review_backend_name=backend_name,
-        fix_backend_name=_resolved_backend_name(config, "fix"),
-        test_backend_name=_resolved_backend_name(config, "test"),
+        fix_backend_name=fix_backend_name,
+        test_backend_name=test_backend_name,
         on_write=_make_archive_callback(config, target_dir, work),
     )
 

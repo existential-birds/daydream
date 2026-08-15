@@ -1240,7 +1240,7 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
 
 
 def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
-    from daydream.runner import RunConfig, _open_recorder
+    from daydream.runner import _open_recorder
     target_dir = tmp_path / "project"
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
@@ -1253,8 +1253,90 @@ def test_open_recorder_resolves_backend_identity(tmp_path: Path) -> None:
     assert recorder.test_backend_name == "codex"
 
 
+def test_open_recorder_resolves_backend_via_per_stack_review(tmp_path: Path) -> None:
+    """The representative backend follows per_stack_review, not the review phase.
+
+    The deep flow's actual review fan-out runs on ``per_stack_review``; the
+    ``review`` phase only powers feedback-mode commit-push, so a per-phase
+    override on ``per_stack_review`` must win for the run's backend identity.
+    """
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(
+        target=str(target_dir),
+        run_eval=False,
+        review_backend="codex",
+        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
+    )
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+    )
+    assert recorder.backend_name == "pi"
+    assert recorder.review_backend_name == "pi"
+    assert recorder.fix_backend_name == "claude"
+    assert recorder.test_backend_name == "claude"
+
+
+def test_open_recorder_improve_omits_fix_test_backend(tmp_path: Path) -> None:
+    """Improve trajectories carry no fix/test backend identity: the improve flow
+    never runs those phases, so serializing them would mislabel the run."""
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
+def test_open_recorder_review_only_omits_fix_test_backend(tmp_path: Path) -> None:
+    """Review-only (TTT) trajectories carry no fix/test backend identity.
+
+    ``--review``/``--comment`` stop the deep spine after post-review, so their
+    flow never runs the fix cycle; emitting fix/test labels would mislabel them.
+    """
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), backend="codex", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.TTT,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
+def test_open_recorder_feedback_resolves_fix_omits_test(tmp_path: Path) -> None:
+    """Feedback (PR) flow records the fix backend but omits the test backend.
+
+    ``daydream feedback`` fixes items (fix phase) but never runs the test
+    phase, and its commit-push step uses the ``review`` backend — so the
+    representative follows the ``review`` phase and only ``fix_backend`` is
+    recorded.
+    """
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), review_backend="codex", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.PR,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == "claude"
+    assert recorder.test_backend_name == ""
+
+
 def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
-    from daydream.runner import RunConfig, _open_recorder
+    from daydream.runner import _open_recorder
     target_dir = tmp_path / "project"
     target_dir.mkdir()
     config = RunConfig(target=str(target_dir), run_eval=False)

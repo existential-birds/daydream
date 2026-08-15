@@ -1287,14 +1287,20 @@ class TrajectoryRecorder:
         pr_number: GitHub PR number if reviewing a PR. Stored in trajectory extra.
         pr_repo: GitHub repo (``owner/repo``) if reviewing a PR. Stored in trajectory extra.
         backend_name: Resolved backend kind (claude/codex/pi/osprey) for the run,
-            resolved via the review phase by ``_open_recorder``. Stored in
+            resolved by ``_open_recorder`` via the ``per_stack_review`` phase for
+            deep-flow runs (the phase that governs the deep flow's actual review
+            fan-out) and via the ``review`` phase otherwise. Stored in
             trajectory extra as ``backend`` when non-empty.
         review_backend_name: Resolved backend kind for the review phase. Stored in
-            trajectory extra as ``review_backend`` when ``backend_name`` is set.
+            trajectory extra as ``review_backend`` when set.
         fix_backend_name: Resolved backend kind for the fix phase. Stored in
-            trajectory extra as ``fix_backend`` when ``backend_name`` is set.
+            trajectory extra as ``fix_backend`` when set; left empty by
+            ``_open_recorder`` for flows that never run fix (e.g. improve), so
+            the key is omitted from their trajectories.
         test_backend_name: Resolved backend kind for the test phase. Stored in
-            trajectory extra as ``test_backend`` when ``backend_name`` is set.
+            trajectory extra as ``test_backend`` when set; left empty by
+            ``_open_recorder`` for flows that never run test (e.g. improve), so
+            the key is omitted from their trajectories.
         _step_id_counter: Monotonic; never decreases (Pitfall 1).
         _final_totals: Running tally for FinalMetrics aggregation (MAP-07).
         _previous_token: ContextVar reset token; used by __aexit__ to restore.
@@ -1748,13 +1754,18 @@ class TrajectoryRecorder:
         extra: dict[str, Any] = {"target_dir": str(self.target_dir)}
         if self.backend_name:
             # Backend identity mirrors archive/manifest.py's record: a
-            # representative ``backend`` (resolved via the review phase) plus
-            # always-present per-phase keys. Empty ``backend_name`` (direct
-            # construction outside the factory) serializes no backend keys.
+            # representative ``backend`` (resolved via the phase that governs the
+            # deep flow's review fan-out) plus per-phase keys, each serialized
+            # only when set — a flow that never runs a phase (improve never runs
+            # fix/test) omits that phase's key entirely. Empty ``backend_name``
+            # (direct construction outside the factory) serializes no backend keys.
             extra["backend"] = self.backend_name
-            extra["review_backend"] = self.review_backend_name
-            extra["fix_backend"] = self.fix_backend_name
-            extra["test_backend"] = self.test_backend_name
+            if self.review_backend_name:
+                extra["review_backend"] = self.review_backend_name
+            if self.fix_backend_name:
+                extra["fix_backend"] = self.fix_backend_name
+            if self.test_backend_name:
+                extra["test_backend"] = self.test_backend_name
         if self.pr_number is not None:
             extra["pr_number"] = self.pr_number
         if self.pr_repo is not None:

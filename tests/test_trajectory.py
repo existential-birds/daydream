@@ -1429,6 +1429,30 @@ async def test_build_trajectory_omits_backend_when_unset(tmp_path: Path) -> None
     assert "test_backend" not in extra
 
 
+async def test_build_trajectory_omits_empty_per_phase_backend_keys(tmp_path: Path) -> None:
+    """Per-phase backend keys are omitted when their name is empty (improve flow)."""
+    recorder = TrajectoryRecorder(
+        path=tmp_path / ".daydream" / "trajectory.json",
+        run_flow=DaydreamRunFlow.IMPROVE,
+        target_dir=tmp_path,
+        agent_model_name="opus",
+        session_id="test",
+        backend_name="codex",
+        review_backend_name="codex",
+        fix_backend_name="",
+        test_backend_name="",
+    )
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe(TextEvent(text="hello"))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+    extra = read_trajectory(recorder.path)["extra"]
+    assert extra["backend"] == "codex"
+    assert extra["review_backend"] == "codex"
+    assert "fix_backend" not in extra
+    assert "test_backend" not in extra
+
+
 async def test_fork_child_inherits_backend_identity(tmp_path: Path) -> None:
     parent = TrajectoryRecorder(
         path=tmp_path / ".daydream" / "trajectory.json",
