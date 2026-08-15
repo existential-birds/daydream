@@ -106,7 +106,13 @@ def test_working_directory_accepts_cwd() -> None:
     regex = re.compile(WORKING_DIRECTORY_SCHEMA["pattern"])
     assert regex.match(".")
     assert regex.match("src/main.rs")
-    assert not regex.match("/abs/path")
+    # A well-formed absolute path is lexically acceptable (confinement is
+    # enforced by path_is_confined + the host check, not this pattern).
+    assert regex.match("/abs/path")
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("/abs/path")
+    # Absolute form still requires a non-empty segment after the slash.
+    assert not regex.match("/")
+    assert not regex.match("//double-slash")
 
 
 @pytest.mark.parametrize("value", MULTI_DOT_PATHS)
