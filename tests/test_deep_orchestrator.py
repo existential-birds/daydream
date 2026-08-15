@@ -1435,8 +1435,8 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
 
     real_analyze = analyzer_mod.analyze_quality
 
-    def _stub(daydream_dir: Any) -> dict[str, Any]:
-        result = real_analyze(daydream_dir)
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
+        result = real_analyze(daydream_dir, candidate_paths)
         if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {
                 rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"
@@ -1626,6 +1626,43 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
         "a finding target must stay covered even when unchanged on disk"
     )
     assert per_file["api.py"]["flagged"] is False
+
+
+async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path (#457): both gate captures call analyze_quality with the reviewed *.py set only.
+
+    The reviewed diff names only ``api.py``; ``unrelated.py`` is a tracked python
+    file outside the diff. Before this fix the analyzer parsed the whole workspace
+    on every gate capture. Now the pre-fix and post-fix captures both receive
+    ``candidate_paths == {"api.py"}`` -- ``unrelated.py`` is neither parsed as a
+    candidate nor reported.
+    """
+    from daydream.eval import analyzer as analyzer_mod
+
+    target = _build_scope_creep_target(tmp_path, "gate_scoped")
+    real_analyze = analyzer_mod.analyze_quality
+    calls: list[set[str] | None] = []
+
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None) -> dict[str, Any]:
+        calls.append(candidate_paths)
+        return real_analyze(daydream_dir, candidate_paths)
+
+    monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
+
+    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects)
+    assert exit_code == 0
+    # The two GATE captures come first; the archive step's ``analyze_session``
+    # adds a trailing argument-free ``analyze_quality`` call (a pinned
+    # invariant — standalone evaluation stays whole-workspace), so pin only
+    # the first two calls.
+    assert len(calls) >= 2, f"expected pre-fix + post-fix captures, got {calls}"
+    assert calls[0] == {"api.py"}, f"pre-fix capture must be scoped to reviewed .py, got {calls[0]}"
+    assert calls[1] == {"api.py"}, f"post-fix capture must be scoped to reviewed .py, got {calls[1]}"
 
 
 async def test_fix_quality_gate_clamps_invalid_thresholds(

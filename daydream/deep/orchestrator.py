@@ -2251,7 +2251,9 @@ async def _step_verify(ctx: FlowContext) -> None:
     )
 
 
-async def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | None, str | None]:
+async def _capture_quality_before(
+    daydream_dir: Path, candidate_paths: set[str] | None
+) -> tuple[dict[str, Any] | None, str | None]:
     """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
 
     ``analyze_quality`` is pure and deterministic (no backend, no network), but
@@ -2260,12 +2262,17 @@ async def _capture_quality_before(daydream_dir: Path) -> tuple[dict[str, Any] | 
     reason is returned so the gate can persist an auditable unavailable entry
     instead of leaving a silent blank (#329). The sync tree-walk runs off the
     event loop so parallel fix fan-out is never blocked by the analyzer
-    (#329 / CodeRabbit Finding D).
+    (#329 / CodeRabbit Finding D). *candidate_paths* (issue #457) scopes the
+    snapshot's parse/aggregate to the reviewed ``*.py`` set resolved by
+    ``_step_fix`` before the capture; ``None`` keeps the whole-workspace
+    snapshot (e.g. a resume that lost the diff context).
     """
     try:
         from daydream.eval.analyzer import analyze_quality
 
-        return await anyio.to_thread.run_sync(analyze_quality, daydream_dir), None
+        return await anyio.to_thread.run_sync(
+            analyze_quality, daydream_dir, candidate_paths
+        ), None
     except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
         return None, f"{type(exc).__name__}: {exc}"
 
@@ -2496,7 +2503,11 @@ async def _evaluate_quality_gate(
         try:
             from daydream.eval.analyzer import analyze_quality
 
-            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir)
+            # Issue #457: scope the post-fix capture to the candidate set
+            # (reviewed *.py + files changed by the fix pass). ``candidates``
+            # is always a set here -- the ``candidates is None`` branch above
+            # returned already.
+            after = await anyio.to_thread.run_sync(analyze_quality, daydream_dir, candidates)
         except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
             _persist_quality_gate_unavailable(
                 gate_p=gate_p,
@@ -2690,17 +2701,29 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     quality_gate_verbosity_absolute = _quality_gate_threshold(
         config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
     )
-    if quality_gate_enabled:
-        quality_before, quality_before_unavailable = await _capture_quality_before(daydream_dir)
-    else:
-        quality_before, quality_before_unavailable = None, None
     # Issue #336 — fix-loop scope bound. Thread the reviewed diff's file set
     # into every fix prompt as an explicit "Allowed files" clause. ``None``
     # (no diff context, e.g. a resume that lost ctx.data["diff"]) leaves the
     # prompt unchanged; the prose scope boundary still applies. Resolved via
     # _resolve_changed_files (shared with the gate) so a missing key never
     # crashes and the gate and post-fix residual net agree on the allowed set.
+    # Issue #457: resolved BEFORE the pre-fix quality capture so the same
+    # reviewed set scopes both gate captures (parsing only reviewed ``*.py``)
+    # and the residual net.
     changed_files = _resolve_changed_files(ctx)
+    if quality_gate_enabled:
+        # Issue #457: scope the pre-fix snapshot to the reviewed ``*.py`` set.
+        # ``None`` (no diff context, e.g. a resume that lost ctx.data["diff"])
+        # keeps the whole-workspace capture, exactly today's behavior on that
+        # resume path.
+        quality_before_paths: set[str] | None = (
+            {f for f in changed_files if f.endswith(".py")} if changed_files is not None else None
+        )
+        quality_before, quality_before_unavailable = await _capture_quality_before(
+            daydream_dir, quality_before_paths
+        )
+    else:
+        quality_before, quality_before_unavailable = None, None
     async with phase_scope(DaydreamPhase.FIX):
         fix_failures = await phase_fix_parallel(
             ctx.backend_for("fix"),
@@ -2835,7 +2858,11 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
             )
             quality_candidates = {path for path in changed_after_fix if path.endswith(".py")}
-            quality_candidates |= {item["file"] for item in ctx.data["items"] if item.get("file")}
+            quality_candidates |= {
+                item["file"]
+                for item in ctx.data["items"]
+                if item.get("file") and item["file"].endswith(".py")
+            }
         except git_ops.GitError:
             quality_candidates = None
     else:
