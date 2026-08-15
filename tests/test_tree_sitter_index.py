@@ -91,8 +91,9 @@ _SHARED_FIXTURES: dict[str, str] = {
             "package/models.py",
         ),
         # `from . import something` resolves to the current package's __init__.py
-        # because tree-sitter captures only the relative import node (the dot),
-        # not the imported name after the dot.
+        # AND the sibling module package/feature/something.py, because the
+        # capture now spans the whole statement, not just the relative import
+        # node (the dot).
         (
             "package/feature/api.py",
             _SHARED_FIXTURES
@@ -100,8 +101,9 @@ _SHARED_FIXTURES: dict[str, str] = {
                 "package/feature/api.py": (
                     '"""API module."""\nfrom . import something\n\nthing = something.thing\n'
                 ),
+                "package/feature/something.py": "",
             },
-            "package/feature/__init__.py",
+            {"package/feature/__init__.py", "package/feature/something.py"},
         ),
         # `from ....something import name` with 4+ dots ascends to the great-grandparent package.
         (
@@ -120,12 +122,15 @@ _SHARED_FIXTURES: dict[str, str] = {
     ],
 )
 def test_python_multilevel_relative_imports(
-    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str
+    tmp_path: Path, api_rel: str, files: dict[str, str], expected_import_path: str | set[str]
 ):
     repo = _materialize(tmp_path, files)
     results = detect_affected_files(_modified_diff(api_rel), repo, depth=1)
     imports_pairs = {(r.path, r.role) for r in results if r.role == "imports"}
-    assert imports_pairs == {(expected_import_path, "imports")}
+    if isinstance(expected_import_path, str):
+        assert imports_pairs == {(expected_import_path, "imports")}
+    else:
+        assert imports_pairs == {(p, "imports") for p in expected_import_path}
 
 
 @pytest.mark.parametrize(

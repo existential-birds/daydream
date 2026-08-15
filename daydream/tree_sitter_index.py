@@ -211,6 +211,14 @@ def _parse_diff_name_status(diff_text: str) -> list[_DiffEntry]:
 # --- Import resolution -------------------------------------------------------
 
 
+def _module_candidates(base: Path, dotted: str) -> list[Path]:
+    """Resolve a dotted module name under `base` to .py and package candidates."""
+    target = base
+    for part in dotted.split("."):
+        target = target / part
+    return [target.with_suffix(".py"), target / "__init__.py"]
+
+
 def _resolve_python_import(import_str: str, repo_root: Path, importer: Path) -> list[Path]:
     candidates: list[Path] = []
     if import_str.startswith("from "):
@@ -230,31 +238,19 @@ def _resolve_python_import(import_str: str, repo_root: Path, importer: Path) -> 
         for _ in range(node.level - 1):
             base = base.parent
         if node.module is not None:
-            target = base
-            for part in node.module.split("."):
-                target = target / part
-            candidates.extend([target.with_suffix(".py"), target / "__init__.py"])
+            candidates.extend(_module_candidates(base, node.module))
         else:
             candidates.append(base / "__init__.py")
             for alias in node.names:
                 if alias.name == "*":
                     continue
-                target = base
-                for part in alias.name.split("."):
-                    target = target / part
-                candidates.extend([target.with_suffix(".py"), target / "__init__.py"])
+                candidates.extend(_module_candidates(base, alias.name))
     else:
         parts = import_str.split(".")
-        target = repo_root
-        for part in parts:
-            target = target / part
-        candidates.extend([target.with_suffix(".py"), target / "__init__.py"])
+        candidates.extend(_module_candidates(repo_root, import_str))
         # Also try resolving the parent (e.g. `from foo.bar import baz`).
         if len(parts) >= 2:
-            parent = repo_root
-            for part in parts[:-1]:
-                parent = parent / part
-            candidates.extend([parent.with_suffix(".py"), parent / "__init__.py"])
+            candidates.extend(_module_candidates(repo_root, ".".join(parts[:-1])))
     return [c for c in candidates if c.exists() and c.is_file()]
 
 
