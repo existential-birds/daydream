@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from rich.console import Console
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import AgentDefinition
@@ -38,11 +39,11 @@ from daydream.backends import (
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
-from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text
+from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text, redact_value
 from daydream.ui import (
+    NEON_THEME,
     AgentTextRenderer,
     LiveToolPanelRegistry,
-    create_console,
     format_callback_progress,
     format_callback_text,
     print_cost,
@@ -125,11 +126,28 @@ class AgentState:
     current_backends: list[Backend] = field(default_factory=list)
 
 
+class _LogRedactingConsole(Console):
+    """Console that redacts string payloads while ``--log`` mode is active.
+
+    phases.py, runner.py, and the other importers bind to this module-level
+    console, so their Rich output would otherwise bypass the run_agent-event
+    emitter and leak raw secrets via the UI path in ``--log`` mode.
+    """
+
+    def print(self, *objects: Any, **kwargs: Any) -> None:
+        if _state.log_mode:
+            objects = tuple(
+                redact_text(obj) if isinstance(obj, str) else obj
+                for obj in objects
+            )
+        super().print(*objects, **kwargs)
+
+
 # Module-level singletons: access/mutate via the getter/setter functions below,
 # never _state directly. reset_state() restores defaults between test runs.
 
 _state = AgentState()
-console = create_console()
+console = _LogRedactingConsole(theme=NEON_THEME)
 
 
 def reset_state() -> None:
@@ -380,26 +398,18 @@ def _summarize_output(output: str) -> str:
 def _redact_log_value(value: Any) -> Any:
     """Recursively redact a log-mode value without mutating its argument.
 
-    ``str`` leaves and string dict keys are run through the fail-closed log
-    boundary; containers are rebuilt fresh so the caller's object is never
-    touched. The redactor never raises, so no error propagation is needed.
+    Delegates to the canonical :func:`daydream.trajectory.redact_value`
+    redactor so the security-relevant recursion lives in exactly one place.
     """
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, dict):
-        return {
-            (redact_text(k) if isinstance(k, str) else k): _redact_log_value(v)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_log_value(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_log_value(item) for item in value)
-    return value
+    return redact_value(value)
 
 
 def _print_log(value: str) -> None:
-    """The single safe ``--log`` emitter: redact, then print."""
+    """The safe ``--log`` emitter for run_agent events: redact, then print.
+
+    Phase/UI output flows through the module-level ``console``, which redacts
+    string payloads in log mode via the same fail-closed boundary.
+    """
     print(redact_text(value), flush=True)
 
 

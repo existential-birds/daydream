@@ -71,20 +71,15 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
     ("events", "config_overrides", "required", "forbidden"),
     [
         # Sentinel-absence is asserted at the agent boundary in
-        # test_log_mode_emission_redacts_sentinels_on_agent_path; the deep
-        # pipeline's out-of-scope phases.py prints legitimately carry raw content,
-        # so ``forbidden`` stays empty here. Marker presence proves the agent's
-        # `_print_log` redaction runs on the real path.
-        # Contract loss, stated explicitly: the pre-redaction version of this case
-        # asserted no Rich markup in log-mode output
-        # (``forbidden=("\x1b[", "[bold]", "[dim]")``); that assertion was dropped
-        # in the redaction rewrite and no remaining test asserts log-mode output
-        # is markup-free.
+        # test_log_mode_emission_redacts_sentinels_on_agent_path; marker presence
+        # here proves the agent's `_print_log` redaction runs on the real path.
+        # The forbidden tuples keep the log-mode markup-free invariant guarded:
+        # captured stdout on this path is plain text (no Rich escape sequences).
         pytest.param(
             [TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
             {"log_mode": True, "quiet": True, "output_mode": "review"},
             ("hello", "[REDACTED_API_KEY]"),
-            (),
+            ("\x1b[", "[bold]", "[dim]"),
             id="plain-text",
         ),
         pytest.param(
@@ -227,6 +222,37 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     out = _summarize_output("x" * 190 + " " + "ghp_" + "y" * 8 + "z" * 10)
     assert "ghp_" not in out
     assert "[REDACTED" in out
+
+
+def test_log_mode_console_redacts_string_payloads() -> None:
+    """phases.py imports agent's module-level console; in --log mode that
+    console redacts string payloads, so phase/UI output (e.g. the failure
+    handoff body) cannot bypass the log-mode redaction boundary."""
+    from daydream.agent import _LogRedactingConsole, set_log_mode
+
+    sentinel = REDACTION_SENTINEL
+    buffer = io.StringIO()
+    rec = _LogRedactingConsole(file=buffer, force_terminal=True, width=100)
+
+    set_log_mode(False)
+    try:
+        # Normal mode: raw pass-through (Rich UI is unredacted by design).
+        rec.print(f"handoff token={sentinel}")
+        assert sentinel in buffer.getvalue()
+
+        # --log mode: the same emission path is redacted at the console boundary.
+        buffer.truncate(0)
+        buffer.seek(0)
+        set_log_mode(True)
+        rec.print(f"handoff token={sentinel}")
+        out = buffer.getvalue()
+        # Rich's highlighter splits the marker's brackets into styled spans, so
+        # assert on the marker body (and the sentinel's absence) rather than the
+        # exact bracketed string.
+        assert "REDACTED_API_KEY" in out
+        assert sentinel not in out
+    finally:
+        set_log_mode(False)
 
 
 def test_log_mode_trajectory_still_written(

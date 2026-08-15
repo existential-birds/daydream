@@ -742,7 +742,7 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="log_mode",
-        help="Bypass Rich UI and emit redacted agent events as plain text to stdout (for CI log capture)."
+        help="Bypass Rich UI and emit redacted agent events as plain text to stdout."
         if full_help else argparse.SUPPRESS,
     )
 

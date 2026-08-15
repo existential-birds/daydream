@@ -14,6 +14,7 @@ import collections
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -59,6 +60,14 @@ _ERROR_CONTEXT_MARKERS = (
     "backend execution error",
     "fatal error",
 )
+
+#: PEM private-key block anchors, mirroring trajectory._PEM_KEY_PATTERN's
+#: ``-----BEGIN (?:RSA )?PRIVATE KEY-----`` spec. Only blocks whose anchors match
+#: that spec are buffered for whole-block redaction: ENCRYPTED/OPENSSH/EC/DSA
+#: headers are not matched by the pattern, so buffering them here would present
+#: them as handled and then forward the raw key to on_line and the failure tail.
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----")
+_PEM_END_RE = re.compile(r"-----END (?:RSA )?PRIVATE KEY-----")
 
 
 def _is_transient(stdout: str) -> bool:
@@ -158,8 +167,15 @@ def _run_streamed(
     # base64 body would leak to on_line and the failure tail. Hold lines from a
     # BEGIN marker until its END marker, then redact the whole block at once —
     # the streamed analogue of the captured path's redact-the-complete-string
-    # invariant.
+    # invariant. Buffering is anchored to _PEM_KEY_PATTERN's spec: a block that
+    # pattern cannot match must not be treated as handled.
     pem_buffer: list[str] = []
+
+    def _emit(line: str) -> None:
+        redacted = redact_text(line)
+        on_line(redacted)
+        tail.append(redacted)
+
     with subprocess.Popen(  # noqa: S603 - args are harness-controlled, not user input
         cmd,  # noqa: S607 - daydream is a trusted command
         stdout=subprocess.PIPE,
@@ -187,23 +203,21 @@ def _run_streamed(
                 ) from None
             if line is None:
                 break
-            if "-----BEGIN" in line and "PRIVATE KEY" in line and "-----END" not in line:
+            if _PEM_BEGIN_RE.search(line) and not _PEM_END_RE.search(line):
                 pem_buffer.append(line)
             elif pem_buffer:
                 pem_buffer.append(line)
-                if "-----END" in line:
-                    redacted = redact_text("".join(pem_buffer))
-                    on_line(redacted)
-                    tail.append(redacted)
+                if _PEM_END_RE.search(line):
+                    _emit("".join(pem_buffer))
                     pem_buffer.clear()
             else:
-                redacted = redact_text(line)
-                on_line(redacted)
-                tail.append(redacted)
-        if pem_buffer:  # stream ended mid-block: redact the held lines as one
-            redacted = redact_text("".join(pem_buffer))
-            on_line(redacted)
-            tail.append(redacted)
+                _emit(line)
+        if pem_buffer:  # stream ended mid-block: no END anchor was seen, so
+            # _PEM_KEY_PATTERN cannot match the fragment; redact the held lines
+            # individually so the BEGIN-only fragment and its body never reach
+            # on_line or the failure tail raw.
+            for held in pem_buffer:
+                _emit(held)
         returncode = proc.wait()
     return returncode, "\n".join(tail)
 

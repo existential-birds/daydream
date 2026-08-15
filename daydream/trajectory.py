@@ -153,6 +153,29 @@ def redact_text(value: str) -> str:
     return value
 
 
+def redact_value(value: Any) -> Any:
+    """Recursively redact a value without mutating its argument (never raises).
+
+    ``str`` leaves and string dict keys are run through :func:`redact_text`;
+    containers are rebuilt fresh so the caller's object is never touched.
+    Non-container, non-string leaves pass through unchanged. This is the
+    canonical structured redactor for log-mode event payloads; the recursion
+    lives here so every consumer shares the same fail-closed boundary.
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {
+            (redact_text(k) if isinstance(k, str) else k): redact_value(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_value(item) for item in value)
+    return value
+
+
 def _safe_descriptor(raw: str) -> str:
     """Slugify a descriptor to filesystem-safe characters (D-06).
 
