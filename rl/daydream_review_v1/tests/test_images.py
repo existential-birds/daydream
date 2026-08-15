@@ -90,6 +90,18 @@ def test_red_rejects_invocations_without_fixture(
     assert captured.err == f"{expected_stderr}\n"
 
 
+def test_no_base_requires_immutable_base_identity() -> None:
+    """A --no-base snapshot build needs an explicit immutable base identity (status 2)."""
+    # Missing value: argparse refuses the invocation before any build.
+    with pytest.raises(SystemExit) as exc:
+        build_images.main(["--no-base"])
+    assert exc.value.code == 2
+
+    # The mutable latest alias is not an accepted immutable identity.
+    status = build_images.main(["--no-base", build_images.BASE_LATEST])
+    assert status == 2
+
+
 @pytest.mark.slow
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:

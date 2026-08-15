@@ -20,7 +20,7 @@ Usage::
 
     uv run python images/build_images.py
     uv run python images/build_images.py --only existential-birds/daydream-rl-fixture
-    uv run python images/build_images.py --no-base --corpus ../corpora/train
+    uv run python images/build_images.py --no-base daydream-rl/base:v1.2.3 --corpus ../corpora/train
 
 ``--red`` is the gate's own test: it plants a failing assertion in the fixture
 repository's head commit and expects the build to die at the final layer.
@@ -34,6 +34,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,11 @@ DIST_DIR = IMAGES_DIR / "dist"
 
 BASE_REPOSITORY = "daydream-rl/base"
 BASE_LATEST = f"{BASE_REPOSITORY}:latest"
+
+#: A versioned base tag, e.g. ``daydream-rl/base:v0.1.2-3-g5ce4c0e`` (git describe).
+_BASE_TAG_RE = re.compile(r"^daydream-rl/base:[^:]+$")
+#: A canonical content digest, e.g. ``daydream-rl/base@sha256:<64 hex>``.
+_BASE_DIGEST_RE = re.compile(r"^daydream-rl/base@sha256:[0-9a-f]{64}$")
 
 #: Manifest ``clone_url`` sentinel meaning "materialize the deterministic fixture
 #: repository" instead of cloning anything (``daydream_review_v1.fixture``).
@@ -119,6 +125,21 @@ def base_tag() -> str:
     """
     describe = _capture(["git", "describe", "--tags", "--always", "--dirty"], cwd=REPO_ROOT)
     return f"{BASE_REPOSITORY}:{describe}"
+
+
+def _immutable_base_image(value: str) -> str | None:
+    """Return *value* when it is an explicit immutable base identity, else ``None``.
+
+    Accepts a versioned tag (``daydream-rl/base:<tag>``) or a canonical digest
+    (``daydream-rl/base@sha256:<64 hex>``). The mutable ``latest`` alias is
+    rejected explicitly, before the tag pattern is consulted, so a snapshot build
+    never silently rides the alias as it moves.
+    """
+    if value == BASE_LATEST:
+        return None
+    if _BASE_TAG_RE.match(value) or _BASE_DIGEST_RE.match(value):
+        return value
+    return None
 
 
 def build_base_image() -> list[str]:
@@ -276,7 +297,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS, help="`daydream bench harvest` corpus dir")
     parser.add_argument("--only", metavar="SLUG", help="build only this repo slug (owner/name)")
     base = parser.add_mutually_exclusive_group()
-    base.add_argument("--no-base", action="store_true", help=f"reuse the existing {BASE_LATEST} image")
+    base.add_argument(
+        "--no-base",
+        metavar="BASE_IMAGE",
+        help="reuse the given immutable base image (daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 hex>)",
+    )
     base.add_argument("--base-only", action="store_true", help=f"build {BASE_LATEST} and no repo image")
     parser.add_argument(
         "--red",
@@ -304,12 +329,22 @@ def main(argv: list[str] | None = None) -> int:
     if red_status is not None:
         return red_status
 
-    if args.no_base:
-        print(f"skipping base build; reusing {BASE_LATEST}")
+    if args.no_base is not None:
+        base_image = _immutable_base_image(args.no_base)
+        if base_image is None:
+            print(
+                f"invalid immutable base image {args.no_base!r}: expected daydream-rl/base:<tag> "
+                "or daydream-rl/base@sha256:<64 hex>; 'latest' is not allowed",
+                file=sys.stderr,
+            )
+            return 2
+        print(f"skipping base build; reusing {base_image}")
     else:
         status = _build_base()
         if status:
             return status
+        # Placeholder until Task 2 retypes _build_base and threads the versioned tag.
+        base_image = BASE_LATEST
 
     built: list[str] = []
     failed: list[str] = []
