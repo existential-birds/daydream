@@ -959,7 +959,9 @@ async def _run_improve(work: WorkContext, config: RunConfig) -> int:
 
         # Every improve advisory model turn (recon/audit/vet/plan-write) runs
         # with a detached audit worktree as its cwd; the target worktree is
-        # never a model cwd. The audit worktree snapshots the target's
+        # never a model cwd (except for unborn-HEAD targets, where
+        # open_audit_workspace yields the source itself with no isolation).
+        # The audit worktree snapshots the target's
         # committed + staged + unstaged tracked state, so an undirected model
         # commit lands only in the detached audit HEAD and is discarded with
         # the worktree at exit — it cannot advance the target's HEAD or staged

@@ -650,6 +650,63 @@ async def test_prune_stale_audit_worktrees_skips_live_locked_worktree(
 
 
 @pytest.mark.anyio
+async def test_prune_stale_audit_worktrees_skips_own_run_even_when_lock_is_stale(
+    tmp_path: Path,
+) -> None:
+    """The run's own audit worktree survives the prune past the stale-lock age.
+
+    ``_step_write_plans`` prunes stale audit worktrees, but a single improve
+    run can exceed 24h — its own lock then looks stale even though the run is
+    alive. The prune must never remove the run's own live cwd mid-flow; only
+    the owning run's exit cleanup removes it.
+    """
+    repo, _ = _make_repo_with_origin(tmp_path)
+    _configure_identity(repo)
+    own_dir = repo / ".daydream" / "audit" / "run-own"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-own",
+        str(own_dir),
+        "HEAD",
+    )
+    (own_dir / "marker.txt").write_text("live", encoding="utf-8")
+    # Age the lock beyond the staleness window, as a >24h run's own lock reads.
+    common = Path(_git(repo, "rev-parse", "--git-common-dir"))
+    if not common.is_absolute():
+        common = repo / common
+    old = time.time() - 48 * 3600
+    os.utime(common / "worktrees" / own_dir.name / "locked", (old, old))
+
+    removed = prune_stale_audit_worktrees(repo, exclude_run_id="run-own")
+
+    assert removed == 0
+    assert own_dir.is_dir()  # the run's own cwd is never destroyed mid-flow
+    # A stale worktree from a *different* run is still reclaimed.
+    crashed_dir = repo / ".daydream" / "audit" / "run-crashed"
+    _git(
+        repo,
+        "worktree",
+        "add",
+        "--detach",
+        "--lock",
+        "--reason",
+        "run-crashed",
+        str(crashed_dir),
+        "HEAD",
+    )
+    os.utime(common / "worktrees" / crashed_dir.name / "locked", (old, old))
+    removed = prune_stale_audit_worktrees(repo, exclude_run_id="run-own")
+    assert removed == 1
+    assert not crashed_dir.exists()
+    assert own_dir.is_dir()
+
+
+@pytest.mark.anyio
 async def test_audit_workspace_yields_source_when_head_unborn(tmp_path: Path) -> None:
     """A repo with no initial commit runs without a snapshot worktree.
 

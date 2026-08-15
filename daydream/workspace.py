@@ -260,7 +260,10 @@ async def open_audit_workspace(
     if _is_unborn_head(source):
         # No initial commit: nothing to snapshot, and ``git worktree add``
         # cannot materialize a worktree without a commit. Yield the source
-        # itself — there are no commits, refs, or staged index to protect.
+        # itself — with zero isolation: a new repo's initial content typically
+        # lives in the staged index, so a model turn running with cwd=source
+        # can still ``git commit`` it, creating the initial commit and
+        # advancing the unborn branch.
         yield source
         return
 
@@ -295,8 +298,17 @@ _AUDIT_WORKTREES_DIR = Path(".daydream") / "audit"
 _AUDIT_LOCK_STALE_AFTER_S = 24 * 3600
 
 
-def prune_stale_audit_worktrees(repo: Path) -> int:
+def prune_stale_audit_worktrees(repo: Path, *, exclude_run_id: str | None = None) -> int:
     """Remove leftover locked audit worktrees from hard-killed improve runs.
+
+    Args:
+        repo: The target worktree under whose ``.daydream/audit`` directory
+            stale audit worktrees are reclaimed.
+        exclude_run_id: When set, the audit worktree for *this* run (named by
+            this run_id) is never removed, even if its lock has aged past
+            ``_AUDIT_LOCK_STALE_AFTER_S`` — only the owning run's exit
+            cleanup removes it, so a run that has simply exceeded 24h keeps
+            its live cwd.
 
     Audit worktrees live under ``<repo>/.daydream/audit/<run_id>`` and are
     created locked (see :func:`open_audit_workspace`) so concurrent pruning
@@ -306,30 +318,64 @@ def prune_stale_audit_worktrees(repo: Path) -> int:
     ``*-reanchor`` names) — this prune is the reclamation path for those
     leftovers.
 
-    The prune is lock-aware, mirroring the re-anchor prune: a live audit
-    worktree (lock age near zero) is skipped without any removal attempt, so a
-    concurrent run mid-write is never destroyed. A worktree whose lock is
-    older than ``_AUDIT_LOCK_STALE_AFTER_S`` is a crashed run's leftover: it
-    is reclaimed via ``git_ops.worktree_remove_unlocked`` (unlock, then
-    force-remove) rather than wedged forever. Unlocked worktrees are removed
-    the same way, the unlock being a no-op for them. Individual failures are
-    tolerated so one stale worktree never blocks a plan run.
+    The prune is lock-aware and shares its body with the re-anchor prune via
+    :func:`_prune_stale_locked_worktrees`, so the staleness window, live-lock
+    skip rule, and unlock-before-remove ordering live in one place and cannot
+    silently drift between the two modules.
     """
-    removed = 0
+    return _prune_stale_locked_worktrees(
+        repo,
+        _iter_audit_worktrees(repo, exclude_run_id=exclude_run_id),
+        stale_after_s=_AUDIT_LOCK_STALE_AFTER_S,
+    )
+
+
+def _iter_audit_worktrees(repo: Path, *, exclude_run_id: str | None = None) -> Iterable[Path]:
+    """Yield existing audit worktree directories under ``.daydream/audit``.
+
+    Single source of truth for which worktrees the audit prune removes, so
+    discovery (including the ``is_dir()`` guard and the run's own worktree
+    exclusion) cannot drift from the shared prune body. Existing directories
+    only; non-directory entries are skipped.
+    """
     audit_dir = repo / _AUDIT_WORKTREES_DIR
     if not audit_dir.is_dir():
-        return 0
-    for path in audit_dir.glob("*"):
-        if not path.is_dir():
-            continue
+        return iter(())
+    return (
+        path
+        for path in audit_dir.glob("*")
+        if path.is_dir() and (exclude_run_id is None or path.name != exclude_run_id)
+    )
+
+
+def _prune_stale_locked_worktrees(
+    repo: Path,
+    paths: Iterable[Path],
+    *,
+    stale_after_s: int,
+) -> int:
+    """Remove stale locked worktrees from a discovery iterable, tolerating failures.
+
+    Single source of truth for the lock-aware prune policy shared by the
+    audit prune (this module) and the re-anchor prune
+    (``daydream.improve.plans.prune_stale_reanchor_worktrees``), so the
+    staleness window, live-lock skip rule, and unlock-before-remove ordering
+    live in one place and cannot silently drift. A live worktree (lock age
+    near zero) is skipped without any removal attempt, so a concurrent run
+    mid-write is never destroyed. A worktree whose lock is older than
+    ``stale_after_s`` is a crashed run's leftover: it is reclaimed via
+    ``git_ops.worktree_remove_unlocked`` (unlock, then force-remove) rather
+    than wedged forever. Unlocked worktrees are removed the same way, the
+    unlock being a no-op for them. Individual failures are tolerated so one
+    stale worktree never blocks a plan run.
+    """
+    removed = 0
+    for path in paths:
         try:
             locked_at = git_ops.worktree_lock_mtime(repo, path)
-            if (
-                locked_at is not None
-                and time.time() - locked_at <= _AUDIT_LOCK_STALE_AFTER_S
-            ):
-                # Live audit worktree (lock age near zero): never unlock or
-                # remove it, so a concurrent run mid-write is not destroyed.
+            if locked_at is not None and time.time() - locked_at <= stale_after_s:
+                # Live worktree (lock age near zero): never unlock or remove
+                # it, so a concurrent run mid-write is not destroyed.
                 continue
             git_ops.worktree_remove_unlocked(repo, path)
         except git_ops.GitError:
@@ -423,11 +469,23 @@ def _is_unborn_head(repo: Path) -> bool:
 
     ``git stash create`` and ``git worktree add`` both fail on an unborn HEAD,
     so the caller must detect it before attempting either.
+
+    A head that cannot be resolved for any OTHER reason (corrupt repo,
+    permission failure, transient git error) is not unborn: the error
+    propagates so the run never proceeds silently on ambiguous evidence — per
+    :func:`open_audit_workspace`'s "must not proceed silently" contract, only
+    a genuine unborn HEAD falls back to the source.
+
+    Raises:
+        GitError: If ``HEAD`` cannot be resolved for a reason other than an
+            unborn HEAD.
     """
     try:
         git_ops.head_sha(repo)
-    except GitError:
-        return True
+    except GitError as exc:
+        if "unknown revision or path not in the working tree" in str(exc):
+            return True
+        raise
     return False
 
 

@@ -128,8 +128,10 @@ def _audit_repo(ctx: FlowContext) -> Path:
     :func:`daydream.workspace.open_audit_workspace`) and stores its path on
     ``ctx.data["audit_repo"]``. Every advisory model turn (recon/audit/vet/
     plan-write) runs with this path as its ``cwd``; the target worktree is never
-    a model cwd, so a model commit can never reach the target's HEAD, named
-    refs, or staged index.
+    a model cwd (except for unborn-HEAD targets, where
+    :func:`daydream.workspace.open_audit_workspace` yields the source itself
+    with no isolation), so a model commit can never reach the target's HEAD,
+    named refs, or staged index.
 
     Raises:
         KeyError: If the runner did not open an audit workspace (a wiring bug —
@@ -1542,7 +1544,7 @@ def _expected_plan_fingerprints(finding: dict[str, Any]) -> list[str]:
 async def _step_write_plans(ctx: FlowContext) -> None:
     """Write selected findings as host-stamped, reconciling handoff plans."""
     prune_stale_reanchor_worktrees(ctx.work.repo)
-    prune_stale_audit_worktrees(ctx.work.repo)
+    prune_stale_audit_worktrees(ctx.work.repo, exclude_run_id=ctx.work.run_id)
     description = ctx.config.improve_plan_description
     if description is not None:
         selected = [_description_finding(description)]

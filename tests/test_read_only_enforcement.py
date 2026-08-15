@@ -1,9 +1,11 @@
 # tests/test_read_only_enforcement.py
-"""Cross-backend gate: both backends construct a non-mutating profile under read_only.
+"""Cross-backend gate: each backend selects its read-only profile under read_only.
 
-In-process proof that each backend, given ``read_only=True``, builds a profile
-that refuses mutation and permits read-only inspection. The *real* CLI/SDK
-denial equivalence is the standing proof of the Task 0 spike
+In-process proof that each backend, given ``read_only=True``, builds the
+profile it is supposed to. Claude's profile refuses mutation; Codex's
+``--sandbox read-only`` has an accepted residual where ``git commit`` still
+succeeds (worktree isolation, not this sandbox flag, is the defense for Codex).
+The *real* CLI/SDK denial equivalence is the standing proof of the Task 0 spike
 (`.beagle/concepts/handoff-accuracy-redesign/task0-spike-notes.md`); this gate
 fails the plan if either backend's profile construction regresses.
 """
