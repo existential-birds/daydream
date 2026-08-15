@@ -1288,6 +1288,27 @@ def status_porcelain(repo: Path) -> str:
     return proc.stdout
 
 
+def staged_patch(repo: Path) -> bytes:
+    """Return the staged index as a binary patch (``git diff --cached --binary``).
+
+    Byte-captured so binary content round-trips unchanged. The strict-query
+    counterpart of :func:`status_porcelain`: a non-zero exit raises
+    :class:`GitError` with the captured stderr text. Patch bytes are never
+    embedded in exception text.
+
+    Returns:
+        The staged patch as raw bytes. Empty bytes when nothing is staged.
+
+    Raises:
+        GitError: If ``git diff --cached --binary`` fails.
+    """
+    proc = _run_git(repo, ["diff", "--cached", "--binary"], timeout=30, capture_bytes=True)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+        raise GitError(f"git diff --cached --binary failed in {repo}: {stderr.strip()}")
+    return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+
+
 def changed_files(repo: Path, *, preexisting_untracked: set[str] | None = None) -> list[str]:
     """Return repo-relative paths of files changed in the working tree.
 
@@ -1476,6 +1497,45 @@ def fetch(repo: Path, remote: str = "origin") -> None:
     proc = _run_git(repo, ["fetch", remote], timeout=30, retries=0)
     if proc.returncode != 0:
         raise GitError(f"git fetch {remote} failed in {repo}: {proc.stderr.strip()}")
+
+
+def remove_remote(repo: Path, remote: str = "origin") -> None:
+    """Remove *remote* from *repo* (``git remote remove``).
+
+    Mutating wrapper — ``retries=0`` so a timed-out removal is never re-run.
+    Callers only invoke this on a fresh clone, which always has *remote*
+    configured, so no soft "no such remote" path is needed.
+
+    Raises:
+        GitError: If ``git remote remove`` fails.
+    """
+    proc = _run_git(repo, ["remote", "remove", remote], timeout=10, retries=0)
+    if proc.returncode != 0:
+        raise GitError(f"git remote remove {remote} failed in {repo}: {proc.stderr.strip()}")
+
+
+def apply_staged_patch(repo: Path, patch: bytes) -> None:
+    """Apply a staged index patch to *repo*'s index (``git apply --cached --binary``).
+
+    Mutating wrapper — ``retries=0`` so a timed-out apply is never re-run.
+    The patch is written to a temp file (``_run_git`` cannot pass stdin) and
+    unlinked in a ``finally``. Patch bytes are never embedded in exception
+    text; a ``NamedTemporaryFile`` write failure raises ``OSError`` uncaught.
+
+    Raises:
+        GitError: If ``git apply --cached --binary`` fails.
+    """
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".patch") as fh:
+            fh.write(patch)
+            tmp_path = fh.name
+        proc = _run_git(repo, ["apply", "--cached", "--binary", tmp_path], timeout=30, retries=0)
+        if proc.returncode != 0:
+            raise GitError(f"git apply --cached --binary failed in {repo}: {proc.stderr.strip()}")
+    finally:
+        if tmp_path is not None:
+            os.unlink(tmp_path)
 
 
 def fetch_ref(repo: Path, refspec: str, remote: str = "origin", *, timeout: int = 300) -> None:

@@ -1431,6 +1431,29 @@ def test_clone_creates_working_tree(tmp_path: Path) -> None:
     assert (target / "base.txt").read_text() == "base\n"
 
 
+def test_clone_of_linked_worktree_materializes_head_and_staged_patch(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """A linked-worktree clone materializes that worktree's HEAD and a staged
+    binary patch round-trips into it (issue #221 / false-assumption STOP)."""
+    _main, linked = linked_worktree
+    # Stage a modification to a feature-only file (absent from main).
+    parser = linked / "services" / "taste" / "parser.go"
+    parser.write_text("package taste\n\n// staged spike\nfunc Spiked() {}\n")
+    _git(linked, "add", "services/taste/parser.go")
+    source_patch = git_ops.staged_patch(linked)
+    assert source_patch, "expected a nonempty staged patch"
+
+    clone = tmp_path / "spike-clone"
+    git_ops.clone(str(linked), clone)
+    assert git_ops.head_sha(clone) == git_ops.head_sha(linked)
+    # Copy the working file so the clone worktree matches the staged content.
+    shutil.copy2(parser, clone / "services" / "taste" / "parser.go")
+    git_ops.apply_staged_patch(clone, source_patch)
+    assert git_ops.staged_patch(clone) == source_patch
+    assert _git(clone, "diff", "--", "services/taste/parser.go") == ""
+
+
 def test_clone_raises_on_invalid_remote(tmp_path: Path) -> None:
     """clone() raises GitError when the remote URL is invalid."""
     target = tmp_path / "nope"
