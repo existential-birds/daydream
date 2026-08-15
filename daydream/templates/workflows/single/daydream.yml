@@ -96,10 +96,12 @@ jobs:
             echo "Unable to resolve the head SHA for PR #$ISSUE_NUMBER" >&2
             exit 1
           fi
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
-          echo "pr_number=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "approved_head_sha=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
-          echo "approved_at=${APPROVED_AT}" >> "$GITHUB_OUTPUT"
+          {
+            echo "proceed=true"
+            echo "pr_number=${ISSUE_NUMBER}"
+            echo "approved_head_sha=${HEAD_SHA}"
+            echo "approved_at=${APPROVED_AT}"
+          } >> "$GITHUB_OUTPUT"
 
       # Acknowledge only after head resolution succeeds: a fallible `gh api`
       # exit in the decide step aborts the job here, so the ack never fires and
