@@ -11,12 +11,14 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import tempfile
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
+from daydream import git_ops
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -43,6 +45,41 @@ _CD_PREFIX_RE = re.compile(r"^cd\s+\S+\s*&&\s*")
 _CODEX_STDOUT_LIMIT_BYTES = 10 * 1024 * 1024
 
 _logger = logging.getLogger(__name__)
+
+
+def _prepare_read_only_checkout(source: Path, destination: Path) -> Path:
+    """Build a disposable standalone clone of *source* at *destination*.
+
+    Mirrors source's HEAD, staged index, tracked working files, and nonignored
+    untracked files into a fresh clone with no source remote. Uses only
+    :mod:`daydream.git_ops` primitives plus shutil/pathlib — never
+    ``git rev-parse --git-common-dir``, ``git worktree list``, or the source
+    ``.git`` file (the linked-worktree #221 trap).
+
+    Returns:
+        The clone path.
+
+    Raises:
+        GitError / OSError / shutil.Error: Underlying git or filesystem
+            failure; the caller wraps these in ``CodexError``.
+    """
+    git_ops.clone(str(source), destination)
+    git_ops.checkout_detach(destination, git_ops.head_sha(source))
+    git_ops.remove_remote(destination)
+    for rel in git_ops.ls_files(source):
+        src = source / rel
+        dst = destination / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    for rel in git_ops.list_untracked(source):
+        src = source / rel
+        dst = destination / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    patch = git_ops.staged_patch(source)
+    if patch:
+        git_ops.apply_staged_patch(destination, patch)
+    return destination
 
 
 def _unwrap_shell_command(command: str) -> str:
@@ -112,22 +149,20 @@ class CodexBackend:
         Args:
             agents: Optional subagent mapping. Codex does not support non-empty
                 subagent maps and will raise if provided.
-            read_only: When True, run under ``--sandbox read-only`` so the agent
-                can inspect history (read-only git, cat, ls) but cannot modify
-                the working tree. Accepted residual (Task 0 spike): the sandbox
-                does not reliably block ``git commit`` — a commit can still
-                advance a branch inside the working tree. That residual is why
-                the improve flow isolates model turns in a detached audit
-                worktree: an undirected model commit there lands only in the
-                detached audit HEAD and is discarded with the worktree at
-                exit — it cannot advance the target's HEAD or staged index
-                (named refs live in the repository's shared ref store and can
-                be written from any worktree). This is not a hard guarantee:
-                the audit worktree is a descendant of the target, and the
-                sandbox's residual is that it does not reliably block git
-                commit against any reachable repo, so a deliberate
-                cd-up-then-commit against the parent target remains possible.
-                Default False keeps ``danger-full-access``.
+            read_only: When True, the agent runs under ``--sandbox read-only``
+                and — whenever *cwd* is a Git worktree root — inside a
+                disposable standalone clone (mirrored HEAD + staged index +
+                tracked/nonignored untracked files, no source remote) that is
+                deleted after the subprocess exits. The sandbox blocks
+                filesystem writes but not Git index/object-store operations;
+                the clone is the hard boundary that makes any commit, ref, or
+                index change land only in the disposable clone's metadata and
+                die with it — the caller's HEAD, staged index, refs, and
+                remotes are physically unreachable. A non-Git *cwd* keeps the
+                read-only sandbox in place (no clone). If the disposable
+                checkout cannot be created or prepared, the call raises
+                ``CodexError`` — never a fallback to the caller's cwd.
+                Default False keeps ``danger-full-access`` in the caller's cwd.
             persist_session: Accepted for backend protocol parity. Codex does
                 not expose persisted CLI sessions here, so this is ignored.
 
@@ -145,31 +180,11 @@ class CodexBackend:
                 "Codex backend does not support exploration subagents; use --backend claude for exploration."
             )
 
-        # Read-only sandbox protects the working tree but (accepted residual,
-        # Task 0 spike) does not reliably block `git commit`; the audit worktree
-        # is the defense that confines any such commit.
         sandbox_mode = "read-only" if read_only else "danger-full-access"
-        args = [
-            "codex",
-            "exec",
-            "--experimental-json",
-            "--model",
-            self.model,
-            "--sandbox",
-            sandbox_mode,
-            "--cd",
-            str(cwd),
-        ]
-        if self.reasoning_effort:
-            args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
 
         schema_path: str | None = None
         if output_schema:
             schema_path = self._write_temp_schema(output_schema)
-            args.extend(["--output-schema", schema_path])
-
-        if continuation and continuation.backend == "codex":
-            args.extend(["resume", continuation.data["thread_id"]])
 
         thread_id: str | None = None
         last_agent_text: str | None = None
@@ -219,8 +234,38 @@ class CodexBackend:
             return item_id
 
         proc: asyncio.subprocess.Process | None = None
+        temp_dir: tempfile.TemporaryDirectory[str] | None = None
+        execution_cwd = cwd
 
         try:
+            if read_only and git_ops.is_inside_worktree(cwd):
+                try:
+                    temp_dir = tempfile.TemporaryDirectory(prefix="daydream-codex-read-only-")
+                    destination = Path(temp_dir.name) / "repo"
+                    execution_cwd = await asyncio.to_thread(
+                        _prepare_read_only_checkout, cwd, destination,
+                    )
+                except (git_ops.GitError, OSError, shutil.Error) as exc:
+                    raise CodexError("failed to create disposable read-only checkout") from exc
+
+            args = [
+                "codex",
+                "exec",
+                "--experimental-json",
+                "--model",
+                self.model,
+                "--sandbox",
+                sandbox_mode,
+                "--cd",
+                str(execution_cwd),
+            ]
+            if self.reasoning_effort:
+                args.extend(["-c", f'model_reasoning_effort="{self.reasoning_effort}"'])
+            if schema_path:
+                args.extend(["--output-schema", schema_path])
+            if continuation and continuation.backend == "codex":
+                args.extend(["resume", continuation.data["thread_id"]])
+
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdin=asyncio.subprocess.PIPE,
@@ -232,6 +277,10 @@ class CodexBackend:
             self._processes.append(proc)
 
             if proc.stdin:
+                if execution_cwd != cwd:
+                    # Rebind the prompt so the caller's source path never
+                    # appears in the bytes written to the isolated subprocess.
+                    prompt = prompt.replace(str(cwd), str(execution_cwd))
                 proc.stdin.write(prompt.encode())
                 proc.stdin.close()
 
@@ -505,6 +554,8 @@ class CodexBackend:
             self._processes = [active for active in self._processes if active is not proc]
             if schema_path:
                 Path(schema_path).unlink(missing_ok=True)
+            if temp_dir is not None:
+                temp_dir.cleanup()
 
     async def cancel(self) -> None:
         """Cancel all running Codex processes.

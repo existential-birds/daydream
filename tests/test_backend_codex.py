@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from daydream import git_ops
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
@@ -27,6 +28,7 @@ from daydream.backends.codex import (
 )
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
 from tests.harness.codex_replay import make_mock_process, make_mock_process_from_fixture
+from tests.harness.git_helpers import git as _git
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
@@ -207,19 +209,82 @@ async def test_continuation_token_resumes():
 
 
 @pytest.mark.asyncio
-async def test_codex_read_only_uses_read_only_sandbox():
-    """read_only=True selects --sandbox read-only; danger-full-access absent."""
-    backend = CodexBackend(model="fixture-model")
+async def test_codex_read_only_uses_read_only_sandbox(
+    tmp_path: Path, linked_worktree: tuple[Path, Path],
+) -> None:
+    """read_only=True at a worktree runs in a disposable standalone clone:
+    read-only sandbox, isolated cwd != source, matching HEAD + staged patch,
+    feature-only files present, no origin, rebound prompt, cleaned up."""
+    _main, source = linked_worktree
+    parser = source / "services" / "taste" / "parser.go"
+    parser.write_text("package taste\n\n// caller staged\nfunc CallerStaged() {}\n")
+    _git(source, "add", "services/taste/parser.go")
+    source_head = git_ops.head_sha(source)
+    source_patch = git_ops.staged_patch(source)
+
+    captured: dict[str, object] = {}
     mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
 
-    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "p", read_only=True):
+    async def fake_exec(*args, **kwargs):
+        flat = list(args)
+        cd = flat[flat.index("--cd") + 1]
+        isolated = Path(cd)
+        captured["isolated"] = isolated
+        captured["head"] = git_ops.head_sha(isolated)
+        captured["patch"] = git_ops.staged_patch(isolated)
+        captured["has_parser"] = (isolated / "services" / "taste" / "parser.go").exists()
+        captured["remote"] = git_ops.remote_url(isolated)
+        captured["args"] = flat
+        return mock_proc
+
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", fake_exec):
+        async for _ in CodexBackend(model="fixture-model").execute(
+            source, f"Audit repository at {source}", read_only=True,
+        ):
             pass
 
-        flat_args = list(mock_exec.call_args.args)
-        assert "read-only" in flat_args
-        assert "danger-full-access" not in flat_args
-        assert flat_args[flat_args.index("--sandbox") + 1] == "read-only"
+    flat = captured["args"]
+    assert flat[flat.index("--sandbox") + 1] == "read-only"
+    isolated = captured["isolated"]
+    assert isolated != source
+    assert captured["head"] == source_head
+    assert captured["patch"] == source_patch
+    assert captured["has_parser"] is True
+    assert captured["remote"] is None
+    # Prompt rebound: isolated path present, source path absent in stdin bytes.
+    written = mock_proc.stdin.write.call_args.args[0]
+    assert isinstance(written, bytes)
+    assert str(isolated).encode() in written
+    assert str(source).encode() not in written
+    # Temp dir removed after execute.
+    assert not isolated.exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_read_only_isolation_failure_is_fail_closed(
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation preparation failure raises CodexError and leaves source Git state untouched."""
+    _main, source = linked_worktree
+    (source / "services" / "taste" / "parser.go").write_text(
+        "package taste\n\n// staged\nfunc S() {}\n"
+    )
+    _git(source, "add", "services/taste/parser.go")
+    before_head = git_ops.head_sha(source)
+    before_patch = git_ops.staged_patch(source)
+
+    def boom(*args, **kwargs):
+        raise git_ops.GitError("isolation probe failure")
+
+    monkeypatch.setattr("daydream.backends.codex.git_ops.clone", boom)
+    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
+    with patch("daydream.backends.codex.asyncio.create_subprocess_exec", return_value=mock_proc):
+        with pytest.raises(CodexError, match="failed to create disposable read-only checkout"):
+            async for _ in CodexBackend(model="fixture-model").execute(source, "Audit", read_only=True):
+                pass
+
+    assert git_ops.head_sha(source) == before_head
+    assert git_ops.staged_patch(source) == before_patch
 
 
 @pytest.mark.asyncio
@@ -235,6 +300,7 @@ async def test_codex_default_uses_full_access_sandbox():
         flat_args = list(mock_exec.call_args.args)
         assert flat_args[flat_args.index("--sandbox") + 1] == "danger-full-access"
         assert "read-only" not in flat_args
+        assert flat_args[flat_args.index("--cd") + 1] == "/tmp"
 
 
 @pytest.mark.asyncio
