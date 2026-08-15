@@ -45,7 +45,10 @@ from daydream.generated_files import (
 )
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.prompt_budget import fits_inline_diff_budget
-from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_RULE,
+    PR_DESCRIPTION_UNTRUSTED_FRAMING,
+)
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
@@ -1214,7 +1217,7 @@ def build_intent_prompt(
         )
         parts.append(
             f"The author supplied the following pull-request description. "
-            f"{AUTHORITATIVE_INTENT_RULE}\n\n"
+            f"{PR_DESCRIPTION_UNTRUSTED_FRAMING}\n{AUTHORITATIVE_INTENT_RULE}\n\n"
             "Pull request description:\n"
             "<pr_description>\n"
             f"{safe_body}\n"
