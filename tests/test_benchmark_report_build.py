@@ -257,6 +257,17 @@ def test_template_renders_excluded_tools_and_per_row_scored_counts() -> None:
     assert "PRs" in lb
 
 
+def test_template_foot_cites_excluded_tools_when_any_judge_dropped_them() -> None:
+    """renderFoot mentions the per-judge excluded-tool disclosure so a reader
+    scanning the methodology sees exclusions without opening a panel."""
+    template = TEMPLATE_HTML.read_text()
+
+    foot = template.split("function renderFoot(){", 1)[1].split("function renderJudgeDependent(){", 1)[0]
+    assert "excluded_tools" in foot
+    assert "DATA.judges" in foot
+    assert "excluded" in foot
+
+
 def test_template_uses_numeric_daydream_coverage() -> None:
     """The binary 'daydream scored' / 'not yet scored' labels and the misleading
     'daydream has no leaf under this judge' copy are gone; coverage renders as a
