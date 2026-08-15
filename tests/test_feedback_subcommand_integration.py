@@ -16,6 +16,7 @@ its prompt-dispatching stub — there is exactly one stub, no parallel copy.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -31,7 +32,8 @@ from tests.test_pr_feedback_integration import (
 
 
 async def test_feedback_subcommand_argv_to_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Real-path: argv -> _parse_args(feedback) -> run_feedback -> full body.
 
@@ -54,7 +56,7 @@ async def test_feedback_subcommand_argv_to_body(
 
     _silence(monkeypatch)
     stub = _PRFeedbackStubBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    install_backend(stub)
 
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
 
@@ -78,7 +80,8 @@ async def test_feedback_subcommand_argv_to_body(
 
 
 async def test_feedback_subcommand_non_interactive_argv_to_body(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    install_backend: Callable[[object], object],
 ) -> None:
     """Real-path: ``daydream feedback ... --non-interactive`` parses AND runs.
 
@@ -115,7 +118,7 @@ async def test_feedback_subcommand_non_interactive_argv_to_body(
 
     # No _silence — stdin must never be touched.
     stub = _PRFeedbackStubBackend()
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    install_backend(stub)
 
     def _forbidden_input(*_a: object, **_kw: object) -> str:
         raise AssertionError("input() was called -- feedback path must not touch stdin")
