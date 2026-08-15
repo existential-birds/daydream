@@ -338,6 +338,8 @@ def test_directory_scope_canonicalization_drops_the_trailing_slash(
     assert applicability["scope"]["paths"] == ["frontend/"]
     assert normalized["scope"]["paths"] == ["frontend"]
     assert canonicalize_directory_scope("frontend/") == "frontend"
+    assert canonicalize_directory_scope("./frontend") == "frontend"
+    assert canonicalize_directory_scope("./frontend/") == "frontend"
 
 
 def test_command_contract_schema_discloses_scope_cross_field_invariants() -> None:
@@ -1000,11 +1002,11 @@ def test_recon_command_rejects_shell_composition_at_trust_boundary(
 @pytest.mark.parametrize(
     "path",
     [
-        "README.md (no precision/target/50% match)",
         "/tmp/catalog.py",
         "../catalog.py",
         "docs/catalog|tee.md",
-        "docs/catalog#draft.md",
+        "docs/catalog$draft.md",
+        "docs/catalog`draft.md",
     ],
 )
 def test_annotated_absolute_escaping_and_metachar_paths_are_blocked(
@@ -1113,7 +1115,13 @@ _PATH_REJECTION_CODES = {
         "stop-related",
     ],
 )
-def test_react_router_dollar_segment_is_valid(repo: Path, location: str) -> None:
+def test_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> None:
+    """A lone ``$`` in a segment is excluded entirely (shell-expansion risk).
+
+    Regression pin for the relaxed grammar (#572/#573): the ``$`` character
+    stays rejected even though legal punctuation like ``# % ~ ! & ( )`` and
+    spaces are now accepted.
+    """
     path = "routes/user.$username.tsx"
     (repo / "routes").mkdir()
     (repo / path).write_text("export default function User() {}\n", encoding="utf-8")
@@ -1128,9 +1136,9 @@ def test_react_router_dollar_segment_is_valid(repo: Path, location: str) -> None
         recon_commands=_recon_commands(),
     )
 
-    assert valid_repository_file_path(path)
-    assert path_is_confined(repo, path)
-    assert _PATH_REJECTION_CODES.isdisjoint({issue.code for issue in issues})
+    assert not valid_repository_file_path(path)
+    assert not path_is_confined(repo, path)
+    assert not _PATH_REJECTION_CODES.isdisjoint({issue.code for issue in issues})
 
 
 @pytest.mark.parametrize("path", ["services/api/", "services/api"])

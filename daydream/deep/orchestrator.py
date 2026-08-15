@@ -2152,6 +2152,16 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # they are ordinary tagged items that reach phase_fix like any other.
     items_file: Path = ctx.data["items_file"]
     items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
+    # A leading ``./`` is a legal path spelling since the grammar relaxed
+    # (#572/#573), but the reviewed-diff file set and the git tree are always
+    # bare (never ``./``-prefixed). Normalize each finding's file once here so
+    # a ``./x`` finding is not misfiled as out-of-scope by the fix gate (and
+    # its own fix edit not reverted by the post-fix residual net), both of
+    # which compare against bare git-derived paths.
+    for _item in items:
+        _file = _item.get("file")
+        if isinstance(_file, str) and _file.startswith("./"):
+            _item["file"] = _file[2:]
     if not items:
         print_success(console, "No actionable items -- done.")
         return Stop(0)

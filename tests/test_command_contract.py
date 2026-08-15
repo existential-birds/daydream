@@ -19,9 +19,11 @@ from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
     WORKING_DIRECTORY_SCHEMA,
+    canonicalize_directory_scope,
     path_is_confined,
     valid_directory_scope_lexical,
     valid_repository_file_path,
+    validate_applicability,
 )
 from daydream.runner import RunConfig, run
 from tests.harness.improve_backend import install_improve_stub
@@ -51,6 +53,27 @@ PATH_ACCEPTS = [
     ".github/workflows/ci.yml",
     "foo.bar",
     "foo..bar",
+    # issues #572/#573: legal filenames the over-tight grammar rejected
+    "foo bar.py",
+    "Café.md",
+    "file#1.py",
+    "a%file.txt",
+    "(x).py",
+    "a&b.py",
+    "~/.bashrc",
+    "./foo.py",
+    "space name.py",
+]
+
+LEGAL_FILENAMES = [
+    "foo bar.py",
+    "Café.md",
+    "file#1.py",
+    "a%file.txt",
+    "(x).py",
+    "a&b.py",
+    "~/.bashrc",
+    "space name.py",
 ]
 
 MULTI_DOT_PATHS = [
@@ -67,6 +90,10 @@ PATH_REJECTS = [
     "a//b",
     "$()",
     "${x}",
+    "a$b",     # $ excluded entirely (shell-expansion risk)
+    "x`y",     # backtick excluded (shell metachar)
+    ".",       # bare current dir is not a valid file path
+    "./",      # bare ./ is not a valid file path
 ]
 
 
@@ -95,10 +122,25 @@ def test_directory_scope_schema_rejects(value: str) -> None:
 
 
 def test_file_path_empty_and_length_bounds() -> None:
+    # empty always rejected
     assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("")
-    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid(
-        "a" * 513
-    )
+    # 4096 (PATH_MAX) is the cap: accepted up to and including, rejected beyond
+    assert Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA).is_valid("a" * 4097)
+    # the lexical gate must agree with the schema at the same cap
+    assert valid_repository_file_path("a" * 4096)
+    assert not valid_repository_file_path("a" * 4097)
+    # the directory-scope pair must agree at the same 4096 (PATH_MAX) cap
+    assert Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(DIRECTORY_SCOPE_SCHEMA).is_valid("a" * 4097)
+    assert valid_directory_scope_lexical("a" * 4096)
+    assert not valid_directory_scope_lexical("a" * 4097)
+    # PATH_MAX is a byte budget (POSIX), so the lexical gates measure UTF-8
+    # bytes, not code points: 2048 × 2-byte é == 4096 bytes == the cap.
+    assert valid_repository_file_path("é" * 2048)
+    assert not valid_repository_file_path("é" * 2049)
+    assert valid_directory_scope_lexical("é" * 2048)
+    assert not valid_directory_scope_lexical("é" * 2049)
 
 
 def test_working_directory_accepts_cwd() -> None:
@@ -113,6 +155,28 @@ def test_working_directory_accepts_cwd() -> None:
     # Absolute form still requires a non-empty segment after the slash.
     assert not regex.match("/")
     assert not regex.match("//double-slash")
+    # The ./ prefix is relative-only: /./foo must not be schema-legal (the
+    # runtime confinement gate rejects it, so the gates must agree).
+    assert not regex.match("/./foo")
+    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("/./foo")
+    # issues #572/#573: inherited grammar now accepts legal names; cap is 4096
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("Café.md")
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("./foo")
+    assert Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4096)
+    assert not Draft202012Validator(WORKING_DIRECTORY_SCHEMA).is_valid("a" * 4097)
+
+
+def test_lexical_gates_reject_trailing_newline() -> None:
+    """Trailing newline is rejected by the fullmatch gates, not the schema.
+
+    The exported patterns anchor with ^/$ because the A/Z anchors are not
+    valid ECMA-262 (Codex/OpenAI strict mode rejects them), and Python
+    re.search lets $ match before a trailing newline, so the schema alone
+    cannot express this rejection. The runtime gates are the enforcement point.
+    """
+    for value in ("foo\n", "src/main.rs\n"):
+        assert not valid_repository_file_path(value)
+        assert not valid_directory_scope_lexical(value)
 
 
 @pytest.mark.parametrize("value", MULTI_DOT_PATHS)
@@ -126,6 +190,70 @@ def test_multi_dot_paths_are_accepted_by_schemas_and_validators(
     assert valid_directory_scope_lexical(value)
     assert path_is_confined(tmp_path, value)
     assert path_is_confined(tmp_path, value, directory_scope=True)
+
+
+CONSISTENCY_ACCEPT = PATH_ACCEPTS + MULTI_DOT_PATHS
+CONSISTENCY_REJECT = PATH_REJECTS
+
+
+def test_schema_and_lexical_gate_agree_on_corpus() -> None:
+    """Schema-valid must equal runtime-accepted for every corpus path."""
+    file_validator = Draft202012Validator(REPOSITORY_FILE_PATH_SCHEMA)
+    for value in CONSISTENCY_ACCEPT:
+        assert file_validator.is_valid(value), f"schema should accept {value!r}"
+        assert valid_repository_file_path(value), f"lexical gate should accept {value!r}"
+    for value in CONSISTENCY_REJECT:
+        assert not file_validator.is_valid(value), f"schema should reject {value!r}"
+        assert not valid_repository_file_path(value), f"lexical gate should reject {value!r}"
+
+
+def test_validate_applicability_collapses_dot_slash_scope_spellings(
+    tmp_path: Path,
+) -> None:
+    """``./foo`` and ``foo`` are the same directory: string dedup must collapse them."""
+    repo = tmp_path / "repo"
+    (repo / "frontend").mkdir(parents=True)
+
+    def applicability(paths: list[str]) -> dict[str, Any]:
+        return {
+            "scope": {"kind": "in-scope-paths", "paths": paths},
+            "preconditions": [],
+            "rationale": "same directory spelled twice",
+        }
+
+    normalized, rejection = validate_applicability(
+        applicability(["frontend/", "./frontend", "frontend"]), repo=repo
+    )
+    assert rejection is not None
+    assert (rejection.code, rejection.pointer) == (
+        "RECON_APPLICABILITY_INVALID",
+        "/scope/paths",
+    )
+    assert normalized is None
+    # a lone ./-prefixed scope is legal and canonicalizes to the bare spelling
+    normalized, rejection = validate_applicability(
+        applicability(["./frontend"]), repo=repo
+    )
+    assert rejection is None
+    assert normalized is not None
+    assert normalized["scope"]["paths"] == ["frontend"]
+    assert canonicalize_directory_scope("./frontend") == "frontend"
+    assert canonicalize_directory_scope("./frontend/") == "frontend"
+
+
+def test_legal_filenames_are_confined(tmp_path: Path) -> None:
+    """Legal filenames pass the confinement walk for real files; traversal never does."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "~").mkdir()  # corpus spelling ~/.bashrc nests through a ~ dir
+    for name in LEGAL_FILENAMES:
+        (repo / name).write_text("x")
+    for name in LEGAL_FILENAMES + ["./foo bar.py"]:
+        assert path_is_confined(repo, name), f"{name!r} must be confined"
+    # security carve-outs still rejected by the confinement gate too
+    assert not path_is_confined(repo, "../x")
+    assert not path_is_confined(repo, "/abs/path")
+    assert not path_is_confined(repo, "a/../b")
 
 
 def test_path_is_confined_allow_absolute(tmp_path: Path) -> None:

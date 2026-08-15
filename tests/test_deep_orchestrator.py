@@ -2758,6 +2758,66 @@ async def test_fix_gate_routes_out_of_scope_finding_to_issue(
     assert "out of scope for PR" in body
 
 
+async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """#572/#573: a ``./``-prefixed finding file stays in scope.
+
+    The grammar now admits ``./x`` as a legal path spelling, so a finding's
+    ``file`` may arrive as ``./api.py`` while the reviewed diff (and the git
+    tree) name the same file as bare ``api.py``. The fix gate's pre-fix
+    partition and the post-fix residual net both compare the finding file
+    against bare git-derived paths, so without normalization a ``./api.py``
+    finding is misfiled as out-of-scope: dropped from auto-fix AND filed as an
+    issue. Discriminating: if the gate normalizes a leading ``./``, the
+    ``./api.py`` finding is fixed (a fix prompt names api.py) and no issue is
+    filed for it.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [
+        _merge_item(1, "./api.py", "high", desc="dot-slash in-scope finding"),
+        _merge_item(2, "notes.txt", "medium", desc="truly out-of-scope finding"),
+    ]
+    mute_side_effects()
+
+    issues: list[tuple[Any, ...]] = []
+
+    def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
+        issues.append((repo, title, body))
+        return "https://github.com/owner/repo/issues/1"
+
+    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
+
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    fix_prompts = [
+        c["prompt"]
+        for c in stub.calls
+        if c["prompt"].lower().startswith(("fix this issue", "fix these"))
+    ]
+    assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
+    # The ./api.py finding was normalized and stays in scope: it is fixed.
+    assert any("api.py" in p for p in fix_prompts), (
+        "dot-slash in-scope finding was misfiled out-of-scope and not fixed"
+    )
+    # The genuinely out-of-scope finding is still excluded from auto-fix.
+    assert not any("notes.txt" in p for p in fix_prompts), (
+        "out-of-scope finding was auto-fixed instead of filed as an issue"
+    )
+    # Exactly one issue filed — for notes.txt only, never for ./api.py.
+    assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
+    _, title, body = issues[0]
+    assert "notes.txt" in body
+    assert "out-of-scope finding" in body
+
+
 async def test_fix_gate_dedups_out_of_scope_finding_already_filed(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
