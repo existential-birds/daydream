@@ -2682,6 +2682,28 @@ async def test_improve_run_leaves_no_stray_audit_worktree(
 
 
 @pytest.mark.anyio
+async def test_improve_model_calls_run_in_audit_worktree_not_target(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    before_status = _git_status_porcelain(improve_monorepo_target)
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    # Every model turn's cwd must be a detached audit worktree under .daydream/audit/,
+    # never the target worktree itself.
+    assert stub.calls, "expected at least one model call"
+    for call in stub.calls:
+        assert call["cwd"] != improve_monorepo_target
+        assert ".daydream/audit/" in str(call["cwd"]), str(call["cwd"])
+    # The target tree is untouched (host artifacts under gitignored paths only).
+    assert _git_status_porcelain(improve_monorepo_target) == before_status
+
+
+@pytest.mark.anyio
 async def test_full_run_leaves_tracked_tree_and_untracked_set_untouched(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,

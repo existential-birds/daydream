@@ -118,6 +118,24 @@ RECON_SCHEMA: dict[str, Any] = {
 }
 
 _EVIDENCE_LOCATION = re.compile(r"^`?(.+?):(\d+)(?::(\d+))?(?:`|\b)")
+
+
+def _audit_repo(ctx: FlowContext) -> Path:
+    """Return the detached audit worktree used as the model cwd for improve turns.
+
+    The runner opens one audit worktree per improve run (see
+    :func:`daydream.workspace.open_audit_workspace`) and stores its path on
+    ``ctx.data["audit_repo"]``. Every advisory model turn (recon/audit/vet/
+    plan-write) runs with this path as its ``cwd``; the target worktree is never
+    a model cwd, so a model commit can never reach the target's HEAD, named
+    refs, or staged index.
+
+    Raises:
+        KeyError: If the runner did not open an audit workspace (a wiring bug —
+            fail loud, never fall back to ``ctx.work.repo``).
+    """
+    return Path(ctx.data["audit_repo"])
+
 _PROVENANCE_VALUES = {"introduced", "inherited"}
 _MAINTENANCE_SIGNALS = set(MAINTENANCE_SIGNALS)
 _CHANGE_SHAPES = set(CHANGE_SHAPES)
@@ -392,12 +410,12 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
 
     backend = ctx.backend_for("recon")
     async with phase_scope(DaydreamPhase.RECON):
-        exploration = await repo_scan(backend, target)
+        exploration = await repo_scan(backend, _audit_repo(ctx))
         recon, _, _ = await run_agent(
             backend,
-            target,
+            _audit_repo(ctx),
             _build_recon_prompt(
-                target, services, groups, exploration.to_prompt_section()
+                _audit_repo(ctx), services, groups, exploration.to_prompt_section()
             ),
             phase=DaydreamPhase.RECON,
             output_schema=RECON_SCHEMA,
@@ -899,7 +917,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                 group=_group_dict(assignment.group),
                 scope_note=scope_note,
                 recon_summary=json.dumps(ctx.data["recon"], sort_keys=True),
-                cwd=ctx.work.repo,
+                cwd=_audit_repo(ctx),
                 tier=tier,
             )
             if branch_focus:
@@ -919,7 +937,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
                         try:
                             output, _, _ = await run_agent(
                                 backend,
-                                ctx.work.repo,
+                                _audit_repo(ctx),
                                 task_prompt,
                                 phase=DaydreamPhase.AUDIT,
                                 output_schema=(
@@ -1216,7 +1234,7 @@ async def _step_vet(ctx: FlowContext) -> None:
             ]
             prompt = ctx.registry.prompt("vet")(
                 findings=indexed,
-                cwd=ctx.work.repo,
+                cwd=_audit_repo(ctx),
             )
             if branch_focus:
                 prompt += (
@@ -1238,7 +1256,7 @@ async def _step_vet(ctx: FlowContext) -> None:
                         try:
                             output, _, _ = await run_agent(
                                 backend,
-                                ctx.work.repo,
+                                _audit_repo(ctx),
                                 task_prompt,
                                 phase=DaydreamPhase.VET,
                                 output_schema=(
@@ -1605,7 +1623,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     verification_commands=_legacy_verification_commands(
                         ctx.data["recon"]
                     ),
-                    cwd=ctx.work.repo,
+                    cwd=_audit_repo(ctx),
                 )
             except Exception:  # noqa: BLE001 - isolate each plan safely
                 _land(
@@ -1635,7 +1653,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     async with phase_scope(DaydreamPhase.PLAN_WRITE):
                         output, _, aborted_reason = await run_agent(
                             backend,
-                            ctx.work.repo,
+                            _audit_repo(ctx),
                             generation_prompt,
                             phase=DaydreamPhase.PLAN_WRITE,
                             output_schema=PLAN_AUTHOR_SCHEMA,
