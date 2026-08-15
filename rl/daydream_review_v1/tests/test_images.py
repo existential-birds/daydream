@@ -33,10 +33,10 @@ FIXTURE_IMAGE = "daydream-rl/fixture"
 BASE_DOCKERFILE = PROJECT_ROOT / "images" / "base.Dockerfile"
 
 
-def _build(*args: str) -> subprocess.CompletedProcess[str]:
+def _build(base_image: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Build the fixture repo image only; the ``base_image`` fixture owns the base."""
     return subprocess.run(
-        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", *args],
+        ["uv", "run", "python", "images/build_images.py", "--only", FIXTURE_SLUG, "--no-base", base_image, *args],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -79,7 +79,7 @@ def test_red_rejects_invocations_without_fixture(
     argv: list[str], expected_stderr: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """--red must fail fast (status 2) when no fixture PR is selected, before any build."""
-    monkeypatch.setattr(build_images, "_build_base", lambda: 0)
+    monkeypatch.setattr(build_images, "_build_base", lambda: (0, None))
     monkeypatch.setattr(build_images, "_stream", lambda *args, **kwargs: None)
 
     status = build_images.main(argv)
@@ -147,7 +147,7 @@ def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
 @DOCKER_REQUIRED
 def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> None:
     """A repository whose suite is red at the head commit must produce NO image."""
-    result = _build("--red")
+    result = _build(base_image, "--red")
     combined = result.stdout + result.stderr
 
     assert result.returncode != 0, "a red baseline built successfully — the gate is not enforcing"
@@ -175,8 +175,9 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
 @DOCKER_REQUIRED
 def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     """The happy path, end to end: image builds, suite green, origin is local."""
-    result = _build()
+    result = _build(base_image)
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
+    assert f"skipping base build; reusing {base_image}" in result.stdout
 
     tag = f"{FIXTURE_IMAGE}:{'9b92381663058612621b186545f91bfb3a54079c'[:12]}"
     assert tag in _tags(), f"{tag} not built; have {_tags()}"
