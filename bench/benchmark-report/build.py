@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -772,10 +771,6 @@ def main() -> None:
     template = (here / "template.html").read_text()
     html = template.replace("__DATA__", _html_script_json(data))
     (out_dir / "index.html").write_text(html)
-    # Each report is self-contained (offline file://): copy the vendored htmx beside it.
-    htmx_src = here / "htmx.min.js"
-    if htmx_src.is_file():
-        shutil.copyfile(htmx_src, out_dir / "htmx.min.js")
     # A convenience 'latest' pointer to the freshest report (best-effort; never fatal).
     if not args.out:
         latest = Path(args.out_root) / "latest"

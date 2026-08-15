@@ -719,7 +719,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     )
     commit_calls: list[int] = []
 
-    async def _spy_commit(backend: Any, work: Any) -> None:
+    async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         commit_calls.append(1)
 
     monkeypatch.setattr("daydream.deep.orchestrator.phase_commit_push", _spy_commit)
@@ -1069,9 +1069,10 @@ class _ScopeCreepBackend(_StubBackend):
     reviewed diff. This is the issue #336 post-fix residual shape: without the
     residual check the creep edit would be committed alongside the fix.
 
-    The commit prompt is answered with a REAL ``git add -u`` + ``git commit``
-    (tracked changes only — the stub's untracked sentinels must not leak into
-    the committed tree), so the test can assert the commit step's actual output.
+    The commit agent now commits the index that ``_do_commit`` deterministically
+    pre-staged (issue #543) — it only commits, never re-stages — so this stub
+    commits the already-staged index and lets the test assert the commit step's
+    actual output.
     """
 
     def __init__(self, target: Path, creep: Path, creep_edit: str) -> None:
@@ -1089,7 +1090,7 @@ class _ScopeCreepBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ):
-        if prompt.startswith("Stage all changes and commit"):
+        if prompt.startswith("The daydream changes are already staged"):
             run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
             version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
             assert run_id is not None
@@ -1099,7 +1100,6 @@ class _ScopeCreepBackend(_StubBackend):
                 f"Daydream-Run: {run_id.group(1)}\n"
                 f"Daydream-Version: {version.group(1)}"
             )
-            _git(cwd, "add", "-u")
             _git(cwd, "commit", "-m", message)
             yield TextEvent(text="Committed.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -1996,7 +1996,7 @@ async def test_parallel_fix_commit_runs_once_after_all(
     stub.merge_items = [_merge_item(i + 1, f, "high") for i, f in enumerate(files)]
     seen_at_commit: list[bool] = []
 
-    async def _spy_commit(backend: Any, work: Any) -> None:
+    async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
         seen_at_commit.append(
             all((multi_stack_target / f".fixed-{f.replace('.', '_')}").exists() for f in files)
         )
@@ -2025,7 +2025,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
       1. unrelated.py is reverted to its pre-fix content (git shows no change);
       2. ``gh_issue_create`` was called with unrelated.py in the body;
-      3. the commit step lands a commit whose tree contains ONLY api.py;
+      3. the commit step lands a commit whose tree contains the fix (api.py)
+         and NOT unrelated.py;
       4. the committed tree contains zero files outside ``changed_files``.
 
     Discriminating: without the residual check, unrelated.py's edit survives to
@@ -2040,7 +2041,7 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     # Commit runs for real (the scope-creep backend answers the commit prompt
-    # with a real `git add -u` + commit); heal is stubbed to pass.
+    # with a real commit of the pre-staged index); heal is stubbed to pass.
     mute_side_effects(commit=False)
     stub = _ScopeCreepBackend(target, target / "unrelated.py", "\n# scope creep\n")
     stub.fix_edit_line = "\n# daydream fix\n"
@@ -2077,9 +2078,14 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     assert len(issues) == 1, f"expected 1 issue, got {issues!r}"
     assert "unrelated.py" in issues[0][2]
 
-    # 3/4. The commit's tree contains zero files outside the reviewed diff.
+    # 3/4. The commit's tree contains the fix but zero out-of-scope files: the
+    # creep edit to unrelated.py must never survive. The commit tree may carry
+    # test-stub sentinels and .daydream/ artifacts (untracked files created
+    # mid-run, pre-staged by _do_commit deterministically), so the invariant is
+    # inclusion + absence, not exact equality.
     committed_paths = _git(target, "show", "--name-only", "--format=", "HEAD").split()
-    assert committed_paths == ["api.py"], (
+    assert "api.py" in committed_paths
+    assert "unrelated.py" not in committed_paths, (
         f"commit tree leaks out-of-scope files: {committed_paths}"
     )
     # The fix itself landed (api.py carries the daydream edit).
@@ -6376,8 +6382,7 @@ class _CommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("Stage all changes and commit"):
-            _git(cwd, "add", "--all")
+        if prompt.startswith("The daydream changes are already staged"):
             _git(cwd, "commit", "-m", "fix: align greeting copy")
             yield TextEvent(text="Committed.")
             yield ResultEvent(structured_output=None, continuation=None)
@@ -6408,7 +6413,7 @@ class _PushingCommittingStubBackend(_StubBackend):
         max_turns: Any = None,
         read_only: bool = False,
     ) -> Any:
-        if prompt.startswith("Stage all changes and commit"):
+        if prompt.startswith("The daydream changes are already staged"):
             run_id = re.search(r"^Daydream-Run: (.+)$", prompt, re.MULTILINE)
             version = re.search(r"^Daydream-Version: (.+)$", prompt, re.MULTILINE)
             assert run_id is not None
@@ -6418,7 +6423,6 @@ class _PushingCommittingStubBackend(_StubBackend):
                 f"Daydream-Run: {run_id.group(1)}\n"
                 f"Daydream-Version: {version.group(1)}"
             )
-            _git(cwd, "add", "--all")
             _git(cwd, "commit", "-m", message)
             branch = _git(cwd, "branch", "--show-current")
             _git(cwd, "push", "-u", "origin", branch)

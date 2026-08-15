@@ -52,6 +52,7 @@ from daydream.improve.partition import (
     PARTITION_MAX_FILES,
     Partition,
     PartitionGroup,
+    PartitionStackOmission,
     build_partitions,
     group_partitions,
     stack_by_path,
@@ -391,7 +392,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     stacks: list[StackAssignment] = []
     partitions: list[Partition] = []
     groups: list[PartitionGroup] = []
-    skipped: list[Partition] = []
+    omissions: list[PartitionStackOmission] = []
     if not description_mode:
         # Availability is resolved once in runner.run and threaded via config;
         # None flows through to detect_stacks' optimistic default.
@@ -404,7 +405,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         if ctx.config.improve_scope:
             stacks = _stacks_for_services(stacks, services)
             tracked = sorted({path for stack in stacks for path in stack.files})
-        partitions, groups, skipped = _partition_repository(
+        partitions, groups, omissions = _partition_repository(
             ctx,
             tracked,
             services,
@@ -414,7 +415,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
         coverage_path(directory).write_text(
             json.dumps(
                 _with_artifact_provenance(
-                    _coverage_ledger(partitions, groups, skipped),
+                    _coverage_ledger(partitions, groups, omissions),
                     phase=DaydreamPhase.RECON,
                 ),
                 indent=2,
@@ -526,7 +527,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     ctx.data["stacks"] = stacks
     ctx.data["partitions"] = partitions
     ctx.data["partition_groups"] = groups
-    ctx.data["partitions_not_audited"] = skipped
+    ctx.data["partition_omissions"] = omissions
     return None
 
 
@@ -537,7 +538,7 @@ def _partition_repository(
     stacks: list[StackAssignment],
     *,
     branch_focus: bool,
-) -> tuple[list[Partition], list[PartitionGroup], list[Partition]]:
+) -> tuple[list[Partition], list[PartitionGroup], list[PartitionStackOmission]]:
     """Cover the audited surface with partitions and pack them into groups.
 
     Branch focus and the ``quick`` tier bypass partitioning: both audit one
@@ -563,13 +564,13 @@ def _partition_repository(
         return [whole], [_whole_surface_group(whole, stack_of)], []
 
     partitions = build_partitions(tracked, services, max_files=max_files)
-    groups, skipped = group_partitions(
+    groups, omissions = group_partitions(
         partitions,
         stack_of,
         max_files=max_files,
         max_groups=max_groups,
     )
-    return partitions, groups, skipped
+    return partitions, groups, omissions
 
 
 def _whole_surface_group(
@@ -609,9 +610,55 @@ def _group_dict(group: PartitionGroup) -> dict[str, Any]:
 def _coverage_ledger(
     partitions: list[Partition],
     groups: list[PartitionGroup],
-    skipped: list[Partition],
+    omissions: list[PartitionStackOmission],
+    failed_groups: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Build the coverage ledger recording what the audit did and did not cover."""
+    """Build the coverage ledger recording what the audit did and did not cover.
+
+    `failed_groups` names the groups whose audit assignments failed; their
+    stacks count as uncovered, never as audited.
+    """
+    failed_groups = failed_groups or set()
+    omitted_by_partition: dict[Partition, list[str]] = {}
+    for omission in omissions:
+        omitted_by_partition.setdefault(omission.partition, []).append(omission.stack)
+
+    not_audited: list[dict[str, Any]] = []
+    partially_audited: list[dict[str, Any]] = []
+    for partition, omitted_stacks in omitted_by_partition.items():
+        retained_groups = [
+            group for group in groups if partition in group.partitions
+        ]
+        audited_stacks = sorted(
+            {
+                group.stack
+                for group in retained_groups
+                if group.name not in failed_groups and group.stack is not None
+            }
+        )
+        failed_stacks = sorted(
+            {
+                group.stack
+                for group in retained_groups
+                if group.name in failed_groups and group.stack is not None
+            }
+        )
+        entry = {
+            "partition": partition.name,
+            "root": partition.root,
+            "file_count": len(partition.files),
+            "reason": (
+                "group-failed"
+                if retained_groups and not audited_stacks
+                else "group-ceiling"
+            ),
+            "omitted_stacks": sorted(set(omitted_stacks) | set(failed_stacks)),
+        }
+        if audited_stacks:
+            partially_audited.append({**entry, "audited_stacks": audited_stacks})
+        else:
+            not_audited.append(entry)
+
     return {
         "artifact_type": "daydream.improve-coverage",
         "partitions": [
@@ -629,15 +676,8 @@ def _coverage_ledger(
             }
             for group in groups
         ],
-        "not_audited": [
-            {
-                "partition": partition.name,
-                "root": partition.root,
-                "file_count": len(partition.files),
-                "reason": "group-ceiling",
-            }
-            for partition in skipped
-        ],
+        "not_audited": not_audited,
+        "partially_audited": partially_audited,
     }
 
 
@@ -1062,7 +1102,7 @@ async def _step_audit(ctx: FlowContext) -> Stop | None:
         directory,
         partitions,
         groups,
-        ctx.data["partitions_not_audited"],
+        ctx.data["partition_omissions"],
         failures=failures,
         assignments=assignments,
     )
@@ -1085,7 +1125,7 @@ def _record_audit_coverage(
     directory: Path,
     partitions: list[Partition],
     groups: list[PartitionGroup],
-    skipped: list[Partition],
+    omissions: list[PartitionStackOmission],
     *,
     failures: dict[str, str],
     assignments: list[_AuditAssignment],
@@ -1096,7 +1136,9 @@ def _record_audit_coverage(
         for assignment in assignments
         if assignment.key in failures
     }
-    ledger = _coverage_ledger(partitions, groups, skipped)
+    ledger = _coverage_ledger(
+        partitions, groups, omissions, failed_groups=failed_groups
+    )
     for entry in ledger["groups"]:
         entry["status"] = "failed" if entry["name"] in failed_groups else "audited"
     ledger["failed_assignments"] = dict(sorted(failures.items()))
@@ -2169,6 +2211,24 @@ def _reanchored_report_section(plans_dir: Path) -> str:
     return f"## Re-anchored plans\n\n{table}\n"
 
 
+def _coverage_bullet(entry: dict[str, Any]) -> str:
+    """Render one coverage ledger entry as a report bullet."""
+    prefix = (
+        f"  - **{entry['partition']}** — `{entry['root']}/` "
+        f"({entry['file_count']} files) "
+    )
+    if "audited_stacks" in entry:
+        return (
+            prefix
+            + f"— partially audited (audited: {', '.join(entry['audited_stacks'])}; "
+            f"omitted: {', '.join(entry['omitted_stacks'])})"
+        )
+    return (
+        prefix
+        + f"— not audited (omitted: {', '.join(entry['omitted_stacks'])})"
+    )
+
+
 def _render_report(ctx: FlowContext) -> str:
     services = ctx.data["services"]
     all_services = ctx.data["all_services"]
@@ -2186,8 +2246,15 @@ def _render_report(ctx: FlowContext) -> str:
     plan_write = ctx.data["plan_write"]
     issue_publication = ctx.data.get("issue_publication")
     partitions = ctx.data["partitions"]
-    partitions_not_audited = ctx.data["partitions_not_audited"]
+    partition_omissions = ctx.data["partition_omissions"]
     groups = ctx.data["partition_groups"]
+    failures = audit.get("failed", {})
+    failed_groups = {key.partition(":")[2] for key in failures}
+    ledger = _coverage_ledger(
+        partitions, groups, partition_omissions, failed_groups=failed_groups
+    )
+    not_audited = ledger["not_audited"]
+    partially_audited = ledger["partially_audited"]
     service_lines = (
         "\n".join(f"- **{service.name}** — `{service.root.as_posix()}`" for service in services)
         or "- No service roots detected."
@@ -2196,7 +2263,6 @@ def _render_report(ctx: FlowContext) -> str:
     cleanup_pressure_lines = _cleanup_pressure_lines(findings)
     stack_lines = "\n".join(f"- **{stack.stack_name}**" for stack in stacks) or "- No stacks detected."
     roots_by_group = {group.name: _group_roots_cell(group) for group in groups}
-    failures = audit.get("failed", {})
     failed_assignment_lines = (
         "\n".join(
             f"- **{assignment.replace(':', ' / ')}** "
@@ -2206,17 +2272,16 @@ def _render_report(ctx: FlowContext) -> str:
         )
         or "- None."
     )
-    not_audited_lines = (
+    coverage_bullets = [
+        _coverage_bullet(entry) for entry in not_audited + partially_audited
+    ]
+    coverage_lines = (
         (
-            "- Partitions not audited (reason: group-ceiling; raise "
+            "- Partitions not fully audited (reason: group-ceiling; raise "
             "`max-partition-groups` to include them):\n"
-            + "\n".join(
-                f"  - **{partition.name}** — `{partition.root}/` "
-                f"({len(partition.files)} files)"
-                for partition in partitions_not_audited
-            )
+            + "\n".join(coverage_bullets)
         )
-        if partitions_not_audited
+        if coverage_bullets
         else f"- All {len(partitions)} partitions were audited."
     )
     tier_bound = {
@@ -2278,7 +2343,7 @@ def _render_report(ctx: FlowContext) -> str:
         "## What was not audited\n\n"
         f"- {tier_bound}\n"
         f"- {scope_statement}\n\n"
-        f"{not_audited_lines}\n\n"
+        f"{coverage_lines}\n\n"
         "### Failed audit assignments\n\n"
         f"{failed_assignment_lines}\n\n"
         "## Audit filtering\n\n"

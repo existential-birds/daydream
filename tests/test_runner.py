@@ -778,7 +778,7 @@ class _CommitWritingBackend:
             yield TextEvent(text="All 1 tests passed. 0 failed.")
             yield ResultEvent(structured_output=None, continuation=None)
             return
-        if "stage all changes and commit" in pl:
+        if "the daydream changes are already staged" in pl:
             self.commit_prompts.append(prompt)
             run_id = re.search(r"Daydream-Run: (\S+)", prompt)
             version = re.search(r"Daydream-Version: (\S+)", prompt)
@@ -787,7 +787,6 @@ class _CommitWritingBackend:
                 f"Daydream-Run: {run_id.group(1) if run_id else 'unknown'}\n"
                 f"Daydream-Version: {version.group(1) if version else 'unknown'}\n"
             )
-            _git(cwd, "add", "-A")
             _git(cwd, "commit", "-m", message)
             yield TextEvent(text="Committed.")
             yield ResultEvent(structured_output=None, continuation=None)

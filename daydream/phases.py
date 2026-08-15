@@ -2575,6 +2575,80 @@ async def phase_test_and_heal(
             return False, retries_used, False
 
 
+def _stage_deterministic(
+    work: WorkContext, preexisting_untracked: set[str],
+) -> set[str] | None:
+    """Pre-stage exactly the daydream changes, excluding run artifacts.
+
+    Deterministic staging (issue #562/#543): everything changed from HEAD
+    minus the pre-run untracked snapshot is staged via ``stage_paths`` (never
+    ``git add --all``), so a user's pre-run scratch files can never be swept
+    into the daydream commit. Daydream's own mid-run artifacts under
+    ``.daydream/`` (recommended.patch, fix-failures, quality-gate/test
+    verdicts) are created after the snapshot and would otherwise be staged
+    and pushed alongside the fixes — they are run state, not user changes,
+    so they are excluded.
+
+    Returns:
+        The staged path set, or ``None`` when there is nothing to commit.
+
+    Raises:
+        GitError: If the changed-file enumeration or staging fails — the
+            strict enumerator must not silently degrade to an empty stage
+            (that would leave tracked fixes uncommitted behind a green
+            "Commit and push complete").
+    """
+    stage = set(
+        git_ops.changed_files_against(
+            work.repo, "HEAD", preexisting_untracked=preexisting_untracked,
+        )
+    )
+    stage = {
+        p for p in stage if p != ".daydream" and not p.startswith(".daydream/")
+    }
+    if not stage:
+        print_info(console, "Nothing to commit — no daydream changes")
+        return None
+    git_ops.stage_paths(work.repo, [Path(p) for p in sorted(stage)])
+    return stage
+
+
+def _verify_commit_scope(
+    work: WorkContext, sha_before: str, stage: set[str],
+) -> None:
+    """Verify the committed tree matches the pre-staged daydream set.
+
+    Issue #562: prompt compliance alone is not enforcement — a commit agent
+    that re-runs ``git add -A`` would sweep pre-existing untracked files into
+    the commit. Enforcement checks both directions:
+
+    - extras (committed beyond the pre-staged set) surfaces scope creep;
+    - missing (pre-staged files absent from the committed tree) surfaces an
+      under-commit, so a tracked fix dropped from the commit (e.g. by a
+      partial commit) is never hidden behind a green "Commit and push
+      complete".
+    """
+    try:
+        committed = set(git_ops.diff_name_only_strict(work.repo, sha_before, "HEAD"))
+    except GitError as exc:
+        print_warning(console, f"Could not verify committed tree: {exc}")
+        return
+    extras = sorted(committed - stage)
+    if extras:
+        print_warning(
+            console,
+            "Commit contains files outside the pre-staged daydream set "
+            f"(scope creep): {', '.join(extras)}",
+        )
+    missing = sorted(stage - committed)
+    if missing:
+        print_warning(
+            console,
+            "Commit is missing pre-staged daydream files (under-commit): "
+            f"{', '.join(missing)}",
+        )
+
+
 async def _do_commit(
     backend: Backend,
     work: WorkContext,
@@ -2582,6 +2656,7 @@ async def _do_commit(
     push: bool = False,
     interactive: bool = False,
     items: list[dict[str, Any]] | None = None,
+    preexisting_untracked: set[str] | None = None,
 ) -> bool:
     """Stage, commit, and optionally push with daydream trailers.
 
@@ -2594,6 +2669,13 @@ async def _do_commit(
         items: Optional list of fix dicts (with ``file`` and ``description``
             keys) summarising changes applied in this run; included in the
             agent prompt so the commit message is accurate.
+        preexisting_untracked: Optional set of repo-relative paths that were
+            untracked before the daydream run started. When supplied, staging
+            is deterministic: exactly ``changed_files(...) - preexisting`` is
+            pre-staged (never ``git add --all``) so a user's pre-run scratch
+            files can never be swept into the daydream commit (issue #543).
+            The commit agent then commits the already-staged index only. When
+            ``None`` (legacy callers), the agent stages as before.
 
     Returns:
         True if a commit was performed, False if the user declined.
@@ -2616,7 +2698,28 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return False
 
+    if preexisting_untracked is not None:
+        stage = _stage_deterministic(work, preexisting_untracked)
+        if stage is None:
+            return False
+
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
+
+    if preexisting_untracked is not None:
+        # Deterministic staging (issue #562/#543): the index already holds
+        # exactly the daydream changes, so the agent commits the pre-staged
+        # index only and must not re-stage anything.
+        staging_instruction = (
+            "The daydream changes are already staged. Review the staged diff "
+            "(git diff --cached) and commit using a conventional commit message. "
+            "Do NOT run git add or stage anything — the index is complete. "
+        )
+    else:
+        # Legacy path: no pre-run untracked snapshot — the agent stages and
+        # commits as before (the documented None contract).
+        staging_instruction = (
+            "Stage all changes and commit using a conventional commit message. "
+        )
 
     if items:
         summaries = "\n".join(
@@ -2631,7 +2734,7 @@ async def _do_commit(
         items_context = ""
 
     prompt = (
-        "Stage all changes and commit using a conventional commit message. "
+        f"{staging_instruction}"
         "Review the diff to write a meaningful summary of what was fixed or changed. "
         "Use the format: <type>: <concise summary of changes>\n\n"
         f"{items_context}"
@@ -2688,14 +2791,25 @@ async def _do_commit(
         except GitError as exc:
             print_warning(console, f"Failed to amend trailers: {exc}")
 
+    # stage is only ever set on the deterministic path (and non-None there,
+    # since _stage_deterministic returned early on an empty stage); the
+    # ``is not None`` narrow lets mypy prove the set type.
+    if preexisting_untracked is not None and stage is not None:
+        _verify_commit_scope(work, sha_before, stage)
+
     return True
 
 
-async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
+async def phase_commit_push(
+    backend: Backend, work: WorkContext, *, preexisting_untracked: set[str] | None = None,
+) -> None:
     """Prompt user to commit and push changes."""
     console.print()
     print_info(console, "Committing and pushing changes...")
-    committed = await _do_commit(backend, work, push=True, interactive=True)
+    committed = await _do_commit(
+        backend, work, push=True, interactive=True,
+        preexisting_untracked=preexisting_untracked,
+    )
     if committed:
         print_success(console, "Commit and push complete")
 
@@ -2725,18 +2839,33 @@ async def phase_fetch_pr_feedback(
 
 
 async def phase_commit_push_auto(
-    backend: Backend, work: WorkContext, *, items: list[dict[str, Any]] | None = None,
+    backend: Backend,
+    work: WorkContext,
+    *,
+    items: list[dict[str, Any]] | None = None,
+    preexisting_untracked: set[str] | None = None,
 ) -> None:
     """Automatically commit and push changes without user prompt.
 
     Args:
         items: Optional fix items applied this run; forwarded to the commit
             agent so it can craft an accurate commit message.
+        preexisting_untracked: Optional pre-run untracked snapshot; forwarded
+            to ``_do_commit`` for deterministic pre-staging (issue #543).
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(backend, work, push=True, items=items)
-    print_success(console, "Commit and push complete")
+    committed = await _do_commit(
+        backend, work, push=True, items=items,
+        preexisting_untracked=preexisting_untracked,
+    )
+    # Only claim success when a commit was actually created: the deterministic
+    # path uses the strict changed_files_against enumerator (a git failure
+    # surfaces as Stop(1), never an empty stage), so _do_commit returns False
+    # only for a genuinely empty daydream change set — a success banner on
+    # either would mislead the operator into believing the fixes were committed.
+    if committed:
+        print_success(console, "Commit and push complete")
 
 
 async def phase_respond_pr_feedback(

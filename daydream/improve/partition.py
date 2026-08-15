@@ -60,6 +60,19 @@ class PartitionGroup:
         return tuple(sorted(partition.root for partition in self.partitions))
 
 
+@dataclass(frozen=True)
+class PartitionStackOmission:
+    """One partition pass omitted from a stack-specific audit group.
+
+    Attributes:
+        partition: The partition whose pass was dropped.
+        stack: The stack-specific group the pass was omitted from.
+    """
+
+    partition: Partition
+    stack: str
+
+
 def build_partitions(
     files: Sequence[str],
     services: Sequence[Service],
@@ -150,12 +163,12 @@ def group_partitions(
     *,
     max_files: int = PARTITION_MAX_FILES,
     max_groups: int | None = None,
-) -> tuple[list[PartitionGroup], list[Partition]]:
+) -> tuple[list[PartitionGroup], list[PartitionStackOmission]]:
     """Pack partitions into stack-homogeneous groups bounded by ``max_files``.
 
     Returns:
         The kept groups (renamed ``group-01``..) and, when ``max_groups`` binds,
-        every partition belonging to a dropped group — the not-audited list.
+        one ``PartitionStackOmission`` per dropped pass.
     """
     buckets: dict[str, list[Partition]] = defaultdict(list)
     for partition in partitions:
@@ -169,13 +182,18 @@ def group_partitions(
 
     bins.sort(key=lambda entry: (entry[0], entry[1][0].name))
 
-    skipped: list[Partition] = []
+    omissions: list[PartitionStackOmission] = []
     if max_groups is not None and len(bins) > max_groups:
         ranked = sorted(bins, key=lambda entry: (-sum(len(p.files) for p in entry[1]), entry[1][0].name))
         kept = {id(entry) for entry in ranked[:max_groups]}
-        skipped = sorted(
-            (partition for entry in bins if id(entry) not in kept for partition in entry[1]),
-            key=lambda partition: partition.root,
+        omissions = sorted(
+            (
+                PartitionStackOmission(partition=partition, stack=entry[0])
+                for entry in bins
+                if id(entry) not in kept
+                for partition in entry[1]
+            ),
+            key=lambda omission: (omission.partition.root, omission.partition.name, omission.stack),
         )
         bins = [entry for entry in bins if id(entry) in kept]
 
@@ -183,7 +201,7 @@ def group_partitions(
         PartitionGroup(name=f"group-{index:02d}", stack=stack, partitions=tuple(members))
         for index, (stack, members) in enumerate(bins, start=1)
     ]
-    return groups, skipped
+    return groups, omissions
 
 
 def _owning_service(path: str, ordered_services: Sequence[Service]) -> Service | None:
