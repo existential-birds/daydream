@@ -325,8 +325,10 @@ class DeepDiffBoundInfo:
     """Truncation statistics for one ``bound_deep_diff`` call.
 
     ``retained_bytes`` excludes the marker line; ``oversize_paths`` names the
-    files whose single block exceeded the cap and was kept whole (block
-    integrity outranks the soft byte bound).
+    files whose single block exceeded the cap and was kept whole. Only a
+    LEADING oversize block (one that arrives before any retained block) is
+    kept whole and recorded; an oversize block arriving after a retained
+    block is dropped whole and absent from ``oversize_paths``.
     """
 
     truncated: bool
@@ -352,8 +354,11 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
     (byte-for-byte identical to today, Must-have #4). Over ``budget`` whole
     blocks are retained while ``retained_bytes + block_bytes <= budget``; a
     single block that alone exceeds the cap is kept whole with its path
-    recorded in ``oversize_paths`` (block integrity outranks the soft bound;
-    the prompt-inline budget already keeps it out of an oversized prompt). The
+    recorded in ``oversize_paths`` -- but only when it is the leading block
+    (no retained block yet). An oversize block arriving after a retained
+    block is dropped whole and omitted from ``oversize_paths`` (block
+    integrity outranks the soft bound; the prompt-inline budget already keeps
+    it out of an oversized prompt). The
     returned value carries a leading ``# daydream: deep diff truncated:``
     marker line only when truncated; ``retained_bytes`` excludes the marker.
 
@@ -373,7 +378,8 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
     total_blocks = 0
     oversize_paths: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if _diff_block_path(block) is None:
+        block_path = _diff_block_path(block)
+        if block_path is None:
             # Leading empty fragment / non-``diff --git`` element: never a block.
             continue
         total_blocks += 1
@@ -387,7 +393,7 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
             # budget keeps it out of an oversized prompt.
             retained.append(block)
             retained_bytes += block_bytes
-            oversize_paths.append(_diff_block_path(block) or "")
+            oversize_paths.append(block_path)
         # else: block dropped whole; never split mid-stream.
 
     marker = (

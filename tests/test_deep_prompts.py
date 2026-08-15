@@ -444,14 +444,15 @@ def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
     """Must-have #2: over cap → only whole blocks retained; each byte-identical."""
     from daydream.deep.coverage import diff_block_for_file
 
-    diff = _blk("a.py", "x" * 3000) + _blk("b.py", "y" * 3000) + _blk("c.py", "z" * 3000)
+    body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
     out, info = bound_deep_diff(diff)
     assert info.truncated
     assert "diff --git a/a.py b/a.py" in out
     assert "diff --git a/b.py b/b.py" in out
     # c.py's block is dropped whole (never split mid-stream).
     assert "diff --git a/c.py b/c.py" not in out
-    assert "-" + "x" * 3000 in out  # a retained block's hunk body is present, unchanged
+    assert "-" + "x" * body in out  # a retained block's hunk body is present, unchanged
     # Every retained block is byte-identical to its source block.
     assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
     assert diff_block_for_file(out, "b.py") == diff_block_for_file(diff, "b.py")
