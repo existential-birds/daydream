@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import cast
 
 from daydream.benchmark.corpus import harvested_corpus
 
@@ -80,11 +81,18 @@ IMMUTABLE_BASE_FORMAT = "daydream-rl/base:<tag> or daydream-rl/base@sha256:<64 h
 #: ``_ . -``, never starting with ``.`` or ``-``, at most 128 characters. The
 #: separate digit check below is what makes a tag *versioned* rather than an
 #: unversioned alias such as ``stable`` or ``dev``.
-_BASE_TAG_RE = re.compile(r"^daydream-rl/base:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$")
-#: Versioned tags must contain a digit (``git describe`` output always does).
+_BASE_TAG_RE = re.compile(r"^daydream-rl/base:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}\Z")
+#: Versioned tags must contain a digit — ``git describe`` output from a real
+#: tag always does, and a digit is what excludes unversioned aliases like
+#: ``stable``. On a clone with no applicable tag (untagged or shallow),
+#: ``--always`` falls back to a bare hex SHA that can be all ``a-f`` and so
+#: digit-free; that is the same immutable identity, so a pure-hex ``--always``
+#: fallback is accepted too, while the mutable aliases (``stable``/``dev``) are
+#: never pure hex.
 _BASE_TAG_CONTAINS_DIGIT = re.compile(r"[0-9]")
+_BASE_TAG_ALWAYS_FALLBACK_RE = re.compile(r"[0-9a-f]{7,40}(-dirty)?\Z")
 #: A canonical content digest, e.g. ``daydream-rl/base@sha256:<64 hex>``.
-_BASE_DIGEST_RE = re.compile(r"^daydream-rl/base@sha256:[0-9a-f]{64}$")
+_BASE_DIGEST_RE = re.compile(r"^daydream-rl/base@sha256:[0-9a-f]{64}\Z")
 
 #: Manifest ``clone_url`` sentinel meaning "materialize the deterministic fixture
 #: repository" instead of cloning anything (``daydream_review_v1.fixture``).
@@ -144,18 +152,22 @@ def _immutable_base_image(value: str) -> str | None:
     """Return *value* when it is an explicit immutable base identity, else ``None``.
 
     The accepted grammar is the single literal ``IMMUTABLE_BASE_FORMAT``: a
-    versioned tag whose tag portion fits Docker's reference grammar and contains
-    a digit (excluding unversioned aliases like ``stable``/``dev``), or a
-    canonical SHA-256 digest. The mutable ``latest`` alias is rejected
-    explicitly, before the patterns are consulted, so a snapshot build never
-    silently rides the alias as it moves.
+    versioned tag whose tag portion fits Docker's reference grammar and either
+    contains a digit or is the bare hex ``git describe --always`` fallback
+    emitted on an untagged/shallow clone (excluding unversioned aliases like
+    ``stable``/``dev``, which are never pure hex), or a canonical SHA-256
+    digest. The mutable ``latest`` alias is rejected explicitly, before the
+    patterns are consulted, so a snapshot build never silently rides the alias
+    as it moves.
     """
     if value == BASE_LATEST:
         return None
     if _BASE_DIGEST_RE.match(value):
         return value
-    if _BASE_TAG_RE.match(value) and _BASE_TAG_CONTAINS_DIGIT.search(value):
-        return value
+    if _BASE_TAG_RE.match(value):
+        tag = value.split(":", 1)[1]
+        if _BASE_TAG_CONTAINS_DIGIT.search(tag) or _BASE_TAG_ALWAYS_FALLBACK_RE.match(tag):
+            return value
     return None
 
 
@@ -201,6 +213,17 @@ def _build_base() -> tuple[int, str | None]:
         print(f"FAILED base image: no immutable versioned tag among {tags}", file=sys.stderr)
         return (1, None)
     return (0, versioned)
+
+
+def _base_image_present(base_image: str) -> bool:
+    """Whether *base_image* exists in the local docker daemon.
+
+    A well-formed but locally absent ``--no-base`` identity would otherwise
+    fail late, per repo build, misattributed as a per-PR build failure; this is
+    the same existence probe the session fixture uses before ``--base-only``.
+    """
+    probe = subprocess.run(["docker", "image", "inspect", base_image], capture_output=True, check=False)
+    return probe.returncode == 0
 
 
 def write_setup_script(ctx: Path, setup_cmds: list[str]) -> None:
@@ -320,6 +343,43 @@ def build_repo_image(entry: _ManifestEntry, *, head_sha: str, base_sha: str, bas
     return tag
 
 
+def _resolve_base_image(args: argparse.Namespace) -> tuple[int, str | None]:
+    """Resolve the immutable base image every snapshot build pins.
+
+    Returns ``(exit_code, base_image)``; a non-zero exit means the caller must
+    stop before any repo build. The ``--no-base`` path reuses an explicit
+    immutable identity and refuses (status 2) an invalid or locally absent one;
+    the fresh path builds the base and returns its versioned tag. A
+    ``(0, None)`` success from the fresh path is an invariant violation.
+    """
+    if args.no_base is not None:
+        base_image = _immutable_base_image(args.no_base)
+        if base_image is None:
+            print(
+                f"invalid immutable base image {args.no_base!r}: expected {IMMUTABLE_BASE_FORMAT}; "
+                "'latest' is not allowed",
+                file=sys.stderr,
+            )
+            return (2, None)
+        if not _base_image_present(base_image):
+            print(f"base image {base_image!r} does not exist locally; build it first with --base-only", file=sys.stderr)
+            return (2, None)
+        print(f"skipping base build; reusing {base_image}")
+        return (0, base_image)
+
+    status, base_image = _build_base()
+    if status:
+        return (status, None)
+    # A successful base build must produce the immutable versioned tag; a
+    # None tag on the success path is an invariant violation, never a cue to
+    # fall back. Deliberately a runtime check rather than an ``assert``:
+    # ``python -O`` strips asserts, and a stripped check would let a
+    # ``(0, None)`` base build feed BASE_IMAGE=None into every snapshot.
+    if base_image is None:
+        raise RuntimeError("_build_base() reported success without an immutable versioned tag")
+    return (0, base_image)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the daydream-review-v1 rollout images.")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="images/manifest.toml")
@@ -359,27 +419,13 @@ def main(argv: list[str] | None = None) -> int:
     if red_status is not None:
         return red_status
 
-    if args.no_base is not None:
-        base_image = _immutable_base_image(args.no_base)
-        if base_image is None:
-            print(
-                f"invalid immutable base image {args.no_base!r}: expected {IMMUTABLE_BASE_FORMAT}; "
-                "'latest' is not allowed",
-                file=sys.stderr,
-            )
-            return 2
-        print(f"skipping base build; reusing {base_image}")
-    else:
-        status, base_image = _build_base()
-        if status:
-            return status
-        # A successful base build must produce the immutable versioned tag; a
-        # None tag on the success path is an invariant violation, never a cue to
-        # fall back. Deliberately a runtime check rather than an ``assert``:
-        # ``python -O`` strips asserts, and a stripped check would let a
-        # ``(0, None)`` base build feed BASE_IMAGE=None into every snapshot.
-        if base_image is None:
-            raise RuntimeError("_build_base() reported success without an immutable versioned tag")
+    status, base_image = _resolve_base_image(args)
+    if status:
+        return status
+    # ``_resolve_base_image`` raises on ``(0, None)``, so a success here always
+    # carries a base image; the cast narrows the tuple for the type checker
+    # without duplicating the runtime guard in main.
+    base_image = cast(str, base_image)
 
     built: list[str] = []
     failed: list[str] = []

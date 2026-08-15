@@ -1,7 +1,7 @@
 """Container image contracts: immutable base inputs and the green-baseline gate.
 
-Two kinds of contract live here. The static ``base.Dockerfile`` checks run with
-no Docker at all — they assert the build pins every remote input to an immutable
+Two kinds of contract live here. The static ``base.Dockerfile`` and ``repo.Dockerfile`` checks run
+with no Docker at all — they assert the build pins every remote input to an immutable
 version and verifies it for integrity before use. A **fast** tier — no Docker
 required — rejects ``--red`` invocations that cannot select the fixture repo,
 ensuring the guard fires before any build side-effect. The two ``slow`` tests
@@ -102,6 +102,23 @@ def test_no_base_requires_immutable_base_identity() -> None:
     assert status == 2
 
 
+def test_no_base_requires_the_base_image_to_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A well-formed but locally absent --no-base identity fails fast (status 2).
+
+    It must never reach a per-repo build: the failure is a configuration error
+    (exit 2), not a per-PR build failure (exit 1).
+    """
+    built: list[str] = []
+    monkeypatch.setattr(build_images, "_base_image_present", lambda _: False)
+    monkeypatch.setattr(build_images, "build_repo_image", lambda *a, **k: built.append("built"))
+
+    status = build_images.main(["--only", FIXTURE_SLUG, "--no-base", "daydream-rl/base:v1.2.3"])
+    assert status == 2
+    assert not built, "an absent base image must be refused before any repo build"
+
+
 def test_immutable_base_image_accepts_only_versioned_identities() -> None:
     """The validator accepts versioned tags/digests; aliases and junk are refused."""
     digest_hex = "a" * 64
@@ -111,6 +128,8 @@ def test_immutable_base_image_accepts_only_versioned_identities() -> None:
         "daydream-rl/base:v0.1.2-3-g5ce4c0e-dirty",  # git describe output
         f"daydream-rl/base@sha256:{digest_hex}",
         "daydream-rl/base:r2d2",  # Docker-grammar tag containing a digit
+        "daydream-rl/base:deadbeef",  # digit-free git describe --always fallback (untagged clone)
+        "daydream-rl/base:deadbeef-dirty",  # ...with a dirty tree
     ]
     rejected = [
         build_images.BASE_LATEST,           # the mutable alias
@@ -122,8 +141,10 @@ def test_immutable_base_image_accepts_only_versioned_identities() -> None:
         "daydream-rl/base:foo/bar",         # docker grammar: slash
         "daydream-rl/base:has space",       # docker grammar: whitespace
         "daydream-rl/base:",                # empty tag
+        "daydream-rl/base:v1.2.3\n",        # trailing newline is not part of the identity
         f"daydream-rl/base@sha256:{'x' * 64}",  # not hex
         f"daydream-rl/base@sha256:{digest_hex[:-1]}",  # 63 hex, not 64
+        f"daydream-rl/base@sha256:{digest_hex}\n",  # trailing newline
     ]
     for value in accepted:
         assert build_images._immutable_base_image(value) == value, value
@@ -163,6 +184,7 @@ def test_main_uses_immutable_base_for_repository_builds(
 
     monkeypatch.setattr(build_images, "_build_base", lambda: (0, versioned))
     monkeypatch.setattr(build_images, "build_repo_image", _record)
+    monkeypatch.setattr(build_images, "_base_image_present", lambda _: True)
 
     # Fresh path (no --no-base): every build uses the versioned tag from the base build.
     assert build_images.main(["--only", FIXTURE_SLUG]) == 0

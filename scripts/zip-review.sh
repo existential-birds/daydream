@@ -100,7 +100,25 @@ else
   echo "Warning: no review-output.md found" >&2
 fi
 
-# Create zip
-zip -r "$ZIP_FILE" "${FILES_TO_ZIP[@]}"
+# Create zip via python3's stdlib so the script needs no external `zip` binary
+# (the script already requires python3 for metadata extraction). Archive paths
+# are relative to the current directory, matching `zip -r` semantics.
+python3 - "$ZIP_FILE" "${FILES_TO_ZIP[@]}" <<'PY'
+import os
+import sys
+import zipfile
+
+zip_path = sys.argv[1]
+paths = sys.argv[2:]
+with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    for path in paths:
+        if os.path.isdir(path):
+            for root, _dirs, files in os.walk(path):
+                for name in files:
+                    full = os.path.join(root, name)
+                    zf.write(full, os.path.relpath(full, os.curdir))
+        else:
+            zf.write(path, os.path.relpath(path, os.curdir))
+PY
 echo ""
 echo "Done: $(du -h "$ZIP_FILE" | cut -f1) $ZIP_FILE"
