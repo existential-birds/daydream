@@ -443,7 +443,9 @@ def test_ci_actionlint_covers_all_workflow_sources() -> None:
     wf = load_workflow(REPO_WORKFLOWS_DIR / "ci.yml")
     steps = job_steps(wf, "check")
     actionlint = next(s for s in steps if s.get("name") == "Lint workflows with actionlint")
-    selectors = [tok for tok in actionlint["run"].split() if tok.endswith(".yml")]
+    selectors = [
+        tok for tok in actionlint["run"].split() if tok.endswith(".yml") and not tok.startswith("-")
+    ]
 
     actual = {p for s in selectors for p in _REPO_ROOT.glob(s)}
     expected = {*REPO_WORKFLOWS_DIR.glob("*.yml"), *TEMPLATES_DIR.rglob("*.yml")}
