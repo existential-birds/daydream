@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import pytest
 
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.exploration import FileInfo
@@ -21,9 +22,13 @@ from daydream.prompts.exploration_subagents import (
     TEST_MAPPER_SCHEMA,
     build_dependency_tracer_prompt,
     build_pattern_scanner_prompt,
+    build_repo_survey_prompt,
     build_test_mapper_prompt,
 )
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diffs"
 
@@ -315,6 +320,41 @@ def test_pre_scan_passes_cwd_absolute_paths(tmp_path):
     for p in paths:
         assert str(tmp_path / p) in joined
         assert f"- {p} (" not in joined
+
+
+@pytest.mark.parametrize(
+    ("builder", "marker"),
+    [
+        pytest.param(
+            lambda: build_pattern_scanner_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="pattern-scanner",
+        ),
+        pytest.param(
+            lambda: build_repo_survey_prompt(["a.py", "b.py"], 10, cwd=Path("/repo")),
+            "<tracked_file_sample>",
+            id="repo-survey",
+        ),
+        pytest.param(
+            lambda: build_dependency_tracer_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="dependency-tracer",
+        ),
+        pytest.param(
+            lambda: build_test_mapper_prompt([FileInfo("a.py", "modified")], "main...HEAD", cwd=Path("/repo")),
+            "<affected_files>",
+            id="test-mapper",
+        ),
+    ],
+)
+def test_exploration_prompts_mark_repository_content_untrusted(builder, marker):
+    prompt = builder()
+    assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+    # Placement: boundary precedes cwd-grounding (the shared prompt fragment
+    # present in all four builders) AND the repo-controlled file-list marker.
+    grounding = CWD_GROUNDING_INSTRUCTION.format(cwd=Path("/repo"))
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index(grounding)
+    assert prompt.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < prompt.index(marker)
 
 
 def test_pre_scan_passes_cwd_absolute_static_files(tmp_path, monkeypatch):
