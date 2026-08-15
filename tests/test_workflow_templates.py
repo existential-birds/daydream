@@ -20,6 +20,10 @@ cannot verify and that a careless edit could silently break:
 - The repository workflow README declares these files as repository-only Codex
   dogfood configuration and points to the packaged install guide (never copies
   ``ANTHROPIC_API_KEY``).
+- The CI actionlint step covers every workflow the project ships — the repo's
+  own top-level workflows plus all recursively discovered template workflows
+  (the nested ``single/daydream.yml`` included) — and each selector still has
+  to match at least one real workflow file (no stale selectors).
 
 PyYAML parses the bare ``on:`` key as boolean ``True``; ``wf_on()`` normalizes it.
 """
@@ -447,7 +451,14 @@ def test_ci_actionlint_covers_all_workflow_sources() -> None:
         tok for tok in actionlint["run"].split() if tok.endswith(".yml") and not tok.startswith("-")
     ]
 
-    actual = {p for s in selectors for p in _REPO_ROOT.glob(s)}
+    actual: set[Path] = set()
+    for selector in selectors:
+        matches = set(_REPO_ROOT.glob(selector))
+        assert matches, (
+            f"actionlint selector {selector!r} in .github/workflows/ci.yml matches "
+            "no workflow files; drop the stale selector or fix its glob"
+        )
+        actual |= matches
     expected = {*REPO_WORKFLOWS_DIR.glob("*.yml"), *TEMPLATES_DIR.rglob("*.yml")}
     actual_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in actual)
     expected_rel = sorted(p.relative_to(_REPO_ROOT).as_posix() for p in expected)
