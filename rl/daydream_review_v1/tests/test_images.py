@@ -54,6 +54,26 @@ def _tags() -> set[str]:
     return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
 
 
+MANIFEST = PROJECT_ROOT / "images" / "manifest.toml"
+README = PROJECT_ROOT / "README.md"
+REFERENCE_IMAGE = "daydream-rl/itsdangerous"
+REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
+REFERENCE_CORPUS = PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"
+
+
+def _build_reference(base_image: str) -> subprocess.CompletedProcess[str]:
+    """Build the reference repo image only; the ``base_image`` fixture owns the base."""
+    return subprocess.run(
+        [
+            "uv", "run", "python", "images/build_images.py",
+            "--only", "pallets/itsdangerous",
+            "--corpus", str(REFERENCE_CORPUS),
+            "--no-base", base_image,
+        ],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
+    )
+
+
 @pytest.mark.parametrize(
     "argv,expected_stderr",
     [
@@ -270,6 +290,66 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     assert "/srv/mirror.git" in probe.stdout
 
 
+def test_reference_manifest_entry_consumes_its_committed_lock() -> None:
+    """The itsdangerous entry installs strictly from its committed uv.lock."""
+    text = MANIFEST.read_text(encoding="utf-8")
+    entry = text[text.index('[repos."pallets/itsdangerous"]') :]
+    assert "uv sync --locked --no-default-groups --group tests" in entry
+    assert "UV_PROJECT_ENVIRONMENT=/opt/repo-venv" in entry
+    assert "UV_PYTHON_DOWNLOADS=never" in entry
+    assert 'test_command = "/opt/repo-venv/bin/python -m pytest -q"' in entry
+    assert "pip install" not in entry
+
+
+def test_fixture_manifest_entry_stays_dependency_free() -> None:
+    """The deterministic fixture entry is untouched: no setup, its unittest command."""
+    text = MANIFEST.read_text(encoding="utf-8")
+    head = text[: text.index('[repos."pallets/itsdangerous"]')]
+    assert 'setup_cmds = []' in head
+    assert 'test_command = "python -m unittest discover -q"' in head
+
+
+def test_readme_documents_the_locked_dependency_policy() -> None:
+    """The 'Adding a repository' section states the four mandatory setup rules."""
+    text = README.read_text(encoding="utf-8")
+    section = text[text.index("## Adding a repository") :]
+    for marker in (
+        "committed at the head SHA",            # rule 1: lockfile committed at baked head
+        "rejects lock drift",                   # rule 2: no silent drift
+        "uv sync --locked",                     # rule 2: the concrete mode
+        "outside `/work/repo`",                 # rule 3: external environment
+        "UV_PROJECT_ENVIRONMENT=/opt/repo-venv",  # rule 3: the concrete env
+        "/opt/repo-venv/bin/python -m pytest -q",  # rule 4: locked test command
+        "image-build failure",                  # no-fallback statement
+        "fall back to unconstrained pip",       # no-fallback statement
+    ):
+        assert marker in section, f"README '## Adding a repository' must state {marker!r}"
+
+
+@pytest.mark.slow
+@DOCKER_REQUIRED
+def test_reference_image_builds_with_locked_dependencies(base_image: str) -> None:
+    """The reference image builds only when the locked setup + green baseline succeed."""
+    result = _build_reference(base_image)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined[-3000:]
+    assert f"built {REFERENCE_TAG}" in result.stdout, combined[-3000:]
+    # Discriminating probe: only the locked setup creates /opt/repo-venv with the
+    # test deps; a pip-based setup would leave it absent, so this fails a regression.
+    # It also pins the editable-install invariant: the package under test must
+    # resolve from the baked /work/repo checkout, not a venv copy, so the rollout
+    # re-run in fix_tests_pass exercises the agent's edits rather than stale code.
+    probe = subprocess.run(
+        ["docker", "run", "--rm", REFERENCE_TAG, "sh", "-c",
+         "test -x /opt/repo-venv/bin/python && /opt/repo-venv/bin/python -c '"
+         "import pytest, freezegun; "
+         "import itsdangerous; "
+         "assert \"/work/repo\" in itsdangerous.__file__, itsdangerous.__file__'"],
+        capture_output=True, text=True, check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
+
+
 def test_docker_required_gates_on_daemon_reachability() -> None:
     """The per-test Docker skip must gate on daemon reachability, not client presence."""
     module = sys.modules[__name__]
@@ -311,8 +391,14 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
             "FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
             id="python-base-index-digest",
         ),
-        pytest.param("ARG UV_VERSION=0.11.29", id="uv-pin"),
-        pytest.param('pip install --no-cache-dir "uv==${UV_VERSION}"', id="uv-exact-install"),
+        pytest.param(
+            (
+                "FROM ghcr.io/astral-sh/uv:0.11.29@"
+                "sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv"
+            ),
+            id="uv-image-digest-pin",
+        ),
+        pytest.param("COPY --from=uv /uv /uvx /bin/", id="uv-copy-from-image"),
         pytest.param("ARG CLAUDE_CODE_VERSION=2.1.214", id="claude-version"),
         pytest.param(
             "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
