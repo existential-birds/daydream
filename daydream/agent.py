@@ -453,14 +453,16 @@ async def run_agent(
         continuation: Optional continuation token for multi-turn.
         agents: Optional mapping of specialist name -> AgentDefinition.
         max_turns: Optional cap on the number of model turns.
-        read_only: When True, the backend enforces a non-mutating tool profile
-            at the tool layer (Claude PreToolUse guard hook; Codex
-            ``--sandbox read-only``). Callers select this explicitly per call
-            site; the diagnostic subagents (setup-investigator,
-            recommendation-verifier), the failure summarizer, and the
-            exploration and repository reconnaissance specialists (pre_scan,
-            repo_scan, improve recon) pass True, while mutating phases keep
-            the False default.
+        read_only: When True, enforcement delegates to the backend: Claude
+            rejects mutating tools via its PreToolUse guard, and Codex
+            combines its read-only sandbox with a disposable standalone Git
+            checkout whenever *cwd* is a worktree root, so a read-only commit
+            can only update the disposable clone's refs and index. Callers
+            select this flag explicitly per call site; the diagnostic
+            subagents (setup-investigator, recommendation-verifier), the
+            failure summarizer, and the exploration and repository
+            reconnaissance specialists (pre_scan, repo_scan, improve recon)
+            pass True, while mutating phases keep the False default.
         persist_session: When False, request an ephemeral backend invocation.
             The default preserves existing continuation behavior.
         wall_budget_s: Opt-in per-invocation wall-clock budget. When exceeded

@@ -308,24 +308,25 @@ class Backend(Protocol):
 
         Args:
             read_only: When True, the backend enforces a non-mutating tool
-                profile at the tool layer (Claude via a PreToolUse guard hook;
-                Codex via ``--sandbox read-only``) so the agent can inspect
-                history but cannot write/edit/delete or mutate the working
-                tree. Callers select this flag explicitly per call site: the
-                diagnostic subagents (setup-investigator,
-                recommendation-verifier), the failure summarizer, and the
-                exploration and repository reconnaissance specialists
-                (pre_scan, repo_scan, improve recon) pass True, while mutating
-                phases keep the False default.
-
-                **Per-backend semantics diverge**: the Claude backend blocks
-                git commits (the PreToolUse hook denies the Bash tool when the
-                command is a mutating git operation), whereas the Codex backend
-                permits git commits even under ``--sandbox read-only`` because
-                Codex's sandbox only restricts filesystem writes, not git
-                index/object-store operations.  Callers relying on a
-                git-immutable guarantee must not assume ``read_only=True`` is
-                sufficient across all backends.
+                profile at the tool layer (Claude via a PreToolUse guard hook)
+                so the agent can inspect history but cannot write/edit/delete
+                or mutate the working tree. The Codex backend combines its
+                ``--sandbox read-only`` with a disposable standalone clone
+                whenever *cwd* is a Git worktree root: the subprocess runs in
+                a clone that mirrors HEAD, the staged index, and tracked /
+                nonignored untracked files with no source remote, and the
+                clone is deleted after the subprocess exits. Codex's sandbox
+                restricts filesystem writes but not git index/object-store
+                operations, so the clone is what makes a commit update only
+                the disposable clone's refs and index — never the caller's
+                HEAD, staged index, refs, or remotes. A non-Git *cwd* uses
+                the read-only sandbox in place. Callers select this flag
+                explicitly per call site: the diagnostic subagents
+                (setup-investigator, recommendation-verifier), the failure
+                summarizer, and the exploration and repository
+                reconnaissance specialists (pre_scan, repo_scan, improve
+                recon) pass True, while mutating phases keep the False
+                default.
             persist_session: When False, request an invocation that leaves no
                 resumable backend session. Backends without persisted sessions
                 accept and ignore this option.
