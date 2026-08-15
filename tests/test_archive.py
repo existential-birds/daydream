@@ -479,6 +479,50 @@ def test_runs_erosion_verbosity_columns_migrate_existing_db(tmp_path: Path):
     assert row["verbosity"] == pytest.approx(0.08)
 
 
+def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
+    """Issue #646: per-stack review identity round-trips through the index."""
+    m = make_manifest(
+        session_id="s-psr",
+        per_stack_review_backend="codex",
+        per_stack_review_model="gpt-psr",
+        review_backend="claude",
+    )
+    upsert_run(tmp_path, m)
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-psr",))[0]
+    assert row["per_stack_review_backend"] == "codex"
+    assert row["per_stack_review_model"] == "gpt-psr"
+    assert row["review_backend"] == "claude"
+
+
+def test_runs_per_stack_review_columns_migrate_existing_db(tmp_path: Path) -> None:
+    """A legacy index.db gains per_stack_review_* via ALTER-ADD, rows preserved."""
+    from daydream.archive.index import _CREATE_TABLE
+
+    legacy_ddl = _CREATE_TABLE.replace(
+        "    per_stack_review_backend TEXT,\n    per_stack_review_model TEXT,\n", ""
+    )
+    assert "per_stack_review_backend" not in legacy_ddl
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("legacy-psr", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-psr")),
+    )
+    conn.commit()
+    conn.close()
+
+    upsert_run(
+        tmp_path,
+        make_manifest(session_id="s-psr-mig", per_stack_review_backend="codex",
+                      per_stack_review_model="gpt-psr"),
+    )
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-psr",))[0]
+    assert legacy["per_stack_review_backend"] is None   # pre-existing row preserved, nullable
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-psr-mig",))[0]
+    assert row["per_stack_review_backend"] == "codex"
+    assert row["per_stack_review_model"] == "gpt-psr"
+
+
 def test_build_manifest_carries_fix_quality_gate(tmp_path: Path):
     """Issue #315: the fix-phase quality-gate verdict round-trips on the manifest."""
     gate = {
