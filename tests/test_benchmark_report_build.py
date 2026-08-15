@@ -1,4 +1,4 @@
-"""Tests for the offline benchmark report generator in bench/benchmark-report/build.py."""
+"""Regression coverage for the offline benchmark report generator (bench/benchmark-report/build.py)."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ def build_mod() -> ModuleType:
 PR_URL = "https://github.com/calcom/cal.com/pull/10600"
 
 SECOND_PR_URL = "https://github.com/calcom/cal.com/pull/10601"
+THIRD_PR_URL = "https://github.com/calcom/cal.com/pull/10602"
 _COMPLETE_SAAS_TOOLS = ("saas-alpha", "saas-beta", "saas-delta", "saas-gamma", "saas-zeta")
 _JUDGE_DIRNAME = "anthropic_claude-opus-4-5-20251101"
 
@@ -133,6 +134,45 @@ def _comparison_corpus(root: Path, incomplete_leaf: dict[str, Any] | None) -> ar
         pr2["saas-incomplete"] = incomplete_leaf
     judge = root / "results" / _JUDGE_DIRNAME
     (judge / "evaluations.json").write_text(json.dumps({PR_URL: pr1, SECOND_PR_URL: pr2}))
+    return args
+
+
+def _partial_matrix_corpus(root: Path, missing_tool: str) -> argparse.Namespace:
+    """Three-PR corpus with one comparison tool's leaf absent on the third PR.
+
+    The anthropic judge is a daydream-only 3-PR global anchor (no SaaS rows, so it
+    is SaaS-skipped). The gpt-5.2 panel judge carries daydream + every complete SaaS
+    tool on all three PRs, then ``missing_tool`` is deleted from the third PR — the
+    partial matrix that must collapse to the two-PR complete cohort. Reuses _corpus
+    for the judge dir + trajectories, then overwrites/creates evaluations.json."""
+    args = _corpus(
+        root,
+        pr_trajectories={
+            PR_URL: ("cal.com-10600.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+            SECOND_PR_URL: ("cal.com-10601.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+            THIRD_PR_URL: ("cal.com-10602.json", None, 1_000_000, 1_000_000, 1_000_000, 3, None),
+        },
+    )
+    results = root / "results"
+    # 3-PR global anchor: daydream only, no SaaS rows -> SaaS-skipped judge.
+    anchor_evals = {
+        PR_URL: {"daydream-owl-alpha": _leaf(tp=1)},
+        SECOND_PR_URL: {"daydream-owl-alpha": _leaf(tp=2)},
+        THIRD_PR_URL: {"daydream-owl-alpha": _leaf(tp=4)},
+    }
+    (results / _JUDGE_DIRNAME / "evaluations.json").write_text(json.dumps(anchor_evals))
+    # Panel judge: daydream + every complete SaaS tool on all three PRs, minus
+    # missing_tool's third-PR leaf (the partial matrix).
+    panel_evals = {}
+    for pr, tp in ((PR_URL, 1), (SECOND_PR_URL, 2), (THIRD_PR_URL, 4)):
+        tools = {"daydream-owl-alpha": _leaf(tp=tp)}
+        for tool in _COMPLETE_SAAS_TOOLS:
+            tools[tool] = _leaf(tp=tp)
+        panel_evals[pr] = tools
+    del panel_evals[THIRD_PR_URL][missing_tool]
+    jdir = results / "openai_gpt-5.2"
+    jdir.mkdir(parents=True, exist_ok=True)
+    (jdir / "evaluations.json").write_text(json.dumps(panel_evals))
     return args
 
 
@@ -239,6 +279,52 @@ def test_unknown_price_model_is_rejected(
         build_mod.build(args)
 
 
+@pytest.mark.parametrize("missing_tool", ["daydream-owl-alpha", _COMPLETE_SAAS_TOOLS[0]],
+                         ids=["missing-daydream", "missing-saas"])
+def test_generated_report_ranks_one_complete_cohort(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    missing_tool: str,
+) -> None:
+    """A partial matrix (one comparison tool's leaf absent on one PR) still ranks all six
+    rows on the SAME complete cohort: n_prs identical, the excluded PR's score not counted.
+    Drives the real entrypoint (main) and inspects the generated report + HTML."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    args = _partial_matrix_corpus(tmp_path, missing_tool)
+    out_dir = tmp_path / "report"
+    monkeypatch.setattr(sys, "argv", [
+        "build.py", str(args.results_root),
+        "--daydream-tool", args.daydream_tool, "--price-model", args.price_model,
+        "--trajectories", args.trajectories, "--out", str(out_dir),
+    ])
+    build_mod.main()
+    data = json.loads((out_dir / "data.json").read_text())
+
+    assert len(data["judges"]) == 1          # anthropic anchor is SaaS-skipped
+    judge = data["judges"][0]
+    assert judge["id"] == "gpt-5.2"
+    assert judge["daydream"] is not None
+    assert len(judge["field"]) == 5
+    assert judge["subset_pr_count"] == 2
+    # daydream's own scored count is independent of the competitor-collapsed cohort:
+    # the anchor scored daydream on all 3 PRs; only the comparison cohort is 2.
+    assert judge["daydream_pr_count"] == (2 if missing_tool == "daydream-owl-alpha" else 3)
+    rows = [judge["daydream"]] + judge["field"]
+    assert {r["n_prs"] for r in rows} == {2}
+    # The third PR's tp=4 leaf must NOT be counted; every row sums tp 1+2 = 3.
+    assert {r["tp"] for r in rows} == {3}
+    assert all(rk[1] == 6 for rk in judge["ranks"].values())
+    # The excluded PR must not leak into the per-PR log either: per-PR scores trace
+    # to the judge's complete cohort, not the full report-wide anchor set.
+    assert set(data["per_pr_scores"][judge["id"]]) == {PR_URL, SECOND_PR_URL}
+    assert THIRD_PR_URL not in data["per_pr_scores"][judge["id"]]
+
+    html = (out_dir / "index.html").read_text()
+    # Lead distinguishes daydream's own scored PR count from the collapsed cohort.
+    assert "daydream was scored on <b>${anchor.daydream_pr_count} PRs</b>" in html
+    assert "present leaf for every ranked row" in html
+    assert "Every SaaS tool is recomputed on this exact subset per judge" not in html
+
+
 def test_malformed_phase_event_timestamp_preserves_trajectory_metrics(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -275,23 +361,108 @@ def test_malformed_phase_event_timestamp_preserves_trajectory_metrics(
 
 
 @pytest.mark.parametrize("incomplete_leaf", [None, {"skipped": True}], ids=["missing", "skipped"])
-def test_build_excludes_incomplete_saas_tools_from_field_and_rank(
+def test_build_collapses_field_to_complete_cohort_when_tool_incomplete(
     build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     incomplete_leaf: dict[str, Any] | None,
 ) -> None:
-    """A SaaS tool measured on fewer than the full daydream subset is omitted from the
-    field and rank denominator; every admitted tool is fully covered. Regression for #382."""
+    """A tool with a missing/skipped leaf on one PR collapses the judge's panel to the
+    complete common cohort (the PRs where every compared tool has a present leaf); the
+    once-incomplete tool is RETAINED on that cohort, not dropped. Reconciles the old
+    #382 per-tool-drop behavior to Plan 089's complete-cohort semantics."""
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
     report: dict[str, Any] = build_mod.build(_comparison_corpus(tmp_path, incomplete_leaf))
 
     judge = next(j for j in report["judges"] if j["id"] == "claude-opus-4-5-20251101")
     field_tools = {r["tool"] for r in judge["field"]}
-    assert field_tools == set(_COMPLETE_SAAS_TOOLS)
-    assert "saas-incomplete" not in field_tools
-    assert {r["n_prs"] for r in judge["field"]} == {2}
-    assert judge["subset_pr_count"] == 2
-    assert judge["ranks"]["f1"] == (1, 6)
+    assert field_tools == set(_COMPLETE_SAAS_TOOLS) | {"saas-incomplete"}
+    assert {r["n_prs"] for r in judge["field"]} == {1}
+    assert judge["subset_pr_count"] == 1
+    assert judge["daydream"] is not None and judge["daydream"]["n_prs"] == 1
+    assert judge["ranks"]["f1"][1] == 7          # 6 SaaS + daydream
+    assert report["meta"]["subset_pr_count"] == 2  # global anchor unchanged
+    # The collapsed cohort (PR 1 only) is the per-PR log's daydream scope too: the
+    # PR whose competitor leaf is missing must not show daydream scores.
+    assert set(report["per_pr_scores"][judge["id"]]) == {PR_URL}
+
+
+def test_build_skips_judge_with_no_complete_common_cohort(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge whose comparison tools never co-occur on any PR passes the SaaS-count gate
+    but has an EMPTY complete cohort; it is skipped (never ranked) with the dedicated reason."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    saas5 = {f"saas-{i}": _leaf(tp=1) for i in range(5)}
+    evals = {
+        _ANCHOR: {
+            PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=1)},
+            SECOND_PR_URL: {**saas5, "daydream-owl-alpha": _leaf(tp=1)},
+        },
+        "openai_gpt-5.2": {
+            PR_URL: dict(saas5),                                # SaaS only, no daydream
+            SECOND_PR_URL: {"daydream-owl-alpha": _leaf(tp=1)},  # daydream only, no SaaS
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
+    skipped = {s["id"]: s for s in report["skipped_judges"]}
+    assert "gpt-5.2" in skipped
+    assert skipped["gpt-5.2"]["reason"] == "no complete common PR cohort"
+    assert all(j["id"] != "gpt-5.2" for j in report["judges"])
+
+
+def test_report_anchor_falls_back_to_retained_judge_when_none_have_daydream(
+    build_mod: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anchor-orphan corner: the largest daydream-subset judge is panel-skipped AND no
+    retained judge carries any daydream leaf, so the has_daydream fallback finds
+    nothing. The anchor must still resolve to a retained judge so meta.anchor_judge
+    never references a skipped judge absent from judges_out; label slices stay empty
+    and the priority-3 re-judge improvement names the retained daydream-less judges."""
+    monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(tmp_path / "absent.toml"))
+    saas5 = {f"saas-{i}": _leaf(tp=1, fp=0) for i in range(5)}
+    skip_anchor = {"saas-0": _leaf(tp=1, fp=0), "saas-1": _leaf(tp=1, fp=0)}
+    evals = {
+        # Largest daydream subset (2 PRs) but only 2 SaaS tools -> SaaS-coverage skip.
+        "a-skip-anchor": {
+            PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=1, fp=2, fn=1)},
+            SECOND_PR_URL: {**skip_anchor, "daydream-owl-alpha": _leaf(tp=2, fp=1, fn=1)},
+        },
+        # Retained judge (5 SaaS tools) with NO daydream leaf on either PR.
+        "z-retained": {
+            PR_URL: dict(saas5),
+            SECOND_PR_URL: dict(saas5),
+        },
+    }
+    report: dict[str, Any] = build_mod.build(_anchor_corpus(tmp_path, evals))
+
+    # The skipped judge is not retained and no retained judge carries daydream, so
+    # the anchor falls back to a retained judge (never a skipped id).
+    assert [j["id"] for j in report["judges"]] == ["z-retained"]
+    assert [s["id"] for s in report["skipped_judges"]] == ["a-skip-anchor"]
+    assert report["judges"][0]["has_daydream"] is False
+    assert report["meta"]["anchor_judge"] == "z-retained"
+    assert "a-skip-anchor" not in {j["id"] for j in report["judges"]}
+
+    # No retained daydream -> no label slices; the economy still traces to the
+    # skipped judge's daydream subset (the fixed cross-judge anchor).
+    assert report["slices"] == []
     assert report["meta"]["subset_pr_count"] == 2
+    assert report["economy"]["n_prs"] == 2
+
+    # No priority-1 (no retained anchor FP to cite); priority-3 names the retained
+    # daydream-less judge.
+    assert all(im["priority"] != 1 for im in report["improvements"])
+    p3 = next(im for im in report["improvements"] if im["priority"] == 3)
+    assert "z-retained" in p3["heading"]
+
+
+def test_complete_cohort_requires_present_leaf_across_all_tools(build_mod: ModuleType) -> None:
+    evals = {
+        "pr1": {"a": _leaf(tp=1), "b": _leaf(tp=1)},
+        "pr2": {"a": _leaf(tp=1), "b": {"skipped": True}},
+        "pr3": {"a": _leaf(tp=1)},                     # b absent
+    }
+    assert build_mod._complete_cohort(evals, ["a", "b"], {"pr1", "pr2", "pr3"}) == {"pr1"}
+    assert build_mod._complete_cohort(evals, ["a"], {"pr1", "pr2", "pr3"}) == {"pr1", "pr2", "pr3"}
 
 
 def test_report_joins_trajectories_by_full_repository_identity(
@@ -634,7 +805,7 @@ def test_template_consumers_resolve_anchor_judge_by_id(tmp_path: Path) -> None:
 
     assert "function anchorJudge(){return DATA.judges.find(j=>j.id===DATA.meta.anchor_judge);}" in template
     assert template.count("const anchor=anchorJudge();") == 2  # renderLead, renderSlices
-    assert "const ddtp=(anchorJudge()||{daydream:{tp:1}})" in template  # renderCost
+    assert "const ddtp=(anchorJudge()||{daydream:{tp:null}}).daydream?.tp;" in template  # renderCost
     assert "DATA.judges.find(j=>j.has_daydream)" not in template
 
 
