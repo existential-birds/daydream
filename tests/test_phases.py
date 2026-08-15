@@ -33,6 +33,31 @@ def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
     return _structured_turn({"handoff_prompt": body})
 
 
+def _unconfined_finding_file(tmp_path: Path, path_kind: str) -> str:
+    """Return a finding ``file`` value that must be rejected as unconfined.
+
+    ``traversal`` escapes via parent-directory traversal; ``absolute`` points
+    outside the repo root; ``symlink`` is a repo-local path whose real file
+    lives outside the repo (crossed via a symlink the worktree contains).
+    File names are keyed to the test's unique ``tmp_path`` so parallel tests
+    never collide.
+    """
+    if path_kind == "traversal":
+        return "../outside.py"
+    if path_kind == "absolute":
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.py"
+        outside.write_bytes(b"x")
+        return str(outside.resolve())
+    if path_kind == "symlink":
+        src_dir = tmp_path / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        target = tmp_path.parent / f"{tmp_path.name}-target.py"
+        target.write_bytes(b"x")
+        (src_dir / "handler.py").symlink_to(target)
+        return "src/handler.py"
+    raise AssertionError(f"unknown path_kind: {path_kind!r}")
+
+
 class _HealBackend(ScriptedBackend):
     """``ScriptedBackend`` plus the per-call ``read_only`` flag the heal-loop tests assert on."""
 
@@ -665,6 +690,35 @@ async def test_phase_fix_falls_back_to_relative_path_when_missing(tmp_path, make
     assert "File: src/nonexistent.py" in backend.prompts[0]
 
 
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_phase_fix_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """A finding file escaping the worktree raises ValueError and emits no prompt."""
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "Escape", "file": _unconfined_finding_file(tmp_path, path_kind), "line": 1}
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference is rejected, not silently delegated."""
+    from daydream.phases import phase_fix
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    item = {"id": 1, "description": "No file", "line": 3}
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix(backend, make_work(tmp_path), item, 1, 1)
+    assert backend.prompts == []
+
+
 @pytest.mark.asyncio
 async def test_phase_fix_passes_no_turn_cap(tmp_path, make_work, silence_console):
     """phase_fix sends no turn ceiling: a real fix is bounded by wall-clock only."""
@@ -797,8 +851,52 @@ async def test_phase_fix_batched_includes_verifier_verdicts(tmp_path, make_work,
     assert "assumes single-threaded" in prompt
 
 
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
+async def test_phase_fix_batched_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """A single unconfined reference at any position rejects the whole batch.
+
+    The hostile value lives only in the second item so the batched preflight
+    loop ``for item in items[1:]`` actually runs past index 0 before raising.
+    """
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    hostile = _unconfined_finding_file(tmp_path, path_kind)
+    items = [
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        {"id": 2, "description": "Escape", "file": hostile, "line": 2},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference rejects the whole batch, not just that item.
+
+    The missing ref lives in the second item so the batched preflight loop
+    ``for item in items[1:]`` actually runs past index 0 before raising.
+    """
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [
+        {"id": 1, "description": "Confined", "file": "src/ok.py", "line": 1},
+        {"id": 2, "description": "No file", "line": 2},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_batched(backend, make_work(tmp_path), items, [1, 2], 2)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_batches_same_file_findings(tmp_path, monkeypatch, make_work):
     """phase_fix_parallel calls phase_fix_batched once per file-group, never falls back."""
     from daydream import phases
 
@@ -820,7 +918,7 @@ async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
         {"id": 5, "file": "b.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
 
     assert failures == {}
     # Two file-groups -> two batched calls (NOT five per-finding calls).
@@ -830,7 +928,7 @@ async def test_phase_fix_parallel_batches_same_file_findings(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(monkeypatch):
+async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(tmp_path, monkeypatch, make_work):
     """When the batched turn raises, the group retries each finding via phase_fix."""
     from daydream import phases
 
@@ -852,7 +950,7 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(mon
         {"id": 4, "file": "boom.py"},
     ]
 
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
 
     # Fallback ran each finding in the failing group individually...
     assert sorted(fix_calls) == [3, 4]
@@ -860,6 +958,50 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(mon
     assert 1 not in fix_calls and 2 not in fix_calls
     # The fallback succeeded, so no failure was collected.
     assert failures == {}
+
+
+@pytest.mark.parametrize("path_kind", ["traversal", "absolute", "symlink"])
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_rejects_unconfined_finding_file(tmp_path, make_work, silence_console, path_kind):
+    """A single unconfined reference at any position aborts the whole run.
+
+    The hostile value lives only in the second item so the parallel preflight
+    loop actually runs past index 0 before raising -- no dispatch happens.
+    """
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    hostile = _unconfined_finding_file(tmp_path, path_kind)
+    items = [
+        {"id": 1, "file": "src/ok.py"},
+        {"id": 2, "file": hostile},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_parallel(backend, make_work(tmp_path), items)
+    assert backend.prompts == []
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_work, silence_console):
+    """An item with no file reference aborts the whole run before any dispatch.
+
+    The missing ref lives in the second item so the parallel preflight loop
+    actually runs past index 0 before raising -- no grouping happens.
+    """
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [
+        {"id": 1, "file": "src/ok.py"},
+        {"id": 2, "description": "No file"},
+    ]
+
+    with pytest.raises(ValueError, match="Finding file must be a confined repository-relative path"):
+        await phase_fix_parallel(backend, make_work(tmp_path), items)
+    assert backend.prompts == []
 
 
 class TestBuildFixPrompt:
@@ -1458,6 +1600,26 @@ def test_feedback_schema_requires_confidence_and_rationale():
     assert "evidence" in required
     confidence = FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["confidence"]
     assert confidence["enum"] == ["HIGH", "MEDIUM"]
+
+
+def test_finding_file_schema_slots_use_repository_file_path_schema():
+    """Every model-facing finding schema constrains its file slot to the shared repository-path grammar."""
+    from daydream import phases
+    from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
+
+    # Directly-assigned slots reference the exact shared schema object.
+    feedback_file = phases.FEEDBACK_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
+    alt_files_items = phases.ALTERNATIVE_REVIEW_SCHEMA["properties"]["issues"]["items"]["properties"]["files"]["items"]
+    merged_file = phases.MERGED_ITEMS_SCHEMA["properties"]["items"]["items"]["properties"]["file"]
+    assert feedback_file is REPOSITORY_FILE_PATH_SCHEMA
+    assert alt_files_items is REPOSITORY_FILE_PATH_SCHEMA
+    assert merged_file is REPOSITORY_FILE_PATH_SCHEMA
+    # PER_STACK_RECORD_SCHEMA deep-copies FEEDBACK_SCHEMA, so its file slot is an
+    # equal copy (not the identical object) -- but it must carry the tightened
+    # grammar, not the loose `{"type":"string"}`.
+    per_stack_file = phases.PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["file"]
+    assert per_stack_file == REPOSITORY_FILE_PATH_SCHEMA
+    assert per_stack_file["pattern"]
 
 
 def test_alternative_review_schema_requires_confidence_and_rationale():
@@ -3106,7 +3268,7 @@ def test_group_items_by_file_preserves_order_within_and_across_groups():
     assert group_items_by_file([]) == []
 
 
-async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(monkeypatch):
+async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(tmp_path, monkeypatch, make_work):
     import anyio
 
     from daydream import phases
@@ -3139,7 +3301,7 @@ async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failu
         {"id": 3, "file": "b.py"},
         {"id": 4, "file": "boom.py"},
     ]
-    failures = await phases.phase_fix_parallel(object(), object(), items)
+    failures = await phases.phase_fix_parallel(object(), make_work(tmp_path), items)
     # a.py has 2 findings -> one batched call. b.py and boom.py have 1 finding
     # each -> direct phase_fix (no batched prompt, no fallback retry).
     assert batched_calls == ["a.py"]
