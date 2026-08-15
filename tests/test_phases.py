@@ -18,6 +18,7 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import commit as git_commit
 from tests.harness.git_helpers import git, init_repo
+from tests.harness.stub_backend import StubBackend
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
 _FAIL_TURN: tuple[AgentEvent, ...] = (TextEvent(text="1 failed, 0 passed"), _RESULT)
@@ -259,6 +260,78 @@ def test_test_healing_guard_preserves_untouched_preexisting_untracked_bytes(tmp_
 
     assert violations == []
     assert migration.read_bytes() == original
+
+
+class _StagedCommitBackend(StubBackend):
+    """Commit-agent stub: commits the ALREADY-STAGED index with daydream trailers.
+
+    Never runs ``git add`` — the deterministic pre-staging in ``_do_commit``
+    (issue #562/#543) has staged exactly the intended files, so re-staging with
+    ``--all`` would sweep pre-existing untracked files back into the commit.
+    """
+
+    async def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: Any = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: Any = None,
+        read_only: bool = False,
+    ):
+        if prompt.startswith("The daydream changes are already staged"):
+            run_id = prompt.split("Daydream-Run: ", 1)[1].splitlines()[0]
+            version = prompt.split("Daydream-Version: ", 1)[1].splitlines()[0]
+            git(
+                cwd,
+                "commit",
+                "-m",
+                f"fix: apply daydream changes\n\n"
+                f"Daydream-Run: {run_id}\nDaydream-Version: {version}",
+            )
+            yield TextEvent(text="Committed the staged changes.")
+            yield ResultEvent(structured_output=None, continuation=None)
+            return
+
+        async for event in super().execute(
+            cwd,
+            prompt,
+            output_schema=output_schema,
+            continuation=continuation,
+            agents=agents,
+            max_turns=max_turns,
+            read_only=read_only,
+        ):
+            yield event
+
+
+@pytest.mark.asyncio
+async def test_do_commit_excludes_preexisting_untracked_from_tree(
+    git_repo: Path, make_work, capsys,
+) -> None:
+    """_do_commit stages only (daydream changes + new untracked) - (pre-existing
+    untracked): a pre-existing file never enters the commit tree; a fix-created
+    file does."""
+    from daydream.phases import _do_commit
+
+    work = make_work(git_repo)
+    (git_repo / "app.py").write_text("x = 1\n")            # daydream change
+    (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
+    backend = _StagedCommitBackend(git_repo)
+
+    ok = await _do_commit(
+        backend, work, push=False, preexisting_untracked={"notes.txt"},
+    )
+    assert ok is True
+    # The commit exists and its tree has the daydream change but NOT notes.txt.
+    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert "app.py" in committed
+    assert "notes.txt" not in committed
+    # notes.txt is still an uncommitted untracked file on disk.
+    assert "notes.txt" in git(git_repo, "status", "--porcelain")
+    # Daydream-Run trailer still applied (existing flow preserved).
+    assert "Daydream-Run:" in git(git_repo, "log", "-1", "--format=%B")
 
 
 @pytest.mark.asyncio

@@ -2544,6 +2544,7 @@ async def _do_commit(
     push: bool = False,
     interactive: bool = False,
     items: list[dict[str, Any]] | None = None,
+    preexisting_untracked: set[str] | None = None,
 ) -> bool:
     """Stage, commit, and optionally push with daydream trailers.
 
@@ -2556,6 +2557,13 @@ async def _do_commit(
         items: Optional list of fix dicts (with ``file`` and ``description``
             keys) summarising changes applied in this run; included in the
             agent prompt so the commit message is accurate.
+        preexisting_untracked: Optional set of repo-relative paths that were
+            untracked before the daydream run started. When supplied, staging
+            is deterministic: exactly ``changed_files(...) - preexisting`` is
+            pre-staged (never ``git add --all``) so a user's pre-run scratch
+            files can never be swept into the daydream commit (issue #543).
+            The commit agent then commits the already-staged index only. When
+            ``None`` (legacy callers), the agent stages as before.
 
     Returns:
         True if a commit was performed, False if the user declined.
@@ -2578,6 +2586,13 @@ async def _do_commit(
             print_dim(console, "Skipping commit and push")
             return False
 
+    if preexisting_untracked is not None:
+        stage = git_ops.changed_files(work.repo, preexisting_untracked=preexisting_untracked)
+        if not stage:
+            print_info(console, "Nothing to commit — no daydream changes")
+            return False
+        git_ops.stage_paths(work.repo, [Path(p) for p in stage])
+
     push_line = "Then push to the remote." if push else "Do NOT push. Only commit."
 
     if items:
@@ -2593,7 +2608,8 @@ async def _do_commit(
         items_context = ""
 
     prompt = (
-        "Stage all changes and commit using a conventional commit message. "
+        "The daydream changes are already staged. Review the staged diff "
+        "(git diff --cached) and commit using a conventional commit message. "
         "Review the diff to write a meaningful summary of what was fixed or changed. "
         "Use the format: <type>: <concise summary of changes>\n\n"
         f"{items_context}"
@@ -2653,11 +2669,16 @@ async def _do_commit(
     return True
 
 
-async def phase_commit_push(backend: Backend, work: WorkContext) -> None:
+async def phase_commit_push(
+    backend: Backend, work: WorkContext, *, preexisting_untracked: set[str] | None = None,
+) -> None:
     """Prompt user to commit and push changes."""
     console.print()
     print_info(console, "Committing and pushing changes...")
-    committed = await _do_commit(backend, work, push=True, interactive=True)
+    committed = await _do_commit(
+        backend, work, push=True, interactive=True,
+        preexisting_untracked=preexisting_untracked,
+    )
     if committed:
         print_success(console, "Commit and push complete")
 
@@ -2687,17 +2708,26 @@ async def phase_fetch_pr_feedback(
 
 
 async def phase_commit_push_auto(
-    backend: Backend, work: WorkContext, *, items: list[dict[str, Any]] | None = None,
+    backend: Backend,
+    work: WorkContext,
+    *,
+    items: list[dict[str, Any]] | None = None,
+    preexisting_untracked: set[str] | None = None,
 ) -> None:
     """Automatically commit and push changes without user prompt.
 
     Args:
         items: Optional fix items applied this run; forwarded to the commit
             agent so it can craft an accurate commit message.
+        preexisting_untracked: Optional pre-run untracked snapshot; forwarded
+            to ``_do_commit`` for deterministic pre-staging (issue #543).
     """
     console.print()
     print_info(console, "Committing and pushing changes...")
-    await _do_commit(backend, work, push=True, items=items)
+    await _do_commit(
+        backend, work, push=True, items=items,
+        preexisting_untracked=preexisting_untracked,
+    )
     print_success(console, "Commit and push complete")
 
 
