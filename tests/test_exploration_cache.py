@@ -1,7 +1,8 @@
 """Cross-run reuse of the deep pipeline's exploration pre-scan.
 
 ``.daydream/exploration/`` now survives a run and is keyed by
-``head sha + diff + tier + depth`` (``daydream.exploration.exploration_cache_key``).
+``head sha + diff + tier + depth + format version``
+(``daydream.exploration.exploration_cache_key``).
 A second run with an identical key reuses the directory verbatim and fires zero
 specialist agents; any key change re-runs the pre-scan and rewrites the files.
 
