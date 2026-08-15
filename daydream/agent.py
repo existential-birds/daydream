@@ -39,7 +39,7 @@ from daydream.backends import (
 from daydream.config import UNKNOWN_SKILL_PATTERN
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
-from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text, redact_value
+from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
 from daydream.ui import (
     NEON_THEME,
     AgentTextRenderer,
@@ -370,17 +370,17 @@ def _summarize_input(input_data: dict[str, Any]) -> str:
     # string is redacted before any [:200] slice — redact-after-slice would
     # truncate a credential into an unmatchable fragment.
     if "command" in input_data:
-        return redact_text(input_data["command"])[:200]
+        return redact_structured_text(input_data["command"])[:200]
     if "path" in input_data:
         complete = f"{input_data['path']}" + (
             f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else ""
         )
-        return redact_text(complete)
+        return redact_structured_text(complete)
     # Generic: first value that's a string
     for v in input_data.values():
         if isinstance(v, str):
-            return redact_text(v)[:200]
-    return redact_text(str(input_data))[:200]
+            return redact_structured_text(v)[:200]
+    return redact_structured_text(str(input_data))[:200]
 
 
 def _summarize_output(output: str) -> str:
@@ -389,7 +389,7 @@ def _summarize_output(output: str) -> str:
         return "(empty)"
     # Redact the COMPLETE output before strip/first-line/[:200] — a credential
     # straddling the summary boundary must be caught before the slice.
-    redacted = redact_text(output)
+    redacted = redact_structured_text(output)
     # Take first non-empty line or first 200 chars
     first_line = redacted.strip().split("\n")[0]
     return first_line[:200]
@@ -410,7 +410,7 @@ def _print_log(value: str) -> None:
     Phase/UI output flows through the module-level ``console``, which redacts
     string payloads in log mode via the same fail-closed boundary.
     """
-    print(redact_text(value), flush=True)
+    print(redact_structured_text(value), flush=True)
 
 
 async def run_agent(

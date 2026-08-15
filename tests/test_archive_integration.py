@@ -381,3 +381,52 @@ async def test_archive_callback_no_archive_dump_artifacts_skips_upload(
     # the dump dir even though centralized archiving + the HF upload are off.
     assert (dump_dir / "manifest.json").is_file()
     assert (dump_dir / "review-output.md").is_file()
+
+
+# Recorder → archive redaction parity (issue #455, Task 3)
+async def test_runner_archive_round_trip_redacts_structured_tool_credentials(
+    tmp_path: Path, archive_dir: Path,
+) -> None:
+    """A structured tool call under a sensitive key is redacted identically in the
+    live trajectory and the archived copy; both pass the ATIF validator."""
+    from daydream.agent import run_agent
+    from daydream.atif import validate as atif_validate
+    from daydream.backends import ResultEvent, ToolResultEvent, ToolStartEvent
+    from daydream.runner import RunConfig, _open_recorder
+    from tests.harness.backend import ScriptedBackend
+
+    sentinel = "opaque-test-only-sentinel"
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+
+    backend = ScriptedBackend(events=(
+        ToolStartEvent(
+            id="t1", name="ListDir",
+            input={"dir": "/tmp", "apiKey": {"nested": sentinel}, "displayName": "visible"},
+        ),
+        ToolResultEvent(
+            id="t1",
+            output='{"status": "ok", "token": "opaque-test-only-sentinel"}',
+            is_error=False,
+        ),
+        ResultEvent(structured_output=None, continuation=None),
+    ))
+
+    config = RunConfig(target=str(target_dir), archive=True, run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.NORMAL,
+    )
+
+    async with recorder:
+        await run_agent(backend, target_dir, "inspect configuration", phase=DaydreamPhase.REVIEW)
+
+    live = json.loads(recorder.path.read_text(encoding="utf-8"))
+    run_dir = archive_dir / "runs" / recorder.session_id
+    archived = json.loads((run_dir / "trajectory.json").read_text(encoding="utf-8"))
+
+    assert live == archived
+    assert atif_validate(live) is True
+    blob = json.dumps(live)
+    assert sentinel not in blob
+    assert "[REDACTED_CREDENTIAL]" in blob
+    assert "visible" in blob
