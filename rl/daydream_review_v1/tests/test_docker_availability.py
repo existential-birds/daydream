@@ -12,6 +12,18 @@ import pytest
 from conftest import docker_daemon_is_available
 
 
+def _patch_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int = 0,
+) -> None:
+    """Replace subprocess.run with a deterministic stub."""
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess([], returncode, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
 @pytest.mark.parametrize(
     "returncode, expected",
     [(0, True), (1, False)],
@@ -22,10 +34,7 @@ def test_docker_daemon_is_available_mirrors_docker_info_returncode(
 ) -> None:
     """A return code of 0 means the client reached its daemon; anything else is unavailable."""
 
-    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess([], returncode, stdout="", stderr="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    _patch_subprocess_run(monkeypatch, returncode)
     assert docker_daemon_is_available() is expected
 
 
