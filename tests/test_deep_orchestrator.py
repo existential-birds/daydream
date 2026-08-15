@@ -805,6 +805,75 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     assert any("App.tsx" in key for key in manifest["fix_failures"])
 
 
+async def test_fix_preflight_unconfined_finding_runs_recovery_and_names_item(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """A symlink-escape finding in the fix cycle is handled, not raised.
+
+    The ``src/handler.py`` finding is confined *lexically* (so it passes the
+    ``_step_fix_gate`` changed_files partition) but escapes via a symlink, so
+    ``phase_fix_parallel``'s preflight raises ``ValueError``. The guarded
+    caller must run the recovery machinery, leave no dangling pre-fix stash,
+    archive ``recommended.patch``, mark the run partial, name the offending
+    item, and return ``Stop(1)`` (exit 1) rather than let the ValueError reach
+    cli.py's generic handler.
+    """
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(commit=False)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+
+    # Symlink-escape finding: src/handler.py is a repo-local path whose real
+    # file lives outside the repo (same shape as _unconfined_finding_file's
+    # "symlink" kind). Commit it into the reviewed diff so the fix gate keeps it.
+    src = multi_stack_target / "src"
+    src.mkdir(exist_ok=True)
+    outside = multi_stack_target.parent / f"{multi_stack_target.name}-outside.py"
+    outside.write_text("def outside():\n    pass\n")
+    (src / "handler.py").symlink_to(outside)
+    _add_to_reviewed_diff(multi_stack_target, ["src/handler.py"])
+
+    stub.merge_items = [_merge_item(1, "src/handler.py", "high")]
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_warning",
+        lambda console, msg, *a, **k: warnings.append(msg),
+    )
+
+    exit_code = await run(
+        make_config(
+            multi_stack_target,
+            assume="yes",
+            output_mode="loop",
+            non_interactive=False,
+            archive=True,
+        )
+    )
+    assert exit_code == 1  # handled failure => Stop(1), not a raise
+
+    # (a) recovery ran: the archived run is partial and records the failure,
+    #     and the recommendation patch survives.
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "partial"
+    assert manifest["fix_failures"], "manifest must record the dropped finding"
+
+    # (b) no dangling pre-fix stash / tree restored: the symlink finding's
+    #     group never got a fix applied (preflight aborts before dispatch).
+    assert not (multi_stack_target / ".fixed-src_handler_py").exists()
+
+    # (c) the CLI output names the offending item by id and/or file ref.
+    assert any("src/handler.py" in m or "1" in m for m in warnings), warnings
+
+
 async def test_fix_failure_enumerates_leftover_untracked_orphan_in_manifest(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
