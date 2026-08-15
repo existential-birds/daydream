@@ -566,3 +566,13 @@ def test_module_docstring_describes_actual_contracts() -> None:
         assert kind in doc, f"docstring must name contract kind/area {kind!r}"
     assert "three" in doc.lower(), "docstring must count the three slow tests"
     assert "two" not in doc.lower(), "stale 'two slow tests' count must be gone"
+
+
+def test_reference_probe_quotes_the_work_repo_path() -> None:
+    """F3 guard (verify-only): the sh -c probe's /work/repo is escaped double-quoted,
+    so the single-quoted sh -c region is never terminated by a bare path."""
+    src = Path(__file__).read_text(encoding="utf-8")
+    quoted = '\\"' + "/work/repo" + '\\"'   # built to avoid self-matching
+    bare = "'" + "/work/repo" + "'"         # built to avoid self-matching
+    assert quoted in src, "python -c body must receive a quoted path literal"
+    assert bare not in src, "a single-quoted path would break the sh -c region"
