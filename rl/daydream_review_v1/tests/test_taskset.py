@@ -350,5 +350,5 @@ def test_reference_corpus_loads_against_the_manifest(fixture_manifest_path: Path
     assert task.data.pr_number == 406
     assert task.data.head_sha == "4bb03cd6819228f30079885297299fe568a62863"
     assert task.data.base_sha == "4dffa1963f896a0a311dec3c14f003a5f382c446"
-    assert task.data.test_command == "python -m pytest -q"
+    assert task.data.test_command == "/opt/repo-venv/bin/python -m pytest -q"
     assert task.data.image == "daydream-rl/itsdangerous:4bb03cd68192"

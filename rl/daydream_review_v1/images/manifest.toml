@@ -25,10 +25,15 @@ setup_cmds = []
 # tests/fixtures/corpus-reference/ (PR #406, head 4bb03cd6819228f3, base
 # 4dffa1963f896a0a — the merge commit's two parents).
 #
+# Dependencies install strictly from the repository's committed uv.lock via a
+# locked sync into an environment OUTSIDE /work/repo (/opt/repo-venv), and the
+# test command runs that environment's interpreter. A lock that is missing or
+# stale fails the build (set -eu in setup.sh); there is no pip fallback.
+#
 # This is a reference, NOT the training set. Expanding to a real training-repo set
 # is data ops, tracked as its own numbered task on issue #164.
 [repos."pallets/itsdangerous"]
 clone_url = "https://github.com/pallets/itsdangerous.git"
 image = "daydream-rl/itsdangerous"
-test_command = "python -m pytest -q"
-setup_cmds = ["pip install -e .", "pip install pytest freezegun"]
+test_command = "/opt/repo-venv/bin/python -m pytest -q"
+setup_cmds = ["UV_PYTHON_DOWNLOADS=never UV_PROJECT_ENVIRONMENT=/opt/repo-venv uv sync --locked --no-default-groups --group tests"]

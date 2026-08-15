@@ -54,6 +54,25 @@ def _tags() -> set[str]:
     return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
 
 
+MANIFEST = PROJECT_ROOT / "images" / "manifest.toml"
+REFERENCE_IMAGE = "daydream-rl/itsdangerous"
+REFERENCE_TAG = f"{REFERENCE_IMAGE}:4bb03cd68192"
+REFERENCE_CORPUS = PROJECT_ROOT / "tests" / "fixtures" / "corpus-reference"
+
+
+def _build_reference(base_image: str) -> subprocess.CompletedProcess[str]:
+    """Build the reference repo image only; the ``base_image`` fixture owns the base."""
+    return subprocess.run(
+        [
+            "uv", "run", "python", "images/build_images.py",
+            "--only", "pallets/itsdangerous",
+            "--corpus", str(REFERENCE_CORPUS),
+            "--no-base", base_image,
+        ],
+        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
+    )
+
+
 @pytest.mark.parametrize(
     "argv,expected_stderr",
     [
@@ -268,6 +287,43 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout
+
+
+def test_reference_manifest_entry_consumes_its_committed_lock() -> None:
+    """The itsdangerous entry installs strictly from its committed uv.lock."""
+    text = MANIFEST.read_text(encoding="utf-8")
+    entry = text[text.index('[repos."pallets/itsdangerous"]') :]
+    assert "uv sync --locked --no-default-groups --group tests" in entry
+    assert "UV_PROJECT_ENVIRONMENT=/opt/repo-venv" in entry
+    assert "UV_PYTHON_DOWNLOADS=never" in entry
+    assert 'test_command = "/opt/repo-venv/bin/python -m pytest -q"' in entry
+    assert "pip install" not in entry
+
+
+def test_fixture_manifest_entry_stays_dependency_free() -> None:
+    """The deterministic fixture entry is untouched: no setup, its unittest command."""
+    text = MANIFEST.read_text(encoding="utf-8")
+    head = text[: text.index('[repos."pallets/itsdangerous"]')]
+    assert 'setup_cmds = []' in head
+    assert 'test_command = "python -m unittest discover -q"' in head
+
+
+@pytest.mark.slow
+@DOCKER_REQUIRED
+def test_reference_image_builds_with_locked_dependencies(base_image: str) -> None:
+    """The reference image builds only when the locked setup + green baseline succeed."""
+    result = _build_reference(base_image)
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, combined[-3000:]
+    assert f"built {REFERENCE_TAG}" in result.stdout, combined[-3000:]
+    # Discriminating probe: only the locked setup creates /opt/repo-venv with the
+    # test deps; a pip-based setup would leave it absent, so this fails a regression.
+    probe = subprocess.run(
+        ["docker", "run", "--rm", REFERENCE_TAG, "sh", "-c",
+         "test -x /opt/repo-venv/bin/python && /opt/repo-venv/bin/python -c 'import pytest, freezegun'"],
+        capture_output=True, text=True, check=False,
+    )
+    assert probe.returncode == 0, probe.stdout + probe.stderr
 
 
 def test_docker_required_gates_on_daemon_reachability() -> None:
