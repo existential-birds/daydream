@@ -223,6 +223,7 @@ class RunConfig:
     quiet: bool = True
     start_at: str = "review"
     pr_number: int | None = None
+    approved_head_sha: str | None = None
     bot: str | None = None
     backend: str | None = None
     model: str | None = None

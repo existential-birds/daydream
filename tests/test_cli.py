@@ -14,6 +14,18 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig, _resolved_backend_name, _resolved_model
 
 
+def test_approved_head_sha_flag_populates_config(monkeypatch):
+    """--approved-head-sha pins config.approved_head_sha (no normalization)."""
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "--approved-head-sha", "a" * 40, "/tmp/repo"])
+    config = _parse_args()
+    assert config.approved_head_sha == "a" * 40
+
+
+def test_approved_head_sha_defaults_none(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
+    assert _parse_args().approved_head_sha is None
+
+
 def test_default_backend_is_none_and_resolves_to_claude(monkeypatch):
     # --backend default is now None so the config file can supply it; the
     # terminal fallback in _resolved_backend_name is "claude".

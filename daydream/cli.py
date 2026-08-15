@@ -832,6 +832,13 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
              "artifact target; default: auto-detect from the current branch)."
         if full_help else argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--approved-head-sha",
+        default=None,
+        dest="approved_head_sha",
+        help="Pin the maintainer-approved PR head SHA."
+        if full_help else argparse.SUPPRESS,
+    )
 
     # Skill selection (overrides auto-detect)
     parser.add_argument(
@@ -1022,6 +1029,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         quiet=True,
         start_at=args.start_at,
         pr_number=pr_number,
+        approved_head_sha=args.approved_head_sha,
         bot=None,
         backend=args.backend,
         review_backend=None,
