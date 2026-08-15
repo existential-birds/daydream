@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -61,9 +61,9 @@ def job_steps(wf: dict[str, Any], job: str) -> list[dict[str, Any]]:
 
 def _wf_triggers(wf: dict[str, Any]) -> dict[str, Any]:
     """Return the ``on:`` trigger map, normalizing PyYAML's boolean key."""
-    on = wf.get("on")
-    if on is None and True in wf and isinstance(wf[True], dict):
-        on = wf[True]
+    on: Any = wf.get("on")
+    if on is None:
+        on = cast(dict[Any, Any], wf).get(True)
     return on if isinstance(on, dict) else {}
 
 
