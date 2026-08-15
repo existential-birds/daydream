@@ -118,3 +118,32 @@ async def test_one_client_serves_concurrent_judges(provider, tmp_path):
     judge_systems = [_extract_system(p[1]) for p in client.posts if "code review evaluator" in _extract_system(p[1])]
     assert len(judge_systems) == 2, "1 golden x 2 extracted candidates -> 2 concurrent judge posts on one client"
     assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_default_invocation_closes_client_on_failure(provider, tmp_path):
+    entry, model, _ = provider
+    seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
+    TrackingAsyncClient.fail_with = BenchmarkStepError("boom")
+
+    with pytest.raises(BenchmarkStepError):
+        await entry(tmp_path, model, golden_urls=[URL], tool="daydream")
+
+    assert len(TrackingAsyncClient.instances) == 1
+    assert TrackingAsyncClient.instances[0].closed is True, "client must close when a phase raises"
+
+
+@pytest.mark.asyncio
+async def test_injected_transport_is_never_entered_or_closed(provider, tmp_path):
+    entry, model, completer = provider
+    seed_benchmark_data(tmp_path, tool="daydream", body="candidate")
+    transport = TrackingAsyncClient()  # caller-owned; instances list is cleared below
+    TrackingAsyncClient.instances = []  # clear so only scoring-code constructions are counted
+    client = completer(transport)
+
+    scores = await entry(tmp_path, model, golden_urls=[URL], tool="daydream", client=client)
+
+    assert scores.scored_pr_count == 1
+    assert transport.closed is False, "caller-injected transport must NOT be closed by scoring code"
+    assert len(TrackingAsyncClient.instances) == 0, "no httpx.AsyncClient may be constructed on the injected path"
+    assert len(transport.posts) > 0, "injected transport must still serve the pipeline"
