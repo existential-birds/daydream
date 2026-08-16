@@ -1055,6 +1055,86 @@ async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
 
 
 @pytest.mark.anyio
+async def test_host_enumeration_dedups_absolute_model_wd(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """A model-cited command whose working_directory is spelled absolutely is
+    deduped against the host record for the same directory (relative spelling):
+    exactly one command record, no rejection noise (issue #654)."""
+    monkeypatch.setattr(
+        "daydream.improve.orchestrator.enumerate_repository_commands",
+        lambda repo, *, directories=(".",), reserved_ids=(): [
+            {
+                "id": "make-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                "working_directory": "apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "in-scope-paths", "paths": ["apps/billing"]},
+                    "preconditions": [],
+                    "rationale": "The billing service declares the test command.",
+                },
+                "evidence": {
+                    "kind": "host-derived",
+                    "source_path": "apps/billing/pyproject.toml",
+                    "line_anchor": {"start_line": 1, "end_line": 1},
+                    "verbatim_excerpt": "[project]",
+                },
+            }
+        ],
+    )
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.recon_output_override = {
+        "languages": ["python"],
+        "commands": [
+            {
+                "id": "model-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                # Absolute spelling of the SAME directory the host enumerates
+                # relative ("apps/billing").
+                "working_directory": f"{improve_monorepo_target}/apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "whole-repository"},
+                    "preconditions": [],
+                    "rationale": "The root configuration declares the test command.",
+                },
+                "evidence": {
+                    "kind": "literal-command",
+                    "source_path": "pyproject.toml",
+                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "verbatim_excerpt": None,
+                },
+            }
+        ],
+        "conventions": ["OpenAPI First"],
+        "intent_docs": ["README.md"],
+    }
+    stub.plan_gate_on_first_menu_id = True
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    recon = json.loads(
+        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
+    )
+    # The host command was deduped against the absolute model wd: no
+    # re-admitted make-check record, no rejection noise.
+    assert [command["id"] for command in recon["commands"]] == ["model-check"]
+    assert recon["command_rejections"] == []
+
+
+@pytest.mark.anyio
 async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch,
