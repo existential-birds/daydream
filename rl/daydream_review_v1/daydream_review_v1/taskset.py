@@ -370,15 +370,12 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
     """
     verify_dir = f"{repo}-verify"
     patch = f"{verify_dir}.candidate.patch"
-    # The candidate diff must come from the shared single source
-    # (rundir._candidate_diff_cmd), never a second hardcoded spelling, so the
-    # command cannot drift across its call sites. It runs as a separate step
-    # into a patch file and applies behind an empty-guard: a genuinely empty
-    # diff (review-only rollout, no committed fix) is a clean no-op, while a
-    # failed diff short-circuits the && chain to None — failing closed rather
-    # than applying raw or partial output, and never producing an empty diff
-    # on failure. (Only the seal producer binds `exit != 0 -> empty`; guard
-    # sites like verify_seal and this one fail closed.)
+    # Single derivation site: the candidate diff is derived by the same helper
+    # the seal binds (rundir._candidate_diff_cmd), spliced into the atomic sh -c
+    # chain because Runtime.run has no stdin. It is applied behind an empty-guard
+    # so a genuinely empty diff is a clean no-op (git apply - exits 128 on empty
+    # input), while a failed diff short-circuits the && chain to None -- never
+    # piping raw/partial output into git apply.
     diff_cmd = shlex.join(_candidate_diff_cmd(repo, head_sha))
     script = (
         f"rm -rf {shlex.quote(verify_dir)} && "

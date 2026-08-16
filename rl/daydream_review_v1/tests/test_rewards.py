@@ -565,33 +565,25 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
 
 
 async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
-    corpus_mini_dir, fixture_manifest_path, monkeypatch,
+    corpus_mini_dir, fixture_manifest_path,
 ) -> None:
     """_prepare_verify_checkout must derive its candidate diff through
     rundir._candidate_diff_cmd (the single source) and apply it behind an
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
-    import shlex
-
-    from conftest import FakeRuntime
-
     from daydream_review_v1 import taskset
+    from daydream_review_v1.rundir import _candidate_diff_cmd
+    from conftest import FakeRuntime
+    import shlex
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
-    # Patch the taskset-bound helper (the name _prepare_verify_checkout calls)
-    # with a distinctive argv, so the assertion below can tell "derived through
-    # the shared helper" apart from a hardcoded byte-identical spelling: a
-    # second hardcoded command would never call this name, so the marker would
-    # not be embedded and the derivation would not be proven.
-    marker = ["git", "-C", repo, "diff", "--exit-code", head_sha, "HEAD"]
-    monkeypatch.setattr(taskset, "_candidate_diff_cmd", lambda _repo, _head: marker)
     await taskset._prepare_verify_checkout(rt, repo, head_sha)
 
     script = rt.commands[0][2]  # the single sh -c script
-    # (a) single derivation site: the script embeds the shared helper's argv
-    assert shlex.join(marker) in script
+    # (a) single derivation site: the script embeds the helper's argv
+    assert shlex.join(_candidate_diff_cmd(repo, head_sha)) in script
     # (b) empty-guard: the apply is skipped when the diff is empty
     assert "[ ! -s " in script and "apply" in script
 
