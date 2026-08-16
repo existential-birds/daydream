@@ -2,7 +2,8 @@
 gate the backend-supplied result through the same ``_salvageable`` check the
 extraction fallback applies (honoring ``validate_structured_output``).
 
-Pins the agent.py:864 asymmetry: before this module, the primary path returned
+Pins the agent.py:878 asymmetry (the primary gate; ``_usable`` lives at 867):
+before this module, the primary path returned
 ``structured_result`` unvalidated whenever ``output_schema`` was set and the
 backend supplied a non-None result — so a codex/pi payload that was valid JSON
 but violated ``output_schema`` leaked out unvalidated. These tests drive
@@ -44,7 +45,7 @@ async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path) -> N
 
 async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(tmp_path) -> None:
     # The reachable codex/pi route: structured output is parsed from the agent
-    # text itself (codex.py:647-648, pi.py:910), so text and structured carry
+    # text itself (codex.py:641, pi.py:910), so text and structured carry
     # the same payload. When that payload violates output_schema, both gates
     # reject and run_agent degrades to the plain-text string — not the
     # unvalidated dict that leaked out before the primary gate existed.

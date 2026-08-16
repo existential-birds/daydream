@@ -230,7 +230,9 @@ class ResultEvent:
     Attributes:
         structured_output: Structured result as emitted by the backend,
             schema-validated (or salvage-checked) at the run_agent return
-            path, or None.
+            path when the caller opts in (``validate_structured_output``
+            True), or None. Callers that pass
+            ``validate_structured_output=False`` re-validate downstream.
         continuation: Optional continuation token for multi-turn flows.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """
