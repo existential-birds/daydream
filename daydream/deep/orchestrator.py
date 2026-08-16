@@ -2822,6 +2822,62 @@ def _record_unconfined_finding_failure(
     return fix_failures, fix_key
 
 
+def _scrub_smart_quotes(
+    work: WorkContext,
+    *,
+    changed_files: list[str] | None = None,
+    ref: str = "HEAD",
+    preexisting_untracked: set[str] | None = None,
+    trustworthy: bool = True,
+    skip_reason: str = "Smart-quote scrub skipped: no trustworthy pre-fix snapshot.",
+) -> None:
+    """Best-effort ASCII-quote scrub of changed files about to be committed (#687).
+
+    Rewrites typographic smart quotes (U+201C/U+201D/U+2018/U+2019) back to ASCII
+    straight quotes in the given ``changed_files`` set, or — when ``changed_files``
+    is None — in the set freshly enumerated against ``ref`` with
+    ``preexisting_untracked`` filtered out. The driver attributes the agent-added
+    lines against ``ref`` (only those lines are rewritten; pre-existing smart
+    quotes in baseline content are preserved). Shared by every
+    agent-write-then-commit path: the deep fix pass, the deep test-heal pass, and
+    the pr-feedback fix step.
+
+    Fail-open by design, never a gate: a missing, binary, or generated file is
+    skipped by the driver, an enumeration or attribution ``GitError`` degrades to
+    a warning, and an untrustworthy pre-fix base (``trustworthy=False``) skips
+    with ``skip_reason``. The scrub must never abort a run or block a commit.
+    """
+    from daydream import git_ops
+
+    if not trustworthy:
+        print_warning(console, skip_reason)
+        return
+    if changed_files is None:
+        try:
+            changed_files = git_ops.changed_files_against(
+                work.repo, ref, preexisting_untracked=preexisting_untracked,
+            )
+        except git_ops.GitError as exc:
+            print_warning(
+                console,
+                f"Could not enumerate changed files for smart-quote scrub: {exc}",
+            )
+            return
+    try:
+        scrubbed = scrub_smart_quotes_changed_files(
+            work.repo, changed_files, pre_fix_ref=ref,
+        )
+    except git_ops.GitError as exc:
+        # Attribution diff could not be computed: fail-open, never abort.
+        print_warning(console, f"Could not scrub smart quotes in changed files: {exc}")
+        return
+    if scrubbed:
+        print_warning(
+            console,
+            "Normalized smart quotes to ASCII in: " + ", ".join(sorted(scrubbed)),
+        )
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
     from daydream import git_ops
@@ -3037,6 +3093,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # double-revert) and BEFORE the quality gate (which then measures the
     # now-scoped edited set).
     pre_fix_ref = pre_fix_snapshot or "HEAD"
+    # Thread the pre-fix base + snapshot trust into the test-heal scrub
+    # (_step_test) so it measures the same base on the same trust gate.
+    ctx.data["pre_fix_ref"] = pre_fix_ref
+    ctx.data["pre_fix_snapshot_captured"] = pre_fix_snapshot_captured
     residual_guard_result = _revert_out_of_scope_edits(
         work,
         pre_fix_ref=pre_fix_ref,
@@ -3055,24 +3115,38 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # typographic finding on every re-review. Scrub the same changed-file set
     # the residual net and quality gate use (pre_fix_ref base) back to ASCII
     # straight quotes BEFORE the quality gate measures the tree, so the gate
-    # and the commit stage the final scrubbed bytes. Best-effort, never a
-    # gate: a missing, binary, or generated file is skipped, and a changed-
-    # file enumeration failure degrades to a warning rather than aborting the
-    # run or blocking the commit.
+    # and the commit stage the final scrubbed bytes. Only the lines the fix
+    # pass added are normalized (attributed from the working-tree diff against
+    # the same base), so pre-existing smart quotes in baseline content are
+    # never rewritten. Best-effort, never a gate: a missing, binary, or
+    # generated file is skipped, a write failure degrades to a warning, and a
+    # changed-file enumeration failure degrades to a warning rather than
+    # aborting the run or blocking the commit. The scrub and the quality gate
+    # below both enumerate the same post-residual tree with no mutation between
+    # them, so enumerate the changed-file set ONCE (Issue #336): one two-
+    # subprocess enumeration per fix run instead of two byte-identical ones,
+    # collapsing the repeated try/except -> warn/None shape.
     try:
-        scrubbed = scrub_smart_quotes_changed_files(
-            work.repo,
-            git_ops.changed_files_against(
-                work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
-            ),
+        changed_after_fix = git_ops.changed_files_against(
+            work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
         )
     except git_ops.GitError as exc:
-        print_warning(console, f"Could not scrub smart quotes in changed files: {exc}")
-        scrubbed = []
-    if scrubbed:
-        print_warning(
-            console,
-            "Normalized smart quotes to ASCII in: " + ", ".join(sorted(scrubbed)),
+        print_warning(console, f"Could not enumerate changed files after fix: {exc}")
+        changed_after_fix = None
+    # Trust gate: when the pre-fix snapshot could not be captured, pre_fix_ref
+    # falls back to HEAD, which may include user edits present before the fix
+    # pass — scrubbing them would rewrite the user's in-progress work. Match the
+    # sibling guards: fail-open, skip with a warning.
+    if changed_after_fix is not None:
+        _scrub_smart_quotes(
+            work,
+            changed_files=changed_after_fix,
+            ref=pre_fix_ref,
+            trustworthy=pre_fix_snapshot_captured,
+            skip_reason=(
+                "Smart-quote scrub skipped: no trustworthy pre-fix snapshot; "
+                "HEAD may include edits present before the fix pass."
+            ),
         )
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
@@ -3098,15 +3172,15 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # flagged missing-baseline entries rather than computing an undefined delta.
     quality_candidates: set[str] | None
     if quality_gate_enabled:
-        try:
-            changed_after_fix = git_ops.changed_files_against(
-                work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
-            )
+        if changed_after_fix is not None:
             quality_candidates = _py_only(changed_after_fix)
             quality_candidates |= _py_only(
                 item["file"] for item in ctx.data["items"] if item.get("file")
             )
-        except git_ops.GitError:
+        else:
+            # Enumeration failed: gate records an explicit ``unavailable`` verdict
+            # rather than gating on a partial candidate set (same fail-open
+            # contract as before).
             quality_candidates = None
     else:
         quality_candidates = set()
@@ -3141,6 +3215,21 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     if not proceed:
         print_warning(console, "Tests failed after fix attempt.")
         return Stop(1)
+    # Issue #687: test healing (phase_test_and_heal) writes agent edits after
+    # _step_fix's scrub, so re-scrub the tree about to be committed on the same
+    # pre_fix_ref base and trust gate (skip with a warning when the pre-fix
+    # snapshot could not be captured). Idempotent for the already-scrubbed fix
+    # edits; catches the test-heal edits before _step_commit stages the tree.
+    _scrub_smart_quotes(
+        ctx.work,
+        ref=ctx.data.get("pre_fix_ref") or "HEAD",
+        preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+        trustworthy=bool(ctx.data.get("pre_fix_snapshot_captured", True)),
+        skip_reason=(
+            "Smart-quote scrub skipped after test healing: no trustworthy "
+            "pre-fix snapshot; HEAD may include edits present before the fix pass."
+        ),
+    )
     return None
 
 
@@ -3270,6 +3359,16 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
             f"All {len(failed)} fix(es) failed. Aborting before commit.",
         )
         return Stop(1)
+
+    # Issue #687: the pr-feedback fix path (phase_fix) writes agent edits that
+    # _step_commit_push stages and pushes with no deterministic scrub. Scrub the
+    # changed files (vs HEAD, with pre-fix untracked filtered out) back to ASCII
+    # straight quotes before the commit — same best-effort, never-a-gate guard the
+    # deep fix pass applies.
+    _scrub_smart_quotes(
+        ctx.work,
+        preexisting_untracked=pre_fix_untracked,
+    )
 
     ctx.data["results"] = results
     ctx.data["successful"] = successful
