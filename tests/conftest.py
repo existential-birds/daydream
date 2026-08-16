@@ -1,6 +1,7 @@
 """Shared pytest fixtures for the daydream test suite."""
 
 import os
+import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -707,3 +708,50 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     everywhere, pre-push gate included.
     """
     return install_fake_gh(tmp_path / "fake-gh-state", monkeypatch)
+
+
+def improve_fixture_service(apps_dir: Path) -> str:
+    """Pick one service directory from ``apps/`` for the host-evidence record.
+
+    Only directories that look like a service (contain a ``pyproject.toml``)
+    qualify: the host evidence slices ``pyproject.toml`` line 1, so a
+    non-service directory would break the attributable-error guarantee.
+    """
+    service_entries: list[Path] = []
+    if apps_dir.is_dir():
+        service_entries = sorted(
+            p
+            for p in apps_dir.iterdir()
+            if p.is_dir() and (p / "pyproject.toml").is_file()
+        )
+    if not service_entries:
+        raise AssertionError(
+            "improve_monorepo_target fixture must contain at least one "
+            "service directory under apps/"
+        )
+    return service_entries[0].name
+
+
+def improve_fixture_test_command_anchor(pyproject: Path) -> int:
+    """Line of the ``test-command`` declaration in the root ``pyproject.toml``.
+
+    The declaration must equal ``uv run pytest`` (validated via tomllib); the
+    anchor is the line whose stripped text starts with the ``test-command``
+    key, not a substring scan that could false-positive on an earlier line
+    merely containing the text.
+    """
+    cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
+        raise AssertionError(
+            "improve_monorepo_target fixture must declare test command "
+            "'uv run pytest' in its root pyproject.toml"
+        )
+    for line_number, line in enumerate(
+        pyproject.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        if line.strip().startswith("test-command"):
+            return line_number
+    raise AssertionError(
+        "improve_monorepo_target fixture must declare test command "
+        "'uv run pytest' in its root pyproject.toml"
+    )

@@ -3,7 +3,6 @@ import os
 import re
 import subprocess
 import time
-import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,6 +32,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
+from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.git_helpers import commit, configure_identity, git, init_repo
 from tests.harness.improve_backend import (
     ImproveStubBackend,
@@ -1100,48 +1100,18 @@ async def test_host_enumeration_dedups_absolute_model_wd(
 
     Fixture contract (mirrors tests/test_command_contract.py): the service dir
     and the test-command anchor are derived from the fixture's actual content
-    rather than hardcoded, so a future fixture edit surfaces as an attributable
-    error instead of a silent meaning shift.
+    via the shared fixture-contract helpers rather than hardcoded, so a future
+    fixture edit surfaces as an attributable error instead of a silent meaning
+    shift.
     """
     # Derive a real service dir (one containing a pyproject.toml) from the
-    # fixture, and the root test-command declaration line, matching the
-    # command_contract copy's hardening.
-    service = next(
-        (
-            p.name
-            for p in sorted((improve_monorepo_target / "apps").iterdir())
-            if p.is_dir() and (p / "pyproject.toml").is_file()
-        ),
-        None,
-    )
-    if service is None:
-        raise AssertionError(
-            "improve_monorepo_target fixture must contain at least one "
-            "service directory under apps/"
-        )
+    # fixture, and the root test-command declaration line, via the shared
+    # fixture-contract helpers.
+    service = improve_fixture_service(improve_monorepo_target / "apps")
     rel = f"apps/{service}"
-    root_pyproject = improve_monorepo_target / "pyproject.toml"
-    cfg = tomllib.loads(root_pyproject.read_text(encoding="utf-8"))
-    if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
-        raise AssertionError(
-            "improve_monorepo_target fixture must declare test command "
-            "'uv run pytest' in its root pyproject.toml"
-        )
-    anchor_line = next(
-        (
-            i
-            for i, line in enumerate(
-                root_pyproject.read_text(encoding="utf-8").splitlines(), 1
-            )
-            if line.strip().startswith("test-command")
-        ),
-        None,
+    anchor_line = improve_fixture_test_command_anchor(
+        improve_monorepo_target / "pyproject.toml"
     )
-    if anchor_line is None:
-        raise AssertionError(
-            "improve_monorepo_target fixture must declare test command "
-            "'uv run pytest' in its root pyproject.toml"
-        )
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
