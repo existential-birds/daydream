@@ -315,21 +315,23 @@ def _host_enumerated_commands(
             f"{type(exc).__name__}: {exc}",
         )
         return 0, [], ["HOST_COMMAND_ENUMERATION_FAILED@/host_commands"]
-    already_cited = {
-        (
+    def _dedup_key(
+        command: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Collapse a model command to the host-enumeration dedup key.
+
+        Both the already-cited set and the candidate filter must use the exact
+        same key (command + canonical working_directory) so an absolute-spelled
+        working_directory collapses against the relative host record.
+        """
+        return (
             command["command"],
             canonicalize_working_directory(repo, command["working_directory"]),
         )
-        for command in model_commands
-    }
+
+    already_cited = {_dedup_key(command) for command in model_commands}
     candidates = [
-        command
-        for command in enumerated
-        if (
-            command["command"],
-            canonicalize_working_directory(repo, command["working_directory"]),
-        )
-        not in already_cited
+        command for command in enumerated if _dedup_key(command) not in already_cited
     ]
     validated, errors = validate_host_commands(candidates, repo=repo)
     return len(candidates), validated, errors
