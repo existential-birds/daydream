@@ -1054,6 +1054,39 @@ async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     assert _git_status_porcelain(improve_monorepo_target) == ""
 
 
+def _dedup_test_command(
+    *,
+    command_id: str,
+    purpose: str,
+    working_directory: str,
+    scope: dict[str, Any],
+    rationale: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one recon command record for the absolute-wd dedup fixture.
+
+    The host-enumerated and model-cited sides of the dedup share the same
+    command, expected-success block, and applicability skeleton; only the id,
+    working-directory spelling, scope, rationale, and evidence differ.
+    """
+    return {
+        "id": command_id,
+        "purpose": purpose,
+        "command": "uv run pytest",
+        "working_directory": working_directory,
+        "expected_success": {
+            "exit_code": 0,
+            "observable_result": "exit 0 and the tests pass",
+        },
+        "applicability": {
+            "scope": scope,
+            "preconditions": [],
+            "rationale": rationale,
+        },
+        "evidence": evidence,
+    }
+
+
 @pytest.mark.anyio
 async def test_host_enumeration_dedups_absolute_model_wd(
     improve_monorepo_target: Path,
@@ -1066,56 +1099,40 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
-            {
-                "id": "make-check",
-                "purpose": "Run the repository test suite",
-                "command": "uv run pytest",
-                "working_directory": "apps/billing",
-                "expected_success": {
-                    "exit_code": 0,
-                    "observable_result": "exit 0 and the tests pass",
-                },
-                "applicability": {
-                    "scope": {"kind": "in-scope-paths", "paths": ["apps/billing"]},
-                    "preconditions": [],
-                    "rationale": "The billing service declares the test command.",
-                },
-                "evidence": {
+            _dedup_test_command(
+                command_id="make-check",
+                purpose="Run the repository test suite",
+                working_directory="apps/billing",
+                scope={"kind": "in-scope-paths", "paths": ["apps/billing"]},
+                rationale="The billing service declares the test command.",
+                evidence={
                     "kind": "host-derived",
                     "source_path": "apps/billing/pyproject.toml",
                     "line_anchor": {"start_line": 1, "end_line": 1},
                     "verbatim_excerpt": "[project]",
                 },
-            }
+            )
         ],
     )
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.recon_output_override = {
         "languages": ["python"],
         "commands": [
-            {
-                "id": "model-check",
-                "purpose": "Run the repository test suite",
-                "command": "uv run pytest",
+            _dedup_test_command(
+                command_id="model-check",
+                purpose="Run the repository test suite",
                 # Absolute spelling of the SAME directory the host enumerates
                 # relative ("apps/billing").
-                "working_directory": f"{improve_monorepo_target}/apps/billing",
-                "expected_success": {
-                    "exit_code": 0,
-                    "observable_result": "exit 0 and the tests pass",
-                },
-                "applicability": {
-                    "scope": {"kind": "whole-repository"},
-                    "preconditions": [],
-                    "rationale": "The root configuration declares the test command.",
-                },
-                "evidence": {
+                working_directory=f"{improve_monorepo_target}/apps/billing",
+                scope={"kind": "whole-repository"},
+                rationale="The root configuration declares the test command.",
+                evidence={
                     "kind": "literal-command",
                     "source_path": "pyproject.toml",
                     "line_anchor": {"start_line": 5, "end_line": 5},
                     "verbatim_excerpt": None,
                 },
-            }
+            )
         ],
         "conventions": ["OpenAPI First"],
         "intent_docs": ["README.md"],
