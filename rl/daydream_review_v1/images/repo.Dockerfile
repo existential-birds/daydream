@@ -52,4 +52,13 @@ RUN cd /work/repo && sh /tmp/setup.sh
 # fails and no image is produced — that is the enforcement, not a warning.
 RUN cd /work/repo && ${TEST_COMMAND}
 
+# The image clones as root (no USER directive), so hand the whole cloned tree
+# to the agent identity at build time — the deep flow's first write
+# (.daydream/, patch, git add/commit/push) runs as the agent uid. This sits
+# after the root-run setup.sh/TEST_COMMAND layers so their outputs (e.g. .venv
+# from uv sync) are agent-owned too. Defense-in-depth: the harness re-chowns
+# the checkout and mirror at launch (harness.py:155-157), and this layer is
+# idempotent against that handoff.
+RUN chown -R agent:agent /work/repo
+
 WORKDIR /work/repo
