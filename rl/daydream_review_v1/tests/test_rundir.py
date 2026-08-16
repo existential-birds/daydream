@@ -76,3 +76,36 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
     assert _REQUIRED_SCORING_FILES <= projected
     assert not (selected / "trajectory.json").exists()
     assert not (selected / "trajectories").exists()
+
+
+async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
+    tmp_path, runtime, rundir_golden, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """verify_seal must fail closed when the candidate diff cannot be re-derived.
+
+    A git failure at verify time must return False, never hash b"" and verify
+    True on a run whose diff was never re-derived (the empty-diff collision).
+    This is a focused unit guard on verify_seal, complementing the scoring-level
+    test_git_failure_at_verify_time_fails_closed.
+    """
+    from test_rewards import _stage_run, _task
+
+    from daydream_review_v1.rundir import RUN_DIR_FILES, verify_seal
+    from daydream_review_v1.verifier import seal_artifacts
+
+    archive_root = tmp_path / "archive"
+    run_dir = _stage_run(archive_root, rundir_golden)
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+
+    present = [
+        run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
+    ] + sorted(run_dir.glob("deep/stack-*-records.json"))
+    # A seal produced while git failed at seal time sealed the empty diff.
+    seal = seal_artifacts(present, candidate_diff=b"")
+    (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
+
+    # The repo under review is not a git repository: git diff fails at verify
+    # time with a non-zero exit, exactly the empty-diff collision.
+    ok = await verify_seal(run_dir, runtime, str(tmp_path / "not-a-repo"), task.data.head_sha,
+                           seal_expected=True)
+    assert ok is False

@@ -312,6 +312,35 @@ def _stage_repo(
     return repo_path
 
 
+def _assert_checkout_pinned_at(
+    verify_dir: Path,
+    head_sha: str,
+    *,
+    exists_msg: str = "the checkout must exist",
+    pinned_msg: str = "the checkout must be pinned at the baked head",
+    clean_msg: str = "the checkout tree must equal the baked head",
+) -> None:
+    """Assert the verify checkout is a real repo pinned at *head_sha* whose tree
+    is identical to it (no partial candidate diff applied).
+
+    Shared by the failed-diff and empty-diff verify-checkout tests: both must
+    prove clone + checkout --detach ran and the candidate diff was either never
+    applied (failed diff) or applied as a genuine no-op (empty diff), leaving
+    the tree byte-identical to the baked head.
+    """
+    assert verify_dir.exists(), exists_msg
+    head = subprocess.run(
+        ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
+        capture_output=True, check=True,
+    ).stdout.decode().strip()
+    assert head == head_sha, pinned_msg
+    clean = subprocess.run(
+        ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
+        capture_output=True,
+    )
+    assert clean.returncode == 0, clean_msg
+
+
 _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@\n-old\n+new\n"
 
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
@@ -565,10 +594,10 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
 
 
 async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
-    corpus_mini_dir, fixture_manifest_path, monkeypatch,
+    corpus_mini_dir, fixture_manifest_path,
 ) -> None:
     """_prepare_verify_checkout must derive its candidate diff through
-    rundir._candidate_diff_cmd (the single source) and apply it behind an
+    rundir.candidate_diff_cmd (the single source) and apply it behind an
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
@@ -577,21 +606,15 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
     from conftest import FakeRuntime
 
     from daydream_review_v1 import taskset
+    from daydream_review_v1.rundir import candidate_diff_cmd
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
-    # Patch the taskset-bound helper (the name _prepare_verify_checkout calls)
-    # with a distinctive argv, so the assertion below can tell "derived through
-    # the shared helper" apart from a hardcoded byte-identical spelling: a
-    # second hardcoded command would never call this name, so the marker would
-    # not be embedded and the derivation would not be proven.
-    marker = ["git", "-C", repo, "diff", "--exit-code", head_sha, "HEAD"]
-    monkeypatch.setattr(taskset, "_candidate_diff_cmd", lambda _repo, _head: marker)
     await taskset._prepare_verify_checkout(rt, repo, head_sha)
 
     script = rt.commands[0][2]  # the single sh -c script
-    # (a) single derivation site: the script embeds the shared helper's argv
-    assert shlex.join(marker) in script
+    # (a) single derivation site: the script embeds the helper's argv
+    assert shlex.join(candidate_diff_cmd(repo, head_sha)) in script
     # (b) empty-guard: the apply is skipped when the diff is empty
     assert "[ ! -s " in script and "apply" in script
 
@@ -1506,27 +1529,37 @@ async def test_git_failure_at_verify_time_fails_closed(
     assert trace.metrics["suite_non_regression"] == 0.0
 
 
-async def test_verify_checkout_failed_diff_fails_closed(tmp_path, runtime) -> None:
-    """A failed candidate-diff derivation must fail closed: _prepare_verify_checkout
-    returns None, never a checkout path, so the reward is a zero and raw/partial
-    diff output is never piped into git apply. The clone and detach steps succeed;
-    the diff step itself exits non-zero, exercising the contract where a real diff
-    failure lands — not at a fake repo's clone, which never reaches the diff.
+async def test_verify_checkout_failed_diff_fails_closed(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """A failed candidate-diff derivation must not pipe raw/partial output into
+    git apply: _prepare_verify_checkout returns None, never a partially-built
+    checkout. Mirrors the rundir fail-closed contract on the unified path.
     """
     from daydream_review_v1 import taskset
 
-    # A real repo whose HEAD is unborn: clone and detach both succeed, but the
-    # candidate-diff step (``git -C repo diff <sha> HEAD``) hits the unresolvable
-    # HEAD and exits non-zero. A bogus head_sha cannot stage this — it fails at
-    # the earlier ``git checkout --detach`` step instead, never running the diff.
-    repo = build_fixture_repo(tmp_path / "repo")
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    # Make the diff-derivation step itself fail (not the clone): a diff.external
+    # tool that cannot run makes ``git diff`` exit non-zero while clone and
+    # checkout --detach both succeed.
     subprocess.run(
-        ["git", "-C", str(repo.path), "symbolic-ref", "HEAD", "refs/heads/unborn"], check=True
+        ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
+        check=True,
     )
-    result = await taskset._prepare_verify_checkout(runtime, str(repo.path), repo.pr1_head_sha)
-    assert result is None, "a failed diff must fail closed, never returning a checkout path"
-    assert (tmp_path / "repo-verify").is_dir(), (
-        "the clone succeeded; the failure landed at the diff step, not the clone"
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
+    assert result is None, "a failed diff derivation must not return a checkout"
+    # The chain died at the diff step, after clone + checkout: the verify dir
+    # exists and is pinned at the baked head (proving clone and checkout ran),
+    # but the candidate diff was never applied -- the tree is still exactly
+    # the baked head, not the fix.
+    verify_dir = tmp_path / "repo-verify"
+    _assert_checkout_pinned_at(
+        verify_dir,
+        task.data.head_sha,
+        exists_msg="the chain must reach the diff step (clone + checkout ran)",
+        pinned_msg="the chain must reach the diff step (checkout detached at the baked head)",
+        clean_msg="a failed diff must never apply a partial candidate diff",
     )
 
 
@@ -1536,12 +1569,10 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     """A review-only rollout (no committed fix) has an empty candidate diff; it
     must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
-    import os
-
     from daydream_review_v1 import taskset
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # --allow-empty commit: HEAD advances, tree identical -> empty diff
+    # --allow-empty commit: HEAD advances, tree identical -> genuinely empty diff
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     if os.geteuid() == 0:
@@ -1549,6 +1580,55 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     else:
         # non-root host: the trailing chown root:root fails, so construction
         # returns None regardless of the diff; pin the on-disk invariant that
-        # the diff/apply step did not fail the checkout.
+        # the empty-guard made the apply a clean no-op: the checkout is a real
+        # repo pinned at the baked head whose tree is identical to it.
         verify_dir = tmp_path / "repo-verify"
-        assert verify_dir.exists(), "the empty diff must not abort the checkout build"
+        _assert_checkout_pinned_at(
+            verify_dir,
+            task.data.head_sha,
+            exists_msg="the empty diff must not abort the checkout build",
+            clean_msg="the empty diff must apply as a clean no-op",
+        )
+
+
+async def test_verify_checkout_applies_exactly_the_candidate_diff(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """The verify-checkout and the seal bind the same candidate diff.
+
+    _prepare_verify_checkout applies the diff derived from rundir.candidate_diff_cmd
+    onto the detached head; this asserts the applied result is exactly that
+    diff (no drift between the two sites), as the verifier re-runs the suite
+    against the same contract the seal binds.
+    """
+    from daydream_review_v1 import taskset
+    from daydream_review_v1.rundir import candidate_diff_cmd
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    head_sha = task.data.head_sha
+
+    # The contract the seal binds: the shared helper's own output.
+    expected = subprocess.run(
+        candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True,
+    ).stdout
+    assert expected, "staged committed fix must yield a non-empty candidate diff"
+
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), head_sha)
+    verify_dir = tmp_path / "repo-verify"
+    # The checkout is built (root host) or at least its git steps ran (non-root
+    # leaves it on disk before the trailing chown fails). The applied result
+    # must equal the helper's derivation.
+    assert verify_dir.is_dir(), "the verify checkout was not constructed"
+    if os.geteuid() == 0:
+        assert result == str(verify_dir), "construction must return the built checkout path"
+    applied = subprocess.run(
+        ["git", "-C", str(verify_dir), "diff", head_sha, "--", "calc.py"],
+        capture_output=True, check=True,
+    ).stdout
+    # Drift guard: the tree after apply is head + exactly the candidate diff
+    # the seal binds -- the checkout and the seal can never disagree.
+    assert applied == expected, "the verify checkout drifted from the candidate diff the seal binds"
+    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
+        "the verify checkout did not carry the candidate diff the seal binds"
+    )

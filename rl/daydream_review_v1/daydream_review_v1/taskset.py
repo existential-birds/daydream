@@ -33,7 +33,7 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
-    _candidate_diff_cmd,
+    candidate_diff_cmd,
     fetch_run_dir,
     verify_seal,
 )
@@ -369,25 +369,27 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
         mutable tree.
     """
     verify_dir = f"{repo}-verify"
-    patch = f"{verify_dir}.candidate.patch"
-    # The candidate diff must come from the shared single source
-    # (rundir._candidate_diff_cmd), never a second hardcoded spelling, so the
-    # command cannot drift across its call sites. It runs as a separate step
-    # into a patch file and applies behind an empty-guard: a genuinely empty
-    # diff (review-only rollout, no committed fix) is a clean no-op, while a
-    # failed diff short-circuits the && chain to None — failing closed rather
-    # than applying raw or partial output, and never producing an empty diff
-    # on failure. (Only the seal producer binds `exit != 0 -> empty`; guard
-    # sites like verify_seal and this one fail closed.)
-    diff_cmd = shlex.join(_candidate_diff_cmd(repo, head_sha))
+    # Single derivation site: the candidate diff is derived by the same helper
+    # the seal binds (rundir.candidate_diff_cmd), spliced into the atomic sh -c
+    # chain because Runtime.run has no stdin. It is applied behind an empty-guard
+    # so a genuinely empty diff is a clean no-op (git apply - exits 128 on empty
+    # input), while a failed diff short-circuits the && chain to None -- never
+    # piping raw/partial output into git apply.
+    #
+    # The patch file is written into a private mktemp directory (root-only 700)
+    # under /tmp, not the agent-writable workspace, so a pre-planted symlink at
+    # a predictable path cannot be followed with O_TRUNC as root. A trap ensures
+    # the patch directory is removed on every exit path -- success or failure.
+    diff_cmd = shlex.join(candidate_diff_cmd(repo, head_sha))
     script = (
+        f"patch_dir=$(mktemp -d) || exit 1; "
+        f"trap 'rm -rf \"$patch_dir\"' EXIT; "
         f"rm -rf {shlex.quote(verify_dir)} && "
         f"git clone -q {shlex.quote(repo)} {shlex.quote(verify_dir)} && "
         f"git -C {shlex.quote(verify_dir)} checkout -q --detach {shlex.quote(head_sha)} && "
-        f"{diff_cmd} > {shlex.quote(patch)} && "
-        f"( [ ! -s {shlex.quote(patch)} ] || "
-        f"git -C {shlex.quote(verify_dir)} apply {shlex.quote(patch)} ) && "
-        f"rm -f {shlex.quote(patch)} && "
+        f"{diff_cmd} > \"$patch_dir/candidate.patch\" && "
+        f"( [ ! -s \"$patch_dir/candidate.patch\" ] || "
+        f"git -C {shlex.quote(verify_dir)} apply \"$patch_dir/candidate.patch\" ) && "
         f"chown -R root:root {shlex.quote(verify_dir)} && "
         f"chmod -R a-w {shlex.quote(verify_dir)}"
     )
