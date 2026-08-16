@@ -58,10 +58,11 @@ class Manifest:
         run_flow: Run flow type (normal, ttt, pr, deep).
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
-        backend: Backend used (claude, codex).
-        review_backend: Per-phase backend override for review, if set.
-        fix_backend: Per-phase backend override for fix, if set.
-        test_backend: Per-phase backend override for test, if set.
+        backend: Backend used (claude, codex, pi, osprey).
+        review_backend: Flow's representative backend, resolved through the full
+            precedence chain (``per_stack_review`` for deep-flow runs).
+        fix_backend: Backend used for the fix phase, when the flow runs it.
+        test_backend: Backend used for the test phase, when the flow runs it.
         per_stack_review_backend: Per-stack review tier backend for runs that
             execute per-stack reviews (issue #646), resolved from the
             ``per_stack_review`` phase key — the key that actually drives
@@ -316,14 +317,16 @@ def build_manifest(
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
         _DEEP_FLOW_ALIASES,
+        _recorder_backend_names,
         _resolved_backend_name,
         _resolved_model,
     )
 
-    # Resolve the effective backend through the full precedence chain so the manifest
-    # records what was actually used (raw config.backend is None when set via file-config);
-    # "review" is the representative phase the orchestrator also prints as the default.
-    backend_used = _resolved_backend_name(config, "review")
+    # Mirror the trajectory's backend identity through the same shared resolver
+    # used by runner._open_recorder (authoritative per-flow mapping prose lives
+    # in its docstring), so the manifest and trajectory never diverge on which
+    # backend produced the run.
+    names = _recorder_backend_names(config, recorder.run_flow)
 
     # Per-stack reviewers (issue #646) execute on the "per_stack_review" phase key —
     # NOT the "review" tier — so archives record that tier's resolved backend and
@@ -369,10 +372,10 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=backend_used,
-        review_backend=backend_used,
-        fix_backend=_resolved_backend_name(config, "fix"),
-        test_backend=_resolved_backend_name(config, "test"),
+        backend=names.backend,
+        review_backend=names.backend,
+        fix_backend=names.fix or None,
+        test_backend=names.test or None,
         per_stack_review_backend=per_stack_review_backend,
         per_stack_review_model=per_stack_review_model,
         review_only=config.output_mode == "review",

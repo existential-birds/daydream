@@ -79,6 +79,20 @@ def test_reviewer_flags_reach_config(tmp_path, monkeypatch):
         == ("pi", "glm-5.2", "openrouter", "daydream-glm")
 
 
+# --reviewer-backend must accept every backend the main CLI accepts (incl. osprey).
+REVIEWER_BACKENDS = ["claude", "codex", "pi", "osprey"]
+
+
+@pytest.mark.parametrize("backend", REVIEWER_BACKENDS, ids=lambda name: name)
+def test_reviewer_backend_accepts_all_cli_backends(tmp_path, monkeypatch, backend):
+    monkeypatch.chdir(tmp_path)
+    cfg = _bench_config_from_argv([
+        "--benchmark-repo", "/b", "--no-score",
+        "--reviewer-backend", backend, "--tool-label", "daydream-x",
+    ])
+    assert cfg.reviewer_backend == backend
+
+
 def test_config_supplies_benchmark_repo_when_flag_omitted(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nbenchmark-repo = "/from/config"\n')
     monkeypatch.chdir(tmp_path)

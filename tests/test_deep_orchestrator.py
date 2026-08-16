@@ -6721,14 +6721,97 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
 async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
+    """An over-budget diff falls back to today's diff.patch pointer in both prompts.
+
+    The committed file is named ``0big.py`` so it sorts FIRST in the git diff
+    (``git diff`` emits paths in byte order): its single block alone exceeds
+    ``INLINE_DIFF_BUDGET_BYTES``, so the gather bound keeps it whole (oversize
+    rule) and the bounded in-memory diff is STILL over the inline budget — the
+    pointer fallback is genuinely exercised rather than replaced by an inline
+    of the small retained blocks. A multi-file over-budget diff whose trailing
+    block is dropped instead yields a bounded diff that WOULD fit the inline
+    budget; it must still fall back to the pointer so the "complete diff"
+    claim never covers a truncated diff
+    (``test_deep_run_keeps_pointer_when_trailing_block_dropped``).
+    """
+    import daydream.deep.orchestrator as orch_mod
     from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
 
     # Push the diff over the byte budget with a large committed file.
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
-    (multi_stack_target / "big.py").write_text(big + "\n")
-    _git(multi_stack_target, "add", "big.py")
+    (multi_stack_target / "0big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "0big.py")
     _git(multi_stack_target, "commit", "-m", "add big file")
+
+    bounded_results: list[str] = []
+    real = orch_mod.bound_deep_diff
+
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+        result = real(diff, budget)
+        bounded_results.append(result[0])
+        return result
+
+    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    # The pointer fallback only discriminates when 0big.py's block really sorts
+    # FIRST in git's byte-ordered diff AND the bound keeps it whole (leading
+    # oversize rule): verify both, so the "not inlined" assertions below cannot
+    # pass via an inline of small retained blocks instead of the pointer.
+    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    assert patch.startswith("diff --git a/0big.py b/0big.py"), (
+        "0big.py must be the FIRST block in git's byte-ordered diff, "
+        f"got {patch.splitlines()[0] if patch else '<empty patch>'!r}"
+    )
+    assert len(bounded_results) == 1, "gather must bound the diff exactly once"
+    assert "line 500 of filler content" in bounded_results[0], (
+        "the bound must keep 0big.py's oversize block whole"
+    )
+    assert len(bounded_results[0].encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES, (
+        "the bounded diff must stay over the inline budget so the pointer fallback is exercised"
+    )
+
+    intent_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "understand the intent of these changes" in c["prompt"].lower()
+    )
+    wonder_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "evaluate the implementation" in c["prompt"].lower()
+    )
+
+    assert "Read the diff file at" in intent_prompt
+    # The wonder pointer clause is "in the diff at {diff_path}"; the inline
+    # clause ("do NOT re-Read {diff_path}") embeds the path too, so the bare
+    # "diff.patch" substring is not discriminating.
+    assert "in the diff at " in wonder_prompt
+    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
+
+
+async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A multi-file over-budget diff whose trailing block is dropped keeps the
+    diff.patch pointer in the intent/wonder prompts.
+
+    Discriminating: the gather bound keeps the small leading block and drops
+    the huge trailing block whole, leaving a bounded in-memory diff that FITS
+    the inline budget. Inlining it would tell the agent "the complete diff is
+    inlined below (do NOT re-Read diff.patch)" over a truncated diff whose
+    dropped block is nowhere reachable — the pointer must be restored instead.
+    """
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    # aaa.py sorts FIRST in the byte-ordered git diff and its block is
+    # retained; zzz.py's block alone exceeds the budget and arrives after a
+    # retained block, so it is dropped whole.
+    (multi_stack_target / "aaa.py").write_text("SMALL_RETAINED_MARKER = 1\n")
+    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
+    (multi_stack_target / "zzz.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "aaa.py", "zzz.py")
+    _git(multi_stack_target, "commit", "-m", "add small and big files")
 
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
@@ -6745,10 +6828,164 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     assert "Read the diff file at" in intent_prompt
     assert "diff.patch" in wonder_prompt
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
+        assert "SMALL_RETAINED_MARKER" not in prompt, f"{name} inlined the bounded diff"
         assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
 
+    # The python stack owns aaa.py (retained by the bound) AND zzz.py (dropped
+    # whole by the bound): the truncation marker names zzz.py as dropped, so
+    # ``_diff_blocks_for_files`` refuses a partial inline and the python
+    # per-stack prompt falls back to the diff.patch pointer instead of silently
+    # inlining aaa.py's hunk with zzz.py's hunks unreachable. The react stack
+    # (App.tsx only, fully retained) keeps its inline.
+    python_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the python stack" in c["prompt"].lower()
+    )
+    assert "Read it directly" in python_prompt, (
+        "a stack mixing retained and dropped blocks must fall back to the "
+        "full diff.patch pointer"
+    )
+    assert "SMALL_RETAINED_MARKER" not in python_prompt, (
+        "must not inline the retained block while the dropped block is missing"
+    )
+    react_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the react stack" in c["prompt"].lower()
+    )
+    assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
-# --- Task 12b: each TTT step writes its own artifact -------------------------
+
+async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL.
+
+    Discriminating: a wiring bug either (a) fails to bound ctx.data['diff']
+    (helper never invoked), or (b) bounds the on-disk diff.patch (disk write
+    loses the truncated block). Both must be caught.
+    """
+    import daydream.deep.orchestrator as orch_mod
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
+    (multi_stack_target / "big.py").write_text(big + "\n")
+    _git(multi_stack_target, "add", "big.py")
+    _git(multi_stack_target, "commit", "-m", "add big file")
+
+    called_with: list[str] = []
+    bounded_results: list[str] = []
+    real = orch_mod.bound_deep_diff
+
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+        called_with.append(diff)
+        result = real(diff, budget)
+        bounded_results.append(result[0])
+        return result
+
+    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    assert await _run_deep(multi_stack_target) == 0
+
+    # (a) the helper was invoked at gather with the full diff (gather wiring).
+    assert len(called_with) == 1 and called_with[0] == (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    # (b) diff.patch on disk is FULL: the big committed file's content survives.
+    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    assert "line 50 of filler content" in patch  # a line far into big.py is present
+    # (c) the helper's BOUNDED result -- not the full diff -- reaches
+    # ctx.data['diff'] and the prompt pipeline. The TTT (intent/wonder) phases
+    # deliberately re-read the FULL on-disk diff when truncation happened
+    # (``_ttt_diff_text``), so the per-stack reviewer is the bounded value's
+    # prompt consumer: big.py's block sorts LAST in git's byte-ordered diff,
+    # so the bound drops it. The python stack owns api.py AND big.py, so its
+    # wanted files span retained and dropped blocks: ``_diff_blocks_for_files``
+    # reads the truncation marker's dropped names, refuses the partial inline,
+    # and the python per-stack prompt carries the diff_path pointer instead of
+    # api.py's hunk alone. A gather bug that invokes the helper and discards
+    # the result (storing the full diff) would carry no marker and no dropped
+    # names -- the mixing guard could not fire.
+    assert len(bounded_results) == 1
+    assert "# daydream: deep diff truncated:" in bounded_results[0]
+    assert "line 50 of filler content" not in bounded_results[0]
+    per_stack_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the python stack" in c["prompt"].lower()
+    )
+    assert "Read it directly" in per_stack_prompt, (
+        "the python stack mixes retained (api.py) and dropped (big.py) blocks; "
+        "it must fall back to the full diff.patch pointer, never inline a "
+        "silent partial subset"
+    )
+    assert "diff --git" not in per_stack_prompt
+    assert "line 50 of filler content" not in per_stack_prompt
+    react_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the react stack" in c["prompt"].lower()
+    )
+    assert "diff --git" in react_prompt, (
+        "a fully-retained stack must keep its inline hunks"
+    )
+
+
+async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep extracts blocks from the FULL diff.patch, not the bounded
+    ctx.data['diff'], so sweep targets cannot diverge from the coverage set.
+
+    Discriminating: if the sweep used the bounded ctx.data['diff'], a file whose
+    block was truncated away would land in skipped_small (diff_block_for_file ->
+    None) instead of being swept.
+    """
+    import daydream.deep.orchestrator as orch_mod
+    from daydream.deep.prompts import INLINE_DIFF_BUDGET_BYTES
+
+    # Push the in-memory diff over the budget with a file that sorts FIRST in
+    # git's byte-ordered diff: its oversize block is kept whole by the bound,
+    # so every later block -- including the small uncovered file below -- is
+    # dropped from ctx.data['diff'] but survives in the on-disk diff.patch.
+    big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
+    (multi_stack_target / "0big.py").write_text(big + "\n")
+    (multi_stack_target / "zzuncovered.py").write_text(
+        "".join(f"content line {i}\n" for i in range(6))
+    )
+    _git(multi_stack_target, "add", "0big.py", "zzuncovered.py")
+    _git(multi_stack_target, "commit", "-m", "add big file and an uncovered file")
+
+    bounded_results: list[str] = []
+    real = orch_mod.bound_deep_diff
+
+    def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES):
+        result = real(diff, budget)
+        bounded_results.append(result[0])
+        return result
+
+    monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    # Per-stack reviewers read their scope files; zzuncovered.py is deliberately
+    # unread so it is the sweep's single uncovered target.
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"zzuncovered.py"})
+
+    assert await _run_deep(multi_stack_target, uncovered_sweep=True) == 0
+
+    # Prove the discriminating setup actually held: the bounded in-memory diff
+    # dropped zzuncovered.py's block (truncation marker present, the file's
+    # content absent) while the full on-disk diff.patch kept it. A sweep that
+    # sourced ctx.data['diff'] would then find no block for the file and route
+    # it into skipped_small; the fixed sweep sources diff.patch and sweeps it.
+    assert len(bounded_results) == 1
+    assert "# daydream: deep diff truncated:" in bounded_results[0]
+    assert "content line 3" not in bounded_results[0]
+    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
+    assert "content line 3" in patch
+
+    stats = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "coverage-stats.json").read_text()
+    )
+    assert "zzuncovered.py" in stats["attempted_files"]
+    assert "zzuncovered.py" not in stats["sweep_skipped_small_hunks_files"]
 
 
 async def test_intent_artifact_survives_wonder_failure(

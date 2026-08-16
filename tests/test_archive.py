@@ -33,7 +33,7 @@ from daydream.archive.index import (
 from daydream.archive.manifest import Manifest, build_manifest
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
-from daydream.trajectory import TrajectoryRecorder
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.trajectory import make_manifest
 
 
@@ -41,7 +41,7 @@ from tests.harness.trajectory import make_manifest
 class _MockRecorder:
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
     path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
-    run_flow: MagicMock = field(default_factory=lambda: MagicMock(value="normal"))
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
     explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
@@ -233,10 +233,14 @@ def test_build_manifest_per_stack_review_tier(
     run = m.to_dict()["run"]
     assert m.per_stack_review_backend == "codex"  # per-stack tier resolved from its own key
     assert m.per_stack_review_model == "gpt-psr"
-    assert m.review_backend == "claude"           # review tier unchanged, distinct
+    # Post-#643 (consolidated backend identity), review_backend for deep-flow runs
+    # IS the per-stack representative — _recorder_backend_names resolves it via the
+    # per_stack_review phase — so it mirrors the per-stack tier rather than the
+    # review tier (which only powers feedback-mode commit-push).
+    assert m.review_backend == "codex"
     assert run["per_stack_review_backend"] == "codex"
     assert run["per_stack_review_model"] == "gpt-psr"
-    assert run["review_backend"] == "claude"
+    assert run["review_backend"] == "codex"
 
 
 def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(tmp_path: Path) -> None:
