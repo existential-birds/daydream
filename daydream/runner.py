@@ -773,6 +773,12 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
         )
 
 
+# Built-in deep-flow mode aliases (review / shallow / deep all route to the
+# single deep flow in different modes, #330). Kept as a module constant so
+# downstream consumers (e.g. archive manifest tier gate) share the same list.
+_DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
+
+
 async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
     """Route an explicit ``--flow <name>`` selection.
 
@@ -789,7 +795,7 @@ async def _dispatch_selected_flow(work: WorkContext, config: RunConfig) -> int:
 
     # Built-in mode aliases: resolve before the registry lookup so the deep
     # routing wins over the "not registered" error.
-    if name in ("review", "shallow", "deep"):
+    if name in _DEEP_FLOW_ALIASES:
         if name in ("shallow", "deep"):
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(work, config)

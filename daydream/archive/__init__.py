@@ -165,6 +165,7 @@ def _archive_run_inner(
         archive_path=run_dir,
         evaluation=evaluation,
         source_path=source_path,
+        cwd=str(work.repo) if work is not None else None,
         fix_failures=fix_failures,
         fix_leftover_untracked=fix_leftover_untracked,
         fix_quality_gate=fix_quality_gate,

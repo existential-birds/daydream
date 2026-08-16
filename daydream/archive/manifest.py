@@ -283,6 +283,7 @@ def build_manifest(
     archive_path: Path,
     evaluation: dict[str, Any] | None = None,
     source_path: str | None = None,
+    cwd: str | None = None,
     fix_failures: dict[str, str] | None = None,
     fix_leftover_untracked: list[str] | None = None,
     fix_quality_gate: dict[str, Any] | None = None,
@@ -297,6 +298,8 @@ def build_manifest(
         archive_path: Absolute path to the archive directory for this run.
         evaluation: Optional ``analyze_session()`` result dict.
         source_path: Absolute path to the source repository at archive time.
+        cwd: The repository directory daydream operated on (``work.repo``), used
+            to mirror PiBackend's cwd-configured default model resolution.
         fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
             every fix applied. Recorded verbatim on the manifest.
         fix_leftover_untracked: Sorted list of untracked paths left behind by a
@@ -311,7 +314,11 @@ def build_manifest(
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
-    from daydream.runner import _resolved_backend_name, _resolved_model  # noqa: PLC0415 - deferred import avoids cycle
+    from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
+        _DEEP_FLOW_ALIASES,
+        _resolved_backend_name,
+        _resolved_model,
+    )
 
     # Resolve the effective backend through the full precedence chain so the manifest
     # records what was actually used (raw config.backend is None when set via file-config);
@@ -325,10 +332,16 @@ def build_manifest(
     # single stack is still reviewed through phase_per_stack_reviews. Only feedback
     # mode (config.bot set — the review spine is skipped entirely) and improve/custom
     # flows (which never invoke the deep orchestrator) have no per-stack fan-out, so
-    # those runs leave both fields None (and to_dict() omits them).
+    # those runs leave both fields None (and to_dict() omits them). The deep-flow
+    # alias set is runner._DEEP_FLOW_ALIASES — the same list _dispatch_selected_flow
+    # routes — so the gate cannot drift from the actual flow routing.
+    # start_at defaults to "review" on the real RunConfig; getattr keeps the
+    # gate robust to lighter config fakes that omit the field.
+    _start_at = getattr(config, "start_at", "review")
     per_stack_reviews_ran = (
         config.bot is None
-        and (config.flow_name is None or config.flow_name in ("review", "shallow", "deep"))
+        and (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
+        and _start_at not in ("merge", "fix")
     )
     per_stack_review_backend: str | None = None
     per_stack_review_model: str | None = None
@@ -339,9 +352,15 @@ def build_manifest(
             # Pi's default is a backend fallback (resolved by PiBackend from cwd)
             # that intentionally never appears in PHASE_DEFAULT_MODELS, so
             # _resolved_model returns None here even though the per-stack reviewers
-            # ran on a concrete model. Surface the backend default instead of
-            # dropping the load-bearing half of the identity.
-            per_stack_review_model = DEFAULT_PI_MODEL
+            # ran on a concrete model. Mirror PiBackend's own precedence — a
+            # cwd-configured default first, then DEFAULT_PI_MODEL — so the archived
+            # identity matches what actually ran (#646 finding 1).
+            from pathlib import Path
+
+            from daydream.backends.pi import _configured_pi_model
+            per_stack_review_model = (
+                _configured_pi_model(Path(cwd)) if cwd else None
+            ) or DEFAULT_PI_MODEL
 
     m = Manifest(
         session_id=recorder.session_id,
