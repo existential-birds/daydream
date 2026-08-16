@@ -201,8 +201,8 @@ async def test_structured_fallback_validates_against_output_schema(
 async def test_structured_fallback_recon_not_gated_all_or_nothing(
     monkeypatch, tmp_path
 ) -> None:
-    """RECON's fallback skips the fallback schema gate via the caller-declared
-    ``validate_fallback_schema=False`` kwarg (not a phase carve-out): the
+    """RECON's fallback skips the structured-output gate via the caller-declared
+    ``validate_structured_output=False`` kwarg (not a phase carve-out): the
     top-level RECON schema requires languages/commands/conventions/intent_docs,
     but the orchestrator salvages per-command records downstream via
     validate_recon_commands() and defaults missing model fields to []. An
@@ -228,7 +228,7 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
     ])
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema,
-        validate_fallback_schema=False,
+        validate_structured_output=False,
     )
     assert result == {"commands": [{"command": "make test"}]}
     assert isinstance(result, dict)

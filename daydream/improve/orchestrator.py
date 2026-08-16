@@ -447,7 +447,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             output_schema=RECON_SCHEMA,
             read_only=True,
             persist_session=False,
-            validate_fallback_schema=False,
+            validate_structured_output=False,
         )
 
     total_candidates = 0
@@ -1738,7 +1738,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                             output_schema=PLAN_AUTHOR_SCHEMA,
                             read_only=True,
                             persist_session=False,
-                            validate_fallback_schema=False,
+                            validate_structured_output=False,
                         )
                     return output, aborted_reason
 
