@@ -404,16 +404,18 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
 def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     """Return whether ``value`` is usable by a salvage-tolerant consumer.
 
-    Full validation is the baseline, but the fallback gate must not be
-    all-or-nothing: the per-stack parse, the recommendation verifier, and the
-    cross-stack merge all normalize partial agent output (dropping invalid
-    records rather than losing the whole payload, or accepting a bare item
-    array), so a dict whose required top-level fields are present — with
-    array-typed fields holding actual lists — is still returned for them to
-    salvage, and so is a bare JSON array, which ``phase_cross_stack_merge``
-    normalizes to its item list (a bare array can never validate against the
-    object-typed ``MERGED_ITEMS_SCHEMA``). Nested item validity is deliberately
-    not checked here: that is the consumers' salvage domain.
+    Full validation is the baseline, but the structured-output gate must not
+    be all-or-nothing: it guards the backend-supplied primary result and the
+    extraction fallback alike, and the per-stack parse, the recommendation
+    verifier, and the cross-stack merge all normalize partial agent output
+    (dropping invalid records rather than losing the whole payload, or
+    accepting a bare item array), so a dict whose required top-level fields
+    are present — with array-typed fields holding actual lists — is still
+    returned for them to salvage, and so is a bare JSON array, which
+    ``phase_cross_stack_merge`` normalizes to its item list (a bare array can
+    never validate against the object-typed ``MERGED_ITEMS_SCHEMA``). Nested
+    item validity is deliberately not checked here: that is the consumers'
+    salvage domain.
     """
     if _validates_schema(value, schema):
         return True
@@ -468,7 +470,7 @@ async def run_agent(
     persist_session: bool = True,
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
-    validate_fallback_schema: bool = True,
+    validate_structured_output: bool = True,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -514,12 +516,13 @@ async def run_agent(
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
-        validate_fallback_schema: When True (default), the structured-output
-            extraction fallback only returns parsed JSON whose shape is usable
-            by downstream consumers (see ``_salvageable``). Set False for call
-            sites that re-validate or salvage wholesale downstream — the
-            improve recon, whose all-or-nothing top-level schema is
-            re-validated per-command by ``validate_recon_commands``.
+        validate_structured_output: When True (default), structured output —
+            the backend-supplied primary result and the extraction fallback alike
+            — is returned only when its shape is usable by downstream consumers
+            (see ``_salvageable``). Set False for call sites that re-validate
+            or salvage wholesale downstream — the improve recon and plan
+            author, whose downstream validators (``validate_recon_commands`` /
+            ``assemble_plan``) are the fail-closed enforcement point.
 
     Returns:
         Tuple of (output, continuation_token, budget_reason). Output is text
@@ -861,7 +864,18 @@ async def run_agent(
     finally:
         _state.current_backends.remove(backend)
 
-    if output_schema is not None and structured_result is not None:
+    def _usable(value: Any) -> bool:
+        """Whether ``value`` passes the structured-output gate.
+
+        One predicate shared by the primary-result and extraction-fallback
+        return paths: either this call site opted out of validation, or the
+        value is salvageable (see ``_salvageable``).
+        """
+        return not validate_structured_output or (
+            output_schema is not None and _salvageable(value, output_schema)
+        )
+
+    if output_schema is not None and structured_result is not None and _usable(structured_result):
         return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
@@ -876,16 +890,13 @@ async def run_agent(
         # rather than losing the whole payload, or accepting a bare item
         # array), so salvageable structures still reach them. Only output that
         # is unusable in any shape falls through to the plain-text return.
-        # Callers that salvage wholesale downstream (the improve recon, whose
-        # top-level schema is all-or-nothing but which re-validates per-command
-        # records via validate_recon_commands) opt out with
-        # validate_fallback_schema=False; the downstream validator remains the
-        # fail-closed enforcement point for those call sites.
+        # Callers that salvage wholesale downstream — the improve recon and
+        # the plan author, whose downstream validators (validate_recon_commands
+        # / assemble_plan) are the fail-closed enforcement point — opt out
+        # with validate_structured_output=False; the downstream validator
+        # remains the fail-closed enforcement point for those call sites.
         if raw.strip():
             parsed = extract_json(raw)
-            if parsed is not None and (
-                not validate_fallback_schema
-                or _salvageable(parsed, output_schema)
-            ):
+            if parsed is not None and _usable(parsed):
                 return parsed, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason
