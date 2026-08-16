@@ -68,6 +68,41 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     return not list(Draft202012Validator(schema).iter_errors(value))
 
 
+def _strip_extra_keys(value: Any, schema: dict[str, Any]) -> Any:
+    """Return a copy of ``value`` with keys the schema forbids removed.
+
+    Walks object schemas (recursing into ``properties`` / ``items``) and drops
+    every key absent from ``properties`` when ``additionalProperties`` is
+    ``False``, so a near-schema fallback parse (e.g. a per-stack record the
+    model decorated with a stray ``title``) can be re-validated instead of
+    being dropped wholesale. Non-dict values and schemas without ``properties``
+    pass through unchanged; the caller re-validates the result before returning
+    it as structured output.
+    """
+    if not isinstance(value, dict) or not isinstance(schema, dict):
+        return value
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        return value
+    forbid_extra = schema.get("additionalProperties") is False
+    out: dict[str, Any] = {}
+    for key, val in value.items():
+        if forbid_extra and key not in props:
+            continue
+        subschema = props.get(key)
+        if isinstance(val, dict) and isinstance(subschema, dict):
+            out[key] = _strip_extra_keys(val, subschema)
+        elif (
+            isinstance(val, list)
+            and isinstance(subschema, dict)
+            and isinstance(subschema.get("items"), dict)
+        ):
+            out[key] = [_strip_extra_keys(item, subschema["items"]) for item in val]
+        else:
+            out[key] = val
+    return out
+
+
 class MissingSkillError(Exception):
     """Raised when a required skill is not available."""
 
@@ -841,4 +876,16 @@ async def run_agent(
             # raw text (no unvalidated structured result reaches the caller).
             if parsed is not None and _validates_schema(parsed, output_schema):
                 return parsed, result_continuation, aborted_reason
+            # Near-schema salvage (issue #336): a parse that only fails because
+            # the model added keys the schema forbids (``additionalProperties:
+            # False``) — e.g. a per-stack record with a stray ``title`` — would
+            # otherwise fall through to plain text, which phase_parse_feedback
+            # turns into ``[]`` and silently drops the stack's entire findings
+            # set. Strip the forbidden keys and re-validate; the salvaged value
+            # still conforms, so no unvalidated structured result reaches the
+            # caller, and genuinely-violating parses still fall through.
+            if parsed is not None:
+                salvaged = _strip_extra_keys(parsed, output_schema)
+                if _validates_schema(salvaged, output_schema):
+                    return salvaged, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason

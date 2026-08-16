@@ -194,3 +194,58 @@ async def test_fallback_invalid_schema_json_falls_through_to_plain_text(tmp_path
     # (status must be a string), so it must NOT be returned as structured
     # output — it falls through to the plain-text return.
     assert result == '{"status": 42}'
+
+
+# Mirrors the FEEDBACK_SCHEMA shape used by the per-stack parse path:
+# items carry additionalProperties: False, so a model-added stray key is the
+# near-schema failure mode that would silently drop the whole stack (issue #336).
+_NEAR_SCHEMA = {
+    "type": "object",
+    "required": ["issues"],
+    "properties": {
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["id", "description"],
+                "properties": {
+                    "id": {"type": "integer"},
+                    "description": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    "additionalProperties": False,
+}
+
+
+async def test_fallback_near_schema_json_is_salvaged_not_dropped(tmp_path) -> None:
+    """A fallback dict that only violates the schema via extra item keys (the
+    per-stack parse's additionalProperties: False gate) is salvaged by stripping
+    the forbidden keys — not returned as raw text that phase_parse_feedback
+    would convert into [] and silently drop the stack's findings (issue #336)."""
+    backend = MockBackend(
+        [TextEvent(text='{"issues": [{"id": 1, "description": "x", "title": "stray"}]}'),
+         ResultEvent(structured_output=None, continuation=None)]
+    )
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW,
+        output_schema=_NEAR_SCHEMA,
+    )
+    assert result == {"issues": [{"id": 1, "description": "x"}]}
+
+
+async def test_fallback_missing_required_key_still_falls_through(tmp_path) -> None:
+    """Salvage only strips forbidden keys — a parse still missing required
+    fields stays a plain-text fall-through (a salvaged non-conforming value must
+    never be returned as structured output)."""
+    backend = MockBackend(
+        [TextEvent(text='{"issues": [{"id": 1}]}'),  # missing required "description"
+         ResultEvent(structured_output=None, continuation=None)]
+    )
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW,
+        output_schema=_NEAR_SCHEMA,
+    )
+    assert result == '{"issues": [{"id": 1}]}'

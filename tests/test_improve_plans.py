@@ -4427,6 +4427,18 @@ def test_host_dedup_collapses_every_model_wd_spelling(tmp_path: Path, model_wd: 
         repo, services, groups=[], model_commands=model_commands
     )
 
+    # Positive control: with nothing cited, the host must enumerate `make
+    # check` itself. A silently empty enumeration (a Makefile-regex
+    # regression, 'check' dropping from _VERIFICATION_WORDS, or the service
+    # root vanishing from _command_enumeration_directories) would also yield
+    # (0, [], []) and pass the dedup assertions below vacuously.
+    control_candidates, control_validated, control_errors = _host_enumerated_commands(
+        repo, services, groups=[], model_commands=[]
+    )
+    assert control_candidates == 1
+    assert [c["command"] for c in control_validated] == ["make check"]
+    assert control_errors == []
+
     # Host emits `make check` with relative wd "sub"; every model spelling of
     # the same directory must collapse so the host command is treated as cited.
     assert candidates == 0
