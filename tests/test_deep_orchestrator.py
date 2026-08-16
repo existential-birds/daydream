@@ -171,6 +171,24 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     return project, migration
 
 
+def _go_quote_project(tmp_path: Path) -> Path:
+    """Build a feature-branch fixture whose reviewed diff is a single Go file."""
+    project = tmp_path / "go_quote_repo"
+    project.mkdir()
+    (project / "main.go").write_text("package main\n\n// doc\n")
+    (project / "notes.md").write_text("# Notes\n")
+    _init_repo(project)
+    _git(project, "add", "main.go", "notes.md")
+    _commit(project, "test: initialize go fixture")
+    _git(project, "checkout", "-b", "feature")
+    # Only main.go changes in the feature-branch commit: it is the sole
+    # reviewed-diff file, so a fix to it is the only edit the run commits.
+    (project / "main.go").write_text("package main\n\n// doc updated\n")
+    _git(project, "add", "main.go")
+    _commit(project, "test: change the go source")
+    return project
+
+
 def _record(**overrides: Any) -> dict[str, Any]:
     """Build one on-disk per-stack record (the shape a merge resume reads back)."""
     record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1}
@@ -1955,6 +1973,57 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert "Daydream-Run: " in commit_message
     assert f"Daydream-Version: {daydream.__version__}" in commit_message
     assert head_after in _git(project, "ls-remote", "--heads", "origin", "feature")
+
+
+async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit.
+
+    Drives ``runner.run`` through the deep flow with a stub backend whose fix
+    turn appends a smart-quote comment line to ``main.go`` — the sole reviewed
+    diff file. The scrub must normalize U+201D to an ASCII straight quote
+    before the quality gate measures the tree and before the commit stages it,
+    so the committed tree never carries the smart quote and the non-changed
+    ``notes.md`` stays byte-identical.
+    """
+    from daydream.runner import run
+
+    project = _go_quote_project(tmp_path)
+    bare = _bare_remote(tmp_path / "remote.git")
+    _git(project, "remote", "add", "origin", str(bare))
+    notes_before = (project / "notes.md").read_bytes()
+    head_before = _git(project, "rev-parse", "HEAD")
+    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
+    mute_side_effects(heal=False, commit=False)
+    stub = _PushingCommittingStubBackend(project)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
+    # A one-file diff collapses to single-stack mode (no cross-stack merge
+    # agent), so the finding is driven through the per-stack parse: the go
+    # review's record points at the sole reviewed file, main.go.
+    stub.parse_by_stack = {
+        "go": {
+            "severity": "high",
+            "confidence": "HIGH",
+            "file": "main.go",
+            "line": 1,
+            "description": "comment doc fix",
+        }
+    }
+    stub.fix_edit_line = "\n// not \u201D\n"  # fix agent writes U+201D into the changed .go comment
+    exit_code = await run(make_config(
+        project, assume="yes", output_mode="loop", non_interactive=False,
+        archive=False, skill_availability=frozenset(SKILL_MAP),
+    ))
+    assert exit_code == 0
+    go_src = (project / "main.go").read_text()
+    assert "not \u201D" not in go_src      # U+201D never lands in the committed tree
+    assert '// not "' in go_src            # normalized to ASCII straight quote
+    assert (project / "notes.md").read_bytes() == notes_before  # non-changed file untouched
+    assert _git(project, "rev-parse", "HEAD") != head_before
 
 
 async def test_test_healing_guard_reverts_generated_migration_edit(

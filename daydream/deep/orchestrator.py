@@ -123,6 +123,7 @@ from daydream.phases import (
     phase_verify_recommendations,
     severity_sorted,
 )
+from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.supervision import (
     RuleBasedSupervisor,
     apply_findings_verdicts,
@@ -3048,6 +3049,31 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         # Fail-close to match the generated-file guard: an unreverted
         # out-of-scope edit must never reach the commit step.
         return Stop(1)
+    # Issue #687: ASCII-quote normalization on the fix path. A fix agent that
+    # writes typographic smart quotes (U+201C/U+201D/U+2018/U+2019) into a
+    # changed file would otherwise commit those bytes and re-trigger the same
+    # typographic finding on every re-review. Scrub the same changed-file set
+    # the residual net and quality gate use (pre_fix_ref base) back to ASCII
+    # straight quotes BEFORE the quality gate measures the tree, so the gate
+    # and the commit stage the final scrubbed bytes. Best-effort, never a
+    # gate: a missing, binary, or generated file is skipped, and a changed-
+    # file enumeration failure degrades to a warning rather than aborting the
+    # run or blocking the commit.
+    try:
+        scrubbed = scrub_smart_quotes_changed_files(
+            work.repo,
+            git_ops.changed_files_against(
+                work.repo, pre_fix_ref, preexisting_untracked=pre_fix_untracked
+            ),
+        )
+    except git_ops.GitError as exc:
+        print_warning(console, f"Could not scrub smart quotes in changed files: {exc}")
+        scrubbed = []
+    if scrubbed:
+        print_warning(
+            console,
+            "Normalized smart quotes to ASCII in: " + ", ".join(sorted(scrubbed)),
+        )
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
