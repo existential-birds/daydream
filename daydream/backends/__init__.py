@@ -228,7 +228,9 @@ class ResultEvent:
     """Final event in the stream. Carries structured output and continuation token.
 
     Attributes:
-        structured_output: Schema-validated structured result, or None.
+        structured_output: Structured result as emitted by the backend,
+            schema-validated (or salvage-checked) at the run_agent return
+            path, or None.
         continuation: Optional continuation token for multi-turn flows.
         timestamp: ISO 8601 UTC timestamp populated at backend yield time.
     """

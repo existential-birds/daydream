@@ -514,12 +514,13 @@ async def run_agent(
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
-        validate_fallback_schema: When True (default), the structured-output
-            extraction fallback only returns parsed JSON whose shape is usable
-            by downstream consumers (see ``_salvageable``). Set False for call
-            sites that re-validate or salvage wholesale downstream — the
-            improve recon, whose all-or-nothing top-level schema is
-            re-validated per-command by ``validate_recon_commands``.
+        validate_fallback_schema: When True (default), structured output — the
+            backend-supplied primary result and the extraction fallback alike —
+            is returned only when its shape is usable by downstream consumers
+            (see ``_salvageable``). Set False for call sites that re-validate
+            or salvage wholesale downstream — the improve recon and plan
+            author, whose downstream validators (``validate_recon_commands`` /
+            ``assemble_plan``) are the fail-closed enforcement point.
 
     Returns:
         Tuple of (output, continuation_token, budget_reason). Output is text
