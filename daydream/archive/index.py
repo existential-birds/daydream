@@ -207,6 +207,8 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "review_backend": manifest.review_backend,
                 "fix_backend": manifest.fix_backend,
                 "test_backend": manifest.test_backend,
+                "per_stack_review_backend": manifest.per_stack_review_backend,
+                "per_stack_review_model": manifest.per_stack_review_model,
                 "review_only": int(manifest.review_only),
                 "deep": int(manifest.deep),
                 "remote_url": manifest.remote_url,

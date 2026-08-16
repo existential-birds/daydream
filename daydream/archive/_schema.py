@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS runs (
     review_backend TEXT,
     fix_backend TEXT,
     test_backend TEXT,
+    per_stack_review_backend TEXT,
+    per_stack_review_model TEXT,
     review_only INTEGER NOT NULL DEFAULT 0,
     deep INTEGER NOT NULL DEFAULT 0,
     remote_url TEXT,
@@ -124,7 +126,7 @@ _CREATE_INDEXES = [
 _UPSERT_SQL = """
 INSERT OR REPLACE INTO runs (
     session_id, archived_at, status, run_flow, skill, model, backend,
-    review_backend, fix_backend, test_backend,
+    review_backend, fix_backend, test_backend, per_stack_review_backend, per_stack_review_model,
     review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
@@ -133,7 +135,7 @@ INSERT OR REPLACE INTO runs (
     outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
     :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
-    :review_backend, :fix_backend, :test_backend,
+    :review_backend, :fix_backend, :test_backend, :per_stack_review_backend, :per_stack_review_model,
     :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
@@ -175,6 +177,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("review_backend", "TEXT"),
             ("fix_backend", "TEXT"),
             ("test_backend", "TEXT"),
+            ("per_stack_review_backend", "TEXT"),
+            ("per_stack_review_model", "TEXT"),
             ("rubric_json", "TEXT"),
             ("base_sha", "TEXT"),
             ("changed_files", "TEXT"),

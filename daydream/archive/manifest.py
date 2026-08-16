@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import GitContext
+from daydream.config import DEFAULT_PI_MODEL
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -26,6 +27,16 @@ if TYPE_CHECKING:
     from daydream.trajectory import TrajectoryRecorder
 
 MANIFEST_SCHEMA_VERSION = "1.0"
+
+
+def _omit_falsy(**fields: Any) -> dict[str, Any]:
+    """Return only the fields whose values are truthy.
+
+    Collapses the repeated ``**({k: v} if v else {})`` conditional-splat guard
+    used for optional manifest fields: ``None`` (and any other falsy value)
+    drops the key entirely, mirroring the old inline pattern exactly.
+    """
+    return {k: v for k, v in fields.items() if v}
 
 
 @dataclass
@@ -57,6 +68,27 @@ class Manifest:
             default).
         test_backend: Effective backend for the test phase (override or general
             default).
+        per_stack_review_backend: Per-stack review tier backend for runs that
+            execute per-stack reviews (issue #646), resolved from the
+            ``per_stack_review`` phase key — the key that actually drives
+            per-stack execution — kept distinct from ``review_backend`` so
+            "who reviewed" is never a misstatement. Every deep-flow mode
+            executes per-stack reviews — loop, shallow (single collapsed
+            stack), review, and comment; only feedback mode (the review spine
+            is skipped entirely) and improve/custom flows (which never invoke
+            the deep orchestrator) have no per-stack fan-out and leave this
+            ``None`` (omitted from ``to_dict()``).
+        per_stack_review_model: Per-stack review tier model for runs that
+            execute per-stack reviews (issue #646), resolved from the
+            ``per_stack_review`` phase key. The model is the load-bearing part
+            of the identity: per-stack defaults to Sonnet vs the ``review``
+            tier's Opus, which a pure backend name cannot distinguish. ``None``
+            (and omitted from ``to_dict()``) only for runs that never execute
+            per-stack reviews (feedback / improve / custom flows). For a Pi run
+            with no explicit override the backend default (``DEFAULT_PI_MODEL``)
+            is recorded: Pi's default intentionally lives outside
+            ``PHASE_DEFAULT_MODELS``, so ``_resolved_model`` alone would leave
+            the load-bearing model NULL.
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         source_path: Absolute path to the source repository at archive time.
@@ -132,6 +164,8 @@ class Manifest:
     review_backend: str | None = None
     fix_backend: str | None = None
     test_backend: str | None = None
+    per_stack_review_backend: str | None = None
+    per_stack_review_model: str | None = None
     review_only: bool = False
     deep: bool = False
     fix_failures: dict[str, str] | None = None
@@ -191,9 +225,13 @@ class Manifest:
                 "skill": self.skill,
                 "model": self.model,
                 "backend": self.backend,
-                **({"review_backend": self.review_backend} if self.review_backend else {}),
-                **({"fix_backend": self.fix_backend} if self.fix_backend else {}),
-                **({"test_backend": self.test_backend} if self.test_backend else {}),
+                **_omit_falsy(
+                    review_backend=self.review_backend,
+                    fix_backend=self.fix_backend,
+                    test_backend=self.test_backend,
+                    per_stack_review_backend=self.per_stack_review_backend,
+                    per_stack_review_model=self.per_stack_review_model,
+                ),
                 "review_only": self.review_only,
                 "deep": self.deep,
             },
@@ -251,6 +289,7 @@ def build_manifest(
     archive_path: Path,
     evaluation: dict[str, Any] | None = None,
     source_path: str | None = None,
+    cwd: str | None = None,
     fix_failures: dict[str, str] | None = None,
     fix_leftover_untracked: list[str] | None = None,
     fix_quality_gate: dict[str, Any] | None = None,
@@ -265,6 +304,8 @@ def build_manifest(
         archive_path: Absolute path to the archive directory for this run.
         evaluation: Optional ``analyze_session()`` result dict.
         source_path: Absolute path to the source repository at archive time.
+        cwd: The repository directory daydream operated on (``work.repo``), used
+            to mirror PiBackend's cwd-configured default model resolution.
         fix_failures: Map of dropped fix file-group -> reason, or ``None`` when
             every fix applied. Recorded verbatim on the manifest.
         fix_leftover_untracked: Sorted list of untracked paths left behind by a
@@ -280,8 +321,11 @@ def build_manifest(
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
+        _DEEP_FLOW_ALIASES,
         _default_backend_name,
         _recorder_backend_names,
+        _resolved_backend_name,
+        _resolved_model,
         _resolved_review_backend_name,
     )
 
@@ -294,6 +338,44 @@ def build_manifest(
     # ``test_backend`` are effective per-phase values; ``review_backend`` is
     # not.
     flow_names = _recorder_backend_names(config, recorder.run_flow)
+
+    # Per-stack reviewers (issue #646) execute on the "per_stack_review" phase key —
+    # NOT the "review" tier — so archives record that tier's resolved backend and
+    # model from its own key. The per-stack-reviews step runs in every deep-flow
+    # mode (loop, shallow, review, comment); shallow is NOT excluded — a collapsed
+    # single stack is still reviewed through phase_per_stack_reviews. Only feedback
+    # mode (config.bot set — the review spine is skipped entirely) and improve/custom
+    # flows (which never invoke the deep orchestrator) have no per-stack fan-out, so
+    # those runs leave both fields None (and to_dict() omits them). The deep-flow
+    # alias set is runner._DEEP_FLOW_ALIASES — the same list _dispatch_selected_flow
+    # routes — so the gate cannot drift from the actual flow routing.
+    # start_at defaults to "review" on the real RunConfig; getattr keeps the
+    # gate robust to lighter config fakes that omit the field.
+    _start_at = getattr(config, "start_at", "review")
+    per_stack_reviews_ran = (
+        config.bot is None
+        and (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
+        and _start_at not in ("merge", "fix")
+    )
+    per_stack_review_backend: str | None = None
+    per_stack_review_model: str | None = None
+    if per_stack_reviews_ran:
+        per_stack_review_backend = _resolved_backend_name(config, "per_stack_review")
+        per_stack_review_model = _resolved_model(config, "per_stack_review")
+        if per_stack_review_model is None and per_stack_review_backend == "pi":
+            # Pi's default is a backend fallback (resolved by PiBackend from cwd)
+            # that intentionally never appears in PHASE_DEFAULT_MODELS, so
+            # _resolved_model returns None here even though the per-stack reviewers
+            # ran on a concrete model. Mirror PiBackend's own precedence — a
+            # cwd-configured default first, then DEFAULT_PI_MODEL — so the archived
+            # identity matches what actually ran (#646 finding 1).
+            from pathlib import Path
+
+            from daydream.backends.pi import _configured_pi_model
+            per_stack_review_model = (
+                _configured_pi_model(Path(cwd)) if cwd else None
+            ) or DEFAULT_PI_MODEL
+
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -305,6 +387,8 @@ def build_manifest(
         review_backend=_resolved_review_backend_name(config),
         fix_backend=flow_names.fix or None,
         test_backend=flow_names.test or None,
+        per_stack_review_backend=per_stack_review_backend,
+        per_stack_review_model=per_stack_review_model,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,
