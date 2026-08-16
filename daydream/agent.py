@@ -871,7 +871,9 @@ async def run_agent(
         return paths: either this call site opted out of validation, or the
         value is salvageable (see ``_salvageable``).
         """
-        return not validate_structured_output or _salvageable(value, output_schema)
+        return not validate_structured_output or (
+            output_schema is not None and _salvageable(value, output_schema)
+        )
 
     if output_schema is not None and structured_result is not None and _usable(structured_result):
         return structured_result, result_continuation, aborted_reason
