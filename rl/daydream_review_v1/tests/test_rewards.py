@@ -1532,3 +1532,43 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
         # the diff/apply step did not fail the checkout.
         verify_dir = tmp_path / "repo-verify"
         assert verify_dir.exists(), "the empty diff must not abort the checkout build"
+
+
+async def test_verify_checkout_applies_exactly_the_candidate_diff(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
+    """The verify-checkout and the seal bind the same candidate diff.
+
+    _prepare_verify_checkout applies the diff derived from rundir._candidate_diff_cmd
+    onto the detached head; this asserts the applied result is exactly that
+    diff (no drift between the two sites), as the verifier re-runs the suite
+    against the same contract the seal binds.
+    """
+    import subprocess
+    from daydream_review_v1 import taskset
+    from daydream_review_v1.rundir import _candidate_diff_cmd
+
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    head_sha = task.data.head_sha
+
+    # The contract the seal binds: the shared helper's own output.
+    expected = subprocess.run(
+        _candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True,
+    ).stdout
+    assert expected, "staged committed fix must yield a non-empty candidate diff"
+
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), head_sha)
+    verify_dir = tmp_path / "repo-verify"
+    # The checkout is built (root host) or at least its git steps ran (non-root
+    # leaves it on disk before the trailing chown fails). The applied result
+    # must equal the helper's derivation.
+    assert verify_dir.is_dir(), "the verify checkout was not constructed"
+    applied = subprocess.run(
+        ["git", "-C", str(verify_dir), "diff", head_sha, "--", "calc.py"],
+        capture_output=True, check=True,
+    ).stdout
+    # The checkout tree after apply == head + exactly the candidate diff.
+    assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
+        "the verify checkout did not carry the candidate diff the seal binds"
+    )
