@@ -4400,3 +4400,66 @@ def test_stale_locked_reanchor_worktree_is_reclaimed(
     assert removed == 1
     assert not stale.exists()
     assert "run-dead-reanchor" not in git(repo, "worktree", "list")
+
+
+@pytest.mark.parametrize("model_wd", ["sub", "./sub", "sub/", "ABSOLUTE"])
+def test_host_dedup_collapses_every_model_wd_spelling(tmp_path: Path, model_wd: str) -> None:
+    from daydream.improve.orchestrator import _host_enumerated_commands
+    from daydream.improve.services import Service
+
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    sub.mkdir(parents=True)
+    (sub / "Makefile").write_text("check:\n\ttool check\n", encoding="utf-8")
+
+    wd = str(sub) if model_wd == "ABSOLUTE" else model_wd
+    model_commands = [{
+        "id": "make-check",
+        "command": "make check",
+        "working_directory": wd,
+    }]
+    # Production Service.root is repo-relative (services.py _expand_globs
+    # returns relative_to(repo_root)), so pass Path("sub"), not the absolute
+    # path — this is what makes the host emit working_directory == "sub".
+    services = [Service(name="sub", root=Path("sub"), source="test")]
+
+    candidates, validated, errors = _host_enumerated_commands(
+        repo, services, groups=[], model_commands=model_commands
+    )
+
+    # Host emits `make check` with relative wd "sub"; every model spelling of
+    # the same directory must collapse so the host command is treated as cited.
+    assert candidates == 0
+    assert validated == []
+    assert errors == []
+
+
+def test_host_dedup_does_not_overcollapse_across_commands(tmp_path: Path) -> None:
+    from daydream.improve.orchestrator import _host_enumerated_commands
+    from daydream.improve.services import Service
+
+    repo = tmp_path / "repo"
+    sub = repo / "sub"
+    sub.mkdir(parents=True)
+    (sub / "Makefile").write_text(
+        "check:\n\ttool check\nlint:\n\ttool lint\n", encoding="utf-8"
+    )
+
+    # Model cites `make check` at the absolute subdir; host has both targets.
+    model_commands = [{
+        "id": "make-check",
+        "command": "make check",
+        "working_directory": str(sub),  # absolute spelling
+    }]
+    services = [Service(name="sub", root=Path("sub"), source="test")]
+
+    candidates, validated, errors = _host_enumerated_commands(
+        repo, services, groups=[], model_commands=model_commands
+    )
+
+    # `make check` is deduped (absolute vs relative collapse), but `make lint`
+    # is a genuinely different command and must survive as a candidate.
+    assert candidates == 1
+    assert [c["command"] for c in validated] == ["make lint"]
+    assert [c["working_directory"] for c in validated] == ["sub"]
+    assert errors == []
