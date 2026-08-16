@@ -145,6 +145,92 @@ async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> Non
         conn.close()
 
 
+@pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
+async def test_full_archive_round_trip_fix_test_backend_columns(
+    tmp_path: Path, archive_dir: Path, run_flow: DaydreamRunFlow,
+) -> None:
+    """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
+    columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    # --- identical round-trip setup as test_full_archive_round_trip, but
+    # run_flow and the step extra's daydream_run_flow come from the param ---
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
+    findings_src = target_dir / "findings" / "findings.json"
+    findings_src.parent.mkdir(parents=True)
+    findings_src.write_text('{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}')
+
+    config = RunConfig(
+        target=str(target_dir),
+        skill="python",
+        backend="claude",
+        archive=True,
+        run_eval=False,
+        findings_out="findings/findings.json",
+    )
+    callback = _make_archive_callback(config, target_dir)
+    assert callback is not None
+
+    recorder = TrajectoryRecorder(
+        path=daydream_dir / "trajectory.json",
+        run_flow=run_flow,
+        target_dir=target_dir,
+        agent_model_name="opus",
+        session_id="test",
+        on_write=callback,
+    )
+    async with recorder:
+        # Two steps spaced 8.5s apart so the derived span is deterministic.
+        for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
+            recorder.steps.append(
+                Step(
+                    step_id=recorder._next_step_id(),
+                    timestamp=ts,
+                    source="agent",
+                    message="step",
+                    extra={
+                        "daydream_phase": DaydreamPhase.REVIEW.value,
+                        "daydream_run_flow": run_flow.value,
+                    },
+                )
+            )
+
+    run_dir = archive_dir / "runs" / recorder.session_id
+    assert run_dir.is_dir()
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert manifest["run"]["flow"] == run_flow.value
+    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
+
+    if run_flow is DaydreamRunFlow.IMPROVE:
+        assert "fix_backend" not in manifest["run"]
+        assert "test_backend" not in manifest["run"]
+    else:
+        assert manifest["run"]["fix_backend"] == "claude"
+        assert manifest["run"]["test_backend"] == "claude"
+
+    conn = sqlite3.connect(str(archive_dir / "index.db"))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT fix_backend, test_backend FROM runs WHERE session_id = ?",
+            (recorder.session_id,),
+        ).fetchone()
+        assert row is not None
+        if run_flow is DaydreamRunFlow.IMPROVE:
+            assert row["fix_backend"] is None
+            assert row["test_backend"] is None
+        else:
+            assert row["fix_backend"] == "claude"
+            assert row["test_backend"] == "claude"
+    finally:
+        conn.close()
+
+
 # on_write failure does not raise
 async def test_on_write_failure_does_not_raise(tmp_path: Path) -> None:
     """If on_write raises, the context manager exits cleanly and trajectory is still written."""
