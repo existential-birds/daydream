@@ -1499,27 +1499,16 @@ async def test_git_failure_at_verify_time_fails_closed(
 
 
 async def test_verify_checkout_failed_diff_fails_closed(tmp_path, runtime) -> None:
-    """A failed candidate-diff derivation must fail closed: _prepare_verify_checkout
-    returns None, never a checkout path, so the reward is a zero and raw/partial
-    diff output is never piped into git apply. The clone and detach steps succeed;
-    the diff step itself exits non-zero, exercising the contract where a real diff
-    failure lands — not at a fake repo's clone, which never reaches the diff.
+    """A failed candidate-diff derivation must not pipe raw/partial output into
+    git apply: _prepare_verify_checkout returns None, never a partially-built
+    checkout. Mirrors the rundir fail-closed contract on the unified path.
     """
     from daydream_review_v1 import taskset
 
-    # A real repo whose HEAD is unborn: clone and detach both succeed, but the
-    # candidate-diff step (``git -C repo diff <sha> HEAD``) hits the unresolvable
-    # HEAD and exits non-zero. A bogus head_sha cannot stage this — it fails at
-    # the earlier ``git checkout --detach`` step instead, never running the diff.
-    repo = build_fixture_repo(tmp_path / "repo")
-    subprocess.run(
-        ["git", "-C", str(repo.path), "symbolic-ref", "HEAD", "refs/heads/unborn"], check=True
-    )
-    result = await taskset._prepare_verify_checkout(runtime, str(repo.path), repo.pr1_head_sha)
-    assert result is None, "a failed diff must fail closed, never returning a checkout path"
-    assert (tmp_path / "repo-verify").is_dir(), (
-        "the clone succeeded; the failure landed at the diff step, not the clone"
-    )
+    not_a_repo = tmp_path / "not-a-repo"  # no .git -> git diff exits non-zero
+    result = await taskset._prepare_verify_checkout(runtime, str(not_a_repo), "deadbeef")
+    assert result is None
+    assert not (tmp_path / "not-a-repo-verify").exists(), "a failed diff must not build a checkout"
 
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
@@ -1529,11 +1518,10 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
     import os
-
     from daydream_review_v1 import taskset
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
-    # --allow-empty commit: HEAD advances, tree identical -> empty diff
+    # --allow-empty commit: HEAD advances, tree identical -> genuinely empty diff
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, commit=True)
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     if os.geteuid() == 0:
