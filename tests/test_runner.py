@@ -1441,13 +1441,15 @@ def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) ->
     )
 
 
-def test_manifest_mirrors_recorder_backend_via_per_stack_review(tmp_path: Path) -> None:
-    """The manifest resolves the representative backend via ``per_stack_review``.
+def test_manifest_backend_is_general_default_not_per_stack_review(tmp_path: Path) -> None:
+    """#647: the manifest records the phase-agnostic general default backend.
 
-    ``build_manifest`` must resolve through the same shared resolver as the
-    recorder, so a deep-flow run with a file-config ``per_stack_review``
-    override is labeled with that backend even when CLI ``review_backend`` is
-    set — the ``review`` phase only powers feedback-mode commit-push.
+    The archive manifest must NOT resolve its general ``backend`` through a
+    per-phase key (e.g. ``per_stack_review``) — that mirrored the trajectory's
+    mislabeled review identity. ``backend`` stays the general default
+    (``config.backend`` → file-config global → ``"claude"``) even when a
+    per-phase review override is set, and ``review_backend`` records only the
+    review-specific override marker.
     """
     from daydream.config_file import DaydreamFileConfig
 
@@ -1458,8 +1460,8 @@ def test_manifest_mirrors_recorder_backend_via_per_stack_review(tmp_path: Path) 
         file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
     )
     m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "pi"
-    assert m.review_backend == "pi"
+    assert m.backend == "claude"
+    assert m.review_backend == "codex"
 
 
 def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
@@ -1473,7 +1475,7 @@ def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
     )
     m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
     assert m.backend == "codex"
-    assert m.review_backend == "codex"
+    assert m.review_backend is None
     assert m.fix_backend == "pi"
     assert m.test_backend == "osprey"
     run = m.to_dict()["run"]
@@ -1491,7 +1493,7 @@ def test_manifest_review_only_omits_fix_test_backend(tmp_path: Path) -> None:
     config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
     m = _build_manifest(config, DaydreamRunFlow.TTT, tmp_path)
     assert m.backend == "codex"
-    assert m.review_backend == "codex"
+    assert m.review_backend is None
     assert m.fix_backend is None
     assert m.test_backend is None
     run = m.to_dict()["run"]
@@ -1504,7 +1506,7 @@ def test_manifest_improve_omits_fix_test_backend(tmp_path: Path) -> None:
     config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
     m = _build_manifest(config, DaydreamRunFlow.IMPROVE, tmp_path)
     assert m.backend == "codex"
-    assert m.review_backend == "codex"
+    assert m.review_backend is None
     assert m.fix_backend is None
     assert m.test_backend is None
     run = m.to_dict()["run"]
@@ -1522,7 +1524,7 @@ def test_manifest_feedback_records_fix_omits_test_backend(tmp_path: Path) -> Non
         target=str(tmp_path / "project"), run_eval=False, review_backend="codex",
     )
     m = _build_manifest(config, DaydreamRunFlow.PR, tmp_path)
-    assert m.backend == "codex"
+    assert m.backend == "claude"
     assert m.review_backend == "codex"
     assert m.fix_backend == "claude"
     assert m.test_backend is None
@@ -1535,6 +1537,6 @@ def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
     config = RunConfig(target=str(tmp_path / "project"), run_eval=False)
     m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
     assert m.backend == "claude"
-    assert m.review_backend == "claude"
+    assert m.review_backend is None
     assert m.fix_backend == "claude"
     assert m.test_backend == "claude"

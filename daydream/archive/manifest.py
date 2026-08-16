@@ -47,11 +47,16 @@ class Manifest:
         run_flow: Run flow type (normal, ttt, pr, deep).
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
-        backend: Backend used (claude, codex, pi, osprey).
-        review_backend: Flow's representative backend, resolved through the full
-            precedence chain (``per_stack_review`` for deep-flow runs).
-        fix_backend: Backend used for the fix phase, when the flow runs it.
-        test_backend: Backend used for the test phase, when the flow runs it.
+        backend: Phase-agnostic general default backend (claude, codex) resolved
+            from config, never a per-phase override.
+        review_backend: Review-specific backend override marker, ``None`` when
+            review ran on the general default. NOT the effective review
+            backend: a CLI ``--backend`` masks a file-config review override,
+            so review may have run on ``backend`` even when this is set.
+        fix_backend: Effective backend for the fix phase (override or general
+            default).
+        test_backend: Effective backend for the test phase (override or general
+            default).
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         source_path: Absolute path to the source repository at archive time.
@@ -274,14 +279,21 @@ def build_manifest(
     totals = recorder._final_totals  # noqa: SLF001 - intentional access to recorder internals
 
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
-    from daydream.runner import _recorder_backend_names  # noqa: PLC0415 - deferred import avoids cycle
+    from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
+        _default_backend_name,
+        _recorder_backend_names,
+        _resolved_review_backend_name,
+    )
 
-    # Mirror the trajectory's backend identity through the same shared resolver
-    # used by runner._open_recorder (authoritative per-flow mapping prose lives
-    # in its docstring), so the manifest and trajectory never diverge on which
-    # backend produced the run.
-    names = _recorder_backend_names(config, recorder.run_flow)
-
+    # ``backend`` records the phase-agnostic general default (config.backend →
+    # file-config global → "claude"), never a per-phase override.
+    # ``review_backend`` is an override marker, NOT an effective value: it is
+    # stamped only when a review-specific override exists, and it can differ
+    # from the backend review actually ran on (a CLI ``--backend`` masks a
+    # file-config review override). Sibling fields ``fix_backend``/
+    # ``test_backend`` are effective per-phase values; ``review_backend`` is
+    # not.
+    flow_names = _recorder_backend_names(config, recorder.run_flow)
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -289,10 +301,10 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=names.backend,
-        review_backend=names.backend,
-        fix_backend=names.fix or None,
-        test_backend=names.test or None,
+        backend=_default_backend_name(config),
+        review_backend=_resolved_review_backend_name(config),
+        fix_backend=flow_names.fix or None,
+        test_backend=flow_names.test or None,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,

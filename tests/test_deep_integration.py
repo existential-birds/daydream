@@ -349,6 +349,31 @@ def test_existing_tests_still_collect() -> None:
         spec.loader.exec_module(module)
 
 
+async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: Path, monkeypatch) -> None:
+    """#647: the 'Default backend' status line never shows a review override."""
+    from daydream.exploration import ExplorationContext
+    from daydream.runner import RunConfig, run
+
+    backend = _ClaudeShape(multi_stack_target)
+    _wire_mocks(monkeypatch, backend)
+    # Capture orchestrator print_info messages (override the _silence_ui noop).
+    captured: list[str] = []
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.print_info",
+        lambda *a, **kw: captured.append(str(a[1]) if len(a) > 1 else kw.get("msg", "")),
+    )
+    config = RunConfig(
+        target=str(multi_stack_target),
+        cleanup=False,
+        exploration_context=ExplorationContext(),
+        backend="claude",
+        review_backend="codex",
+    )
+    exit_code = await run(config)
+    assert exit_code == 0, f"run returned {exit_code} (expected 0)"
+    assert "Default backend: claude" in captured, captured
+
+
 async def test_structural_meta_stack_flows_end_to_end(
     multi_stack_target: Path, monkeypatch
 ) -> None:
