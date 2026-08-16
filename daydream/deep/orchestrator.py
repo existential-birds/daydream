@@ -933,6 +933,28 @@ def _has_non_daydream_worktree_changes(status: str) -> bool:
     return False
 
 
+def _read_full_diff(ctx: FlowContext) -> str:
+    """Read the full on-disk PR diff (``ctx.data["diff_path"]``).
+
+    Issue #644 — the gather-time bound shrinks the in-memory
+    ``ctx.data["diff"]`` to ``INLINE_DIFF_BUDGET_BYTES`` via whole-block
+    retention, so consumers that need the COMPLETE diff (the exploration
+    pre-scan, the intent/wonder TTT phases, and the uncovered sweep) must
+    re-read ``diff_path``, which is always written full at gather. This is
+    that single re-read site.
+
+    Raises ``OSError`` on a failed read so each caller keeps its own
+    degradation shape (warn-and-fallback for exploration / TTT,
+    propagate-to-the-fail-open-wrapper for the sweep). When the ctx carries no
+    ``diff_path`` (defensive legacy fallback only, never the default), the
+    bounded in-memory ``ctx.data["diff"]`` is returned instead of crashing.
+    """
+    diff_path = ctx.data.get("diff_path")
+    if diff_path is None:
+        return ctx.data["diff"]
+    return diff_path.read_text(encoding="utf-8")
+
+
 async def _step_exploration(ctx: FlowContext) -> None:
     """Exploration pre-scan (D-43), reused on an exact key match."""
     from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
@@ -950,16 +972,14 @@ async def _step_exploration(ctx: FlowContext) -> None:
     # read failure degrades to the bounded text with a warning rather than
     # failing the run — exploration is fail-open by design.
     diff = ctx.data["diff"]
-    diff_path = ctx.data.get("diff_path")
-    if diff_path is not None:
-        try:
-            diff = diff_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            print_warning(
-                console,
-                f"Could not read the full diff for the exploration pre-scan "
-                f"({exc}); falling back to the bounded in-memory diff",
-            )
+    try:
+        diff = _read_full_diff(ctx)
+    except OSError as exc:
+        print_warning(
+            console,
+            f"Could not read the full diff for the exploration pre-scan "
+            f"({exc}); falling back to the bounded in-memory diff",
+        )
     tier = ctx.data["tier"]
     exploration_path = daydream_dir / "exploration"
 
@@ -1038,24 +1058,20 @@ def _ttt_diff_text(ctx: FlowContext) -> str | None:
     """
     if not ctx.data.get("diff_truncated"):
         return ctx.data["diff"]
-    diff_path = ctx.data.get("diff_path")
-    if diff_path is not None:
-        try:
-            return diff_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            truncation = ctx.data.get("diff_truncation")
-            detail = (
-                f" ({truncation.retained_bytes}/{truncation.original_bytes} "
-                f"bytes, {truncation.retained_blocks}/{truncation.total_blocks} "
-                "blocks retained)"
-                if truncation is not None
-                else ""
-            )
-            print_warning(
-                console,
-                f"Could not read the full diff for the intent/wonder phases "
-                f"({exc}); falling back to the bounded in-memory diff{detail}",
-            )
+    try:
+        return _read_full_diff(ctx)
+    except OSError as exc:
+        truncation = ctx.data.get("diff_truncation")
+        detail = (
+            f" ({truncation.marker.strip()})"
+            if truncation is not None and truncation.marker is not None
+            else ""
+        )
+        print_warning(
+            console,
+            f"Could not read the full diff for the intent/wonder phases "
+            f"({exc}); falling back to the bounded in-memory diff{detail}",
+        )
     return ctx.data["diff"]
 
 
@@ -1465,18 +1481,12 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     # the coverage file set above derives from the same full ``diff.patch``:
     # a bounded in-memory ``ctx.data["diff"]`` would silently route a
     # truncated-away file into ``skipped_small`` (block lookup -> None) and it
-    # would never be swept. A read error here propagates to the step's
+    # would never be swept. A read error propagates to the step's
     # fail-open wrapper (the sweep must NEVER fail the run); it is not
-    # swallowed with a silent empty-diff fallback.
-    full_diff: str
-    diff_path = ctx.data.get("diff_path")
-    if diff_path is not None:
-        full_diff = diff_path.read_text(encoding="utf-8")
-    else:
-        # Defensive legacy fallback only (never the default): a ctx built
-        # without ``diff_path`` degrades to the in-memory diff rather than
-        # crashing the sweep.
-        full_diff = ctx.data["diff"]
+    # swallowed with a silent empty-diff fallback. A ctx built without
+    # ``diff_path`` (defensive legacy fallback only, never the default)
+    # degrades to the in-memory diff rather than crashing the sweep.
+    full_diff = _read_full_diff(ctx)
 
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
@@ -3766,11 +3776,22 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         # after the full diff is persisted, so the disk copy is never bounded.
         bounded_diff, bound_info = bound_deep_diff(diff)
         if bound_info.truncated:
+            dropped = (
+                f"; dropped blocks: {', '.join(bound_info.dropped_paths)}"
+                if bound_info.dropped_paths
+                else ""
+            )
+            oversize = (
+                f"; oversized block kept whole: {', '.join(bound_info.oversize_paths)}"
+                if bound_info.oversize_paths
+                else ""
+            )
             print_warning(
                 console,
                 f"Deep diff truncated: {bound_info.original_bytes} -> "
                 f"{bound_info.retained_bytes} bytes "
-                f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained)",
+                f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained"
+                f"{dropped}{oversize})",
             )
         ctx = FlowContext(
             config=config,

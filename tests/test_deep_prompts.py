@@ -459,6 +459,8 @@ def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
     assert info.original_bytes == len(diff.encode("utf-8"))
     assert info.retained_bytes == len(out.encode("utf-8")) - len((info.marker or "").encode("utf-8"))
     assert info.retained_blocks < info.total_blocks
+    assert info.dropped_paths == ["c.py"]
+    assert "dropped: c.py" in (info.marker or "")
 
 
 def test_bound_deep_diff_oversize_single_block_kept_whole() -> None:
@@ -469,6 +471,7 @@ def test_bound_deep_diff_oversize_single_block_kept_whole() -> None:
     assert "diff --git a/huge.py b/huge.py" in out
     assert "huge.py" in info.oversize_paths
     assert info.retained_blocks == 1
+    assert info.dropped_paths == []  # nothing follows the kept-whole oversize block
 
 
 def test_bound_deep_diff_marker_is_parse_safe() -> None:
@@ -503,6 +506,36 @@ def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     assert both is not None
     assert "def hello(): return 'universe'" in both
     assert "<div>universe</div>" in both
+
+
+def test_diff_blocks_for_files_refuses_partial_inline_for_mixed_stack() -> None:
+    """A stack that mixes retained and dropped blocks falls back to the pointer.
+
+    ``bound_deep_diff`` keeps whole blocks up to the cap and names the dropped
+    ones in the truncation marker; ``_diff_blocks_for_files`` must refuse to
+    inline only the retained hunks of a stack whose other files' blocks were
+    dropped -- the caller then falls back to the diff_path pointer so the
+    reviewer never silently reviews a partial hunk set.
+    """
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
+    bounded, info = bound_deep_diff(diff)
+    assert info.truncated
+    assert info.dropped_paths == ["c.py"]
+
+    # Fully-retained stack still inlines its complete hunks.
+    kept = _diff_blocks_for_files(bounded, ["a.py", "b.py"])
+    assert kept is not None
+    assert "diff --git a/a.py b/a.py" in kept
+    assert "diff --git a/b.py b/b.py" in kept
+    # Fully-dropped stack falls back (no blocks present in the bounded text).
+    assert _diff_blocks_for_files(bounded, ["c.py"]) is None
+    # Mixed stack must NOT get a partial inline of a.py alone.
+    assert _diff_blocks_for_files(bounded, ["a.py", "c.py"]) is None
+    # A scope file never changed in this PR is not mistaken for a dropped block.
+    assert _diff_blocks_for_files(bounded, ["a.py", "never.py"]) is not None
 
 
 def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:

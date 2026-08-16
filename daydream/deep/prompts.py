@@ -245,6 +245,16 @@ _DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
 _DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
 # Fallback header for binary / mode-only diffs that lack `--- / +++`.
 _DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+# Truncation marker emitted by ``bound_deep_diff``; carries the same dropped
+# names as ``DeepDiffBoundInfo.dropped_paths`` so consumers of the bounded text
+# alone (``_diff_blocks_for_files``) can tell a dropped block from a file
+# simply absent from the diff. Parse-safe for every block consumer: the line
+# carries no ``diff --git`` / ``---`` / ``+++`` header, so ``_diff_block_path``
+# returns None and the block splitters skip it.
+_DIFF_TRUNCATION_MARKER = re.compile(
+    r"^# daydream: deep diff truncated: \d+ -> \d+ bytes "
+    r"\(\d+/\d+ blocks retained(?:; dropped: (?P<dropped>[^)]+))?\)\n"
+)
 
 
 def _diff_block_path(block: str) -> str | None:
@@ -301,11 +311,25 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
 
     Returns:
         The concatenated diff blocks (with a trailing newline), or ``None``
-        when the result would exceed the byte budget or no blocks match.
+        when the result would exceed the byte budget, no blocks match, or the
+        ``diff`` is a bounded value whose truncation marker names one of
+        ``files`` as dropped whole (a stack that mixes retained and dropped
+        blocks must fall back to the diff_path pointer rather than inline a
+        silently partial hunk set).
     """
     wanted = set(files)
     if not wanted:
         return None
+
+    # Issue #644 follow-up: ``bound_deep_diff`` drops whole blocks over budget
+    # and names them in the leading truncation marker. A wanted file absent
+    # from the bounded text is only a problem when the marker names it as
+    # dropped -- a scope file never changed in this PR has no hunks to inline.
+    marker = _DIFF_TRUNCATION_MARKER.match(diff)
+    if marker is not None and marker.group("dropped") is not None:
+        dropped = {p.strip() for p in marker.group("dropped").split(",") if p.strip()}
+        if wanted & dropped:
+            return None
 
     selected: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
@@ -325,10 +349,15 @@ class DeepDiffBoundInfo:
     """Truncation statistics for one ``bound_deep_diff`` call.
 
     ``retained_bytes`` excludes the marker line; ``oversize_paths`` names the
-    files whose single block exceeded the cap and was kept whole. Only a
-    LEADING oversize block (one that arrives before any retained block) is
-    kept whole and recorded; an oversize block arriving after a retained
-    block is dropped whole and absent from ``oversize_paths``.
+    files whose single block exceeded the cap and was kept whole;
+    ``dropped_paths`` names the files whose blocks were dropped whole by the
+    bound (``marker`` carries the same names inline, so a consumer of the
+    bounded text alone -- e.g. ``_diff_blocks_for_files`` -- can tell a
+    dropped block from a file simply absent from the diff). Only a LEADING
+    oversize block (one that arrives before any retained block) is kept
+    whole and recorded; an oversize block arriving after a retained block is
+    dropped whole, so it is absent from ``oversize_paths`` but present in
+    ``dropped_paths``.
     """
 
     truncated: bool
@@ -337,6 +366,7 @@ class DeepDiffBoundInfo:
     total_blocks: int = 0
     retained_blocks: int = 0
     oversize_paths: list[str] = field(default_factory=list)
+    dropped_paths: list[str] = field(default_factory=list)
     marker: str | None = None
 
 
@@ -361,6 +391,8 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
     it out of an oversized prompt). The
     returned value carries a leading ``# daydream: deep diff truncated:``
     marker line only when truncated; ``retained_bytes`` excludes the marker.
+    When blocks were dropped the marker names them (``; dropped: <paths>``),
+    mirroring ``dropped_paths`` in the info object.
 
     Blocks that fail to resolve a path via ``_diff_block_path`` (the leading
     empty split fragment, non-``diff --git`` elements) are skipped exactly as
@@ -377,6 +409,7 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
     retained_bytes = 0
     total_blocks = 0
     oversize_paths: list[str] = []
+    dropped_paths: list[str] = []
     for block in _DIFF_BLOCK_SPLIT.split(diff):
         block_path = _diff_block_path(block)
         if block_path is None:
@@ -394,11 +427,16 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
             retained.append(block)
             retained_bytes += block_bytes
             oversize_paths.append(block_path)
-        # else: block dropped whole; never split mid-stream.
+        else:
+            # Block dropped whole; never split mid-stream. The path is
+            # recorded so per-stack extraction can refuse a silently partial
+            # inline when a stack mixes retained and dropped blocks.
+            dropped_paths.append(block_path)
 
+    dropped_clause = f"; dropped: {', '.join(dropped_paths)}" if dropped_paths else ""
     marker = (
         f"# daydream: deep diff truncated: {original_bytes} -> {retained_bytes} bytes "
-        f"({len(retained)}/{total_blocks} blocks retained)\n"
+        f"({len(retained)}/{total_blocks} blocks retained{dropped_clause})\n"
     )
     bounded = marker + "".join(retained)
     return bounded, DeepDiffBoundInfo(
@@ -408,6 +446,7 @@ def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[
         total_blocks=total_blocks,
         retained_blocks=len(retained),
         oversize_paths=oversize_paths,
+        dropped_paths=dropped_paths,
         marker=marker,
     )
 

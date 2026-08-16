@@ -6831,6 +6831,29 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
         assert "SMALL_RETAINED_MARKER" not in prompt, f"{name} inlined the bounded diff"
         assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
 
+    # The python stack owns aaa.py (retained by the bound) AND zzz.py (dropped
+    # whole by the bound): the truncation marker names zzz.py as dropped, so
+    # ``_diff_blocks_for_files`` refuses a partial inline and the python
+    # per-stack prompt falls back to the diff.patch pointer instead of silently
+    # inlining aaa.py's hunk with zzz.py's hunks unreachable. The react stack
+    # (App.tsx only, fully retained) keeps its inline.
+    python_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the python stack" in c["prompt"].lower()
+    )
+    assert "Read it directly" in python_prompt, (
+        "a stack mixing retained and dropped blocks must fall back to the "
+        "full diff.patch pointer"
+    )
+    assert "SMALL_RETAINED_MARKER" not in python_prompt, (
+        "must not inline the retained block while the dropped block is missing"
+    )
+    react_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the react stack" in c["prompt"].lower()
+    )
+    assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
+
 
 async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
@@ -6872,14 +6895,15 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     # (c) the helper's BOUNDED result -- not the full diff -- reaches
     # ctx.data['diff'] and the prompt pipeline. The TTT (intent/wonder) phases
     # deliberately re-read the FULL on-disk diff when truncation happened
-    # (``_ttt_diff_text``), so the only prompt consumer of the bounded value is
-    # the per-stack reviewer: big.py's block sorts LAST in git's byte-ordered
-    # diff, so the bound drops it and the python stack's combined blocks (api.py
-    # only) fit the inline budget -- the python per-stack prompt inlines api.py's
-    # hunk and carries neither big.py's dropped content nor the diff_path
-    # pointer. A gather bug that invokes the helper and discards the result
-    # (storing the full diff) would push the python stack's combined blocks over
-    # the budget, dropping the inline for the pointer.
+    # (``_ttt_diff_text``), so the per-stack reviewer is the bounded value's
+    # prompt consumer: big.py's block sorts LAST in git's byte-ordered diff,
+    # so the bound drops it. The python stack owns api.py AND big.py, so its
+    # wanted files span retained and dropped blocks: ``_diff_blocks_for_files``
+    # reads the truncation marker's dropped names, refuses the partial inline,
+    # and the python per-stack prompt carries the diff_path pointer instead of
+    # api.py's hunk alone. A gather bug that invokes the helper and discards
+    # the result (storing the full diff) would carry no marker and no dropped
+    # names -- the mixing guard could not fire.
     assert len(bounded_results) == 1
     assert "# daydream: deep diff truncated:" in bounded_results[0]
     assert "line 50 of filler content" not in bounded_results[0]
@@ -6887,10 +6911,20 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
         c["prompt"] for c in stub.calls
         if "you are reviewing the python stack" in c["prompt"].lower()
     )
-    assert "diff --git" in per_stack_prompt, (
-        "the bounded diff must be inlined into the python per-stack prompt"
+    assert "Read it directly" in per_stack_prompt, (
+        "the python stack mixes retained (api.py) and dropped (big.py) blocks; "
+        "it must fall back to the full diff.patch pointer, never inline a "
+        "silent partial subset"
     )
+    assert "diff --git" not in per_stack_prompt
     assert "line 50 of filler content" not in per_stack_prompt
+    react_prompt = next(
+        c["prompt"] for c in stub.calls
+        if "you are reviewing the react stack" in c["prompt"].lower()
+    )
+    assert "diff --git" in react_prompt, (
+        "a fully-retained stack must keep its inline hunks"
+    )
 
 
 async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
