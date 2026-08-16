@@ -7,6 +7,7 @@ preserving the accept/reject grammar.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -25,8 +26,9 @@ from daydream.improve.command_contract import (
     valid_repository_file_path,
     validate_applicability,
 )
+from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
-from tests.harness.improve_backend import install_improve_stub
+from tests.harness.improve_backend import improve_artifact, install_improve_stub
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -290,6 +292,154 @@ def test_path_is_confined_allow_absolute_symlinked_ancestor(
     assert path_is_confined(repo, "improve")
     # The resolved spelling of the same path is confined too.
     assert path_is_confined(repo, (real / "repo" / "improve").as_posix(), allow_absolute=True)
+
+
+def test_canonicalize_working_directory_relative_and_dot(tmp_path: Path) -> None:
+    """Must-have #2: relative / ./ / trailing-slash / root spellings collapse."""
+    assert canonicalize_working_directory(tmp_path, ".") == "."
+    assert canonicalize_working_directory(tmp_path, "sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "./sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "sub/") == "sub"
+
+
+def test_canonicalize_working_directory_absolute_collapses_to_relative(tmp_path: Path) -> None:
+    """Must-have #1: an absolute in-repo spelling maps to its repo-relative form."""
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}") == "."
+
+
+def test_canonicalize_working_directory_all_spellings_share_one_key(tmp_path: Path) -> None:
+    """Discriminating: the SAME directory in every accepted spelling yields ONE key."""
+    spelled = {
+        canonicalize_working_directory(tmp_path, wd)
+        for wd in ("sub", "./sub", "sub/", f"{tmp_path}/sub")
+    }
+    assert spelled == {"sub"}
+
+
+def test_canonicalize_working_directory_resolved_repo_spelling(tmp_path: Path) -> None:
+    """The repo.resolve() fallback base: a symlinked repo strips a value
+    spelled with its RESOLVED path, which the literal prefix cannot match."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    # Literal spelling strips on the first (unresolved) base.
+    assert canonicalize_working_directory(link, f"{link}/sub") == "sub"
+    # Resolved spelling matches only the repo.resolve() base.
+    assert canonicalize_working_directory(link, f"{link.resolve()}/sub") == "sub"
+
+
+def test_canonicalize_working_directory_collapses_parent_traversal(tmp_path: Path) -> None:
+    """A ``..``-containing absolute spelling of an in-repo directory yields the
+    same key as its plain spelling (the issue #649 dedup miss)."""
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub/../sub") == "sub"
+
+
+@pytest.mark.anyio
+async def test_host_enumeration_dedups_absolute_model_wd(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+) -> None:
+    """Must-have #1 at the entrypoint: an absolute-spelled model
+    working_directory collapses against the relative host record, so the
+    host command is NOT re-admitted into recon.json."""
+    monkeypatch.setattr(
+        "daydream.improve.orchestrator.enumerate_repository_commands",
+        lambda repo, *, directories=(".",), reserved_ids=(): [
+            {
+                "id": "make-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                "working_directory": "apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "in-scope-paths", "paths": ["apps/billing"]},
+                    "preconditions": [],
+                    "rationale": "The billing service declares the test command.",
+                },
+                "evidence": {
+                    "kind": "host-derived",
+                    "source_path": "apps/billing/pyproject.toml",
+                    "line_anchor": {"start_line": 1, "end_line": 1},
+                    "verbatim_excerpt": "[project]",
+                },
+            }
+        ],
+    )
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.recon_output_override = {
+        "languages": ["python"],
+        "commands": [
+            {
+                "id": "model-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                # Absolute spelling of the SAME directory the host enumerates
+                # relative ("apps/billing").
+                "working_directory": f"{improve_monorepo_target}/apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "whole-repository"},
+                    "preconditions": [],
+                    "rationale": "The root configuration declares the test command.",
+                },
+                "evidence": {
+                    "kind": "literal-command",
+                    "source_path": "pyproject.toml",
+                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "verbatim_excerpt": None,
+                },
+            }
+        ],
+        "conventions": ["OpenAPI First"],
+        "intent_docs": ["README.md"],
+    }
+    stub.plan_gate_on_first_menu_id = True
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    recon = json.loads(
+        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
+    )
+    # The host command was deduped against the absolute model wd: no
+    # re-admitted make-check record, no rejection noise.
+    assert [command["id"] for command in recon["commands"]] == ["model-check"]
+    assert recon["command_rejections"] == []
+
+
+def test_host_enumeration_does_not_dedup_different_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Discriminating: a genuinely different directory is NOT collapsed —
+    normalization must not widen dedup to 'same command anywhere'."""
+    from daydream.improve import orchestrator as orch
+
+    host_record = {
+        "id": "make-check",
+        "command": "make check",
+        "working_directory": "sub",
+    }
+    monkeypatch.setattr(
+        orch, "enumerate_repository_commands", lambda *a, **k: [host_record]
+    )
+    model = [{
+        "id": "m1",
+        "command": "make check",
+        "working_directory": f"{tmp_path}/other",
+    }]
+    count, _, _ = orch._host_enumerated_commands(
+        tmp_path, [], [], model_commands=model
+    )
+    assert count == 1  # different directory stays a separate candidate
 
 
 def test_path_is_confined_allow_absolute_cannot_escape_via_ancestor_skip(

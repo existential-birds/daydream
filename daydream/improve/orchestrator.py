@@ -87,6 +87,7 @@ from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.improve.services import Service, enumerate_services, filter_scope
 from daydream.pr_review import compute_fingerprint
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.repository_paths import canonicalize_working_directory
 from daydream.trajectory import (
     DaydreamPhase,
     get_current_recorder,
@@ -314,14 +315,23 @@ def _host_enumerated_commands(
             f"{type(exc).__name__}: {exc}",
         )
         return 0, [], ["HOST_COMMAND_ENUMERATION_FAILED@/host_commands"]
-    already_cited = {
-        (command["command"], command["working_directory"])
-        for command in model_commands
-    }
+    def _dedup_key(
+        command: dict[str, Any],
+    ) -> tuple[str, str]:
+        """Collapse a model command to the host-enumeration dedup key.
+
+        Both the already-cited set and the candidate filter must use the exact
+        same key (command + canonical working_directory) so an absolute-spelled
+        working_directory collapses against the relative host record.
+        """
+        return (
+            command["command"],
+            canonicalize_working_directory(repo, command["working_directory"]),
+        )
+
+    already_cited = {_dedup_key(command) for command in model_commands}
     candidates = [
-        command
-        for command in enumerated
-        if (command["command"], command["working_directory"]) not in already_cited
+        command for command in enumerated if _dedup_key(command) not in already_cited
     ]
     validated, errors = validate_host_commands(candidates, repo=repo)
     return len(candidates), validated, errors
@@ -437,6 +447,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             output_schema=RECON_SCHEMA,
             read_only=True,
             persist_session=False,
+            validate_fallback_schema=False,
         )
 
     total_candidates = 0
