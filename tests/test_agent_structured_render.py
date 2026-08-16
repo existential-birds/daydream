@@ -196,3 +196,36 @@ async def test_structured_fallback_validates_against_output_schema(
     )
     assert result2 == '{"line": 3}'
     assert isinstance(result2, str)
+
+
+async def test_structured_fallback_recon_not_gated_all_or_nothing(
+    monkeypatch, tmp_path
+) -> None:
+    """RECON's fallback skips the all-or-nothing schema gate: the top-level
+    RECON schema requires languages/commands/conventions/intent_docs, but the
+    orchestrator salvages per-command records downstream via
+    validate_recon_commands() and defaults missing model fields to []. An
+    extracted response with a valid commands list but a missing top-level field
+    must still reach that salvage path instead of falling through to plain text.
+    Non-RECON phases keep the gate (see the REVIEW assertions above)."""
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    schema = {
+        "type": "object",
+        "required": ["languages", "commands", "conventions", "intent_docs"],
+        "properties": {
+            "languages": {"type": "array", "items": {"type": "string"}},
+            "commands": {"type": "array", "items": {"type": "object"}},
+            "conventions": {"type": "array", "items": {"type": "string"}},
+            "intent_docs": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+    backend = MockBackend([
+        TextEvent(text='{"commands": [{"command": "make test"}]}'),
+        ResultEvent(structured_output=None, continuation=None),
+    ])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema
+    )
+    assert result == {"commands": [{"command": "make test"}]}
+    assert isinstance(result, dict)

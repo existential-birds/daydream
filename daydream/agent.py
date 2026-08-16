@@ -828,8 +828,15 @@ async def run_agent(
         # markdown code fences — common with GLM and other OpenAI-compat models).
         # The parsed result must also validate against the requested schema —
         # an unvalidated fallback would be asymmetric with the success path.
+        # RECON is the exception: its top-level schema is all-or-nothing but the
+        # orchestrator salvages per-command records downstream (validate_recon_commands),
+        # so an all-or-nothing gate here would preempt that salvage. The downstream
+        # validator remains the fail-closed enforcement point for RECON.
         if raw.strip():
             parsed = extract_json(raw)
-            if parsed is not None and _validates_schema(parsed, output_schema):
+            if parsed is not None and (
+                phase is DaydreamPhase.RECON
+                or _validates_schema(parsed, output_schema)
+            ):
                 return parsed, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason

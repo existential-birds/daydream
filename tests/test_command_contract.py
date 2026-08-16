@@ -7,6 +7,7 @@ preserving the accept/reject grammar.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -27,7 +28,7 @@ from daydream.improve.command_contract import (
 )
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
-from tests.harness.improve_backend import install_improve_stub
+from tests.harness.improve_backend import improve_artifact, install_improve_stub
 
 MakeConfig = Callable[..., RunConfig]
 
@@ -316,31 +317,84 @@ def test_canonicalize_working_directory_all_spellings_share_one_key(tmp_path: Pa
     assert spelled == {"sub"}
 
 
-def test_host_enumeration_dedups_absolute_model_wd(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.anyio
+async def test_host_enumeration_dedups_absolute_model_wd(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
 ) -> None:
-    """Must-have #1: an absolute-spelled model working_directory collapses
-    against the relative host record, so the host command is NOT re-admitted."""
-    from daydream.improve import orchestrator as orch
-
-    host_record = {
-        "id": "make-check",
-        "command": "make check",
-        "working_directory": "sub",
-    }
+    """Must-have #1 at the entrypoint: an absolute-spelled model
+    working_directory collapses against the relative host record, so the
+    host command is NOT re-admitted into recon.json."""
     monkeypatch.setattr(
-        orch, "enumerate_repository_commands", lambda *a, **k: [host_record]
+        "daydream.improve.orchestrator.enumerate_repository_commands",
+        lambda repo, *, directories=(".",), reserved_ids=(): [
+            {
+                "id": "make-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                "working_directory": "apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "in-scope-paths", "paths": ["apps/billing"]},
+                    "preconditions": [],
+                    "rationale": "The billing service declares the test command.",
+                },
+                "evidence": {
+                    "kind": "host-derived",
+                    "source_path": "apps/billing/pyproject.toml",
+                    "line_anchor": {"start_line": 1, "end_line": 1},
+                    "verbatim_excerpt": "[project]",
+                },
+            }
+        ],
     )
-    model = [{
-        "id": "m1",
-        "command": "make check",
-        "working_directory": f"{tmp_path}/sub",
-    }]
-    count, validated, _ = orch._host_enumerated_commands(
-        tmp_path, [], [], model_commands=model
+    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    stub.recon_output_override = {
+        "languages": ["python"],
+        "commands": [
+            {
+                "id": "model-check",
+                "purpose": "Run the repository test suite",
+                "command": "uv run pytest",
+                # Absolute spelling of the SAME directory the host enumerates
+                # relative ("apps/billing").
+                "working_directory": f"{improve_monorepo_target}/apps/billing",
+                "expected_success": {
+                    "exit_code": 0,
+                    "observable_result": "exit 0 and the tests pass",
+                },
+                "applicability": {
+                    "scope": {"kind": "whole-repository"},
+                    "preconditions": [],
+                    "rationale": "The root configuration declares the test command.",
+                },
+                "evidence": {
+                    "kind": "literal-command",
+                    "source_path": "pyproject.toml",
+                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "verbatim_excerpt": None,
+                },
+            }
+        ],
+        "conventions": ["OpenAPI First"],
+        "intent_docs": ["README.md"],
+    }
+    stub.plan_gate_on_first_menu_id = True
+
+    code = await run(make_config(improve_monorepo_target, flow_name="improve"))
+
+    assert code == 0
+    recon = json.loads(
+        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
     )
-    assert count == 0  # host command deduped against the absolute model wd
-    assert validated == []
+    # The host command was deduped against the absolute model wd: no
+    # re-admitted make-check record, no rejection noise.
+    assert [command["id"] for command in recon["commands"]] == ["model-check"]
+    assert recon["command_rejections"] == []
 
 
 def test_host_enumeration_does_not_dedup_different_directory(
