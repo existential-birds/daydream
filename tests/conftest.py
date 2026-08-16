@@ -713,9 +713,11 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
 def improve_fixture_service(apps_dir: Path) -> str:
     """Pick one service directory from ``apps/`` for the host-evidence record.
 
-    Only directories that look like a service (contain a ``pyproject.toml``)
-    qualify: the host evidence slices ``pyproject.toml`` line 1, so a
-    non-service directory would break the attributable-error guarantee.
+    Only directories that look like a service (contain a ``pyproject.toml``
+    whose line 1 is ``[project]``) qualify: the host evidence slices
+    ``pyproject.toml`` line 1 verbatim, so a non-service directory or a
+    service whose pyproject does not start with ``[project]`` would silently
+    change host evidence and break the attributable-error guarantee.
     """
     service_entries: list[Path] = []
     if apps_dir.is_dir():
@@ -729,16 +731,22 @@ def improve_fixture_service(apps_dir: Path) -> str:
             "improve_monorepo_target fixture must contain at least one "
             "service directory under apps/"
         )
-    return service_entries[0].name
+    chosen = service_entries[0]
+    if chosen.joinpath("pyproject.toml").read_text(encoding="utf-8").splitlines()[:1] != ["[project]"]:
+        raise AssertionError(
+            f"improve_monorepo_target service {chosen.name!r} must declare "
+            "'[project]' on pyproject.toml line 1 to anchor host evidence"
+        )
+    return chosen.name
 
 
 def improve_fixture_test_command_anchor(pyproject: Path) -> int:
     """Line of the ``test-command`` declaration in the root ``pyproject.toml``.
 
     The declaration must equal ``uv run pytest`` (validated via tomllib); the
-    anchor is the line whose stripped text starts with the ``test-command``
-    key, not a substring scan that could false-positive on an earlier line
-    merely containing the text.
+    anchor is the line whose stripped text is exactly the ``test-command`` key
+    (up to ``=``), not a prefix scan that could false-positive on a sibling key
+    like ``test-command-timeout`` on an earlier line.
     """
     cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
@@ -749,7 +757,7 @@ def improve_fixture_test_command_anchor(pyproject: Path) -> int:
     for line_number, line in enumerate(
         pyproject.read_text(encoding="utf-8").splitlines(), 1
     ):
-        if line.strip().startswith("test-command"):
+        if line.strip().split("=", 1)[0].strip() == "test-command":
             return line_number
     raise AssertionError(
         "improve_monorepo_target fixture must declare test command "
