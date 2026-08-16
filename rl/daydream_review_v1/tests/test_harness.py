@@ -257,12 +257,14 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     """The docker deep flow's first write succeeds because the harness hands the
     checkout + in-container mirror to the agent uid before the privilege drop.
 
-    repo.Dockerfile clones /work/repo as root (no layer chowns it), so without
-    this handoff an agent-uid process would EACCES on its first write
-    (.daydream/ mkdir, patch, git add/commit/push). The harness issues
-    `chown -R agent:agent <repo> /srv/mirror.git` before launching through
-    run-as-agent; this pins that the ownership handoff is actually issued under
-    a docker-shaped runtime (the existing wrapper test only pinned argv[0]).
+    repo.Dockerfile chowns /work/repo to the agent at build time
+    (RUN chown -R agent:agent /work/repo), but the in-container mirror at
+    /srv/mirror.git is baked by COPY and never chowned by the image, so without
+    this handoff an agent-uid process would still EACCES on the mirror. The
+    harness issues `chown -R agent:agent <repo> /srv/mirror.git` before
+    launching through run-as-agent; this pins that the ownership handoff is
+    actually issued under a docker-shaped runtime (the existing wrapper test
+    only pinned argv[0]).
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
