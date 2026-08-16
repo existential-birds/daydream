@@ -73,6 +73,8 @@ class _MockConfig:
     test_backend: str | None = None
     output_mode: str = "loop"
     shallow: bool = False
+    bot: str | None = None
+    flow_name: str | None = None
     loop: bool = False
     archive: bool = True
     run_eval: bool = False
@@ -197,52 +199,86 @@ def test_build_manifest_basic(tmp_path: Path):
     assert m.head_sha == "a" * 40
 
 
-def test_build_manifest_deep_records_per_stack_review_tier(tmp_path: Path) -> None:
-    """Issue #646: a deep manifest records the per-stack tier, distinct from review."""
+@pytest.mark.parametrize(
+    ("flow_name", "shallow"),
+    [
+        (None, False),      # default deep loop
+        (None, True),       # --shallow single-stack
+        ("deep", False),   # --flow deep
+        ("shallow", False),  # --flow shallow
+        ("review", False),   # --flow review
+    ],
+)
+def test_build_manifest_per_stack_review_tier(
+    tmp_path: Path, flow_name: str | None, shallow: bool
+) -> None:
+    """Issue #646: every deep-flow mode that executes per-stack reviews records the
+    per-stack tier resolved from its own key — including shallow, whose collapsed
+    single stack is still reviewed by ``phase_per_stack_reviews`` on the
+    ``per_stack_review`` tier."""
     fc = DaydreamFileConfig(
         model=None, backend=None,
         phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}},
     )
     config = RunConfig(
         target=str(tmp_path), backend=None, model=None,
-        file_config=fc, review_backend="claude", shallow=False,
+        file_config=fc, shallow=shallow, flow_name=flow_name,
+        review_backend="claude",
     )
     m = build_manifest(
         recorder=cast(TrajectoryRecorder, _MockRecorder()),
         config=config, git_ctx=GitContext(),
         status="complete", archive_path=tmp_path,
     )
-    assert m.deep is True
-    assert m.per_stack_review_backend == "codex"     # per-stack tier resolved from its own key
-    assert m.per_stack_review_model == "gpt-psr"
-    assert m.review_backend == "claude"              # review tier unchanged, distinct
     run = m.to_dict()["run"]
+    assert m.per_stack_review_backend == "codex"  # per-stack tier resolved from its own key
+    assert m.per_stack_review_model == "gpt-psr"
+    assert m.review_backend == "claude"           # review tier unchanged, distinct
     assert run["per_stack_review_backend"] == "codex"
     assert run["per_stack_review_model"] == "gpt-psr"
     assert run["review_backend"] == "claude"
 
 
-def test_build_manifest_shallow_omits_per_stack_review(tmp_path: Path) -> None:
-    """Issue #646: shallow/non-deep manifests are byte-for-byte unchanged."""
-    fc = DaydreamFileConfig(
-        model=None, backend=None,
-        phases={"per_stack_review": {"backend": "codex", "model": "gpt-psr"}},
-    )
-    config = RunConfig(
-        target=str(tmp_path), backend=None, model=None,
-        file_config=fc, shallow=True,
-    )
+def test_build_manifest_omits_per_stack_review_without_spine(tmp_path: Path) -> None:
+    """Issue #646: runs that never execute per-stack reviews record no identity —
+    feedback mode (the review spine is skipped entirely) and improve/custom flows
+    (which never invoke the deep orchestrator's per-stack-reviews step)."""
+    for config in (
+        RunConfig(target=str(tmp_path), backend=None, model=None,
+                  bot="myapp[bot]", pr_number=42),        # feedback mode
+        RunConfig(target=str(tmp_path), backend=None, model=None,
+                  flow_name="improve"),                   # improve flow
+        RunConfig(target=str(tmp_path), backend=None, model=None,
+                  flow_name="custom-flow"),               # custom flow
+    ):
+        m = build_manifest(
+            recorder=cast(TrajectoryRecorder, _MockRecorder()),
+            config=config, git_ctx=GitContext(),
+            status="complete", archive_path=tmp_path,
+        )
+        run = m.to_dict()["run"]
+        assert m.per_stack_review_backend is None
+        assert m.per_stack_review_model is None
+        assert "per_stack_review_backend" not in run
+        assert "per_stack_review_model" not in run
+
+
+def test_build_manifest_pi_deep_records_backend_default_model(tmp_path: Path) -> None:
+    """Issue #646: a Pi deep run with no explicit model override records Pi's
+    backend default. Pi's default intentionally lives outside PHASE_DEFAULT_MODELS
+    (it is a backend fallback), so _resolved_model alone leaves the load-bearing
+    model NULL; the manifest surfaces the backend default instead."""
+    from daydream.config import DEFAULT_PI_MODEL
+
     m = build_manifest(
         recorder=cast(TrajectoryRecorder, _MockRecorder()),
-        config=config, git_ctx=GitContext(),
+        config=RunConfig(target=str(tmp_path), backend="pi", model=None),
+        git_ctx=GitContext(),
         status="complete", archive_path=tmp_path,
     )
-    assert m.deep is False
-    assert m.per_stack_review_backend is None
-    assert m.per_stack_review_model is None
-    run = m.to_dict()["run"]
-    assert "per_stack_review_backend" not in run
-    assert "per_stack_review_model" not in run
+    assert m.per_stack_review_backend == "pi"
+    assert m.per_stack_review_model == DEFAULT_PI_MODEL
+    assert m.to_dict()["run"]["per_stack_review_model"] == DEFAULT_PI_MODEL
 
 
 def test_manifest_to_dict_structure(tmp_path: Path):
