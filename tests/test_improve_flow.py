@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import time
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -1095,19 +1096,64 @@ async def test_host_enumeration_dedups_absolute_model_wd(
 ) -> None:
     """A model-cited command whose working_directory is spelled absolutely is
     deduped against the host record for the same directory (relative spelling):
-    exactly one command record, no rejection noise (issue #654)."""
+    exactly one command record, no rejection noise (issue #654).
+
+    Fixture contract (mirrors tests/test_command_contract.py): the service dir
+    and the test-command anchor are derived from the fixture's actual content
+    rather than hardcoded, so a future fixture edit surfaces as an attributable
+    error instead of a silent meaning shift.
+    """
+    # Derive a real service dir (one containing a pyproject.toml) from the
+    # fixture, and the root test-command declaration line, matching the
+    # command_contract copy's hardening.
+    service = next(
+        (
+            p.name
+            for p in sorted((improve_monorepo_target / "apps").iterdir())
+            if p.is_dir() and (p / "pyproject.toml").is_file()
+        ),
+        None,
+    )
+    if service is None:
+        raise AssertionError(
+            "improve_monorepo_target fixture must contain at least one "
+            "service directory under apps/"
+        )
+    rel = f"apps/{service}"
+    root_pyproject = improve_monorepo_target / "pyproject.toml"
+    cfg = tomllib.loads(root_pyproject.read_text(encoding="utf-8"))
+    if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
+        raise AssertionError(
+            "improve_monorepo_target fixture must declare test command "
+            "'uv run pytest' in its root pyproject.toml"
+        )
+    anchor_line = next(
+        (
+            i
+            for i, line in enumerate(
+                root_pyproject.read_text(encoding="utf-8").splitlines(), 1
+            )
+            if line.strip().startswith("test-command")
+        ),
+        None,
+    )
+    if anchor_line is None:
+        raise AssertionError(
+            "improve_monorepo_target fixture must declare test command "
+            "'uv run pytest' in its root pyproject.toml"
+        )
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
             _dedup_test_command(
                 command_id="make-check",
                 purpose="Run the repository test suite",
-                working_directory="apps/billing",
-                scope={"kind": "in-scope-paths", "paths": ["apps/billing"]},
-                rationale="The billing service declares the test command.",
+                working_directory=rel,
+                scope={"kind": "in-scope-paths", "paths": [rel]},
+                rationale=f"The {service} service declares the test command.",
                 evidence={
                     "kind": "host-derived",
-                    "source_path": "apps/billing/pyproject.toml",
+                    "source_path": f"{rel}/pyproject.toml",
                     "line_anchor": {"start_line": 1, "end_line": 1},
                     "verbatim_excerpt": "[project]",
                 },
@@ -1122,14 +1168,14 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 command_id="model-check",
                 purpose="Run the repository test suite",
                 # Absolute spelling of the SAME directory the host enumerates
-                # relative ("apps/billing").
-                working_directory=f"{improve_monorepo_target}/apps/billing",
+                # relative.
+                working_directory=f"{improve_monorepo_target}/{rel}",
                 scope={"kind": "whole-repository"},
                 rationale="The root configuration declares the test command.",
                 evidence={
                     "kind": "literal-command",
                     "source_path": "pyproject.toml",
-                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "line_anchor": {"start_line": anchor_line, "end_line": anchor_line},
                     "verbatim_excerpt": None,
                 },
             )
