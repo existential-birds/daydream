@@ -25,6 +25,7 @@ from daydream.improve.command_contract import (
     valid_repository_file_path,
     validate_applicability,
 )
+from daydream.repository_paths import canonicalize_working_directory
 from daydream.runner import RunConfig, run
 from tests.harness.improve_backend import install_improve_stub
 
@@ -344,3 +345,28 @@ async def test_improve_recon_schema_sent_to_backend_is_lookaround_free(
     for schema in schemas:
         for pattern in _iter_schema_patterns(schema):
             assert re.search(r"\(\?[=!<]", pattern) is None
+
+
+def test_canonicalize_working_directory_collapses_all_spellings(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    # All spellings of the same in-repo directory share one canonical form.
+    assert canonicalize_working_directory(tmp_path, "sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "./sub") == "sub"
+    assert canonicalize_working_directory(tmp_path, "sub/") == "sub"
+    assert canonicalize_working_directory(tmp_path, str(sub)) == "sub"      # absolute
+    assert canonicalize_working_directory(tmp_path, ".") == "."              # root relative
+    assert canonicalize_working_directory(tmp_path, str(tmp_path)) == "."    # root absolute
+
+
+def test_canonicalize_working_directory_never_raises_on_a_confined_path(tmp_path: Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    for wd in (".", "sub", "./sub", "sub/", str(sub), str(tmp_path)):
+        # "sub/" is not confinement-accepted by the default gate; the
+        # canonicalizer must still handle it losslessly and never raise.
+        if wd == "sub/":
+            assert canonicalize_working_directory(tmp_path, wd) == "sub"
+            continue
+        assert path_is_confined(tmp_path, wd, allow_absolute=True)
+        assert canonicalize_working_directory(tmp_path, wd) in (".", "sub")
