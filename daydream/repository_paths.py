@@ -77,6 +77,24 @@ def _strip_prefix(
     return None
 
 
+def _strip_repo_prefix(
+    parts: tuple[str, ...], repo: Path, root: Path
+) -> tuple[str, ...] | None:
+    """Return ``parts`` minus a leading repo-root prefix, else None.
+
+    Tries the un-resolved ``repo`` first, then the resolved ``root`` (which
+    must be ``repo.resolve()``): a symlinked ancestor of the repo (e.g. macOS
+    ``/tmp`` -> ``/private/tmp``) makes the two differ, and an absolute
+    spelling of an in-repo path may be given through either. Component-wise,
+    so ``/repo/sub`` and ``/repo/sub2`` cannot collide.
+    """
+    for base in (PurePosixPath(repo).parts, PurePosixPath(str(root)).parts):
+        stripped = _strip_prefix(parts, base)
+        if stripped is not None:
+            return stripped
+    return None
+
+
 def _walk_components(candidate: Path, parts: Sequence[str]) -> Path | None:
     """Return ``candidate`` advanced through ``parts``, or None on a crossing.
 
@@ -139,11 +157,7 @@ def path_is_confined(
             # are adjudicated by the containment check below; walk only the
             # components at or below the repo root, exactly like the relative
             # form does.
-            stripped = _strip_prefix(parts, PurePosixPath(repo).parts)
-            if stripped is None:
-                stripped = _strip_prefix(
-                    parts, PurePosixPath(str(root)).parts
-                )
+            stripped = _strip_repo_prefix(parts, repo, root)
             if stripped is not None:
                 parts = stripped
         walked = _walk_components(candidate, parts)
@@ -179,14 +193,9 @@ def canonicalize_working_directory(repo: Path, value: str) -> str:
         return "."
     if value.startswith("/"):
         parts = PurePosixPath(value).parts
-        for base in (
-            PurePosixPath(repo).parts,
-            PurePosixPath(str(repo.resolve())).parts,
-        ):
-            stripped = _strip_prefix(parts, base)
-            if stripped is not None:
-                value = "/".join(stripped) if stripped else "."
-                break
+        stripped = _strip_repo_prefix(parts, repo, repo.resolve())
+        if stripped is not None:
+            value = "/".join(stripped) if stripped else "."
     canonical = canonicalize_directory_scope(value)
     return canonical or "."
 

@@ -359,6 +359,28 @@ def test_canonicalize_working_directory_collapses_all_spellings(tmp_path: Path) 
     assert canonicalize_working_directory(tmp_path, str(tmp_path)) == "."    # root absolute
 
 
+def test_canonicalize_working_directory_symlinked_ancestor_fallback(
+    tmp_path: Path,
+) -> None:
+    """The resolved-root fallback base collapses spellings through a symlink.
+
+    Regression pin for the second ``_strip_repo_prefix`` base: when an
+    ancestor of the repo is a symlink (macOS ``/tmp`` -> ``/private/tmp``),
+    ``repo.resolve()`` differs from ``repo``, so only the resolved root strips
+    an absolute spelling given through the real path.
+    """
+    real = tmp_path / "real"
+    (real / "repo" / "sub").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    repo = alias / "repo"
+    # Absolute spelling through the symlinked ancestor matches the un-resolved
+    # base; the resolved spelling exercises the fallback base.
+    assert canonicalize_working_directory(repo, (repo / "sub").as_posix()) == "sub"
+    assert canonicalize_working_directory(repo, (real / "repo" / "sub").as_posix()) == "sub"
+    assert canonicalize_working_directory(repo, (real / "repo").as_posix()) == "."
+
+
 def test_canonicalize_working_directory_never_raises_on_a_confined_path(tmp_path: Path) -> None:
     sub = tmp_path / "sub"
     sub.mkdir()
