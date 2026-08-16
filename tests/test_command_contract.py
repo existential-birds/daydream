@@ -344,7 +344,31 @@ async def test_host_enumeration_dedups_absolute_model_wd(
 ) -> None:
     """Must-have #1 at the entrypoint: an absolute-spelled model
     working_directory collapses against the relative host record, so the
-    host command is NOT re-admitted into recon.json."""
+    host command is NOT re-admitted into recon.json.
+
+    Fixture contract: ``improve_monorepo_target`` must remain a monorepo
+    that (a) declares the test command ``uv run pytest`` in its root
+    ``pyproject.toml`` and (b) contains at least one service directory
+    under ``apps/``. Both facts are derived from the fixture's actual
+    content below rather than hardcoded, so any layout/names that retain
+    that semantic content keep this test driving the dedup path; a future
+    editor changing the fixture must preserve those two properties or this
+    test fails with the attributable errors below."""
+    # Discover a real service directory from the fixture instead of
+    # hardcoding a name: any directory under apps/ works, because dedup
+    # collapses the absolute model wd against the relative host wd.
+    apps_dir = improve_monorepo_target / "apps"
+    service_entries = (
+        sorted(p for p in apps_dir.iterdir() if p.is_dir()) if apps_dir.is_dir() else []
+    )
+    if not service_entries:
+        raise AssertionError(
+            "improve_monorepo_target fixture must contain at least one "
+            "service directory under apps/"
+        )
+    service = service_entries[0].name
+    rel = f"apps/{service}"
+    abs_wd = f"{improve_monorepo_target}/apps/{service}"
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
@@ -352,19 +376,19 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 "id": "make-check",
                 "purpose": "Run the repository test suite",
                 "command": "uv run pytest",
-                "working_directory": "apps/billing",
+                "working_directory": rel,
                 "expected_success": {
                     "exit_code": 0,
                     "observable_result": "exit 0 and the tests pass",
                 },
                 "applicability": {
-                    "scope": {"kind": "in-scope-paths", "paths": ["apps/billing"]},
+                    "scope": {"kind": "in-scope-paths", "paths": [rel]},
                     "preconditions": [],
-                    "rationale": "The billing service declares the test command.",
+                    "rationale": f"The {service} service declares the test command.",
                 },
                 "evidence": {
                     "kind": "host-derived",
-                    "source_path": "apps/billing/pyproject.toml",
+                    "source_path": f"{rel}/pyproject.toml",
                     "line_anchor": {"start_line": 1, "end_line": 1},
                     "verbatim_excerpt": "[project]",
                 },
@@ -398,8 +422,8 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 "purpose": "Run the repository test suite",
                 "command": "uv run pytest",
                 # Absolute spelling of the SAME directory the host enumerates
-                # relative ("apps/billing").
-                "working_directory": f"{improve_monorepo_target}/apps/billing",
+                # relative; dedup collapses the two spellings.
+                "working_directory": abs_wd,
                 "expected_success": {
                     "exit_code": 0,
                     "observable_result": "exit 0 and the tests pass",
