@@ -9,8 +9,10 @@ from daydream.deep.prompts import (
     CONFIG_FLOW_TRACE_INSTRUCTION,
     CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
     DOC_REVIEW_NOTICE,
+    INLINE_DIFF_BUDGET_BYTES,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
+    bound_deep_diff,
     build_arbiter_prompt,
     build_generic_fallback_prompt,
     build_merge_prompt,
@@ -415,6 +417,82 @@ _DIFF_TWO_FILES = (
 )
 
 
+# =============================================================================
+# Issue #644 — bound the deep-flow diff at gather time (whole-block retention)
+# =============================================================================
+
+
+def _blk(path: str, body: str) -> str:
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        f"-{body}\n"
+        f"+{body.upper()}\n"
+    )
+
+
+def test_bound_deep_diff_under_budget_is_byte_identical() -> None:
+    """Must-have #4: at/under cap → identical value, no marker, no truncation."""
+    out, info = bound_deep_diff(_DIFF_TWO_FILES)
+    assert out == _DIFF_TWO_FILES
+    assert not info.truncated
+    assert info.marker is None
+
+
+def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
+    """Must-have #2: over cap → only whole blocks retained; each byte-identical."""
+    from daydream.deep.coverage import diff_block_for_file
+
+    body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
+    out, info = bound_deep_diff(diff)
+    assert info.truncated
+    assert "diff --git a/a.py b/a.py" in out
+    assert "diff --git a/b.py b/b.py" in out
+    # c.py's block is dropped whole (never split mid-stream).
+    assert "diff --git a/c.py b/c.py" not in out
+    assert "-" + "x" * body in out  # a retained block's hunk body is present, unchanged
+    # Every retained block is byte-identical to its source block.
+    assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
+    assert diff_block_for_file(out, "b.py") == diff_block_for_file(diff, "b.py")
+    assert info.original_bytes == len(diff.encode("utf-8"))
+    assert info.retained_bytes == len(out.encode("utf-8")) - len((info.marker or "").encode("utf-8"))
+    assert info.retained_blocks < info.total_blocks
+    assert info.dropped_paths == ["c.py"]
+    assert "dropped: c.py" in (info.marker or "")
+
+
+def test_bound_deep_diff_oversize_single_block_kept_whole() -> None:
+    """Must-have #5: a single block larger than the cap is kept whole + oversize marker."""
+    diff = _blk("huge.py", "y" * (INLINE_DIFF_BUDGET_BYTES + 256))
+    out, info = bound_deep_diff(diff)
+    assert info.truncated
+    assert "diff --git a/huge.py b/huge.py" in out
+    assert "huge.py" in info.oversize_paths
+    assert info.retained_blocks == 1
+    assert info.dropped_paths == []  # nothing follows the kept-whole oversize block
+
+
+def test_bound_deep_diff_marker_is_parse_safe() -> None:
+    """Must-have #3 + spike: marker element is skipped by every block consumer."""
+    # Derive the block body from the budget (not a magic size) so the test stays
+    # valid if INLINE_DIFF_BUDGET_BYTES changes: three whole blocks, exactly two
+    # fit under the cap, so the marker-skip assertions exercise a dropped block.
+    body = INLINE_DIFF_BUDGET_BYTES // 5
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
+    out, info = bound_deep_diff(diff)
+    assert info.marker is not None
+    assert out.startswith("# daydream: deep diff truncated:")
+    # count_changed_files / _diff_changed_files / diff_block_for_file ignore the marker.
+    from daydream.deep.coverage import diff_block_for_file
+    from daydream.exploration_runner import count_changed_files
+
+    assert count_changed_files(out) == 2
+    assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
+    assert diff_block_for_file(out, "c.py") is None
+
+
 def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     """AC4 helper: ``_diff_blocks_for_files`` returns only the blocks for the
     requested files (post-state path match), concatenated as-is.
@@ -432,6 +510,36 @@ def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     assert both is not None
     assert "def hello(): return 'universe'" in both
     assert "<div>universe</div>" in both
+
+
+def test_diff_blocks_for_files_refuses_partial_inline_for_mixed_stack() -> None:
+    """A stack that mixes retained and dropped blocks falls back to the pointer.
+
+    ``bound_deep_diff`` keeps whole blocks up to the cap and names the dropped
+    ones in the truncation marker; ``_diff_blocks_for_files`` must refuse to
+    inline only the retained hunks of a stack whose other files' blocks were
+    dropped -- the caller then falls back to the diff_path pointer so the
+    reviewer never silently reviews a partial hunk set.
+    """
+    from daydream.deep.prompts import _diff_blocks_for_files
+
+    body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
+    bounded, info = bound_deep_diff(diff)
+    assert info.truncated
+    assert info.dropped_paths == ["c.py"]
+
+    # Fully-retained stack still inlines its complete hunks.
+    kept = _diff_blocks_for_files(bounded, ["a.py", "b.py"])
+    assert kept is not None
+    assert "diff --git a/a.py b/a.py" in kept
+    assert "diff --git a/b.py b/b.py" in kept
+    # Fully-dropped stack falls back (no blocks present in the bounded text).
+    assert _diff_blocks_for_files(bounded, ["c.py"]) is None
+    # Mixed stack must NOT get a partial inline of a.py alone.
+    assert _diff_blocks_for_files(bounded, ["a.py", "c.py"]) is None
+    # A scope file never changed in this PR is not mistaken for a dropped block.
+    assert _diff_blocks_for_files(bounded, ["a.py", "never.py"]) is not None
 
 
 def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:

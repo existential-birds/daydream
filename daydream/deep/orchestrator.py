@@ -171,6 +171,7 @@ except ImportError:  # pragma: no cover -- only hit when Phases 1-4 absent
 from daydream.deep.prompts import (
     _DIFF_BLOCK_SPLIT,
     _diff_block_path,
+    bound_deep_diff,
 )
 
 # User-visible pipeline stages (exploration is a pre-stage banner, not counted).
@@ -932,6 +933,28 @@ def _has_non_daydream_worktree_changes(status: str) -> bool:
     return False
 
 
+def _read_full_diff(ctx: FlowContext) -> str:
+    """Read the full on-disk PR diff (``ctx.data["diff_path"]``).
+
+    Issue #644 — the gather-time bound shrinks the in-memory
+    ``ctx.data["diff"]`` to ``INLINE_DIFF_BUDGET_BYTES`` via whole-block
+    retention, so consumers that need the COMPLETE diff (the exploration
+    pre-scan, the intent/wonder TTT phases, and the uncovered sweep) must
+    re-read ``diff_path``, which is always written full at gather. This is
+    that single re-read site.
+
+    Raises ``OSError`` on a failed read so each caller keeps its own
+    degradation shape (warn-and-fallback for exploration / TTT,
+    propagate-to-the-fail-open-wrapper for the sweep). When the ctx carries no
+    ``diff_path`` (defensive legacy fallback only, never the default), the
+    bounded in-memory ``ctx.data["diff"]`` is returned instead of crashing.
+    """
+    diff_path = ctx.data.get("diff_path")
+    if diff_path is None:
+        return ctx.data["diff"]
+    return diff_path.read_text(encoding="utf-8")
+
+
 async def _step_exploration(ctx: FlowContext) -> None:
     """Exploration pre-scan (D-43), reused on an exact key match."""
     from daydream.exploration import cache_key_path, exploration_cache_key, read_cache_key
@@ -940,7 +963,23 @@ async def _step_exploration(ctx: FlowContext) -> None:
     config = ctx.config
     target_dir = ctx.work.repo
     daydream_dir = target_dir / ".daydream"
+    # Issue #644 — the pre-scan must be grounded in the FULL diff, never the
+    # bounded in-memory ``ctx.data["diff"]``: ``detect_affected_files`` seeds a
+    # specialist per affected file, so a dropped-block file would otherwise get
+    # zero exploration context, and the exact-match cache key would cover only
+    # the retained blocks (a change confined to a dropped-block region could
+    # then hit the cache). ``diff_path`` is always written full at gather; a
+    # read failure degrades to the bounded text with a warning rather than
+    # failing the run — exploration is fail-open by design.
     diff = ctx.data["diff"]
+    try:
+        diff = _read_full_diff(ctx)
+    except OSError as exc:
+        print_warning(
+            console,
+            f"Could not read the full diff for the exploration pre-scan "
+            f"({exc}); falling back to the bounded in-memory diff",
+        )
     tier = ctx.data["tier"]
     exploration_path = daydream_dir / "exploration"
 
@@ -1001,6 +1040,41 @@ async def _step_exploration(ctx: FlowContext) -> None:
     ctx.data["exploration_dir"] = exploration_dir
 
 
+def _ttt_diff_text(ctx: FlowContext) -> str | None:
+    """The diff text handed to the TTT phases (intent/wonder).
+
+    Issue #644 — the gather-time bound shrinks an over-budget diff to whole
+    retained blocks so ``ctx.data["diff"]`` fits the inline prompt budget, but
+    the inline prompts promise "the complete diff is inlined below (do NOT
+    re-Read ``diff.patch``)". Inlining the bounded text would make that claim
+    over a truncated diff with no path to the dropped blocks, so when the diff
+    WAS truncated the FULL on-disk diff (``ctx.data["diff_path"]``, always
+    written full at gather) is handed over instead: it never fits the inline
+    budget, so worktree-cwd backends keep the ``diff.patch`` pointer and
+    disposable-clone read-only backends keep their documented truncated-inline
+    fallback. The bounded text is therefore only ever inlined when it genuinely
+    IS the complete diff. A full-diff read failure degrades to the bounded text
+    with a warning (defensive only — ``diff.patch`` was written this run).
+    """
+    if not ctx.data.get("diff_truncated"):
+        return ctx.data["diff"]
+    try:
+        return _read_full_diff(ctx)
+    except OSError as exc:
+        truncation = ctx.data.get("diff_truncation")
+        detail = (
+            f" ({truncation.marker.strip()})"
+            if truncation is not None and truncation.marker is not None
+            else ""
+        )
+        print_warning(
+            console,
+            f"Could not read the full diff for the intent/wonder phases "
+            f"({exc}); falling back to the bounded in-memory diff{detail}",
+        )
+    return ctx.data["diff"]
+
+
 async def _step_intent(ctx: FlowContext) -> None:
     """TTT intent analysis, grounded by the PR description when it is fresh.
 
@@ -1051,7 +1125,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             ctx.data["branch"],
             exploration_dir=ctx.data["exploration_dir"],
             pr_description=pr_description,
-            diff_text=ctx.data["diff"],
+            diff_text=_ttt_diff_text(ctx),
         )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
@@ -1076,7 +1150,7 @@ async def _wonder(ctx: FlowContext) -> None:
                 ctx.data["diff_path"],
                 intent_summary,
                 exploration_dir=ctx.data["exploration_dir"],
-                diff_text=ctx.data["diff"],
+                diff_text=_ttt_diff_text(ctx),
             )
 
     alts_p = _alternatives_path(ctx.data["dd"])
@@ -1402,9 +1476,21 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
 
+    # Issue #644 — the sweep's block extraction must source the FULL on-disk
+    # diff (``ctx.data["diff_path"]``, always written full at gather) because
+    # the coverage file set above derives from the same full ``diff.patch``:
+    # a bounded in-memory ``ctx.data["diff"]`` would silently route a
+    # truncated-away file into ``skipped_small`` (block lookup -> None) and it
+    # would never be swept. A read error propagates to the step's
+    # fail-open wrapper (the sweep must NEVER fail the run); it is not
+    # swallowed with a silent empty-diff fallback. A ctx built without
+    # ``diff_path`` (defensive legacy fallback only, never the default)
+    # degrades to the in-memory diff rather than crashing the sweep.
+    full_diff = _read_full_diff(ctx)
+
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
-        ctx.data["diff"],
+        full_diff,
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
         max_files=_uncovered_sweep_max_files(config),
     )
@@ -1462,7 +1548,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             output_path = dd / f"uncovered-{n}-review.md"
             prompt = build_uncovered_sweep_prompt(
                 file=file,
-                hunks=diff_block_for_file(ctx.data["diff"], file) or "",
+                hunks=diff_block_for_file(full_diff, file) or "",
                 intent_path=ctx.data["intent_path"],
                 cwd=ctx.work.repo,
                 output_path=output_path,
@@ -3680,13 +3766,40 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
 
         # Flow context (steps communicate through ctx.data); ctx shares
         # run_deep's backend cache so instance-sharing semantics are unchanged.
+        # Issue #644 — the in-memory diff is bounded at gather time to
+        # ``INLINE_DIFF_BUDGET_BYTES`` via whole-block retention (``diff.patch``
+        # above stays FULL on disk for the archival/coverage/eval/training
+        # consumers; tiering / ``diff_key`` / ``changed_files`` above already
+        # ran on the full ``diff``; the exploration pre-scan and the uncovered
+        # sweep read the FULL on-disk patch at step time, never this bounded
+        # value). ``bound_deep_diff`` is infallible and runs
+        # after the full diff is persisted, so the disk copy is never bounded.
+        bounded_diff, bound_info = bound_deep_diff(diff)
+        if bound_info.truncated:
+            dropped = (
+                f"; dropped blocks: {', '.join(bound_info.dropped_paths)}"
+                if bound_info.dropped_paths
+                else ""
+            )
+            oversize = (
+                f"; oversized block kept whole: {', '.join(bound_info.oversize_paths)}"
+                if bound_info.oversize_paths
+                else ""
+            )
+            print_warning(
+                console,
+                f"Deep diff truncated: {bound_info.original_bytes} -> "
+                f"{bound_info.retained_bytes} bytes "
+                f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained"
+                f"{dropped}{oversize})",
+            )
         ctx = FlowContext(
             config=config,
             work=work,
             registry=get_registry(),
             data={
                 "mode": mode,
-                "diff": diff,
+                "diff": bounded_diff,
                 # Issue #336 — fix-loop scope bound. The reviewed diff's file
                 # set threads through ctx.data so the fix gate can partition
                 # out-of-scope findings (Task 3) and the fix step can both
@@ -3695,6 +3808,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 # ``_diff_changed_files``; a missing key never crashes.
                 "changed_files": set(changed_files),
                 "diff_path": diff_path,
+                "diff_truncated": bound_info.truncated,
+                "diff_truncation": bound_info,
                 "tier": tier,
                 "dd": dd,
                 "stacks": stacks,
