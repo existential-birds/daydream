@@ -447,6 +447,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
             output_schema=RECON_SCHEMA,
             read_only=True,
             persist_session=False,
+            validate_fallback_schema=False,
         )
 
     total_candidates = 0

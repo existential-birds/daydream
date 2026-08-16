@@ -317,6 +317,25 @@ def test_canonicalize_working_directory_all_spellings_share_one_key(tmp_path: Pa
     assert spelled == {"sub"}
 
 
+def test_canonicalize_working_directory_resolved_repo_spelling(tmp_path: Path) -> None:
+    """The repo.resolve() fallback base: a symlinked repo strips a value
+    spelled with its RESOLVED path, which the literal prefix cannot match."""
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    # Literal spelling strips on the first (unresolved) base.
+    assert canonicalize_working_directory(link, f"{link}/sub") == "sub"
+    # Resolved spelling matches only the repo.resolve() base.
+    assert canonicalize_working_directory(link, f"{link.resolve()}/sub") == "sub"
+
+
+def test_canonicalize_working_directory_collapses_parent_traversal(tmp_path: Path) -> None:
+    """A ``..``-containing absolute spelling of an in-repo directory yields the
+    same key as its plain spelling (the issue #649 dedup miss)."""
+    assert canonicalize_working_directory(tmp_path, f"{tmp_path}/sub/../sub") == "sub"
+
+
 @pytest.mark.anyio
 async def test_host_enumeration_dedups_absolute_model_wd(
     improve_monorepo_target: Path,

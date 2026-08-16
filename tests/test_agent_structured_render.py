@@ -201,13 +201,15 @@ async def test_structured_fallback_validates_against_output_schema(
 async def test_structured_fallback_recon_not_gated_all_or_nothing(
     monkeypatch, tmp_path
 ) -> None:
-    """RECON's fallback skips the all-or-nothing schema gate: the top-level
-    RECON schema requires languages/commands/conventions/intent_docs, but the
-    orchestrator salvages per-command records downstream via
+    """RECON's fallback skips the fallback schema gate via the caller-declared
+    ``validate_fallback_schema=False`` kwarg (not a phase carve-out): the
+    top-level RECON schema requires languages/commands/conventions/intent_docs,
+    but the orchestrator salvages per-command records downstream via
     validate_recon_commands() and defaults missing model fields to []. An
     extracted response with a valid commands list but a missing top-level field
     must still reach that salvage path instead of falling through to plain text.
-    Non-RECON phases keep the gate (see the REVIEW assertions above)."""
+    Callers that do not opt out keep the gate (see the REVIEW assertions
+    above)."""
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     monkeypatch.setattr("daydream.agent.console", rec)
     schema = {
@@ -225,7 +227,80 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
         ResultEvent(structured_output=None, continuation=None),
     ])
     result, _, _ = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema
+        backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema,
+        validate_fallback_schema=False,
     )
     assert result == {"commands": [{"command": "make test"}]}
     assert isinstance(result, dict)
+
+
+async def test_structured_fallback_salvages_partial_dict(
+    monkeypatch, tmp_path
+) -> None:
+    """The fallback gate is salvage-tolerant, not all-or-nothing: a dict whose
+    required top-level field is present but whose nested records contain one
+    schema-invalid item still reaches the consumer. The recommendation verifier
+    (and the per-stack parse) drop invalid records rather than losing the whole
+    payload, so an all-or-nothing gate here would starve every valid record."""
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    schema = {
+        "type": "object",
+        "required": ["verdicts"],
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["issue_id", "verdict", "evidence"],
+                    "properties": {
+                        "issue_id": {"type": "integer"},
+                        "verdict": {"type": "string"},
+                        "evidence": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+    partial = {
+        "verdicts": [
+            {"issue_id": 1, "verdict": "consistent", "evidence": "matches"},
+            {"issue_id": 2, "verdict": "bogus"},  # missing required "evidence"
+        ]
+    }
+    backend = MockBackend([
+        TextEvent(text=json.dumps(partial)),
+        ResultEvent(structured_output=None, continuation=None),
+    ])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema
+    )
+    assert result == partial  # the partial dict reaches the salvage path
+    assert isinstance(result, dict)
+
+
+async def test_structured_fallback_bare_array_reaches_merge_shape(
+    monkeypatch, tmp_path
+) -> None:
+    """A bare JSON array can never validate against an object-typed schema
+    (MERGED_ITEMS_SCHEMA is ``type: object``), but phase_cross_stack_merge
+    normalizes a bare array to its item list. The gate must let it through
+    instead of falling back to plain text, which would raise
+    CrossStackMergeError downstream and abort the run."""
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.agent.console", rec)
+    schema = {
+        "type": "object",
+        "required": ["items"],
+        "properties": {"items": {"type": "array", "items": {"type": "object"}}},
+    }
+    items = [{"id": 1, "description": "x"}]
+    backend = MockBackend([
+        TextEvent(text=json.dumps(items)),
+        ResultEvent(structured_output=None, continuation=None),
+    ])
+    result, _, _ = await run_agent(
+        backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema
+    )
+    assert result == items
+    assert isinstance(result, list)

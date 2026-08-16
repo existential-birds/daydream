@@ -59,6 +59,7 @@ _logger = logging.getLogger(__name__)
 
 class MissingSkillError(Exception):
     """Raised when a required skill is not available."""
+
     def __init__(self, skill_name: str):
         self.skill_name = skill_name
         super().__init__(f"Skill '{skill_name}' is not available")
@@ -400,6 +401,40 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     return not any(Draft202012Validator(schema).iter_errors(value))
 
 
+def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
+    """Return whether ``value`` is usable by a salvage-tolerant consumer.
+
+    Full validation is the baseline, but the fallback gate must not be
+    all-or-nothing: the per-stack parse, the recommendation verifier, and the
+    cross-stack merge all normalize partial agent output (dropping invalid
+    records rather than losing the whole payload, or accepting a bare item
+    array), so a dict whose required top-level fields are present — with
+    array-typed fields holding actual lists — is still returned for them to
+    salvage, and so is a bare JSON array, which ``phase_cross_stack_merge``
+    normalizes to its item list (a bare array can never validate against the
+    object-typed ``MERGED_ITEMS_SCHEMA``). Nested item validity is deliberately
+    not checked here: that is the consumers' salvage domain.
+    """
+    if _validates_schema(value, schema):
+        return True
+    if isinstance(value, list):
+        return True
+    if not isinstance(value, dict):
+        return False
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return False
+    properties = schema.get("properties", {})
+    for key in required:
+        if key not in value:
+            return False
+        prop = properties.get(key)
+        if isinstance(prop, dict) and prop.get("type") == "array":
+            if not isinstance(value[key], list):
+                return False
+    return True
+
+
 def _redact_log_value(value: Any) -> Any:
     """Recursively redact a log-mode value without mutating its argument.
 
@@ -433,6 +468,7 @@ async def run_agent(
     persist_session: bool = True,
     wall_budget_s: float | None = None,
     tool_call_budget: int | None = None,
+    validate_fallback_schema: bool = True,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
     """Run agent with the given prompt and return output plus continuation token.
 
@@ -478,6 +514,12 @@ async def run_agent(
         tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
             exceeded the loop breaks with the same abort/partial-return path.
             ``None`` (the default) means no tool-call ceiling.
+        validate_fallback_schema: When True (default), the structured-output
+            extraction fallback only returns parsed JSON whose shape is usable
+            by downstream consumers (see ``_salvageable``). Set False for call
+            sites that re-validate or salvage wholesale downstream — the
+            improve recon, whose all-or-nothing top-level schema is
+            re-validated per-command by ``validate_recon_commands``.
 
     Returns:
         Tuple of (output, continuation_token, budget_reason). Output is text
@@ -826,17 +868,24 @@ async def run_agent(
         # Fallback: extract JSON from the raw text when structured output
         # failed. Uses robust extraction (handles prose-wrapped JSON and
         # markdown code fences — common with GLM and other OpenAI-compat models).
-        # The parsed result must also validate against the requested schema —
-        # an unvalidated fallback would be asymmetric with the success path.
-        # RECON is the exception: its top-level schema is all-or-nothing but the
-        # orchestrator salvages per-command records downstream (validate_recon_commands),
-        # so an all-or-nothing gate here would preempt that salvage. The downstream
-        # validator remains the fail-closed enforcement point for RECON.
+        # The parsed result must also pass the fallback gate — an unvalidated
+        # fallback would be asymmetric with the success path. The gate is
+        # salvage-tolerant, not all-or-nothing (see _salvageable): consumers
+        # like the per-stack parse, the recommendation verifier, and the
+        # cross-stack merge normalize partial output (dropping invalid records
+        # rather than losing the whole payload, or accepting a bare item
+        # array), so salvageable structures still reach them. Only output that
+        # is unusable in any shape falls through to the plain-text return.
+        # Callers that salvage wholesale downstream (the improve recon, whose
+        # top-level schema is all-or-nothing but which re-validates per-command
+        # records via validate_recon_commands) opt out with
+        # validate_fallback_schema=False; the downstream validator remains the
+        # fail-closed enforcement point for those call sites.
         if raw.strip():
             parsed = extract_json(raw)
             if parsed is not None and (
-                phase is DaydreamPhase.RECON
-                or _validates_schema(parsed, output_schema)
+                not validate_fallback_schema
+                or _salvageable(parsed, output_schema)
             ):
                 return parsed, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason
