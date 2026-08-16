@@ -12,6 +12,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 import pytest
 
@@ -24,6 +25,9 @@ from daydream.trajectory import (
 )
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.trajectory import make_recorder
+
+if TYPE_CHECKING:
+    from daydream.runner import RunConfig
 
 
 def _add_user_step(recorder: TrajectoryRecorder) -> None:
@@ -39,6 +43,118 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
         },
     )
     recorder.steps.append(step)
+
+
+# --- shared round-trip setup for the archive on_write tests ---
+def _make_round_trip_fixture(
+    tmp_path: Path,
+    run_flow: DaydreamRunFlow,
+) -> tuple[RunConfig, Callable[[TrajectoryRecorder, str], None], TrajectoryRecorder]:
+    """Build the full archive round-trip fixture: minimal .daydream/ scaffolding,
+    RunConfig, archive callback, and a recorder primed with two steps spaced 8.5s
+    apart so the derived wall-clock span is deterministic."""
+    from daydream.runner import RunConfig, _make_archive_callback
+
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    daydream_dir = target_dir / ".daydream"
+    daydream_dir.mkdir()
+    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
+    findings_src = target_dir / "findings" / "findings.json"
+    findings_src.parent.mkdir(parents=True)
+    findings_src.write_text(
+        '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
+    )
+
+    config = RunConfig(
+        target=str(target_dir),
+        skill="python",
+        backend="claude",
+        archive=True,
+        run_eval=False,
+        findings_out="findings/findings.json",
+    )
+    callback = _make_archive_callback(config, target_dir)
+    assert callback is not None
+
+    recorder = TrajectoryRecorder(
+        path=daydream_dir / "trajectory.json",
+        run_flow=run_flow,
+        target_dir=target_dir,
+        agent_model_name="opus",
+        session_id="test",
+        on_write=callback,
+    )
+    # Two steps spaced 8.5s apart so the derived span is deterministic.
+    for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
+        recorder.steps.append(
+            Step(
+                step_id=recorder._next_step_id(),
+                timestamp=ts,
+                source="agent",
+                message="step",
+                extra={
+                    "daydream_phase": DaydreamPhase.REVIEW.value,
+                    "daydream_run_flow": run_flow.value,
+                },
+            )
+        )
+    return config, callback, recorder
+
+
+def _assert_round_trip_bundle(
+    archive_dir: Path,
+    recorder: TrajectoryRecorder,
+    *,
+    fix_backend: str | None,
+    test_backend: str | None,
+) -> None:
+    """Shared manifest + SQLite assertions for the archive round-trip.
+
+    fix_backend/test_backend parameterize the divergent branch: flows that never
+    run fix/test (IMPROVE) omit the keys and leave the SQL columns NULL (None),
+    while deep-family flows (NORMAL) record the resolved backend."""
+    run_dir = archive_dir / "runs" / recorder.session_id
+    assert run_dir.is_dir()
+
+    manifest_path = run_dir / "manifest.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["session_id"] == recorder.session_id
+    assert manifest["status"] == "complete"
+    assert manifest["run"]["flow"] == recorder.run_flow.value
+    assert manifest["run"]["skill"] == "python"
+    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
+    if fix_backend is None:
+        assert "fix_backend" not in manifest["run"]
+        assert "test_backend" not in manifest["run"]
+    else:
+        assert manifest["run"]["fix_backend"] == fix_backend
+        assert manifest["run"]["test_backend"] == test_backend
+
+    archived = run_dir / "findings.json"
+    assert archived.is_file()
+    assert (
+        json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"]
+        == "deadbeef"
+    )
+
+    db_path = archive_dir / "index.db"
+    assert db_path.exists()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE session_id = ?",
+            (recorder.session_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["status"] == "complete"
+        assert row["run_flow"] == recorder.run_flow.value
+        assert row["fix_backend"] == fix_backend
+        assert row["test_backend"] == test_backend
+    finally:
+        conn.close()
 
 
 # on_write does NOT fire on empty trajectory
@@ -60,89 +176,15 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
 # Full archive round-trip via on_write
 async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> None:
     """_make_archive_callback wires archive_run through on_write, producing manifest + SQLite row."""
-    from daydream.runner import RunConfig, _make_archive_callback
-
-    # Set up a minimal .daydream/ structure the archive copier expects
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
-    findings_src = target_dir / "findings" / "findings.json"
-    findings_src.parent.mkdir(parents=True)
-    findings_src.write_text(
-        '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
-    )
-
-    config = RunConfig(
-        target=str(target_dir),
-        skill="python",
-        backend="claude",
-        archive=True,
-        run_eval=False,
-        findings_out="findings/findings.json",
-    )
-
-    callback = _make_archive_callback(config, target_dir)
-    assert callback is not None
-
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "trajectory.json",
-        run_flow=DaydreamRunFlow.NORMAL,
-        target_dir=target_dir,
-        agent_model_name="opus",
-        session_id="test",
-        on_write=callback,
-    )
+    _, _, recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL)
 
     async with recorder:
-        # Two steps spaced 8.5s apart so the derived span is deterministic.
-        for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
-            recorder.steps.append(
-                Step(
-                    step_id=recorder._next_step_id(),
-                    timestamp=ts,
-                    source="agent",
-                    message="step",
-                    extra={
-                        "daydream_phase": DaydreamPhase.REVIEW.value,
-                        "daydream_run_flow": DaydreamRunFlow.NORMAL.value,
-                    },
-                )
-            )
+        pass
 
-    assert (daydream_dir / "trajectory.json").exists()
-
-    run_dir = archive_dir / "runs" / recorder.session_id
-    assert run_dir.is_dir()
-
-    manifest_path = run_dir / "manifest.json"
-    assert manifest_path.exists()
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["session_id"] == recorder.session_id
-    assert manifest["status"] == "complete"
-    assert manifest["run"]["flow"] == "normal"
-    assert manifest["run"]["skill"] == "python"
-    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
-
-    archived = run_dir / "findings.json"
-    assert archived.is_file()
-    assert json.loads(archived.read_text(encoding="utf-8"))["findings"][0]["fingerprint"] == "deadbeef"
-
-    db_path = archive_dir / "index.db"
-    assert db_path.exists()
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT * FROM runs WHERE session_id = ?",
-            (recorder.session_id,),
-        ).fetchone()
-        assert row is not None
-        assert row["status"] == "complete"
-        assert row["run_flow"] == "normal"
-    finally:
-        conn.close()
+    assert recorder.path.exists()
+    _assert_round_trip_bundle(
+        archive_dir, recorder, fix_backend="claude", test_backend="claude",
+    )
 
 
 @pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
@@ -151,84 +193,17 @@ async def test_full_archive_round_trip_fix_test_backend_columns(
 ) -> None:
     """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
     columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
-    from daydream.runner import RunConfig, _make_archive_callback
+    _, _, recorder = _make_round_trip_fixture(tmp_path, run_flow)
 
-    # --- identical round-trip setup as test_full_archive_round_trip, but
-    # run_flow and the step extra's daydream_run_flow come from the param ---
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
-    findings_src = target_dir / "findings" / "findings.json"
-    findings_src.parent.mkdir(parents=True)
-    findings_src.write_text('{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}')
-
-    config = RunConfig(
-        target=str(target_dir),
-        skill="python",
-        backend="claude",
-        archive=True,
-        run_eval=False,
-        findings_out="findings/findings.json",
-    )
-    callback = _make_archive_callback(config, target_dir)
-    assert callback is not None
-
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "trajectory.json",
-        run_flow=run_flow,
-        target_dir=target_dir,
-        agent_model_name="opus",
-        session_id="test",
-        on_write=callback,
-    )
     async with recorder:
-        # Two steps spaced 8.5s apart so the derived span is deterministic.
-        for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
-            recorder.steps.append(
-                Step(
-                    step_id=recorder._next_step_id(),
-                    timestamp=ts,
-                    source="agent",
-                    message="step",
-                    extra={
-                        "daydream_phase": DaydreamPhase.REVIEW.value,
-                        "daydream_run_flow": run_flow.value,
-                    },
-                )
-            )
+        pass
 
-    run_dir = archive_dir / "runs" / recorder.session_id
-    assert run_dir.is_dir()
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["status"] == "complete"
-    assert manifest["run"]["flow"] == run_flow.value
-    assert manifest["metrics"]["wall_clock_seconds"] == 8.5
-
-    if run_flow is DaydreamRunFlow.IMPROVE:
-        assert "fix_backend" not in manifest["run"]
-        assert "test_backend" not in manifest["run"]
-    else:
-        assert manifest["run"]["fix_backend"] == "claude"
-        assert manifest["run"]["test_backend"] == "claude"
-
-    conn = sqlite3.connect(str(archive_dir / "index.db"))
-    conn.row_factory = sqlite3.Row
-    try:
-        row = conn.execute(
-            "SELECT fix_backend, test_backend FROM runs WHERE session_id = ?",
-            (recorder.session_id,),
-        ).fetchone()
-        assert row is not None
-        if run_flow is DaydreamRunFlow.IMPROVE:
-            assert row["fix_backend"] is None
-            assert row["test_backend"] is None
-        else:
-            assert row["fix_backend"] == "claude"
-            assert row["test_backend"] == "claude"
-    finally:
-        conn.close()
+    # Collapse the IMPROVE/NORMAL branch pair into a single expected value: the
+    # shared assert helper applies it to both the manifest keys and the SQL columns.
+    backend: str | None = None if run_flow is DaydreamRunFlow.IMPROVE else "claude"
+    _assert_round_trip_bundle(
+        archive_dir, recorder, fix_backend=backend, test_backend=backend,
+    )
 
 
 # on_write failure does not raise
