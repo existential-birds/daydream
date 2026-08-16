@@ -568,7 +568,7 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
     corpus_mini_dir, fixture_manifest_path,
 ) -> None:
     """_prepare_verify_checkout must derive its candidate diff through
-    rundir._candidate_diff_cmd (the single source) and apply it behind an
+    rundir.candidate_diff_cmd (the single source) and apply it behind an
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
@@ -577,7 +577,7 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
     from conftest import FakeRuntime
 
     from daydream_review_v1 import taskset
-    from daydream_review_v1.rundir import _candidate_diff_cmd
+    from daydream_review_v1.rundir import candidate_diff_cmd
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
@@ -585,7 +585,7 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
 
     script = rt.commands[0][2]  # the single sh -c script
     # (a) single derivation site: the script embeds the helper's argv
-    assert shlex.join(_candidate_diff_cmd(repo, head_sha)) in script
+    assert shlex.join(candidate_diff_cmd(repo, head_sha)) in script
     # (b) empty-guard: the apply is skipped when the diff is empty
     assert "[ ! -s " in script and "apply" in script
 
@@ -1578,13 +1578,13 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 ) -> None:
     """The verify-checkout and the seal bind the same candidate diff.
 
-    _prepare_verify_checkout applies the diff derived from rundir._candidate_diff_cmd
+    _prepare_verify_checkout applies the diff derived from rundir.candidate_diff_cmd
     onto the detached head; this asserts the applied result is exactly that
     diff (no drift between the two sites), as the verifier re-runs the suite
     against the same contract the seal binds.
     """
     from daydream_review_v1 import taskset
-    from daydream_review_v1.rundir import _candidate_diff_cmd
+    from daydream_review_v1.rundir import candidate_diff_cmd
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
@@ -1592,7 +1592,7 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
 
     # The contract the seal binds: the shared helper's own output.
     expected = subprocess.run(
-        _candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True,
+        candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True,
     ).stdout
     assert expected, "staged committed fix must yield a non-empty candidate diff"
 

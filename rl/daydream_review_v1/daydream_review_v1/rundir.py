@@ -52,7 +52,7 @@ RUN_DIR_FILES: tuple[str, ...] = (
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 
 
-def _candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
+def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
     """Argv for re-deriving the rollout's committed diff against the baked head.
 
     The candidate diff is the load-bearing contract the seal binds and the
@@ -183,7 +183,7 @@ async def verify_seal(
     # embedded copy is an audit record, never the verification input, so a
     # committed diff rewritten after sealing fails the digest check.
     try:
-        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
+        diff_result = await runtime.run(candidate_diff_cmd(repo, head_sha), {})
     except Exception:
         return False
     if diff_result.exit_code != 0:
@@ -232,7 +232,7 @@ async def seal_archived_run(
             if rel == "seal.json":
                 continue
             artifacts[rel] = await runtime.read(f"{session_dir}/{rel}")
-        diff_result = await runtime.run(_candidate_diff_cmd(repo, head_sha), {})
+        diff_result = await runtime.run(candidate_diff_cmd(repo, head_sha), {})
         candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
         seal = seal_bytes(artifacts, candidate_diff)
         await runtime.write(f"{session_dir}/seal.json", seal.model_dump_json().encode())

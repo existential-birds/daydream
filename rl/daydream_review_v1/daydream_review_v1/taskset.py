@@ -33,7 +33,7 @@ from verifiers.v1.errors import boundary
 
 from daydream_review_v1.rundir import (
     DEFAULT_ARCHIVE_ROOT,
-    _candidate_diff_cmd,
+    candidate_diff_cmd,
     fetch_run_dir,
     verify_seal,
 )
@@ -370,7 +370,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
     """
     verify_dir = f"{repo}-verify"
     # Single derivation site: the candidate diff is derived by the same helper
-    # the seal binds (rundir._candidate_diff_cmd), spliced into the atomic sh -c
+    # the seal binds (rundir.candidate_diff_cmd), spliced into the atomic sh -c
     # chain because Runtime.run has no stdin. It is applied behind an empty-guard
     # so a genuinely empty diff is a clean no-op (git apply - exits 128 on empty
     # input), while a failed diff short-circuits the && chain to None -- never
@@ -380,7 +380,7 @@ async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str
     # under /tmp, not the agent-writable workspace, so a pre-planted symlink at
     # a predictable path cannot be followed with O_TRUNC as root. A trap ensures
     # the patch directory is removed on every exit path -- success or failure.
-    diff_cmd = shlex.join(_candidate_diff_cmd(repo, head_sha))
+    diff_cmd = shlex.join(candidate_diff_cmd(repo, head_sha))
     script = (
         f"patch_dir=$(mktemp -d) || exit 1; "
         f"trap 'rm -rf \"$patch_dir\"' EXIT; "
