@@ -47,11 +47,16 @@ class Manifest:
         run_flow: Run flow type (normal, ttt, pr, deep).
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
-        backend: Backend used (claude, codex, pi, osprey).
-        review_backend: Flow's representative backend, resolved through the full
-            precedence chain (``per_stack_review`` for deep-flow runs).
-        fix_backend: Backend used for the fix phase, when the flow runs it.
-        test_backend: Backend used for the test phase, when the flow runs it.
+        backend: Phase-agnostic general default backend (claude, codex) resolved
+            from config, never a per-phase override.
+        review_backend: Review-specific backend override marker, ``None`` when
+            review ran on the general default. NOT the effective review
+            backend: a CLI ``--backend`` masks a file-config review override,
+            so review may have run on ``backend`` even when this is set.
+        fix_backend: Effective backend for the fix phase (override or general
+            default).
+        test_backend: Effective backend for the test phase (override or general
+            default).
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         source_path: Absolute path to the source repository at archive time.
@@ -281,10 +286,13 @@ def build_manifest(
     )
 
     # ``backend`` records the phase-agnostic general default (config.backend →
-    # file-config global → "claude"), never a per-phase override;
-    # ``review_backend`` is stamped only when a review-specific override exists.
-    backend_used = _default_backend_name(config)
-
+    # file-config global → "claude"), never a per-phase override.
+    # ``review_backend`` is an override marker, NOT an effective value: it is
+    # stamped only when a review-specific override exists, and it can differ
+    # from the backend review actually ran on (a CLI ``--backend`` masks a
+    # file-config review override). Sibling fields ``fix_backend``/
+    # ``test_backend`` are effective per-phase values; ``review_backend`` is
+    # not.
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -292,7 +300,7 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=backend_used,
+        backend=_default_backend_name(config),
         review_backend=_resolved_review_backend_name(config),
         fix_backend=_resolved_backend_name(config, "fix"),
         test_backend=_resolved_backend_name(config, "test"),
