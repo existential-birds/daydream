@@ -33,7 +33,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from rich.markup import escape as escape_markup
 
@@ -361,18 +361,11 @@ def _open_recorder(
     """
     session_id = str(uuid.uuid4())
     trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    # Backend identity mirrors archive/manifest.py, but the representative
-    # backend resolves through the phase that actually governs the flow's
-    # review: the deep flow's review fan-out runs on ``per_stack_review``
-    # (loop/shallow/review/comment modes), while ``review`` only powers
-    # feedback-mode commit-push and the PR-feedback banner — so resolving via
-    # "review" would mislabel deep-flow runs under per-phase backend overrides.
-    # Per-phase fix/test resolutions are recorded only for flows that run those
-    # phases: review-only (TTT) and improve flows stop before the fix cycle,
-    # and feedback (PR) runs fix but never test, so their keys stay omitted.
-    backend_name, fix_backend_name, test_backend_name = _recorder_backend_names(
-        config, flow_kind,
-    )
+    # Backend identity is resolved in exactly one place,
+    # ``_recorder_backend_names`` — see its docstring for the authoritative
+    # per-flow phase mapping. Keep the mapping prose there so it cannot drift
+    # between call sites (runner, archive manifest).
+    names = _recorder_backend_names(config, flow_kind)
     return TrajectoryRecorder(
         path=trajectory_path,
         run_flow=flow_kind,
@@ -382,10 +375,10 @@ def _open_recorder(
         explicit_path=config.trajectory_path is not None,
         pr_number=config.pr_number,
         pr_repo=config.pr_repo,
-        backend_name=backend_name,
-        review_backend_name=backend_name,
-        fix_backend_name=fix_backend_name,
-        test_backend_name=test_backend_name,
+        backend_name=names.backend,
+        review_backend_name=names.backend,
+        fix_backend_name=names.fix,
+        test_backend_name=names.test,
         on_write=_make_archive_callback(config, target_dir, work),
     )
 
@@ -416,38 +409,68 @@ def _resolved_backend_name(config: RunConfig, phase: str) -> str:
     )
 
 
+class RecorderBackendNames(NamedTuple):
+    """Resolved backend identities for a run's trajectory and manifest.
+
+    Attributes:
+        backend: Representative backend kind for the run, resolved through the
+            phase that actually governs the flow (see
+            :func:`_recorder_backend_names`).
+        fix: Backend kind for the fix phase, or ``""`` when the flow never
+            runs fix (the key is omitted on serialization).
+        test: Backend kind for the test phase, or ``""`` when the flow never
+            runs test (the key is omitted on serialization).
+    """
+
+    backend: str
+    fix: str
+    test: str
+
+
 def _recorder_backend_names(
     config: RunConfig, flow_kind: DaydreamRunFlow
-) -> tuple[str, str, str]:
-    """Resolve the backend identity ``(backend, fix, test)`` for the run recorder.
+) -> RecorderBackendNames:
+    """Resolve the backend identities for the run's trajectory and manifest.
 
-    Shared by :func:`_open_recorder` and the archive manifest so the trajectory
-    and manifest never diverge on which backend produced the run. The
-    representative backend resolves through the phase that actually governs the
-    flow's review: deep-flow runs (DEEP/NORMAL/TTT) fan out on
-    ``per_stack_review``, while ``review`` only powers feedback-mode commit-push
-    and the PR-feedback banner. Per-phase fix/test are recorded only for flows
-    that run those phases (improve/TTT never run fix/test; PR runs fix but never
-    test), so a flow that skips a phase yields an empty name (the key is omitted
-    on serialization) rather than a misleading label.
+    Single authoritative source for the per-flow backend mapping, shared by
+    :func:`_open_recorder` and ``archive.manifest.build_manifest`` so the
+    trajectory and manifest never diverge on which backend produced the run.
+    The representative backend resolves through the phase that actually governs
+    the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
+    improve runs on its advisory phases with ``recon`` first; ``review`` only
+    powers feedback-mode commit-push and the PR-feedback banner, so PR/CUSTOM
+    fall back to it. Per-phase fix/test are recorded only for flows that
+    statically run those phases: improve/TTT never run fix/test; PR runs fix
+    but never test; CUSTOM composition is fork-defined and unknowable at
+    recorder-open time, so labeling it unconditionally would mislabel
+    review-only forks. A flow that skips a phase yields an empty name (the key
+    is omitted on serialization) rather than a misleading label.
     """
-    review_phase = (
-        "per_stack_review"
-        if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT)
-        else "review"
-    )
-    backend = _resolved_backend_name(config, review_phase)
+    if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT):
+        representative_phase = "per_stack_review"
+    elif flow_kind == DaydreamRunFlow.IMPROVE:
+        representative_phase = "recon"
+    else:
+        representative_phase = "review"
+    backend = _resolved_backend_name(config, representative_phase)
     fix = (
         _resolved_backend_name(config, "fix")
-        if flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE)
+        if flow_kind
+        not in (DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM)
         else ""
     )
     test = (
         _resolved_backend_name(config, "test")
-        if flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE)
+        if flow_kind
+        not in (
+            DaydreamRunFlow.TTT,
+            DaydreamRunFlow.PR,
+            DaydreamRunFlow.IMPROVE,
+            DaydreamRunFlow.CUSTOM,
+        )
         else ""
     )
-    return backend, fix, test
+    return RecorderBackendNames(backend=backend, fix=fix, test=test)
 
 
 def _resolved_model(config: RunConfig, phase: str) -> str | None:

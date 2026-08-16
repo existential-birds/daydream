@@ -10,18 +10,21 @@ import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
 
 from daydream import git_ops, runner
+from daydream.archive.git_context import GitContext
+from daydream.archive.manifest import Manifest, build_manifest
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig
-from daydream.trajectory import DaydreamRunFlow
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.git_helpers import commit as _commit
@@ -1314,6 +1317,54 @@ def test_open_recorder_review_only_omits_fix_test_backend(tmp_path: Path) -> Non
     assert recorder.test_backend_name == ""
 
 
+def test_open_recorder_custom_omits_fix_test_backend(tmp_path: Path) -> None:
+    """Custom (fork) flows carry no fix/test backend identity.
+
+    A fork-defined CUSTOM flow's composition is unknowable at recorder-open
+    time — review-only forks are explicitly supported — so labeling it
+    unconditionally would mislabel runs that never run the fix/test phases.
+    Even an explicit ``fix_backend`` must not leak onto a CUSTOM run.
+    """
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(target=str(target_dir), backend="codex", fix_backend="pi", run_eval=False)
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
+    )
+    assert recorder.backend_name == "codex"
+    assert recorder.review_backend_name == "codex"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
+def test_open_recorder_improve_resolves_backend_via_recon(tmp_path: Path) -> None:
+    """The improve flow's representative backend follows its advisory phases.
+
+    The improve flow runs exclusively on recon/audit/vet/plan_write steps (no
+    review step), so a file-config override on ``recon`` — its first advisory
+    phase — must win for the run's backend identity instead of the never-run
+    ``review`` phase.
+    """
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import _open_recorder
+    target_dir = tmp_path / "project"
+    target_dir.mkdir()
+    config = RunConfig(
+        target=str(target_dir),
+        run_eval=False,
+        review_backend="codex",
+        file_config=DaydreamFileConfig(phases={"recon": {"backend": "pi"}}),
+    )
+    recorder = _open_recorder(
+        config=config, target_dir=target_dir, work=None, flow_kind=DaydreamRunFlow.IMPROVE,
+    )
+    assert recorder.backend_name == "pi"
+    assert recorder.review_backend_name == "pi"
+    assert recorder.fix_backend_name == ""
+    assert recorder.test_backend_name == ""
+
+
 def test_open_recorder_feedback_resolves_fix_omits_test(tmp_path: Path) -> None:
     """Feedback (PR) flow records the fix backend but omits the test backend.
 
@@ -1347,3 +1398,143 @@ def test_open_recorder_backend_falls_back_to_claude(tmp_path: Path) -> None:
     assert recorder.review_backend_name == "claude"
     assert recorder.fix_backend_name == "claude"
     assert recorder.test_backend_name == "claude"
+
+
+@dataclass
+class _MockManifestRecorder:
+    """Minimal recorder surface consumed by ``build_manifest``.
+
+    Mirrors tests/test_archive.py's ``_MockRecorder``: ``build_manifest`` reads
+    the identity fields, ``run_flow``, and ``_final_totals``, and calls the two
+    timing methods.
+    """
+
+    session_id: str = "abcd1234-0000-0000-0000-000000000000"
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
+    pr_number: int | None = None
+    pr_repo: str | None = None
+    _final_totals: dict[str, Any] = field(
+        default_factory=lambda: {
+            "prompt": 0,
+            "completion": 0,
+            "cached": 0,
+            "cost": 0.0,
+            "any_cost_seen": False,
+        },
+    )
+
+    def compute_wall_clock_seconds(self) -> float | None:
+        return None
+
+    def compute_phase_timings(self) -> dict[str, Any] | None:
+        return None
+
+
+def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> Manifest:
+    """Build a manifest for ``config``/``flow`` from a mock recorder."""
+    return build_manifest(
+        recorder=cast(TrajectoryRecorder, _MockManifestRecorder(run_flow=flow)),
+        config=config,
+        git_ctx=GitContext(),
+        status="complete",
+        archive_path=tmp_path,
+    )
+
+
+def test_manifest_mirrors_recorder_backend_via_per_stack_review(tmp_path: Path) -> None:
+    """The manifest resolves the representative backend via ``per_stack_review``.
+
+    ``build_manifest`` must resolve through the same shared resolver as the
+    recorder, so a deep-flow run with a file-config ``per_stack_review``
+    override is labeled with that backend even when CLI ``review_backend`` is
+    set — the ``review`` phase only powers feedback-mode commit-push.
+    """
+    from daydream.config_file import DaydreamFileConfig
+
+    config = RunConfig(
+        target=str(tmp_path / "project"),
+        run_eval=False,
+        review_backend="codex",
+        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
+    )
+    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
+    assert m.backend == "pi"
+    assert m.review_backend == "pi"
+
+
+def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
+    """A deep-flow run records per-phase fix/test backends on the manifest."""
+    config = RunConfig(
+        target=str(tmp_path / "project"),
+        run_eval=False,
+        backend="codex",
+        fix_backend="pi",
+        test_backend="osprey",
+    )
+    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
+    assert m.backend == "codex"
+    assert m.review_backend == "codex"
+    assert m.fix_backend == "pi"
+    assert m.test_backend == "osprey"
+    run = m.to_dict()["run"]
+    assert run["fix_backend"] == "pi"
+    assert run["test_backend"] == "osprey"
+
+
+def test_manifest_review_only_omits_fix_test_backend(tmp_path: Path) -> None:
+    """Review-only (TTT) manifests omit fix/test backend keys entirely.
+
+    ``--review``/``--comment`` never run the fix or test phases, so
+    ``fix_backend``/``test_backend`` resolve empty and the ``or None`` omission
+    in ``build_manifest`` drops the keys rather than mislabeling the run.
+    """
+    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
+    m = _build_manifest(config, DaydreamRunFlow.TTT, tmp_path)
+    assert m.backend == "codex"
+    assert m.review_backend == "codex"
+    assert m.fix_backend is None
+    assert m.test_backend is None
+    run = m.to_dict()["run"]
+    assert "fix_backend" not in run
+    assert "test_backend" not in run
+
+
+def test_manifest_improve_omits_fix_test_backend(tmp_path: Path) -> None:
+    """Improve manifests omit fix/test backend keys (those phases never run)."""
+    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
+    m = _build_manifest(config, DaydreamRunFlow.IMPROVE, tmp_path)
+    assert m.backend == "codex"
+    assert m.review_backend == "codex"
+    assert m.fix_backend is None
+    assert m.test_backend is None
+    run = m.to_dict()["run"]
+    assert "fix_backend" not in run
+    assert "test_backend" not in run
+
+
+def test_manifest_feedback_records_fix_omits_test_backend(tmp_path: Path) -> None:
+    """Feedback (PR) manifests keep ``fix_backend`` but omit ``test_backend``.
+
+    ``daydream feedback`` runs the fix phase but never the test phase, and its
+    representative backend follows the ``review`` phase.
+    """
+    config = RunConfig(
+        target=str(tmp_path / "project"), run_eval=False, review_backend="codex",
+    )
+    m = _build_manifest(config, DaydreamRunFlow.PR, tmp_path)
+    assert m.backend == "codex"
+    assert m.review_backend == "codex"
+    assert m.fix_backend == "claude"
+    assert m.test_backend is None
+    run = m.to_dict()["run"]
+    assert "test_backend" not in run
+
+
+def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
+    """With no backend configured anywhere, the manifest defaults to claude."""
+    config = RunConfig(target=str(tmp_path / "project"), run_eval=False)
+    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
+    assert m.backend == "claude"
+    assert m.review_backend == "claude"
+    assert m.fix_backend == "claude"
+    assert m.test_backend == "claude"

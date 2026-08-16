@@ -47,10 +47,11 @@ class Manifest:
         run_flow: Run flow type (normal, ttt, pr, deep).
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
-        backend: Backend used (claude, codex).
-        review_backend: Per-phase backend override for review, if set.
-        fix_backend: Per-phase backend override for fix, if set.
-        test_backend: Per-phase backend override for test, if set.
+        backend: Backend used (claude, codex, pi, osprey).
+        review_backend: Flow's representative backend, resolved through the full
+            precedence chain (``per_stack_review`` for deep-flow runs).
+        fix_backend: Backend used for the fix phase, when the flow runs it.
+        test_backend: Backend used for the test phase, when the flow runs it.
         review_only: Whether the run was review-only.
         deep: Whether deep review mode was used.
         source_path: Absolute path to the source repository at archive time.
@@ -276,11 +277,10 @@ def build_manifest(
     from daydream.runner import _recorder_backend_names  # noqa: PLC0415 - deferred import avoids cycle
 
     # Mirror the trajectory's backend identity through the same shared resolver
-    # used by runner._open_recorder, so the manifest and trajectory never diverge
-    # on which backend produced the run. Deep-flow runs resolve the representative
-    # backend via ``per_stack_review`` (the phase that actually drives their review
-    # fan-out); fix/test are recorded only for flows that run those phases.
-    backend_used, fix_backend, test_backend = _recorder_backend_names(config, recorder.run_flow)
+    # used by runner._open_recorder (authoritative per-flow mapping prose lives
+    # in its docstring), so the manifest and trajectory never diverge on which
+    # backend produced the run.
+    names = _recorder_backend_names(config, recorder.run_flow)
 
     m = Manifest(
         session_id=recorder.session_id,
@@ -289,10 +289,10 @@ def build_manifest(
         run_flow=recorder.run_flow.value,
         skill=config.skill,
         model=None,
-        backend=backend_used,
-        review_backend=backend_used,
-        fix_backend=fix_backend or None,
-        test_backend=test_backend or None,
+        backend=names.backend,
+        review_backend=names.backend,
+        fix_backend=names.fix or None,
+        test_backend=names.test or None,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,
