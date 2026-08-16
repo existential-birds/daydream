@@ -372,6 +372,24 @@ async def test_host_enumeration_dedups_absolute_model_wd(
         ],
     )
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+
+    # Derive the evidence anchor from the fixture's actual content instead of
+    # hardcoding a line number: the root pyproject.toml must declare the test
+    # subject command, and the validated line is wherever that declaration
+    # lives (any layout that keeps the declaration works).
+    root_pyproject = (
+        improve_monorepo_target / "pyproject.toml"
+    ).read_text(encoding="utf-8").splitlines()
+    anchor_line = next(
+        (i for i, line in enumerate(root_pyproject, 1) if "uv run pytest" in line),
+        None,
+    )
+    if anchor_line is None:
+        raise AssertionError(
+            "improve_monorepo_target fixture must declare test command "
+            "'uv run pytest' in its root pyproject.toml"
+        )
+
     stub.recon_output_override = {
         "languages": ["python"],
         "commands": [
@@ -394,7 +412,7 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 "evidence": {
                     "kind": "literal-command",
                     "source_path": "pyproject.toml",
-                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "line_anchor": {"start_line": anchor_line, "end_line": anchor_line},
                     "verbatim_excerpt": None,
                 },
             }
