@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 import verifiers.v1 as vf
-from conftest import PROJECT_ROOT, FakeRuntime
+from conftest import PROJECT_ROOT, FakeRuntime, assert_docstring_guards
 from verifiers.v1.graph import MessageNode
 
 from daydream_review_v1.backends import STRATEGIES
@@ -280,11 +280,12 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
 
     repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
     against the launch-time handoff), so the baked checkout is already
-    agent-owned; the in-container origin mirror /srv/mirror.git is created at launch,
-    so no build layer chowns it. The harness issues `chown -R agent:agent <repo>
-    /srv/mirror.git` before launching through run-as-agent, re-chowning the
-    checkout and covering the mirror; this pins that the ownership handoff is
-    actually issued under a docker-shaped runtime.
+    agent-owned. The in-container origin mirror /srv/mirror.git is baked into the
+    image at build time (COPY mirror.git /srv/mirror.git); no build layer chowns it,
+    so the launch-time handoff must cover it. The harness issues
+    `chown -R agent:agent <repo> /srv/mirror.git` before launching through
+    run-as-agent, re-chowning the checkout and covering the mirror; this pins
+    that the ownership handoff is actually issued under a docker-shaped runtime.
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
@@ -313,18 +314,20 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
 def test_docker_handoff_docstring_describes_build_chown_and_mirror() -> None:
     """The docker-handoff docstring must describe the CURRENT ownership design:
     build-time chown in repo.Dockerfile (defense-in-depth) plus the launch-time
-    handoff that covers the runtime-created /srv/mirror.git mirror. The stale
-    'no layer chowns it' claim is gone."""
-    doc = test_docker_launch_hands_checkout_to_agent_before_run_as_agent.__doc__
-    assert doc is not None
-    # The stale false claim is gone.
-    assert "no layer chowns it" not in doc
-    # The accurate premise is present: build-time chown (defense-in-depth) of the
-    # baked checkout, and the mirror created at launch that only the handoff covers.
-    assert "chowns /work/repo at build time" in doc
-    assert "defense-in-depth" in doc
-    assert "/srv/mirror.git" in doc
-    assert "created at launch" in doc
+    handoff that covers the mirror — baked into the image at build time (COPY
+    mirror.git /srv/mirror.git) but chowned by no build layer. The stale 'no
+    layer chowns it' and 'created at launch' claims are gone."""
+    assert_docstring_guards(
+        test_docker_launch_hands_checkout_to_agent_before_run_as_agent,
+        gone=("no layer chowns it", "created at launch"),
+        present=(
+            "chowns /work/repo at build time",
+            "defense-in-depth",
+            "/srv/mirror.git",
+            "baked",
+            "no build layer chowns it",
+        ),
+    )
 
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
