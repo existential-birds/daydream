@@ -572,10 +572,12 @@ async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
+    import shlex
+
+    from conftest import FakeRuntime
+
     from daydream_review_v1 import taskset
     from daydream_review_v1.rundir import _candidate_diff_cmd
-    from conftest import FakeRuntime
-    import shlex
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
@@ -1498,17 +1500,44 @@ async def test_git_failure_at_verify_time_fails_closed(
     assert trace.metrics["suite_non_regression"] == 0.0
 
 
-async def test_verify_checkout_failed_diff_fails_closed(tmp_path, runtime) -> None:
+async def test_verify_checkout_failed_diff_fails_closed(
+    tmp_path, runtime, corpus_mini_dir, fixture_manifest_path,
+) -> None:
     """A failed candidate-diff derivation must not pipe raw/partial output into
     git apply: _prepare_verify_checkout returns None, never a partially-built
     checkout. Mirrors the rundir fail-closed contract on the unified path.
     """
     from daydream_review_v1 import taskset
 
-    not_a_repo = tmp_path / "not-a-repo"  # no .git -> git diff exits non-zero
-    result = await taskset._prepare_verify_checkout(runtime, str(not_a_repo), "deadbeef")
-    assert result is None
-    assert not (tmp_path / "not-a-repo-verify").exists(), "a failed diff must not build a checkout"
+    task = _task(corpus_mini_dir, fixture_manifest_path)
+    repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
+    # Make the diff-derivation step itself fail (not the clone): a diff.external
+    # tool that cannot run makes ``git diff`` exit non-zero while clone and
+    # checkout --detach both succeed.
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
+        check=True,
+    )
+    result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
+    assert result is None, "a failed diff derivation must not return a checkout"
+    # The chain died at the diff step, after clone + checkout: the verify dir
+    # exists and is pinned at the baked head (proving clone and checkout ran),
+    # but the candidate diff was never applied -- the tree is still exactly
+    # the baked head, not the fix.
+    verify_dir = tmp_path / "repo-verify"
+    assert verify_dir.is_dir(), "the chain must reach the diff step (clone + checkout ran)"
+    head = subprocess.run(
+        ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
+        capture_output=True, check=True,
+    ).stdout.decode().strip()
+    assert head == task.data.head_sha, (
+        "the chain must reach the diff step (checkout detached at the baked head)"
+    )
+    clean = subprocess.run(
+        ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
+        capture_output=True,
+    )
+    assert clean.returncode == 0, "a failed diff must never apply a partial candidate diff"
 
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
@@ -1517,7 +1546,6 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     """A review-only rollout (no committed fix) has an empty candidate diff; it
     must apply cleanly as a no-op, never failing _prepare_verify_checkout.
     """
-    import os
     from daydream_review_v1 import taskset
 
     task = _task(corpus_mini_dir, fixture_manifest_path)
@@ -1529,9 +1557,20 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
     else:
         # non-root host: the trailing chown root:root fails, so construction
         # returns None regardless of the diff; pin the on-disk invariant that
-        # the diff/apply step did not fail the checkout.
+        # the empty-guard made the apply a clean no-op: the checkout is a real
+        # repo pinned at the baked head whose tree is identical to it.
         verify_dir = tmp_path / "repo-verify"
         assert verify_dir.exists(), "the empty diff must not abort the checkout build"
+        head = subprocess.run(
+            ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
+            capture_output=True, check=True,
+        ).stdout.decode().strip()
+        assert head == task.data.head_sha, "the checkout must be pinned at the baked head"
+        clean = subprocess.run(
+            ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
+            capture_output=True,
+        )
+        assert clean.returncode == 0, "the empty diff must apply as a clean no-op"
 
 
 async def test_verify_checkout_applies_exactly_the_candidate_diff(
@@ -1544,7 +1583,6 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     diff (no drift between the two sites), as the verifier re-runs the suite
     against the same contract the seal binds.
     """
-    import subprocess
     from daydream_review_v1 import taskset
     from daydream_review_v1.rundir import _candidate_diff_cmd
 
@@ -1564,11 +1602,15 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     # leaves it on disk before the trailing chown fails). The applied result
     # must equal the helper's derivation.
     assert verify_dir.is_dir(), "the verify checkout was not constructed"
+    if os.geteuid() == 0:
+        assert result == str(verify_dir), "construction must return the built checkout path"
     applied = subprocess.run(
         ["git", "-C", str(verify_dir), "diff", head_sha, "--", "calc.py"],
         capture_output=True, check=True,
     ).stdout
-    # The checkout tree after apply == head + exactly the candidate diff.
+    # Drift guard: the tree after apply is head + exactly the candidate diff
+    # the seal binds -- the checkout and the seal can never disagree.
+    assert applied == expected, "the verify checkout drifted from the candidate diff the seal binds"
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED, (
         "the verify checkout did not carry the candidate diff the seal binds"
     )

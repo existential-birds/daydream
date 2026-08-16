@@ -208,6 +208,27 @@ class _DockerLikeRuntime(FakeRuntime):
         self.info = DockerRuntimeInfo(**self.config.model_dump())
 
 
+class _OrderingDockerRuntime(_DockerLikeRuntime):
+    """A docker-shaped FakeRuntime that records one shared call sequence.
+
+    FakeRuntime keeps ``run`` and ``run_program`` calls in separate lists with
+    no cross-list ordering, so the handoff-before-launch contract cannot be
+    asserted from it. This records every argv in call order.
+    """
+
+    def __init__(self, *, exit_code: int = 0) -> None:
+        super().__init__(exit_code=exit_code)
+        self.sequence: list[list[str]] = []
+
+    async def run(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
+        self.sequence.append(argv)
+        return await super().run(argv, env)
+
+    async def run_program(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
+        self.sequence.append(argv)
+        return await super().run_program(argv, env)
+
+
 async def test_launch_uses_run_as_agent_wrapper_under_docker(
     corpus_mini_dir, fixture_manifest_path
 ) -> None:
@@ -265,7 +286,7 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
-    runtime = _DockerLikeRuntime(exit_code=0)
+    runtime = _OrderingDockerRuntime(exit_code=0)
 
     await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
@@ -276,6 +297,15 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     )
     (argv, _), = runtime.programs
     assert argv[0] == "run-as-agent"
+    # Ordering, not existence: the base FakeRuntime records run and run_program
+    # calls in separate lists with no shared sequence, so a membership check
+    # alone would let a harness that chowns *after* the launch pass — the exact
+    # regression this test pins. The shared sequence makes the handoff's
+    # position relative to the launch assertable.
+    assert runtime.sequence.index(handoff) < runtime.sequence.index(argv), (
+        "the handoff must be issued before the run-as-agent launch: an agent-uid "
+        "process chowned only after the launch still EACCESes on its first write"
+    )
 
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:

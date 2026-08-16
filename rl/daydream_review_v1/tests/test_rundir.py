@@ -88,9 +88,10 @@ async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
     This is a focused unit guard on verify_seal, complementing the scoring-level
     test_git_failure_at_verify_time_fails_closed.
     """
+    from test_rewards import _stage_run, _task
+
     from daydream_review_v1.rundir import RUN_DIR_FILES, verify_seal
     from daydream_review_v1.verifier import seal_artifacts
-    from test_rewards import _stage_run, _task
 
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
