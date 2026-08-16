@@ -396,16 +396,18 @@ def _resolved_backend_name(config: RunConfig, phase: str) -> str:
     """Resolve the backend kind for ``phase`` across all precedence tiers.
 
     Order (highest first): explicit per-phase ``{phase}_backend``, global
-    ``config.backend`` (``--backend``), file-config phase override, file-config
-    global, then the terminal ``"claude"`` fallback.
+    ``config.backend`` (``--backend``), file-config phase override, then the
+    phase-agnostic terminal default (:func:`_default_backend_name`). Delegating
+    the final tier is exact: it is only reached when ``config.backend`` is
+    already falsy, at which point ``_default_backend_name`` collapses to the
+    same ``file_config.backend or "claude"`` fallback.
     """
     file_config = _file_config_or_empty(config)
     return (
         getattr(config, f"{phase}_backend", None)
         or config.backend
         or file_config.phase_backend(phase)
-        or file_config.backend
-        or "claude"
+        or _default_backend_name(config)
     )
 
 
