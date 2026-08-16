@@ -424,13 +424,14 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     agent uid after the harness handoff, and the write reaches the in-container
     origin mirror.
 
-    repo.Dockerfile clones /work/repo as root with no chown (this issue forbids
-    re-adding one), so an agent-uid process would EACCES on its first write
-    unless the harness hands the checkout + mirror to the agent identity before
-    the privilege drop (harness.py:148-162). This drives that exact handoff then
-    the deep flow's terminal write sequence (.daydream/ mkdir, git apply a fix
-    patch, git add/commit, git push HEAD:main) as the agent uid inside the real
-    image, and asserts the push reached /srv/mirror.git. When a docker daemon is
+    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
+    against the launch-time handoff), so the baked checkout is already
+    agent-owned. The harness re-chowns the checkout plus the runtime-created
+    /srv/mirror.git at launch (harness.py:148-162), covering the mirror that no
+    build layer owns. This drives that exact handoff then the deep flow's
+    terminal write sequence (.daydream/ mkdir, git apply a fix patch,
+    git add/commit, git push HEAD:main) as the agent uid inside the real image,
+    and asserts the push reached /srv/mirror.git. When a docker daemon is
     reachable but the write fails, this FAILS (never skips).
     """
     result = _build(base_image)
@@ -494,6 +495,22 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
         "the agent's fix did not reach the in-container origin mirror: "
         f"{probe.stdout}{probe.stderr}"
     )
+
+
+def test_real_docker_write_docstring_describes_build_chown_and_rechown() -> None:
+    """The real-docker-write docstring must describe the CURRENT design: the image
+    chowns the checkout at build time AND the harness re-chowns the checkout plus
+    the mirror at launch. The stale 'no chown (this issue forbids re-adding one)'
+    claims are gone."""
+    doc = test_real_docker_deep_flow_fix_pipeline_write_as_agent.__doc__
+    assert doc is not None
+    # The stale false claims are gone.
+    assert "no chown" not in doc
+    assert "forbids re-adding one" not in doc
+    # The accurate premise is present: build-time chown plus launch-time re-chown
+    # of the checkout and the runtime-created mirror.
+    assert "chowns /work/repo at build time" in doc
+    assert "/srv/mirror.git" in doc
 
 
 def test_docker_required_gates_on_daemon_reachability() -> None:
