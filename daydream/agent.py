@@ -861,7 +861,10 @@ async def run_agent(
     finally:
         _state.current_backends.remove(backend)
 
-    if output_schema is not None and structured_result is not None:
+    if output_schema is not None and structured_result is not None and (
+        not validate_fallback_schema
+        or _salvageable(structured_result, output_schema)
+    ):
         return structured_result, result_continuation, aborted_reason
     if output_schema is not None:
         raw = "".join(output_parts)
