@@ -1125,9 +1125,7 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     code = await run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert code == 0
-    recon = json.loads(
-        improve_artifact(improve_monorepo_target, "recon.json").read_text(encoding="utf-8")
-    )
+    recon = _load_improve_json(improve_monorepo_target, "recon.json")
     # The host command was deduped against the absolute model wd: no
     # re-admitted make-check record, no rejection noise.
     assert [command["id"] for command in recon["commands"]] == ["model-check"]
