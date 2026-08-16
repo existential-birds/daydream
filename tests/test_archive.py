@@ -33,7 +33,7 @@ from daydream.archive.index import (
 from daydream.archive.manifest import Manifest, build_manifest
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
-from daydream.trajectory import TrajectoryRecorder
+from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.trajectory import make_manifest
 
 
@@ -41,7 +41,7 @@ from tests.harness.trajectory import make_manifest
 class _MockRecorder:
     session_id: str = "abcd1234-0000-0000-0000-000000000000"
     path: Path = field(default_factory=lambda: Path("/nonexistent/trajectory.json"))
-    run_flow: MagicMock = field(default_factory=lambda: MagicMock(value="normal"))
+    run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL
     explicit_path: bool = False
     pr_number: int | None = None
     pr_repo: str | None = None
