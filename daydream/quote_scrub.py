@@ -16,7 +16,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from daydream.generated_files import is_generated_file
-from daydream.git_ops import diff_worktree_against
+from daydream.git_ops import GitError, diff_worktree_against
 
 # U+201C LEFT DOUBLE QUOTATION MARK / U+201D RIGHT DOUBLE QUOTATION MARK -> "
 # U+2018 LEFT SINGLE QUOTATION MARK / U+2019 RIGHT SINGLE QUOTATION MARK -> '
@@ -24,6 +24,28 @@ _SMART_QUOTE_TABLE = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'",
 
 # Unified-diff hunk header: @@ -<old_start>[,<old_count>] +<new_start>[,<new_count>] @@
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+# Extended header lines git emits in place of hunks (binary/rename/mode-only
+# diffs). Their presence marks the output as git-structured even without ``+++``
+# file headers; anything else in a header-less diff is an external diff driver's
+# output, which cannot be attributed.
+_NON_HUNK_DIFF_LINES = (
+    "diff --git ",
+    "index ",
+    "Binary files ",
+    "--- ",
+    '--- "',
+    "similarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "old mode ",
+    "new mode ",
+    "deleted file mode ",
+    "new file mode ",
+    "\\ No newline at end of file",
+)
 
 
 def normalize_smart_quotes(text: str) -> str:
@@ -36,28 +58,85 @@ def normalize_smart_quotes(text: str) -> str:
     return text.translate(_SMART_QUOTE_TABLE)
 
 
+def _header_path(raw: str) -> str | None:
+    """Extract the repo-relative path from a ``+++`` file-header line.
+
+    Handles the plain ``+++ b/rel/path`` form, git's ``core.quotepath`` quoted
+    form (``+++ "b/caf\\303\\251.go"``), and ``diff.noprefix`` output (``+++
+    rel/path`` with no ``b/`` prefix). A trailing tab — git appends one after
+    space-containing paths — is stripped first, or the extracted key would not
+    match the caller's path and the file would silently fall through to the
+    whole-file normalization branch. Returns None for the ``+++ /dev/null``
+    deletion header.
+    """
+    if not raw.startswith("+++ "):
+        return None
+    tail = raw[4:].rstrip("\t")
+    if tail.startswith('"') and tail.endswith('"'):
+        tail = _unquote_git_path(tail)
+    if tail.startswith("b/"):
+        return tail[2:]
+    if tail == "/dev/null":
+        return None
+    return tail
+
+
+def _attribution_unusable(diff_text: str) -> bool:
+    """True when a non-empty *diff_text* carries no parseable unified-diff structure.
+
+    A working-tree diff restricted to real paths must contain ``+++`` file
+    headers; their absence means the text came from an external diff driver
+    rather than git's unified format, so added-line attribution is impossible —
+    and falling back to whole-file normalization would rewrite baseline smart
+    quotes in tracked files. Binary-only, rename-only, and mode-change-only
+    diffs (git's extended header lines, no hunks) are exempt: their files fail
+    UTF-8 decoding or carry no added lines, and untracked siblings still
+    normalize whole-file.
+    """
+    lines = diff_text.splitlines()
+    if not any(line.strip() for line in lines):
+        return False
+    if any(line.startswith("+++") for line in lines):
+        return False
+    return not all(not line or line.startswith(_NON_HUNK_DIFF_LINES) for line in lines)
+
+
 def _added_line_numbers(diff_text: str) -> dict[str, set[int]]:
     """Map repo-relative paths in a working-tree diff to the new-file line
     numbers the diff adds.
 
-    Parses ``git diff <ref>`` unified-diff output: within each ``+++ b/`` file
+    Parses ``git diff <ref>`` unified-diff output: within each ``+++`` file
     section it tracks the new-file line counter and records every ``+`` line.
     Context lines advance the counter; deletions (``-``) and header lines do
     not, matching how git numbers the new file. Every file present in the diff
     is a key (mapping to the possibly-empty set of added lines); files absent
     from the diff (untracked new files) are not keys at all.
+
+    A ``+++`` line is treated as a file header only when the previous line was
+    its ``--- `` counterpart (git always emits the pair adjacently), so an added
+    line whose content starts with ``++ b/`` — rendered identically to a header
+    — is parsed as content and cannot re-key the current file.
     """
     added: dict[str, set[int]] = {}
     current: str | None = None
     new_line = 0
+    prev_old_header = False
     for raw in diff_text.splitlines():
-        if raw.startswith("+++ b/"):
-            current = raw[6:]
-            added.setdefault(current, set())
-            new_line = 0
-        elif current is None:
+        if raw.startswith(("--- ", '--- "')):
+            prev_old_header = True
             continue
-        elif raw.startswith("@@"):
+        if raw.startswith("+++ ") and prev_old_header:
+            prev_old_header = False
+            path = _header_path(raw)
+            if path is not None:
+                current = path
+                added.setdefault(current, set())
+                new_line = 0
+            continue
+        prev_old_header = False
+        if current is None:
+            continue
+        if raw.startswith("@@"):
             match = _HUNK_HEADER.match(raw)
             if match:
                 new_line = int(match.group(2))
@@ -68,6 +147,46 @@ def _added_line_numbers(diff_text: str) -> dict[str, set[int]]:
             new_line += 1
         # "-" deletions and mode/header lines advance no new-file counter.
     return added
+
+
+def _unquote_git_path(quoted: str) -> str:
+    """Unquote a ``core.quotepath``-quoted path from ``git diff`` output.
+
+    Git quotes non-ASCII path names as C-style string literals, e.g.
+    ``"b/caf\303\251.go"`` (octal escapes of the raw UTF-8 bytes). Strips the
+    surrounding quotes, decodes the escapes back to bytes, and decodes those as
+    UTF-8. Non-quoted input passes through unchanged.
+    """
+    if not (quoted.startswith('"') and quoted.endswith('"')):
+        return quoted
+    inner = quoted[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt == "\\":
+                out.append(ord("\\"))
+                i += 2
+            elif nxt == '"':
+                out.append(ord('"'))
+                i += 2
+            elif nxt in "01234567":
+                val = 0
+                j = i + 1
+                while j < len(inner) and j < i + 4 and inner[j] in "01234567":
+                    val = val * 8 + int(inner[j])
+                    j += 1
+                out.append(val)
+                i = j
+            else:
+                out.append(ord("\\"))
+                i += 1
+        else:
+            out.extend(ch.encode("utf-8"))
+            i += 1
+    return out.decode("utf-8")
 
 
 def _normalize_added_lines(text: str, added: set[int]) -> str:
@@ -94,6 +213,11 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     Raises:
         OSError: On any write failure (after cleaning up the temp file).
     """
+    if path.is_symlink():
+        # The driver reads through the link (read_bytes/stat follow it), so
+        # os.replace here would swap the link's directory entry for a regular
+        # file and destroy the symlink. Write to the link target instead.
+        path = path.resolve()
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
         try:
@@ -102,6 +226,8 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
             mode = None
         with os.fdopen(fd, "wb") as tmp:
             tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
         if mode is not None:
             os.chmod(tmp_name, mode)
         os.replace(tmp_name, path)
@@ -150,14 +276,34 @@ def scrub_smart_quotes_changed_files(
         caller's responsibility; order here follows the input order).
 
     Raises:
-        GitError: If the attribution diff cannot be computed; callers treat
-            this as fail-open (degrade to a warning, never abort a run).
+        GitError: If the attribution diff cannot be computed — including when
+            the diff output contains non-UTF-8 bytes (a changed file with
+            binary/latin-1 content) and cannot be decoded; callers treat this
+            as fail-open (degrade to a warning, never abort a run).
     """
     changed = list(changed_files)
     if pre_fix_ref is None:
         added_lines: dict[str, set[int]] | None = None
     else:
-        added_lines = _added_line_numbers(diff_worktree_against(repo, pre_fix_ref, changed))
+        try:
+            diff_text = diff_worktree_against(repo, pre_fix_ref, changed)
+        except UnicodeDecodeError as exc:
+            # A changed file with non-UTF-8 content makes the attribution diff
+            # undecodable. The diff cannot be computed: degrade to the
+            # documented GitError fail-open path instead of crashing the run.
+            raise GitError(
+                f"attribution diff against {pre_fix_ref} is not valid UTF-8: {exc}"
+            ) from exc
+        if _attribution_unusable(diff_text):
+            # Not unified-diff output (external diff driver, ...): attribution
+            # is impossible, and whole-file normalization would rewrite baseline
+            # smart quotes in tracked files. Fail open through the caller's
+            # GitError guard instead.
+            raise GitError(
+                "attribution diff for smart-quote scrub is not unified-diff output "
+                f"(external diff driver?): {diff_text[:120]!r}"
+            )
+        added_lines = _added_line_numbers(diff_text)
     scrubbed: list[str] = []
     for path in changed:
         if path.startswith(".daydream/"):

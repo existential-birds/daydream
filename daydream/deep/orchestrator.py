@@ -3224,7 +3224,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
         ctx.work,
         ref=ctx.data.get("pre_fix_ref") or "HEAD",
         preexisting_untracked=ctx.data.get("pre_fix_untracked"),
-        trustworthy=bool(ctx.data.get("pre_fix_snapshot_captured", True)),
+        trustworthy=bool(ctx.data.get("pre_fix_snapshot_captured", False)),
         skip_reason=(
             "Smart-quote scrub skipped after test healing: no trustworthy "
             "pre-fix snapshot; HEAD may include edits present before the fix pass."
@@ -3332,10 +3332,29 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     fix_backend = ctx.backend_for("fix")
 
     # Issue #543: snapshot the pre-fix untracked set so the feedback commit step
-    # can exclude user scratch files from the daydream commit. list_untracked
-    # soft-fails to [] on GitError, so set(...) is already the fail-open empty
-    # snapshot (deterministic stage = all untracked), mirroring _step_fix.
-    pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
+    # can exclude user scratch files from the daydream commit, and (Issue #687)
+    # snapshot the tracked tree too so the smart-quote scrub below can
+    # attribute agent-added lines against the pre-fix state instead of bare
+    # HEAD. Feedback mode runs in-place on the user's checkout, so HEAD may
+    # include uncommitted tracked user edits; without the snapshot the scrub
+    # would diff-attribute those user smart-quote lines as agent-added and
+    # rewrite them. Mirrors _step_fix. list_untracked soft-fails to [] on
+    # GitError, so set(...) is already the fail-open empty snapshot.
+    try:
+        pre_fix_snapshot = git_ops.stash_create(ctx.work.repo)
+        pre_fix_untracked = set(git_ops.list_untracked(ctx.work.repo))
+    except (git_ops.GitError, OSError) as exc:
+        print_warning(
+            console,
+            f"Could not snapshot tree before feedback fixes: {exc}",
+        )
+        pre_fix_snapshot = None
+        pre_fix_untracked = set()
+        pre_fix_snapshot_captured = False
+    else:
+        pre_fix_snapshot_captured = True
+    pre_fix_ref = pre_fix_snapshot or "HEAD"
+    ctx.data["pre_fix_ref"] = pre_fix_ref
     ctx.data["pre_fix_untracked"] = pre_fix_untracked
 
     # Fix sequentially to avoid concurrent access to one mutable backend.
@@ -3367,7 +3386,13 @@ async def _step_fix_items(ctx: FlowContext) -> Stop | None:
     # deep fix pass applies.
     _scrub_smart_quotes(
         ctx.work,
+        ref=pre_fix_ref,
         preexisting_untracked=pre_fix_untracked,
+        trustworthy=pre_fix_snapshot_captured,
+        skip_reason=(
+            "Smart-quote scrub skipped after feedback fix: no trustworthy "
+            "pre-fix snapshot; HEAD may include user edits present before the fix pass."
+        ),
     )
 
     ctx.data["results"] = results
