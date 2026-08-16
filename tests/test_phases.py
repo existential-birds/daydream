@@ -937,6 +937,13 @@ def test_fix_guardrails_forbid_generated_file_edits():
     assert "migration" in _FIX_GUARDRAILS.lower()
 
 
+def test_fix_guardrails_preserve_ascii_quotes():
+    from daydream.phases import _FIX_GUARDRAILS
+
+    assert "ascii" in _FIX_GUARDRAILS.lower()
+    assert "smart quote" in _FIX_GUARDRAILS.lower()
+
+
 def test_build_fix_prompt_carries_generated_file_rule():
     from daydream.phases import _build_fix_prompt
 

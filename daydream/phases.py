@@ -1689,6 +1689,12 @@ confirmed author intent below overrides it). Do not override documented intent
 to satisfy the finding; stop and report the conflict rather than overriding
 documented intent. Treat low/medium-confidence findings with extra skepticism
 here.
+
+Preserve ASCII quotes verbatim in code and comments. Never convert existing
+ASCII ``''`` / ``""`` into typographic smart quotes (``”`` ``“`` ``’`` ``‘``),
+and never introduce smart quotes when writing new code or comments — use plain
+ASCII straight quotes so the committed tree stays byte-clean and re-reviews do
+not re-surface a typographic finding.
 """
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
