@@ -1724,6 +1724,12 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                     generation_prompt: str,
                 ) -> tuple[Any, str | None]:
                     async with phase_scope(DaydreamPhase.PLAN_WRITE):
+                        # assemble_plan re-validates the authored plan against
+                        # PLAN_AUTHOR_SCHEMA downstream and reports
+                        # AUTHOR_SCHEMA_INVALID (with a repair pass), so the
+                        # schema-violating structured result must reach it
+                        # un-gated — the downstream validator is the fail-closed
+                        # enforcement point, mirroring the recon.
                         output, _, aborted_reason = await run_agent(
                             backend,
                             _audit_repo(ctx),
@@ -1732,6 +1738,7 @@ async def _step_write_plans(ctx: FlowContext) -> None:
                             output_schema=PLAN_AUTHOR_SCHEMA,
                             read_only=True,
                             persist_session=False,
+                            validate_fallback_schema=False,
                         )
                     return output, aborted_reason
 
