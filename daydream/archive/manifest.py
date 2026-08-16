@@ -281,7 +281,7 @@ def build_manifest(
     # Deferred import breaks the module-level cycle: archive.manifest → runner → (lazy) archive.
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
         _default_backend_name,
-        _resolved_backend_name,
+        _recorder_backend_names,
         _resolved_review_backend_name,
     )
 
@@ -293,6 +293,7 @@ def build_manifest(
     # file-config review override). Sibling fields ``fix_backend``/
     # ``test_backend`` are effective per-phase values; ``review_backend`` is
     # not.
+    flow_names = _recorder_backend_names(config, recorder.run_flow)
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -302,8 +303,8 @@ def build_manifest(
         model=None,
         backend=_default_backend_name(config),
         review_backend=_resolved_review_backend_name(config),
-        fix_backend=_resolved_backend_name(config, "fix"),
-        test_backend=_resolved_backend_name(config, "test"),
+        fix_backend=flow_names.fix or None,
+        test_backend=flow_names.test or None,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,
