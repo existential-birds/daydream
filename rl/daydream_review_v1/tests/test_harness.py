@@ -271,7 +271,7 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     handoff = ["chown", "-R", "agent:agent", harness.config.repo_path, "/srv/mirror.git"]
-    assert handoff in runtime.commands, (
+    assert runtime.commands[0] == handoff, (
         "the harness must hand the checkout + mirror to the agent identity "
         "before the privilege drop, or the deep flow's first write EACCESes"
     )
