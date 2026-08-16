@@ -152,6 +152,8 @@ def stub_upstream() -> Iterator[str]:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
 def assert_docstring_guards(
     func: Callable[..., object], *, gone: tuple[str, ...] = (), present: tuple[str, ...] = ()
 ) -> None:
