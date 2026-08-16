@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 import anyio
+from jsonschema import Draft202012Validator
 from rich.console import Console
 
 if TYPE_CHECKING:
@@ -54,6 +55,17 @@ from daydream.ui import (
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
+    """Return whether ``value`` conforms to a draft-2020-12 JSON schema.
+
+    Mirrors the project's existing ``Draft202012Validator(...).iter_errors(...)``
+    pattern (e.g. ``command_contract._schema_rejection``): no errors means the
+    value satisfies the schema's shape and required fields. Does not raise for
+    the (already-valid) schemas callers pass.
+    """
+    return not list(Draft202012Validator(schema).iter_errors(value))
 
 
 class MissingSkillError(Exception):
@@ -823,6 +835,10 @@ async def run_agent(
         # markdown code fences — common with GLM and other OpenAI-compat models).
         if raw.strip():
             parsed = extract_json(raw)
-            if parsed is not None:
+            # Only a fallback that actually conforms to the requested schema is
+            # returned as structured output — a parse that violates it falls
+            # through to the plain-text return below, exactly like unparseable
+            # raw text (no unvalidated structured result reaches the caller).
+            if parsed is not None and _validates_schema(parsed, output_schema):
                 return parsed, result_continuation, aborted_reason
     return "".join(output_parts), result_continuation, aborted_reason

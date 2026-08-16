@@ -160,3 +160,37 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(monkeypatch
     )
     assert result == payload  # the captured dict, NOT the stray [] scraped from prose
     assert isinstance(result, dict)  # the exact type the merge phase gate requires
+
+
+_FALLBACK_SCHEMA = {
+    "type": "object",
+    "required": ["status"],
+    "properties": {"status": {"type": "string"}},
+}
+
+
+async def test_fallback_valid_schema_json_is_returned_as_structured(tmp_path) -> None:
+    backend = MockBackend(
+        [TextEvent(text='{"status": "complete"}'),
+         ResultEvent(structured_output=None, continuation=None)]
+    )
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW,
+        output_schema=_FALLBACK_SCHEMA,
+    )
+    assert result == {"status": "complete"}
+
+
+async def test_fallback_invalid_schema_json_falls_through_to_plain_text(tmp_path) -> None:
+    backend = MockBackend(
+        [TextEvent(text='{"status": 42}'),
+         ResultEvent(structured_output=None, continuation=None)]
+    )
+    result, _, _ = await run_agent(
+        backend, tmp_path, "scan", phase=DaydreamPhase.REVIEW,
+        output_schema=_FALLBACK_SCHEMA,
+    )
+    # `{"status": 42}` parses via extract_json but violates the schema
+    # (status must be a string), so it must NOT be returned as structured
+    # output — it falls through to the plain-text return.
+    assert result == '{"status": 42}'
