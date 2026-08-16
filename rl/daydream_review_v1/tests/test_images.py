@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 from conftest import PROJECT_ROOT, docker_daemon_is_available
 
-from daydream_review_v1.fixture import FIXTURE_SLUG, build_fixture_repo
+from daydream_review_v1.fixture import FIXTURE_PR2_HEAD_SHA, FIXTURE_SLUG, build_fixture_repo
 from images import build_images
 
 DOCKER_REQUIRED = pytest.mark.skipif(
@@ -435,7 +435,7 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     """
     result = _build(base_image)
     assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
-    tag = f"{FIXTURE_IMAGE}:9b9238166305"  # pr2 head SHA[:12]
+    tag = f"{FIXTURE_IMAGE}:{FIXTURE_PR2_HEAD_SHA[:12]}"
     assert tag in _tags(), f"{tag} not built; have {_tags()}"
 
     # A real one-line fix patch that applies cleanly to the baked calc.py tree

@@ -312,6 +312,35 @@ def _stage_repo(
     return repo_path
 
 
+def _assert_checkout_pinned_at(
+    verify_dir: Path,
+    head_sha: str,
+    *,
+    exists_msg: str = "the checkout must exist",
+    pinned_msg: str = "the checkout must be pinned at the baked head",
+    clean_msg: str = "the checkout tree must equal the baked head",
+) -> None:
+    """Assert the verify checkout is a real repo pinned at *head_sha* whose tree
+    is identical to it (no partial candidate diff applied).
+
+    Shared by the failed-diff and empty-diff verify-checkout tests: both must
+    prove clone + checkout --detach ran and the candidate diff was either never
+    applied (failed diff) or applied as a genuine no-op (empty diff), leaving
+    the tree byte-identical to the baked head.
+    """
+    assert verify_dir.exists(), exists_msg
+    head = subprocess.run(
+        ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
+        capture_output=True, check=True,
+    ).stdout.decode().strip()
+    assert head == head_sha, pinned_msg
+    clean = subprocess.run(
+        ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
+        capture_output=True,
+    )
+    assert clean.returncode == 0, clean_msg
+
+
 _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@\n-old\n+new\n"
 
 _CALC_FIXED = _CALC_BROKEN.replace("return a + b + 1", "return a + b")
@@ -1525,19 +1554,13 @@ async def test_verify_checkout_failed_diff_fails_closed(
     # but the candidate diff was never applied -- the tree is still exactly
     # the baked head, not the fix.
     verify_dir = tmp_path / "repo-verify"
-    assert verify_dir.is_dir(), "the chain must reach the diff step (clone + checkout ran)"
-    head = subprocess.run(
-        ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
-        capture_output=True, check=True,
-    ).stdout.decode().strip()
-    assert head == task.data.head_sha, (
-        "the chain must reach the diff step (checkout detached at the baked head)"
+    _assert_checkout_pinned_at(
+        verify_dir,
+        task.data.head_sha,
+        exists_msg="the chain must reach the diff step (clone + checkout ran)",
+        pinned_msg="the chain must reach the diff step (checkout detached at the baked head)",
+        clean_msg="a failed diff must never apply a partial candidate diff",
     )
-    clean = subprocess.run(
-        ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
-        capture_output=True,
-    )
-    assert clean.returncode == 0, "a failed diff must never apply a partial candidate diff"
 
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
@@ -1560,17 +1583,12 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
         # the empty-guard made the apply a clean no-op: the checkout is a real
         # repo pinned at the baked head whose tree is identical to it.
         verify_dir = tmp_path / "repo-verify"
-        assert verify_dir.exists(), "the empty diff must not abort the checkout build"
-        head = subprocess.run(
-            ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
-            capture_output=True, check=True,
-        ).stdout.decode().strip()
-        assert head == task.data.head_sha, "the checkout must be pinned at the baked head"
-        clean = subprocess.run(
-            ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
-            capture_output=True,
+        _assert_checkout_pinned_at(
+            verify_dir,
+            task.data.head_sha,
+            exists_msg="the empty diff must not abort the checkout build",
+            clean_msg="the empty diff must apply as a clean no-op",
         )
-        assert clean.returncode == 0, "the empty diff must apply as a clean no-op"
 
 
 async def test_verify_checkout_applies_exactly_the_candidate_diff(
