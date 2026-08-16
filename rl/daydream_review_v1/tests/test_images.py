@@ -719,6 +719,27 @@ def test_base_image_has_distinct_agent_identity() -> None:
     assert "chown" in dockerfile and "agent:agent" in dockerfile  # /rollout (incl. archive) is agent-owned
 
 
+def test_repo_image_chowns_checkout_to_agent() -> None:
+    """repo.Dockerfile must hand the cloned /work/repo tree to the agent uid.
+
+    The image clones /work/repo as root (no USER directive), so without a chown
+    layer an agent-uid process hits EACCES on its first write. The harness
+    re-chowns at launch (idempotent against this), but the image should be
+    self-sufficient defense-in-depth — root-owned by default is the failure the
+    issue describes.
+    """
+    dockerfile = (PROJECT_ROOT / "images" / "repo.Dockerfile").read_text(encoding="utf-8")
+    # Pin the anchored layer exactly (recursive, full /work/repo target, agent
+    # uid), and require it to sit after the root-run setup.sh/TEST_COMMAND
+    # layers so their outputs (e.g. .venv from uv sync) are agent-owned too.
+    # Bare substring checks let a dropped -R, a subpath target, a retargeted
+    # uid, or a chown moved before the setup layers pass green.
+    chown_layer = "RUN chown -R agent:agent /work/repo"
+    assert chown_layer in dockerfile
+    assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && sh /tmp/setup.sh")
+    assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && ${TEST_COMMAND}")
+
+
 def test_readme_documents_single_reward_axis_and_metric() -> None:
     from conftest import PROJECT_ROOT
 

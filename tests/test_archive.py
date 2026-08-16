@@ -66,7 +66,7 @@ class _MockRecorder:
 @dataclass
 class _MockConfig:
     skill: str | None = "python"
-    backend: str = "claude"
+    backend: str | None = None
     model: str | None = None
     review_backend: str | None = None
     fix_backend: str | None = None
@@ -160,12 +160,13 @@ def _build(
     *,
     git_ctx: GitContext | None = None,
     recorder: _MockRecorder | None = None,
+    config: Any | None = None,
     **kw: Any,
 ) -> Manifest:
     """Build a manifest from the mock recorder/config pair."""
     return build_manifest(
         recorder=cast(TrajectoryRecorder, recorder or _MockRecorder()),
-        config=cast(RunConfig, _MockConfig()),
+        config=cast(RunConfig, _MockConfig() if config is None else config),
         git_ctx=git_ctx if git_ctx is not None else GitContext(),
         status="complete",
         archive_path=tmp_path,
@@ -191,6 +192,7 @@ def test_build_manifest_basic(tmp_path: Path):
     # Per-phase models replaced config.model; build_manifest stamps model as None.
     assert m.model is None
     assert m.backend == "claude"
+    assert m.review_backend is None
     assert m.total_cost_usd == 0.05
     assert m.total_prompt_tokens == 100
     assert m.total_completion_tokens == 50
@@ -233,14 +235,14 @@ def test_build_manifest_per_stack_review_tier(
     run = m.to_dict()["run"]
     assert m.per_stack_review_backend == "codex"  # per-stack tier resolved from its own key
     assert m.per_stack_review_model == "gpt-psr"
-    # Post-#643 (consolidated backend identity), review_backend for deep-flow runs
-    # IS the per-stack representative — _recorder_backend_names resolves it via the
-    # per_stack_review phase — so it mirrors the per-stack tier rather than the
-    # review tier (which only powers feedback-mode commit-push).
-    assert m.review_backend == "codex"
+    # Post-#647, review_backend is an override marker (_resolved_review_backend_name),
+    # so it stays the explicit review override "claude" — distinct from the
+    # per-stack tier resolved from its own key. The per-stack model is the
+    # load-bearing part of the identity.
+    assert m.review_backend == "claude"
     assert run["per_stack_review_backend"] == "codex"
     assert run["per_stack_review_model"] == "gpt-psr"
-    assert run["review_backend"] == "codex"
+    assert run["review_backend"] == "claude"
 
 
 def test_build_manifest_per_stack_review_gate_tracks_runner_aliases(tmp_path: Path) -> None:
@@ -1551,6 +1553,61 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path):
 
     hist = label_observation_history(tmp_path, "sess-legacy")
     assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
+
+
+def test_manifest_backend_is_general_default_not_review_override(tmp_path: Path) -> None:
+    """#647: backend records the general default even when review differs."""
+    m = _build(tmp_path, config=_MockConfig(backend="claude", review_backend="codex"))
+    assert m.backend == "claude"
+    assert m.review_backend == "codex"
+
+
+def test_manifest_review_backend_none_when_no_override(tmp_path: Path) -> None:
+    """#647: only a general backend -> review_backend stays None."""
+    m = _build(tmp_path, config=_MockConfig(backend="codex"))
+    assert m.backend == "codex"
+    assert m.review_backend is None
+
+
+def test_manifest_backend_falls_back_to_file_config_global(tmp_path: Path) -> None:
+    """#647: no CLI backend -> backend resolves from the file-config global."""
+    m = _build(
+        tmp_path,
+        config=_MockConfig(backend=None, file_config=DaydreamFileConfig(backend="file-backend")),
+    )
+    assert m.backend == "file-backend"
+    assert m.review_backend is None
+
+
+def test_manifest_review_backend_from_file_config_phase(tmp_path: Path) -> None:
+    """#647: a file-config review-phase override stamps review_backend only."""
+    m = _build(
+        tmp_path,
+        config=_MockConfig(backend="claude", file_config=DaydreamFileConfig(phases={"review": {"backend": "codex"}})),
+    )
+    assert m.backend == "claude"
+    assert m.review_backend == "codex"
+
+
+def test_archive_run_records_general_backend_and_override(tmp_path: Path, archive_dir: Path) -> None:
+    """#647: archive_run persists the general backend + nullable review override."""
+    session_id = "abcd1234-0000-0000-0000-000000000000"
+    config = _MockConfig(backend="claude", review_backend="codex")
+    target, _, _ = _setup_bundle(tmp_path, session_id)
+    recorder = _MockRecorder(session_id=session_id)
+    archive_run(
+        recorder=cast(TrajectoryRecorder, recorder),
+        target_dir=target,
+        config=cast(RunConfig, config),
+        status="complete",
+    )
+    manifest_data = json.loads((archive_dir / "runs" / session_id / "manifest.json").read_text())
+    assert manifest_data["run"]["backend"] == "claude"
+    assert manifest_data["run"]["review_backend"] == "codex"
+    rows = query_runs(archive_dir)
+    assert len(rows) == 1
+    assert rows[0]["backend"] == "claude"
+    assert rows[0]["review_backend"] == "codex"
 
 
 async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path):

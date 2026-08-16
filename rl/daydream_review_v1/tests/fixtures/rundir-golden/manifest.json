@@ -9,7 +9,6 @@
     "skill": null,
     "model": null,
     "backend": "claude",
-    "review_backend": "claude",
     "fix_backend": "claude",
     "test_backend": "claude",
     "review_only": false,

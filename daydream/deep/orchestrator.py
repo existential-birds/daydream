@@ -3635,8 +3635,8 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
+        _default_backend_name,
         _open_recorder,
-        _resolved_backend_name,
     )
 
     # Cache one Backend instance per (backend_name, resolved_model, resolved_effort)
@@ -3689,7 +3689,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
-        print_info(console, f"Default backend: {_resolved_backend_name(config, 'review')}")
+        print_info(console, f"Default backend: {_default_backend_name(config)}")
         # Bot logins look like ``my-app[bot]``; escape so Rich doesn't eat the brackets.
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()

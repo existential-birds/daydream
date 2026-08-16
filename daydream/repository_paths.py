@@ -10,6 +10,7 @@ at package root keeps flow subpackages dependent on core, never the reverse.
 
 from __future__ import annotations
 
+import posixpath
 import re
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
@@ -77,6 +78,22 @@ def _strip_prefix(
     return None
 
 
+def _repo_relative_parts(
+    parts: tuple[str, ...], repo: Path, root: Path
+) -> tuple[str, ...] | None:
+    """Return ``parts`` minus the repo prefix, trying unresolved then resolved.
+
+    ``root`` is ``repo.resolve()``; the second base strips absolute spellings
+    of a symlinked repo against its resolved spelling. None when neither base
+    prefixes ``parts``.
+    """
+    for base in (PurePosixPath(repo).parts, PurePosixPath(str(root)).parts):
+        remainder = _strip_prefix(parts, base)
+        if remainder is not None:
+            return remainder
+    return None
+
+
 def _walk_components(candidate: Path, parts: Sequence[str]) -> Path | None:
     """Return ``candidate`` advanced through ``parts``, or None on a crossing.
 
@@ -139,11 +156,7 @@ def path_is_confined(
             # are adjudicated by the containment check below; walk only the
             # components at or below the repo root, exactly like the relative
             # form does.
-            stripped = _strip_prefix(parts, PurePosixPath(repo).parts)
-            if stripped is None:
-                stripped = _strip_prefix(
-                    parts, PurePosixPath(str(root)).parts
-                )
+            stripped = _repo_relative_parts(parts, repo, root)
             if stripped is not None:
                 parts = stripped
         walked = _walk_components(candidate, parts)
@@ -164,6 +177,28 @@ def canonicalize_directory_scope(value: str) -> str:
     return stripped
 
 
+def canonicalize_working_directory(repo: Path, value: str) -> str:
+    """Return ``value`` as the repo-relative posix form (``"."`` for the root).
+
+    Absolute, ``./``-prefixed, and plain relative spellings of the same
+    directory collapse to one repo-relative key. Accepted values are already
+    confinement-checked (``path_is_confined``), so the transform is lossless.
+    """
+    if value.startswith("/"):
+        parts = PurePosixPath(value.rstrip("/")).parts
+        remainder = _repo_relative_parts(parts, repo, repo.resolve())
+        if remainder is not None:
+            # Parent-traversal segments name an in-repo directory for
+            # confinement-checked values (the walk resolves each ``..``
+            # against a real in-repo dir), so collapse them lexically to keep
+            # "sub/../sub" and "sub" on one dedup key.
+            return posixpath.normpath("/".join(remainder)) or "."
+        # Not-under-repo absolute spellings are unreachable for
+        # confinement-checked callers; return unchanged as a defensive identity.
+        return value
+    return canonicalize_directory_scope(value)
+
+
 __all__ = [
     "DIRECTORY_SCOPE_PATTERN",
     "DIRECTORY_SCOPE_SCHEMA",
@@ -171,6 +206,7 @@ __all__ = [
     "REPOSITORY_FILE_PATH_SCHEMA",
     "REPOSITORY_FILE_PATH_SEGMENTS",
     "canonicalize_directory_scope",
+    "canonicalize_working_directory",
     "path_is_confined",
     "valid_directory_scope_lexical",
     "valid_repository_file_path",

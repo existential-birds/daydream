@@ -396,16 +396,18 @@ def _resolved_backend_name(config: RunConfig, phase: str) -> str:
     """Resolve the backend kind for ``phase`` across all precedence tiers.
 
     Order (highest first): explicit per-phase ``{phase}_backend``, global
-    ``config.backend`` (``--backend``), file-config phase override, file-config
-    global, then the terminal ``"claude"`` fallback.
+    ``config.backend`` (``--backend``), file-config phase override, then the
+    phase-agnostic terminal default (:func:`_default_backend_name`). Delegating
+    the final tier is exact: it is only reached when ``config.backend`` is
+    already falsy, at which point ``_default_backend_name`` collapses to the
+    same ``file_config.backend or "claude"`` fallback.
     """
     file_config = _file_config_or_empty(config)
     return (
         getattr(config, f"{phase}_backend", None)
         or config.backend
         or file_config.phase_backend(phase)
-        or file_config.backend
-        or "claude"
+        or _default_backend_name(config)
     )
 
 
@@ -471,6 +473,36 @@ def _recorder_backend_names(
         else ""
     )
     return RecorderBackendNames(backend=backend, fix=fix, test=test)
+
+
+def _default_backend_name(config: RunConfig) -> str:
+    """Resolve the phase-agnostic general default backend.
+
+    Order (highest first): global ``config.backend`` (``--backend``),
+    file-config global, then the terminal ``"claude"`` fallback. Deliberately
+    phase-agnostic: it must never consult any ``{phase}_backend`` attribute, so
+    a ``review_backend`` override can never surface here — the archive's
+    general ``backend`` field and the orchestrator's "Default backend" line
+    record the true general default, not a per-phase override.
+    """
+    file_config = _file_config_or_empty(config)
+    return config.backend or file_config.backend or "claude"
+
+
+def _resolved_review_backend_name(config: RunConfig) -> str | None:
+    """Resolve the review-specific backend override, or ``None`` when unset.
+
+    Returns the override only when a review-specific source is configured
+    (CLI ``review_backend``, then file-config review phase); ``None`` when no
+    override exists — the archive must distinguish "review used the general
+    backend" from "review was explicitly overridden", so this is never coerced
+    to a fallback string. The file-config review phase is consulted directly
+    rather than through :func:`_resolved_backend_name` because a CLI global
+    ``config.backend`` outranks the file phase there and would mask a
+    configured override.
+    """
+    file_config = _file_config_or_empty(config)
+    return config.review_backend or file_config.phase_backend("review")
 
 
 def _resolved_model(config: RunConfig, phase: str) -> str | None:
