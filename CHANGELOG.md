@@ -7,11 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.27.0] - 2026-08-15
+## [0.27.0] - 2026-08-16
 
-### Security
+### Added
 
-- **reviews:** Bind credential-bearing PR reviews to a maintainer-approved head SHA and reject head drift before model access.
+- **cli:** support osprey backend selection (#642) (#652)
+- **backends:** add Osprey programmatic backend
+- **backends:** add additive Osprey backend
+- **improve:** surface re-anchored plans outside the README execution board (Closes #352) (#462)
+- **improve:** operator-initiated pruning of executed re-anchor worktrees (#351) (#461)
+
+### Changed
+
+- **daydream:** Harden fixture-contract tests via shared conftest helpers (Closes #688) (#700)
+- **daydream:** Preserve ASCII quotes in the pi fix-apply step (Closes #687) (#697)
+- **daydream:** Gate primary structured output through the salvage check (Closes #669) (#696)
+- **daydream:** Correct stale docker docstring claims + dedupe docstring-guard tests (Closes #676) (#695)
+- **daydream:** Add real-path archive round-trip coverage for fix/test backend flows (Closes #666) (#689)
+- **daydream:** rl sealed-run verification hardening (#637, #639, #640) (Closes #655) (#686)
+- **daydream:** Gate fix/test backend labels on executed pipeline (#648) (#683)
+- **daydream:** Persist per-stack review identity in archive index (Closes #646) (#682)
+- **daydream:** Consolidated: rl docker/seal follow-ups (privilege-drop flow + candidate-diff dedup) (#637, #640) (#681)
+- **daydream:** manifest records phase-agnostic general default backend + nullable review_backend (Closes #647)
+- **daydream:** Consolidated: daydream input-handling hardening (host-command dedup + structured-output schema) (#649) (#678)
+- **daydream:** Bound the deep-flow diff size (#625) (Closes #644) (#675)
+- **daydream:** Consolidated: backend identity in trajectory metadata (#623) (Closes #643) (#671)
+- Isolate RL reward scoring against mutable agent state (Closes #580) (#645)
+- **daydream:** Harden intent analysis: treat PR-derived intent as data (Closes #579) (#631)
+- Require trusted, head-bound approval before credential-bearing Daydream PR reviews (#626)
+- **backends:** trim Osprey integration to backend surface
+- Scope fix-gate quality analysis to reviewed Python candidates (#612)
+- **daydream:** #456 Preserve stack-specific omissions in improve coverage reporting (#610)
+- **daydream:** #578 Remove unused htmx sidecar from offline benchmark reports (#605)
+- **daydream:** #562 Consolidate out-of-scope findings in daydream/phases.py (raw --log output, untracked files in commit) (#604)
+- **daydream:** Consolidate out-of-scope findings in rl/daydream_review_v1/tests/ (base-layer coverage, trajectory.json fixture) (#602)
+- **daydream:** #444 Isolate Codex read-only runs from the caller's Git metadata (#601)
+- **daydream:** #443 Confine model-supplied finding paths before fix-agent dispatch (#600)
+- **daydream:** #566 Consolidate out-of-scope findings in daydream/improve/ (command_contract abs paths, shared prune) (#599)
+- **daydream:** #561 Consolidate out-of-scope findings in daydream/trajectory.py (PEM redaction variants, redact_value helper) (#595)
+- **daydream:** Consolidate read-only Bash guard contract findings (claude.py deny-reason, prompts.py grep) (issue #565) (#592)
+- record untracked-oracle caveat verification for issue #571 (#589)
+- **daydream:** Consolidate out-of-scope findings in tests/test_rewards.py (duplicate gate tail, test coupling) (#588)
+- **daydream:** Document format version in exploration cache-key contract (issue #569) (#587)
+- **daydream:** Consolidate stale repo.Dockerfile network-claim comments (images/ + rl/daydream_review_v1/images/) (#586)
+- remove stalled stream from never-retried list in CLAUDE.md (#577)
+- **daydream:** Consolidate out-of-scope findings in tests/test_images.py (dedup _build, quoting bug, stale docstring) (#559)
+- Restrict archive uploads to operator-controlled destinations (#551)
+- **rl:** reuse one archived run snapshot across rollout scoring (Closes #435) (#542)
+- Bound benchmark extraction and deduplication concurrency deterministically (#541)
+- point PR checklist at make check and CI actionlint gates (#538)
+- **rl:** pin rollout image inputs to immutable, integrity-verified references (#537)
+- **benchmark:** reuse native HTTP clients for each direct-scoring invocation (Closes #424) (#527)
+- Batch reverse-import searches and reuse the Go package index (Closes #425) (#526)
+- Pin RL repository snapshot builds to an explicit immutable base identity (#525)
+- Resolve Python parent-relative and bare-relative imports in exploration (#516)
+- Share the scorer judge-error ratio threshold with the benchmark report (#515)
+- **backends:** reuse fanout concurrency parser (#512)
+- Pin and verify every remote input in the RL rollout base image (#506)
+- Route redrive PR posting through canonical merged items (#400)
+- Confine ephemeral workspace copy paths to both roots (Closes #399) (#500)
+- Validate GitHub subprocess timeout and retry environment controls (Closes #393) (#497)
+- **workflows:** document repository-specific Codex credentials (#486)
+- **workflows:** replace stale dogfood setup docs with canonical install pointer (#483)
+- **workflows:** align repository workflow setup docs with Codex authentication (#481)
+- remove task-overriding directives from CLAUDE.md (#478)
+- **benchmark:** filter direct benchmark extraction and deduplication by selected PR URLs (#470)
+- Constrain workspace-copy entries to source and destination worktrees (#469)
+- stop prune_stale_reanchor_worktrees racing a live *-reanchor worktree (#468)
 
 ### Fixed
 
@@ -19,7 +81,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **bot:** Surface head-drift rejections on the PR (issue #336) — a failed `workflow_dispatch` analyze run uploads a failure-context artifact that `surface-analyze-failure` resolves, so the instructive "comment the review command again" message reaches the PR instead of staying in the Actions log.
 - **security:** Restrict archive upload destinations to the operator-controlled `--trajectory-hub-repo` / `DAYDREAM_TRAJECTORY_HUB_REPO` sources; a `trajectory_hub_repo` key in the target checkout's file config is now ignored.
 - **rl:** Verify untracked-oracle caveat for protected test-oracle paths (issue #571) — confirmed the fail-closed docstring and README manifest caveat are present and accurate at HEAD (b824946), landed by commit df1fd3f (#558); no code or behavior change.
+- **deep:** handle unconfined parallel fix preflight rejection (#629)
+- **daydream_review_v1:** harden fail-closed gate oracle in test_rewards (Closes #576) (#630)
+- **improve:** attribute dot-slash evidence + ECMA-valid anchors + legal-filename path grammar (#572, #573) (#620)
+- **backends:** type-check Osprey adapter
+- **redaction:** broaden structured credential redaction in trajectory and archive artifacts (#613)
+- **improve:** isolate improve model calls in a detached audit worktree (#560)
+- **rl:** withhold fix-test reward when protected test-oracle paths change (#558)
+- enforce an untrusted-content boundary for exploration specialists and artifacts (Closes #442) (#555)
+- **redact:** redact agent log mode and benchmark subprocess output (Closes #438) (#553)
+- **bench:** exclude incomplete benchmark tools so every rank uses one PR population (#437) (#548)
+- **archive:** prevent pre-existing untracked files from entering recommended patch archives (#436) (#544)
+- **bench:** rank every benchmark tool on one complete PR cohort per judge (#536)
+- **benchmark:** preserve positional identity for duplicate comments (Closes #427) (#532)
+- **rl:** guard golden trajectory fixtures at the RL scoring boundary (#422) (#524)
+- **bench:** render zero-candidate benchmark reports as an empty-findings state (#521)
+- **rl:** require a fixture target for --red baseline-gate proofs (Closes #416) (#519)
+- **rl:** reject unknown keys in RL image manifests (#517)
+- **rl:** verify the pi package tarball checksum before install (Closes #405) (#513)
+- **demo:** honor --skip-setup in the full Python demo (#509)
+- **bench:** preserve benchmark metrics when trajectory timestamps are malformed (#508)
+- **rl:** verify pinned rollout CLI downloads before installation or extraction (Closes #403) (#505)
+- **rewards:** sanitize and guard the committed RL rollout trajectory message (Closes #394) (#501)
+- **bench:** unify benchmark report around largest-subset anchor judge (Closes #392) (#498)
+- **benchmark-report:** reject duplicate canonical benchmark-trajectory identities (Closes #395) (#499)
+- **tree_sitter_index:** resolve parent and grandparent Python relative imports (Closes #390) (#495)
+- **codex:** treat non-zero Codex CLI exits as classified backend failures (Closes #391) (#494)
+- **bench:** reject reports with no eligible judge panel (#493)
+- **bench:** derive evidence-backed benchmark improvement recommendations (Closes #387) (#491)
+- support pre-push hook installation from linked git worktrees (Closes #388) (#490)
+- **clipboard:** bound clipboard copies without blocking the async failure handoff (#489)
+- **workflows:** reject unvalidated artifact-derived failure targets (Closes #384) (#488)
+- **benchmark-report:** exclude incomplete SaaS tools from common-subset rankings (Closes #382) (#487)
+- **ui:** remove blocking thought-animation delay while preserving stable terminal output (#485)
+- **bench:** join benchmark trajectories by canonical repository and PR identity (#484)
+- **training:** remove stale corpus lineage metadata after empty rebuild (#480)
+- **rl:** reject empty commits from the RL fix reward path (#479)
+- redact GitHub App manifest-conversion codes from GitHub CLI errors (Closes #371) (#476)
+- **phases:** enforce read-only profiles for setup and recommendation diagnostics (#475)
+- **rl:** reject occupied fixture destinations before Git initialization (#372) (#474)
+- **ci:** pin GitHub App token action in live and packaged posting workflows (#467)
+- **workflows:** remove unusable post checkout (Closes #365) (#466)
+- **scripts:** pass archive paths as python arguments (465)
+- **deep:** arbiter cross-stack merge crash — salvage completed stack verdicts (Closes #361) (#464)
+- **improve:** write the main index immediately on re-anchor (Closes #353) (#463)
+- **pi:** survive transient stream failures in deep reviews (#459)
 
+### Security
+
+- **reviews:** Bind credential-bearing PR reviews to a maintainer-approved head SHA and reject head drift before model access.
 ## [0.26.0] - 2026-08-12
 
 ### Added
