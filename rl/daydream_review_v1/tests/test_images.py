@@ -7,7 +7,7 @@ use. A **fast** tier — no Docker required — rejects ``--red`` invocations th
 cannot select the fixture repo, ensuring the guard fires before any build
 side-effect. A manifest/README tier asserts the locked-dependency policy: the
 itsdangerous manifest entry installs strictly from its committed uv.lock and the
-README documents the four mandatory setup rules. The four ``slow`` tests execute
+README documents the four mandatory setup rules. The five ``slow`` tests execute
 real Docker builds: the red baseline path plants a failing assertion and the
 build must die (enforcement IS the build failing), the green baseline path builds
 and bakes the checkout, and the reference-image build proves the itsdangerous
@@ -415,6 +415,85 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         assert dropped_uid.stdout.strip() != "0", "run-as-agent must drop off root"
     finally:
         subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
+
+
+@pytest.mark.slow
+@DOCKER_REQUIRED
+def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> None:
+    """A real (non-fake) docker invocation completes a fix-pipeline write as the
+    agent uid after the harness handoff, and the write reaches the in-container
+    origin mirror.
+
+    repo.Dockerfile clones /work/repo as root with no chown (this issue forbids
+    re-adding one), so an agent-uid process would EACCES on its first write
+    unless the harness hands the checkout + mirror to the agent identity before
+    the privilege drop (harness.py:148-162). This drives that exact handoff then
+    the deep flow's terminal write sequence (.daydream/ mkdir, git apply a fix
+    patch, git add/commit, git push HEAD:main) as the agent uid inside the real
+    image, and asserts the push reached /srv/mirror.git. When a docker daemon is
+    reachable but the write fails, this FAILS (never skips).
+    """
+    result = _build(base_image)
+    assert result.returncode == 0, (result.stdout + result.stderr)[-3000:]
+    tag = f"{FIXTURE_IMAGE}:9b9238166305"  # pr2 head SHA[:12]
+    assert tag in _tags(), f"{tag} not built; have {_tags()}"
+
+    # A real one-line fix patch that applies cleanly to the baked calc.py tree
+    # (deterministic fixture content; the hunk matches the baked pr2 tree).
+    fix_patch = (
+        "diff --git a/calc.py b/calc.py\n"
+        "index 319252d..f5de56a 100644\n"
+        "--- a/calc.py\n"
+        "+++ b/calc.py\n"
+        "@@ -3,7 +3,7 @@\n"
+        " \n"
+        " def add(a: int, b: int) -> int:\n"
+        "     \"\"\"Return the sum of *a* and *b*.\"\"\"\n"
+        "-    return a + b\n"
+        "+    return a + b  # fixed\n"
+        " \n"
+        " \n"
+        " def divide(a: int, b: int) -> float:\n"
+    )
+
+    script = (
+        # The harness handoff (harness.py:148-162): hand checkout + mirror to agent.
+        "chown -R agent:agent /work/repo /srv/mirror.git && "
+        # The deep flow's fix-pipeline write, run as the agent uid. The fix patch
+        # arrives on stdin (docker run -i) and is applied via `git apply -`, so
+        # no base64/coreutils dependency is introduced into the image contract.
+        "run-as-agent sh -c '"
+        "cd /work/repo && "
+        "mkdir -p .daydream && "
+        "cat > .daydream/recommended.patch && "
+        "git apply .daydream/recommended.patch && "
+        "git add -A && "
+        # The deep flow injects a fallback identity when none is configured
+        # (fresh-CI env, git_ops.py:1902-1912); the baked image carries no
+        # user.name/user.email, so the commit must do the same or it dies
+        # "Author identity unknown".
+        "git -c user.email=daydream@localhost -c user.name=daydream commit -q -m fix && "
+        "git push -q origin HEAD:main"
+        "' && "
+        # Same container: prove the write reached the in-container mirror.
+        "git --git-dir=/srv/mirror.git show main:calc.py"
+    )
+    probe = subprocess.run(
+        ["docker", "run", "--rm", "-i", tag, "sh", "-c", script],
+        input=fix_patch, capture_output=True, text=True, check=False,
+    )
+    # The write reached the in-container origin mirror: the same container that
+    # pushed now reads main:calc.py back out of /srv/mirror.git and it carries
+    # the agent's fix (each docker run --rm starts from the baked image, so the
+    # mirror state must be verified inside the one container that wrote it).
+    assert probe.returncode == 0, (
+        "real docker fix-pipeline write failed as agent uid: "
+        f"{probe.stdout}{probe.stderr}"
+    )
+    assert "# fixed" in probe.stdout, (
+        "the agent's fix did not reach the in-container origin mirror: "
+        f"{probe.stdout}{probe.stderr}"
+    )
 
 
 def test_docker_required_gates_on_daemon_reachability() -> None:
