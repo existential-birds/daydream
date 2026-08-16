@@ -12,7 +12,6 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
 
 import pytest
 
@@ -25,9 +24,6 @@ from daydream.trajectory import (
 )
 from tests.harness.config import TARGET_HUB_KEY_CONFIG
 from tests.harness.trajectory import make_recorder
-
-if TYPE_CHECKING:
-    from daydream.runner import RunConfig
 
 
 def _add_user_step(recorder: TrajectoryRecorder) -> None:
@@ -49,42 +45,31 @@ def _add_user_step(recorder: TrajectoryRecorder) -> None:
 def _make_round_trip_fixture(
     tmp_path: Path,
     run_flow: DaydreamRunFlow,
-) -> tuple[RunConfig, Callable[[TrajectoryRecorder, str], None], TrajectoryRecorder]:
+) -> TrajectoryRecorder:
     """Build the full archive round-trip fixture: minimal .daydream/ scaffolding,
     RunConfig, archive callback, and a recorder primed with two steps spaced 8.5s
     apart so the derived wall-clock span is deterministic."""
     from daydream.runner import RunConfig, _make_archive_callback
 
-    target_dir = tmp_path / "project"
-    target_dir.mkdir()
-    daydream_dir = target_dir / ".daydream"
-    daydream_dir.mkdir()
-    (target_dir / ".review-output.md").write_text("# Review\nLooks good.\n")
-    findings_src = target_dir / "findings" / "findings.json"
+    (tmp_path / ".review-output.md").write_text("# Review\nLooks good.\n")
+    findings_src = tmp_path / "findings" / "findings.json"
     findings_src.parent.mkdir(parents=True)
     findings_src.write_text(
         '{"schema_version": 1, "findings": [{"fingerprint": "deadbeef"}]}'
     )
 
     config = RunConfig(
-        target=str(target_dir),
+        target=str(tmp_path),
         skill="python",
         backend="claude",
         archive=True,
         run_eval=False,
         findings_out="findings/findings.json",
     )
-    callback = _make_archive_callback(config, target_dir)
+    callback = _make_archive_callback(config, tmp_path)
     assert callback is not None
 
-    recorder = TrajectoryRecorder(
-        path=daydream_dir / "trajectory.json",
-        run_flow=run_flow,
-        target_dir=target_dir,
-        agent_model_name="opus",
-        session_id="test",
-        on_write=callback,
-    )
+    recorder = make_recorder(tmp_path, run_flow=run_flow, on_write=callback)
     # Two steps spaced 8.5s apart so the derived span is deterministic.
     for ts in ("2026-05-31T10:00:00.000000Z", "2026-05-31T10:00:08.500000Z"):
         recorder.steps.append(
@@ -99,7 +84,7 @@ def _make_round_trip_fixture(
                 },
             )
         )
-    return config, callback, recorder
+    return recorder
 
 
 def _assert_round_trip_bundle(
@@ -173,27 +158,13 @@ async def test_on_write_does_not_fire_on_empty_trajectory(tmp_path: Path) -> Non
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 
-# Full archive round-trip via on_write
-async def test_full_archive_round_trip(tmp_path: Path, archive_dir: Path) -> None:
-    """_make_archive_callback wires archive_run through on_write, producing manifest + SQLite row."""
-    _, _, recorder = _make_round_trip_fixture(tmp_path, DaydreamRunFlow.NORMAL)
-
-    async with recorder:
-        pass
-
-    assert recorder.path.exists()
-    _assert_round_trip_bundle(
-        archive_dir, recorder, fix_backend="claude", test_backend="claude",
-    )
-
-
 @pytest.mark.parametrize("run_flow", [DaydreamRunFlow.NORMAL, DaydreamRunFlow.IMPROVE])
 async def test_full_archive_round_trip_fix_test_backend_columns(
     tmp_path: Path, archive_dir: Path, run_flow: DaydreamRunFlow,
 ) -> None:
     """Real-path round-trip: IMPROVE omits fix/test_backend (keys + NULL SQL
     columns); NORMAL (deep-family) records both (keys present + non-NULL)."""
-    _, _, recorder = _make_round_trip_fixture(tmp_path, run_flow)
+    recorder = _make_round_trip_fixture(tmp_path, run_flow)
 
     async with recorder:
         pass
