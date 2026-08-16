@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 import verifiers.v1 as vf
-from conftest import PROJECT_ROOT, FakeRuntime
+from conftest import PROJECT_ROOT, FakeRuntime, assert_docstring_guards
 from verifiers.v1.graph import MessageNode
 
 from daydream_review_v1.backends import STRATEGIES
@@ -278,11 +278,14 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     """The docker deep flow's first write succeeds because the harness hands the
     checkout + in-container mirror to the agent uid before the privilege drop.
 
-    repo.Dockerfile clones /work/repo as root (no layer chowns it), so without
-    this handoff an agent-uid process would EACCES on its first write. The
-    harness issues `chown -R agent:agent <repo> /srv/mirror.git` before
-    launching through run-as-agent; this pins that the ownership handoff is
-    actually issued under a docker-shaped runtime.
+    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
+    against the launch-time handoff), so the baked checkout is already
+    agent-owned. The in-container origin mirror /srv/mirror.git is baked into the
+    image at build time (COPY mirror.git /srv/mirror.git); no build layer chowns it,
+    so the launch-time handoff must cover it. The harness issues
+    `chown -R agent:agent <repo> /srv/mirror.git` before launching through
+    run-as-agent, re-chowning the checkout and covering the mirror; this pins
+    that the ownership handoff is actually issued under a docker-shaped runtime.
     """
     task = _task(corpus_mini_dir, fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
@@ -305,6 +308,25 @@ async def test_docker_launch_hands_checkout_to_agent_before_run_as_agent(
     assert runtime.sequence.index(handoff) < runtime.sequence.index(argv), (
         "the handoff must be issued before the run-as-agent launch: an agent-uid "
         "process chowned only after the launch still EACCESes on its first write"
+    )
+
+
+def test_docker_handoff_docstring_describes_build_chown_and_mirror() -> None:
+    """The docker-handoff docstring must describe the CURRENT ownership design:
+    build-time chown in repo.Dockerfile (defense-in-depth) plus the launch-time
+    handoff that covers the mirror — baked into the image at build time (COPY
+    mirror.git /srv/mirror.git) but chowned by no build layer. The stale 'no
+    layer chowns it' and 'created at launch' claims are gone."""
+    assert_docstring_guards(
+        test_docker_launch_hands_checkout_to_agent_before_run_as_agent,
+        gone=("no layer chowns it", "created at launch"),
+        present=(
+            "chowns /work/repo at build time",
+            "defense-in-depth",
+            "/srv/mirror.git",
+            "baked",
+            "no build layer chowns it",
+        ),
     )
 
 

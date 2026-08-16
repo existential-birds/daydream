@@ -26,7 +26,7 @@ import uuid
 from pathlib import Path
 
 import pytest
-from conftest import PROJECT_ROOT, docker_daemon_is_available
+from conftest import PROJECT_ROOT, assert_docstring_guards, docker_daemon_is_available
 
 from daydream_review_v1.fixture import FIXTURE_PR2_HEAD_SHA, FIXTURE_SLUG, build_fixture_repo
 from images import build_images
@@ -424,13 +424,16 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     agent uid after the harness handoff, and the write reaches the in-container
     origin mirror.
 
-    repo.Dockerfile clones /work/repo as root with no chown (this issue forbids
-    re-adding one), so an agent-uid process would EACCES on its first write
-    unless the harness hands the checkout + mirror to the agent identity before
-    the privilege drop (harness.py:148-162). This drives that exact handoff then
-    the deep flow's terminal write sequence (.daydream/ mkdir, git apply a fix
-    patch, git add/commit, git push HEAD:main) as the agent uid inside the real
-    image, and asserts the push reached /srv/mirror.git. When a docker daemon is
+    repo.Dockerfile chowns /work/repo at build time (idempotent defense-in-depth
+    against the launch-time handoff), so the baked checkout is already
+    agent-owned. The in-container origin mirror /srv/mirror.git is baked into
+    the image at build time (COPY mirror.git /srv/mirror.git), but no build
+    layer chowns it; the harness re-chowns the checkout plus the mirror at
+    launch (harness.py:148-162), covering the mirror. This drives that exact
+    handoff then the deep flow's
+    terminal write sequence (.daydream/ mkdir, git apply a fix patch,
+    git add/commit, git push HEAD:main) as the agent uid inside the real image,
+    and asserts the push reached /srv/mirror.git. When a docker daemon is
     reachable but the write fails, this FAILS (never skips).
     """
     result = _build(base_image)
@@ -493,6 +496,18 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
     assert "# fixed" in probe.stdout, (
         "the agent's fix did not reach the in-container origin mirror: "
         f"{probe.stdout}{probe.stderr}"
+    )
+
+
+def test_real_docker_write_docstring_describes_build_chown_and_rechown() -> None:
+    """The real-docker-write docstring must describe the CURRENT design: the image
+    chowns the checkout at build time AND the harness re-chowns the checkout plus
+    the mirror at launch. The stale 'no chown (this issue forbids re-adding one)'
+    and 'runtime-created mirror' claims are gone."""
+    assert_docstring_guards(
+        test_real_docker_deep_flow_fix_pipeline_write_as_agent,
+        gone=("no chown", "forbids re-adding one", "runtime-created"),
+        present=("chowns /work/repo at build time", "/srv/mirror.git", "baked"),
     )
 
 
