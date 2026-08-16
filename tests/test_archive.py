@@ -7,6 +7,7 @@ Covers git_context, manifest, index, and the top-level archive_run flow.
 import json
 import sqlite3
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -35,6 +36,9 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
 from daydream.trajectory import DaydreamRunFlow, TrajectoryRecorder
 from tests.harness.trajectory import make_manifest
+
+MakeConfig = Callable[..., RunConfig]
+InstallBackend = Callable[[object], object]
 
 
 @dataclass
@@ -199,6 +203,232 @@ def test_build_manifest_basic(tmp_path: Path):
     assert m.total_cached_tokens == 20
     assert m.repo_slug == "org/repo"
     assert m.head_sha == "a" * 40
+
+
+@pytest.mark.parametrize(
+    "flow",
+    list(DaydreamRunFlow),
+    ids=[f.value for f in DaydreamRunFlow],
+)
+def test_build_manifest_fix_test_backend_gated_per_flow(
+    tmp_path: Path, flow: DaydreamRunFlow,
+) -> None:
+    """Issue #648: backend labels track the executed step pipeline.
+
+    Driven over every ``DaydreamRunFlow`` member: the deep family's
+    fix-bearing mode labels (NORMAL for shallow, DEEP for loop) resolve
+    fix/test backends exactly as today, while TTT (review/comment) gates the
+    fix/test STEPS off at runtime (``_fix_cycle_enabled`` is loop/shallow
+    only) and drops both labels. PR (feedback) runs its own ``fix-items``
+    phase (``_step_fix_items``, ``backend_for("fix")``) but never the ``test``
+    step, so it keeps a fix backend and drops only test. IMPROVE's built-in
+    pipeline defines no fix/test phase, so it drops both. CUSTOM is classified
+    by its registered pipeline; with no fork flow configured here it cannot
+    prove a fix/test phase, so it drops both.
+    """
+    recorder = _MockRecorder(run_flow=flow)
+    config = _MockConfig(fix_backend="codex", test_backend="codex")
+    m = _build(tmp_path, recorder=recorder, config=config)
+    run = m.to_dict()["run"]
+    if flow is DaydreamRunFlow.PR:
+        # Feedback runs fix-items but never the test step.
+        assert m.fix_backend == "codex"
+        assert m.test_backend is None
+        assert run["fix_backend"] == "codex"
+        assert "test_backend" not in run
+    elif flow in (
+        DaydreamRunFlow.IMPROVE,
+        DaydreamRunFlow.TTT,
+        DaydreamRunFlow.CUSTOM,
+    ):
+        assert m.fix_backend is None
+        assert m.test_backend is None
+        assert "fix_backend" not in run
+        assert "test_backend" not in run
+    else:
+        assert m.fix_backend == "codex"
+        assert m.test_backend == "codex"
+        assert run["fix_backend"] == "codex"
+        assert run["test_backend"] == "codex"
+
+
+def test_build_manifest_classifies_custom_flow_by_registered_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every ``--flow`` run is stamped CUSTOM regardless of step composition, so
+    a fork flow is classified from its registered pipeline, not its label: one
+    composing the built-in fix/test steps records backends, one without them
+    records none.
+    """
+    from daydream.extensions import build_registry
+
+    registry = build_registry()
+    registry.set_flow("fix-cycle-fork", ["exploration", "intent", "fix", "test", "commit"])
+    registry.set_flow("review-only-fork", ["exploration", "intent"])
+    monkeypatch.setattr("daydream.archive.manifest.get_registry", lambda: registry)
+
+    for flow_name, fix_backend, test_backend in (
+        ("fix-cycle-fork", "codex", "codex"),
+        ("review-only-fork", None, None),
+    ):
+        recorder = _MockRecorder(run_flow=DaydreamRunFlow.CUSTOM)
+        config = _MockConfig(
+            fix_backend="codex", test_backend="codex", flow_name=flow_name,
+        )
+        m = _build(tmp_path, recorder=recorder, config=config)
+        assert m.fix_backend == fix_backend
+        assert m.test_backend == test_backend
+        run = m.to_dict()["run"]
+        assert ("fix_backend" in run) == (fix_backend is not None)
+        assert ("test_backend" in run) == (test_backend is not None)
+
+
+def test_build_manifest_classifies_fork_override_of_builtin_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #648: fork overrides of built-in flow names are classified by
+    the registry pipeline actually executed by ``run_flow``, not by the label.
+
+    ``Registry.set_flow`` has no built-in-name guard, so a fork overriding
+    ``deep`` (dropping fix/test) or ``improve`` (adding fix/test) runs its own
+    pipeline while the recorder label still suggests the built-in. The manifest
+    must follow the registry in both directions.
+    """
+    from daydream.extensions import build_registry
+
+    registry = build_registry()
+    # Override built-ins after seeding, exactly as an extension would.
+    registry.set_flow("deep", ["exploration", "intent"])
+    registry.set_flow("improve", ["exploration", "fix", "test"])
+    monkeypatch.setattr("daydream.archive.manifest.get_registry", lambda: registry)
+
+    for flow, flow_name, fix_backend, test_backend in (
+        (DaydreamRunFlow.DEEP, None, None, None),
+        (DaydreamRunFlow.NORMAL, None, None, None),
+        (DaydreamRunFlow.IMPROVE, None, "codex", "codex"),
+    ):
+        recorder = _MockRecorder(run_flow=flow)
+        config = _MockConfig(
+            fix_backend="codex", test_backend="codex", flow_name=flow_name,
+        )
+        m = _build(tmp_path, recorder=recorder, config=config)
+        assert m.fix_backend == fix_backend
+        assert m.test_backend == test_backend
+
+
+def test_fix_cycle_classification_covers_every_run_flow() -> None:
+    """Every ``DaydreamRunFlow`` member is explicitly classified: TTT
+    (review/comment) is mode-gated never to reach the fix cycle, PR (feedback)
+    runs its own fix-items phase (fix yes, test no), and every other label is
+    classified by its registered pipeline (issue #648). A future enum member
+    fails this exhaustiveness check instead of silently changing which backend
+    fields the manifest emits.
+    """
+    mode_gated_labels = {DaydreamRunFlow.TTT}
+    fix_only_labels = {DaydreamRunFlow.PR}
+    fix_cycle_builtins = {
+        DaydreamRunFlow.NORMAL,
+        DaydreamRunFlow.DEEP,
+    }
+    assert set(DaydreamRunFlow) == (
+        mode_gated_labels
+        | fix_only_labels
+        | fix_cycle_builtins
+        | {DaydreamRunFlow.IMPROVE, DaydreamRunFlow.CUSTOM}
+    )
+
+
+def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None:
+    """Issue #648 observable outcomes: manifest + SQLite carry no fix/test backend."""
+    manifests = list((archive_dir / "runs").glob("*/manifest.json"))
+    assert len(manifests) == 1, f"expected exactly one archived run, found {len(manifests)}"
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["run"]["flow"] == flow
+    assert "fix_backend" not in manifest["run"]
+    assert "test_backend" not in manifest["run"]
+    rows = query_runs(archive_dir)
+    assert len(rows) == 1
+    assert rows[0]["fix_backend"] is None
+    assert rows[0]["test_backend"] is None
+
+
+async def test_improve_archive_real_path_omits_fix_test_backend(
+    improve_monorepo_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """Issue #648 real-path: an improve run archives no fix/test backend.
+
+    Enters from the production entrypoint (``runner.run``) with a real temp git
+    worktree, real recorder, and real event loop; only the network backend is
+    mocked via the ``create_backend`` seam. The archived manifest drops
+    ``fix_backend``/``test_backend`` and the SQLite runs row stores NULL.
+    """
+    from daydream.runner import run
+    from tests.harness.improve_backend import install_improve_stub
+
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+    install_improve_stub(monkeypatch, improve_monorepo_target)
+
+    rc = await run(
+        make_config(
+            improve_monorepo_target, flow_name="improve", archive=True, run_eval=False,
+        )
+    )
+
+    assert rc == 0
+    _assert_archive_omits_fix_test_backend(archive_dir, "improve")
+
+
+async def test_custom_flow_archive_real_path_omits_fix_test_backend(
+    ext_dir: Any,
+    multi_stack_target: Path,
+    install_backend: InstallBackend,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    make_config: MakeConfig,
+) -> None:
+    """Issue #648 real-path: a fork-registered custom flow archives no fix/test backend.
+
+    Same production entry (``runner.run``) with a real git worktree and
+    recorder; only the backend is mocked. The custom flow is extension-defined,
+    so its pipeline has no fix/test step and the archive must not invent labels.
+    """
+    from daydream.backends import ResultEvent, TextEvent
+    from daydream.runner import run
+    from tests.harness.backend import ScriptedBackend
+
+    monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
+    ext_dir.write_module(
+        "from daydream.extensions import FlowStep\n"
+        "async def _audit(ctx):\n"
+        "    from daydream.agent import run_agent\n"
+        "    from daydream.trajectory import DaydreamPhase\n"
+        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-FLOW-PROMPT',\n"
+        "                    phase=DaydreamPhase.REVIEW)\n"
+        "def register(r):\n"
+        "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
+        "    r.set_flow('ro-audit', ['ro_audit'])\n"
+    )
+    install_backend(
+        ScriptedBackend(
+            events=(
+                TextEvent(text=""),
+                ResultEvent(structured_output=None, continuation=None),
+            ),
+            model="mock-model",
+        )
+    )
+
+    rc = await run(
+        make_config(
+            multi_stack_target, flow_name="ro-audit", archive=True, run_eval=False,
+        )
+    )
+
+    assert rc == 0
+    _assert_archive_omits_fix_test_backend(archive_dir, "custom")
 
 
 @pytest.mark.parametrize(

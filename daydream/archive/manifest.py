@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import GitContext
 from daydream.config import DEFAULT_PI_MODEL
+from daydream.extensions import UnresolvedExtensionError, get_registry
+from daydream.trajectory import DaydreamRunFlow
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,6 +29,76 @@ if TYPE_CHECKING:
     from daydream.trajectory import TrajectoryRecorder
 
 MANIFEST_SCHEMA_VERSION = "1.0"
+
+
+def _runtime_flow_name(flow: DaydreamRunFlow, flow_name: str | None) -> str | None:
+    """Return the registered flow name ``run_flow`` resolved for this label.
+
+    The deep family (NORMAL/DEEP/TTT/PR — four mode labels of the single
+    registered ``deep`` flow, #330) always resolves to ``"deep"`` regardless
+    of ``config.flow_name``; ``IMPROVE`` resolves ``"improve"``; ``CUSTOM`` is
+    the literal ``--flow`` name. Builtins are seeded before the session's
+    registry loads, so a fork registering a built-in name is resolved exactly
+    as it runs (issue #648).
+    """
+    if flow is DaydreamRunFlow.IMPROVE:
+        return "improve"
+    if flow is DaydreamRunFlow.CUSTOM:
+        return flow_name
+    return "deep"
+
+
+def _flow_phase_steps(flow_name: str | None) -> set[str]:
+    """Return the set of phase steps in the registered flow's pipeline.
+
+    Introspects the per-run registry (builtins are seeded before extension
+    load) — the same source ``run_flow`` resolves — so a fork flow composing
+    the built-in ``fix``/``test`` phases is detected exactly as it runs them.
+    An unknown/absent flow yields an empty set: we record no backend rather
+    than invent one for phases that never ran (#648).
+    """
+    if not flow_name:
+        return set()
+    try:
+        entries = get_registry().flow(flow_name)
+    except UnresolvedExtensionError:
+        return set()
+    step_names: set[str] = set()
+    for entry in entries:
+        if isinstance(entry, str):
+            step_names.add(entry)
+        else:
+            step_names.update(entry.steps)
+    return step_names
+
+
+def _flow_fix_test_steps(flow: DaydreamRunFlow, flow_name: str | None) -> tuple[bool, bool]:
+    """Return ``(runs_fix, runs_test)`` for the pipeline ``run_flow`` executes.
+
+    Issue #648 gates the manifest's fix/test backend labels on the step
+    pipeline ``run_flow`` actually executes, resolved from the per-run registry
+    for every label — not just ``CUSTOM`` — because ``Registry.set_flow`` has no
+    built-in-name guard: a fork overriding ``deep`` or ``improve`` runs its own
+    pipeline while the label would suggest the built-in. Two labels are fixed
+    by runtime mode, not the registry:
+
+    - Review/comment (``TTT``) stops after ``post-review`` (``_review_only_mode``)
+      and never runs the fix cycle, so it records neither backend.
+    - Feedback (``PR``) runs its own ``fix-items`` phase (``_step_fix_items``,
+      ``backend_for("fix")``) but never the ``test`` step, so it records a fix
+      backend only — matching the trajectory's ``_recorder_backend_names``.
+
+    ``NORMAL``/``DEEP``/``IMPROVE``/``CUSTOM`` are classified by the registered
+    pipeline (``NORMAL``/``DEEP`` → the ``deep`` flow; ``IMPROVE`` → ``improve``;
+    ``CUSTOM`` → the literal ``--flow`` name).
+    """
+    if flow is DaydreamRunFlow.TTT:
+        return False, False
+    if flow is DaydreamRunFlow.PR:
+        # Feedback runs the fix phase (fix-items) but never the test phase.
+        return True, False
+    steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
+    return ("fix" in steps, "test" in steps)
 
 
 def _omit_falsy(**fields: Any) -> dict[str, Any]:
@@ -65,9 +137,13 @@ class Manifest:
             backend: a CLI ``--backend`` masks a file-config review override,
             so review may have run on ``backend`` even when this is set.
         fix_backend: Effective backend for the fix phase (override or general
-            default).
+            default), or ``None`` for flows whose executed step pipeline has no
+            fix phase (improve, custom flows without fix, and TTT whose fix/test
+            steps are gated off at runtime; #648).
         test_backend: Effective backend for the test phase (override or general
-            default).
+            default), or ``None`` for flows whose executed step pipeline has no
+            test phase (improve, custom flows without test, and TTT/PR which
+            never run the test step; #648).
         per_stack_review_backend: Per-stack review tier backend for runs that
             execute per-stack reviews (issue #646), resolved from the
             ``per_stack_review`` phase key — the key that actually drives
@@ -323,7 +399,6 @@ def build_manifest(
     from daydream.runner import (  # noqa: PLC0415 - deferred import avoids cycle
         _DEEP_FLOW_ALIASES,
         _default_backend_name,
-        _recorder_backend_names,
         _resolved_backend_name,
         _resolved_model,
         _resolved_review_backend_name,
@@ -337,7 +412,6 @@ def build_manifest(
     # file-config review override). Sibling fields ``fix_backend``/
     # ``test_backend`` are effective per-phase values; ``review_backend`` is
     # not.
-    flow_names = _recorder_backend_names(config, recorder.run_flow)
 
     # Per-stack reviewers (issue #646) execute on the "per_stack_review" phase key —
     # NOT the "review" tier — so archives record that tier's resolved backend and
@@ -376,6 +450,17 @@ def build_manifest(
                 _configured_pi_model(Path(cwd)) if cwd else None
             ) or DEFAULT_PI_MODEL
 
+    # Gate fix/test backend labels on whether this flow's step pipeline actually
+    # includes those phases (issue #648): improve never reaches the fix/test
+    # STEPS, TTT (review/comment) gates them off at runtime (_fix_cycle_enabled
+    # is loop/shallow only), PR (feedback) runs its own fix-items phase but
+    # never test, and custom flows are classified from their registered pipeline
+    # (every ``--flow`` run is stamped CUSTOM regardless of step composition), so
+    # a fork composing the built-in fix/test steps records backends like the deep
+    # family. Registry-resolved for every label so fork overrides of built-in
+    # ``deep``/``improve`` are classified by the pipeline actually executed.
+    runs_fix, runs_test = _flow_fix_test_steps(recorder.run_flow, config.flow_name)
+
     m = Manifest(
         session_id=recorder.session_id,
         archived_at=datetime.now(timezone.utc).isoformat(),
@@ -385,8 +470,8 @@ def build_manifest(
         model=None,
         backend=_default_backend_name(config),
         review_backend=_resolved_review_backend_name(config),
-        fix_backend=flow_names.fix or None,
-        test_backend=flow_names.test or None,
+        fix_backend=_resolved_backend_name(config, "fix") if runs_fix else None,
+        test_backend=_resolved_backend_name(config, "test") if runs_test else None,
         per_stack_review_backend=per_stack_review_backend,
         per_stack_review_model=per_stack_review_model,
         review_only=config.output_mode == "review",
