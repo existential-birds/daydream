@@ -269,11 +269,19 @@ def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:
     set — a divergence left the residual net strictly weaker than the gate on
     the resume path.
     """
-    from daydream.deep.orchestrator import _diff_changed_files
+    from daydream.deep.orchestrator import _diff_changed_files, _read_full_diff
 
     changed_files: set[str] | None = ctx.data.get("changed_files")
     if changed_files is None:
-        diff_str = ctx.data.get("diff") or ""
+        # Issue #644 — ctx.data["diff"] is the gather-time BOUNDED diff; the
+        # resume path must resolve the scope from the FULL diff.patch (via
+        # diff_path) so a truncated-away file is not silently excluded from
+        # the auto-fix scope. Fall back to the bounded text only when the ctx
+        # carries no diff_path (defensive legacy path).
+        try:
+            diff_str = _read_full_diff(ctx) or ""
+        except OSError:
+            diff_str = ctx.data.get("diff") or ""
         if diff_str:
             changed_files = set(_diff_changed_files(diff_str))
     return changed_files

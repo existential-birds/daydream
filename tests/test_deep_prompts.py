@@ -476,7 +476,11 @@ def test_bound_deep_diff_oversize_single_block_kept_whole() -> None:
 
 def test_bound_deep_diff_marker_is_parse_safe() -> None:
     """Must-have #3 + spike: marker element is skipped by every block consumer."""
-    diff = _blk("a.py", "x" * 3000) + _blk("b.py", "y" * 3000) + _blk("c.py", "z" * 3000)
+    # Derive the block body from the budget (not a magic size) so the test stays
+    # valid if INLINE_DIFF_BUDGET_BYTES changes: three whole blocks, exactly two
+    # fit under the cap, so the marker-skip assertions exercise a dropped block.
+    body = INLINE_DIFF_BUDGET_BYTES // 5
+    diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
     out, info = bound_deep_diff(diff)
     assert info.marker is not None
     assert out.startswith("# daydream: deep diff truncated:")
