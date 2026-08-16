@@ -32,6 +32,7 @@ from daydream.improve.prompts import (
 )
 from daydream.improve.services import Service
 from daydream.runner import RunConfig, run
+from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.git_helpers import commit, configure_identity, git, init_repo
 from tests.harness.improve_backend import (
     ImproveStubBackend,
@@ -1095,19 +1096,34 @@ async def test_host_enumeration_dedups_absolute_model_wd(
 ) -> None:
     """A model-cited command whose working_directory is spelled absolutely is
     deduped against the host record for the same directory (relative spelling):
-    exactly one command record, no rejection noise (issue #654)."""
+    exactly one command record, no rejection noise (issue #654).
+
+    Fixture contract (mirrors tests/test_command_contract.py): the service dir
+    and the test-command anchor are derived from the fixture's actual content
+    via the shared fixture-contract helpers rather than hardcoded, so a future
+    fixture edit surfaces as an attributable error instead of a silent meaning
+    shift.
+    """
+    # Derive a real service dir (one containing a pyproject.toml) from the
+    # fixture, and the root test-command declaration line, via the shared
+    # fixture-contract helpers.
+    service = improve_fixture_service(improve_monorepo_target / "apps")
+    rel = f"apps/{service}"
+    anchor_line = improve_fixture_test_command_anchor(
+        improve_monorepo_target / "pyproject.toml"
+    )
     monkeypatch.setattr(
         "daydream.improve.orchestrator.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [
             _dedup_test_command(
                 command_id="make-check",
                 purpose="Run the repository test suite",
-                working_directory="apps/billing",
-                scope={"kind": "in-scope-paths", "paths": ["apps/billing"]},
-                rationale="The billing service declares the test command.",
+                working_directory=rel,
+                scope={"kind": "in-scope-paths", "paths": [rel]},
+                rationale=f"The {service} service declares the test command.",
                 evidence={
                     "kind": "host-derived",
-                    "source_path": "apps/billing/pyproject.toml",
+                    "source_path": f"{rel}/pyproject.toml",
                     "line_anchor": {"start_line": 1, "end_line": 1},
                     "verbatim_excerpt": "[project]",
                 },
@@ -1122,14 +1138,14 @@ async def test_host_enumeration_dedups_absolute_model_wd(
                 command_id="model-check",
                 purpose="Run the repository test suite",
                 # Absolute spelling of the SAME directory the host enumerates
-                # relative ("apps/billing").
-                working_directory=f"{improve_monorepo_target}/apps/billing",
+                # relative.
+                working_directory=f"{improve_monorepo_target}/{rel}",
                 scope={"kind": "whole-repository"},
                 rationale="The root configuration declares the test command.",
                 evidence={
                     "kind": "literal-command",
                     "source_path": "pyproject.toml",
-                    "line_anchor": {"start_line": 5, "end_line": 5},
+                    "line_anchor": {"start_line": anchor_line, "end_line": anchor_line},
                     "verbatim_excerpt": None,
                 },
             )
