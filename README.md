@@ -4,7 +4,7 @@
 
 Daydream is an automated code-review agent. It reviews a code change, applies fixes, and runs the test suite to validate the result. It records every agent action as a structured trajectory.
 
-The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. The model uses SFT (supervised fine-tuning) and RL (reinforcement learning). Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
+The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
 ## How to read this document
 
@@ -155,7 +155,7 @@ concurrency:
 
 ## Training data
 
-This section is for machine learning researchers. Daydream is a data-collection system. It turns every run into a labeled trajectory. You project these trajectories into JSONL datasets for SFT and RL fine-tuning.
+This section is for machine learning researchers. Daydream is a data-collection system. It turns every run into a labeled trajectory. You project these trajectories into JSONL datasets. You use these datasets in a staged training recipe.
 
 ### Trajectories
 
@@ -212,12 +212,23 @@ export HF_TOKEN="hf_..."   # required for upload to proceed
 
 ### Training roadmap
 
-The repository contains an RL training recipe and a verifiers environment:
+Training follows the staged recipe from the open-weight model epic (issue #86):
+
+| Stage | What it does |
+|-------|--------------|
+| 0. Reward construction | Train a reward model on the accept/reject labels. Validate it offline against held-out labels before any RL run. |
+| 1. SFT cold-start | Supervised fine-tuning as a warm start. bf16 LoRA at rank 64 to 128. |
+| 2. RFT | Rejection-sample against the stage-0 reward. Fold the winners back in as dense supervision. |
+| 3. Online RL | GRPO against the stage-0 reward. bf16 LoRA at rank 16 to 32. |
+
+SFT is a cold-start stage only. Online RL is the center of gravity of the recipe.
+
+The repository contains an RL recipe and a verifiers environment:
 
 - `rl/train/rl.toml` is a GRPO recipe. It uses prime-rl 0.7.0, LoRA rank 16, and batch size 128. The train and eval sets are two separate corpus directories. Training uses the `pi` backend only.
 - `rl/daydream_review_v1/` is a verifiers v1 environment. One rollout is one headless deep run. The reward combines the intrinsic composite and a non-regression metric over the test suite.
 
-The corpus paths and the base model in these files are placeholders. The real training set is tracked as issue #164. Daydream has scaffolded and validated the pipeline, but it has not yet harvested production data.
+The corpus paths and the base model in these files are placeholders. The real training set is tracked as issue #164. Daydream has scaffolded and validated the pipeline, but it has not yet harvested production data. The training pipeline itself is tracked as issue #91.
 
 ### Evaluation
 
