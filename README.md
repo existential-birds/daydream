@@ -1,15 +1,36 @@
 # daydream
+
 [![DOI](https://zenodo.org/badge/1147075973.svg)](https://doi.org/10.5281/zenodo.21614348) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/existential-birds/daydream)
 
-Daydream is a code-review agent that produces structured training data from its own runs. It reviews diffs using stack-specific [Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus pipeline then scores, labels, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream is an automated code-review agent. It reviews a code change, applies fixes, and runs the test suite to validate the result. It records every agent action as a structured trajectory.
 
-The goal is an open-weight code-review model trained on daydream's own trajectory archive, benchmarked against commercial code-review bots on a held-out PR replay corpus.
+The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. The model uses SFT (supervised fine-tuning) and RL (reinforcement learning). Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
-![demo](https://github.com/user-attachments/assets/60a80645-36de-410e-afa7-7a96efef3f57)
+## How to read this document
 
-## Quick Start
+This document serves two audiences:
 
-Requires Python 3.12.13+, [uv](https://docs.astral.sh/uv/), and [Claude Code](https://claude.ai/code) CLI.
+- **Machine learning researchers.** Read the [Training data](#training-data) section. It explains how to collect, score, and project trajectories into datasets. You use these datasets to train your own code-review model.
+- **Software engineers.** Read the [Quick start](#quick-start) and [Usage](#usage) sections. They show how to run daydream on your project.
+
+## Requirements
+
+Daydream requires the following tools:
+
+- Python 3.12.13 or newer
+- [uv](https://docs.astral.sh/uv/)
+- The [Claude Code](https://claude.ai/code) command line interface
+
+The following tools are optional:
+
+- [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode
+- [Codex CLI](https://openai.com/codex) for the `codex` backend
+- [Pi CLI](https://pi.dev) for the `pi` backend
+- Osprey CLI for the `osprey` backend
+
+## Quick start
+
+Clone the repository and install the dependencies:
 
 ```bash
 git clone https://github.com/existential-birds/daydream.git
@@ -17,47 +38,54 @@ cd daydream
 uv sync
 ```
 
-Install the [Beagle](https://github.com/existential-birds/beagle) plugin:
+Install the Beagle plugin. Beagle provides stack-specific review skills:
 
 ```bash
 claude plugin marketplace add https://github.com/existential-birds/beagle
 claude plugin install beagle
 ```
 
-Optional: [GitHub CLI](https://cli.github.com/) (`gh`) for PR feedback and `--comment` mode. [Codex CLI](https://openai.com/codex) for `--backend codex`. [Pi CLI](https://pi.dev) for `--backend pi` (Nous Research DeepSeek models). Osprey CLI for `--backend osprey`.
-
-### Golden paths
-
-Two near-zero-flag entry points cover the common cases:
+To update daydream, run the following commands:
 
 ```bash
-daydream /path/to/project            # review → fix → test (deep multi-stack)
-daydream --comment /path/to/project  # review → post inline PR comments, then exit
+git pull
+uv sync
 ```
 
-`daydream /path` is the default verb; `daydream review /path` is identical. The
-remaining surface is opt-in:
+## Usage
+
+Run `daydream /path/to/project` to review, fix, and test a project. The command `daydream review /path/to/project` performs the same action.
+
+The default flow is the deep multi-stack pipeline. This pipeline performs the following stages:
+
+1. Pre-scan the repository for imports and conventions.
+2. Analyze the author intent.
+3. Review each stack with the applicable Beagle skill.
+4. Review alternative approaches.
+5. Resolve conflicts between findings.
+6. Merge the findings across stacks.
+7. Verify the findings.
+8. Fix the identified issues.
+9. Run the test suite to validate the fixes.
+
+Use the common commands for the common tasks:
 
 ```bash
-daydream --review /path/to/project            # write a report to terminal/markdown, no fixes
-daydream --shallow /path/to/project           # single-stack review → parse → fix → test (one pass)
-daydream --yes /path/to/project               # auto-apply fixes without prompting
+daydream /path/to/project                    # review, fix, and test
+daydream --comment /path/to/project          # review, then post inline PR comments
+daydream --review /path/to/project           # write a report, no fixes
+daydream --shallow /path/to/project          # review one stack in one pass
+daydream --yes /path/to/project              # apply fixes without prompting
 daydream feedback 42 --bot "<bot-login>[bot]" /path/to/project  # fix bot PR comments
 ```
 
-Run `daydream --help` for the common flags and `daydream --help-all` for the full
-advanced surface (`--start-at`, `--ignore-path`, `--worktree`, `--trajectory`, …).
+The `--comment` and `--review` modes stop after they post the review. They do not run the fix cycle.
 
-To update: `git pull && uv sync`
+Run `daydream --help` to see the common flags. Run `daydream --help-all` to see the full advanced surface.
 
 ## Audit a repository and write implementation plans
 
-`daydream improve` audits the whole repository, verifies candidate findings,
-prioritizes them by leverage, and writes self-contained implementation plans.
-Every agent call uses a read-only backend profile. Daydream's host code writes
-only run artifacts under `.daydream/` and durable advisory artifacts under
-`daydream_plans/`; it does not modify tracked source files. GitHub issue
-publishing is disabled unless the repository explicitly enables it.
+The `improve` command audits a whole repository. It verifies each candidate finding, prioritizes the findings by impact, and writes self-contained implementation plans. Every agent call uses a read-only backend profile. Daydream writes only run artifacts under `.daydream/` and advisory plans under `daydream_plans/`. It does not modify tracked source files.
 
 ```bash
 daydream improve /path/to/project
@@ -67,21 +95,15 @@ daydream improve --focus security /path/to/project
 
 ### Effort tiers
 
+`--effort` selects the audit breadth. It does not change the model or the reasoning effort.
+
 | Tier | Audit coverage |
 |------|----------------|
-| `quick` | Correctness, security, tests, and tech debt; serial, HIGH-confidence findings only, capped near six |
-| `standard` | All eight categories with a concurrency ceiling of ten; the default |
-| `deep` | All eight categories with a concurrency ceiling of ten; includes LOW-confidence investigation items |
+| `quick` | Correctness, security, tests, and tech debt. Serial, HIGH-confidence findings only. Cap near six. |
+| `standard` | All eight categories. Concurrency ceiling of ten. This is the default. |
+| `deep` | All eight categories. Concurrency ceiling of ten. Includes LOW-confidence investigation items. |
 
-`--effort` selects audit *breadth* only. It does not change the model or the
-reasoning effort — those are per-phase (see [Reasoning Effort](#reasoning-effort)).
-
-On a large repository the audit fans out over *partition groups* — bounded,
-stack-homogeneous slices of the tree (services where they exist, directories
-elsewhere) — instead of the whole repository at once, so one agent per group per
-category each search a bounded surface. `standard` audits at most eight groups
-per run, `deep` is unbounded, and `quick` audits the whole repository as one
-group. Tune both bounds in `[tool.daydream.improve]`:
+On a large repository the audit fans out over partition groups. A partition group is a bounded, stack-homogeneous slice of the tree. Each agent searches one group for one category. The `standard` tier audits at most eight groups per run. The `deep` tier is unbounded. The `quick` tier audits the whole repository as one group.
 
 ```toml
 [tool.daydream.improve]
@@ -89,9 +111,7 @@ partition_max_files = 400
 max_partition_groups = 8
 ```
 
-Whatever a bound leaves out is named in the report's "What was not audited"
-section and in `.daydream/improve/coverage.json` — coverage is never silently
-truncated.
+The report names whatever a bound leaves out. The file `.daydream/improve/coverage.json` also names it. Coverage is never silently truncated.
 
 ### Focus modes
 
@@ -100,52 +120,32 @@ truncated.
 | `security` | Audit only security |
 | `performance` | Audit only performance |
 | `tests` | Audit only test coverage |
-| `branch` | Audit the merge-base diff and label findings as introduced or inherited |
+| `branch` | Audit the merge-base diff. Label each finding as introduced or inherited. |
 
-Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected
-services. The report names detected services that the scope did not cover.
+Use `--scope SERVICE_OR_GLOB` to restrict the audit to matching detected services.
 
 ### Plan subcommands
+
+The `plan` subcommand runs reconnaissance and writes one plan for the supplied request. It does not run the category audit.
 
 ```bash
 daydream improve plan "add rate limiting" /path/to/project
 ```
 
-`plan` runs reconnaissance and writes one plan for the supplied request without
-running the category audit.
+Each audit writes its report under `.daydream/improve/`. Durable output under `daydream_plans/` contains numbered plan files, an index, a rendered `README.md`, and `rejected.json`. Daydream honors the **Status** cell of a plan in `README.md`. That cell outranks `.index.json`.
 
-Each audit writes its report and structured intermediate data under
-`.daydream/improve/`. Durable output under `daydream_plans/` consists of
-numbered plan files, a `.index.json` durable plan record, a `README.md` plan
-index rendered from it, and `rejected.json` for findings that later runs should
-suppress. Editing a plan's **Status** cell in `README.md` is honored: that cell
-outranks `.index.json`. In non-interactive mode, Daydream selects every vetted
-work package only when automatic GitHub issue publishing is enabled; compatible
-overlapping findings have already been aggregated into those issue-sized
-packages. Without automatic publishing, the unattended default remains the top
-five packages.
+### Publish plans as GitHub issues
 
-### Publish Improve plans as GitHub issues
-
-Repositories can opt into fully unattended issue publication:
+A repository can opt into unattended issue publication:
 
 ```toml
 [tool.daydream.improve.github]
 publish_issues = true
 ```
 
-When enabled, Improve first writes and validates each plan locally, then copies
-the complete plan Markdown into the corresponding GitHub issue description.
-It creates no plan branch, commit, or push. A stable marker in each issue makes
-reruns idempotent even from a fresh GitHub Actions checkout; both open and
-closed issues are reconciled before any new issue is created. If reconciliation
-fails, publication stops rather than risking a duplicate issue.
+When enabled, improve first writes and validates each plan locally. It then copies the plan into the corresponding GitHub issue. It creates no plan branch, commit, or push. A stable marker in each issue makes reruns idempotent. Daydream reconciles both open and closed issues before it creates any new issue. If reconciliation fails, publication stops.
 
-Only one Improve publisher may run against a repository at a time. Marker
-reconciliation makes sequential reruns idempotent, but two concurrent runs can
-both observe that an issue is absent before either creates it. Use a
-repository-scoped GitHub Actions concurrency group (and an equivalent lock for
-cron jobs running elsewhere):
+Only one improve publisher may run against a repository at a time. Use a repository-scoped GitHub Actions concurrency group:
 
 ```yaml
 concurrency:
@@ -153,175 +153,130 @@ concurrency:
   cancel-in-progress: false
 ```
 
-The workflow token needs issue write access, but Daydream does not need content
-write access. A minimal GitHub Actions permission block is:
+## Training data
 
-```yaml
-permissions:
-  contents: read # required by actions/checkout, not by issue publication
-  issues: write
-```
+This section is for machine learning researchers. Daydream is a data-collection system. It turns every run into a labeled trajectory. You project these trajectories into JSONL datasets for SFT and RL fine-tuning.
 
-## Architecture
+### Trajectories
 
-Daydream runs a deep multi-stack review pipeline (exploration, intent analysis, alternative review, per-stack Beagle skill reviews, arbiter pass, cross-stack merge, recommendation verification), with a `--shallow` single-skill mode for simpler projects. Every run is recorded as an ATIF v1.7 trajectory and archived (unless `--no-archive` is passed). A bitemporal corpus pipeline harvests, scores, and projects those trajectories into JSONL datasets for SFT and RL fine-tuning.
+Daydream records every agent interaction as an [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. The trajectory records the review pipeline, the model output, the tool calls, the cost, and the result.
 
-Full architectural details about the review pipeline stages, trajectory recording format, corpus pipeline, training roadmap, and benchmarking methodology are documented on the [project page](https://existentialbirds.com/projects/daydream).
+Each run writes its trajectory to `<project>/.daydream/runs/<session-id>/trajectory.json`. Parallel fan-outs write sibling trajectories to `trajectories/`. Daydream archives the complete run bundle at `~/.daydream/archive/runs/<session-id>/`. The bundle contains the trajectory, the manifest, the review output, the diff, and the evaluation analysis. An SQLite index at `~/.daydream/archive/index.db` supports cross-project querying.
 
-## CLI Reference
-
-### Output Modes
-
-| Flag | Behavior |
-|------|----------|
-| _(default)_ | Deep multi-stack review, fix, test (one pass) |
-| `--shallow` | Single-stack review, parse, fix, test (one pass) |
-| `--review` | Write report to terminal/markdown, then exit |
-| `--comment` | Post inline PR comments, then exit |
-
-### Additional Commands
-
-```bash
-daydream summarize <path>                          # print run-info markdown for a trajectory/run dir
-daydream setup /path/to/repo --repo OWNER/REPO    # one-command self-hosted review bot setup
-daydream setup /path/to/repo --verify             # read-only install audit (checks secrets, workflows, App)
-daydream post-findings findings.json --pr 7 --head-sha <sha> --repo owner/repo  # Phase B: validate + post
-daydream --review --findings-out findings.json --pr-number 7 /path  # Phase A: emit findings artifact
-daydream feedback 42 --bot "<bot-login>[bot]" /path  # ingest and fix bot PR comments
-daydream ext validate                              # resolve-check the daydream_ext extension registry
-daydream improve /path/to/project                  # read-only audit and prioritized plans
-daydream improve plan "add rate limiting" /path/to/project
-```
-
-### Corpus Commands
+### Corpus commands
 
 The data-pipeline verbs live under the `corpus` namespace:
 
 ```bash
-daydream corpus harvest                              # annotate all archived runs (reward + label)
+daydream corpus harvest                              # annotate all archived runs
 daydream corpus harvest --dry-run
 daydream corpus build --out /path/to/out.jsonl       # project labeled runs to JSONL
 daydream corpus build --out out.jsonl --min-reward 0.5 --include-all-labels
 daydream corpus build --out out.jsonl --as-of 2026-05-01T00:00:00Z  # pinned snapshot
-daydream corpus label <session_id> --outcome accepted  # manual outcome label override
+daydream corpus label <session-id> --outcome accepted  # manual outcome override
 ```
 
-### Common Options
+The pipeline has three stages:
 
-```bash
-daydream -s python /path/to/project           # force a specific Beagle skill
-daydream --backend codex /path/to/project     # override backend (claude, codex, pi, osprey)
-daydream --model claude-haiku-4-5 /path/to/project  # overrides ALL phases (beats config-file overrides)
-daydream --yes /path/to/project               # auto-apply fixes without prompting
+1. **Harvest.** Walk the archive. Write one bitemporal annotation per run. Each annotation contains a label, an intrinsic reward, and a valid-at timestamp.
+2. **Label.** Override the automated outcome for a run. The manual label beats the automated label.
+3. **Build.** Project the annotations into a JSONL training corpus. Add a lineage manifest.
+
+The build stage applies a temporal-leakage guard. It prevents future data from leaking into the past. It applies C5, C8, and C9 filters. It stratifies the corpus by stack.
+
+### Scoring
+
+The harvest stage scores each trajectory. The intrinsic reward is a composite:
+
+- Correctness, weight 0.6
+- Grounding, weight 0.4
+- A length ramp (a penalty)
+
+The format-valid check dominates. A trajectory that fails the format check receives no reward. Daydream records a posterior-cost axis as a sibling. It is never folded into the intrinsic reward.
+
+### Upload to a private Hugging Face dataset
+
+Upload of trajectories to Hugging Face is opt-in. Only the operator selects the destination. It comes from two sources, highest first:
+
+1. The `--trajectory-hub-repo` CLI flag
+2. The `DAYDREAM_TRAJECTORY_HUB_REPO` environment variable
+
+Daydream ignores a `trajectory_hub_repo` key in the target checkout file config. When unset, nothing leaves your machine.
+
+When set, daydream uploads every run's complete archive bundle to the dataset repo as a per-run folder. The upload requires the `huggingface_hub` package and a valid `HF_TOKEN`. If either is missing, or the upload fails, the run is never aborted. Daydream emits a one-line warning and leaves the bundle un-uploaded. On the first upload daydream creates the dataset repo private. It reuses an existing repo with its current visibility.
+
+```sh
+export DAYDREAM_TRAJECTORY_HUB_REPO="existentialbirds/daydream-trajectories"
+export HF_TOKEN="hf_..."   # required for upload to proceed
 ```
 
-Advanced flags (hidden from `--help`, shown by `--help-all`, all still parse):
+### Training roadmap
 
-```bash
-daydream --start-at fix /path/to/project      # resume from a specific phase
-daydream --trajectory /tmp/run.json /path/to/project
-daydream --ignore-path vendor /path/to/project
-daydream --worktree /path/to/project          # force ephemeral worktree
-daydream --no-eval /path/to/project           # skip the deterministic evaluation analysis (on by default)
-daydream --no-archive /path/to/project        # skip run archival
-daydream --trajectory-hub-repo owner/repo /path/to/project  # upload each run's archive bundle to a private HF dataset repo
-daydream --non-interactive /path/to/project   # run unattended; take every prompt's safe default
-```
+The repository contains an RL training recipe and a verifiers environment:
 
-`--start-at` refuses to resume onto stale artifacts. A fresh run records the
-diff it reviewed in `.daydream/deep/diff-key`; if the diff has changed since,
-the resume exits 1 rather than adjudicating stale findings against changed code
-— re-run without `--start-at` to regenerate. An artifact directory produced
-before diff tracking existed has no key and is refused for the same reason: it
-cannot be verified.
+- `rl/train/rl.toml` is a GRPO recipe. It uses prime-rl 0.7.0, LoRA rank 16, and batch size 128. The train and eval sets are two separate corpus directories. Training uses the `pi` backend only.
+- `rl/daydream_review_v1/` is a verifiers v1 environment. One rollout is one headless deep run. The reward combines the intrinsic composite and a non-regression metric over the test suite.
 
-`--non-interactive` takes each prompt's safe default: on test failure it writes a `handoff.md` and exits non-zero, otherwise it declines fixes and exits 0. It is orthogonal to `--yes`: `--non-interactive` controls *whether* daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment (`CI` set) auto-enables non-interactive mode without the flag.
+The corpus paths and the base model in these files are placeholders. The real training set is tracked as issue #164. Daydream has scaffolded and validated the pipeline, but it has not yet harvested production data.
 
-Per-phase model and backend overrides are no longer CLI flags. Set them in the config file (see [Configuration](#configuration)).
+### Evaluation
+
+The evaluation framework has two arms:
+
+- **Recall.** Compare daydream findings against a human gold baseline. Report inter-annotator agreement (Krippendorff alpha) and PR-level bootstrap confidence intervals.
+- **Quality.** Track erosion and verbosity metrics. The fix-phase quality gate uses these metrics to flag degraded fixes.
+
+The offline benchmark scores deep-review findings against a held-out PR corpus. The benchmark uses micro-averaged metrics and bootstrap confidence intervals. See [docs/benchmark.md](docs/benchmark.md) and [docs/evaluation-framework.md](docs/evaluation-framework.md).
+
+## Architecture
+
+Daydream runs a deep multi-stack review pipeline. The pipeline runs exploration, intent analysis, alternative review, per-stack Beagle reviews, an arbiter pass, cross-stack merge, and recommendation verification. A `--shallow` mode reviews one stack in a single pass for simpler projects.
+
+Daydream records and archives every run as an ATIF v1.7 trajectory. The `--no-archive` flag skips archival. A bitemporal corpus pipeline harvests, scores, and projects these trajectories into JSONL datasets.
+
+The [project page](https://existentialbirds.com/projects/daydream) documents the full architectural details.
+
+### Backends
+
+Daydream supports four backends. Each implements the same `Backend` protocol and emits the same event stream:
+
+| Backend | Driver |
+|---------|--------|
+| `claude` | In-process Claude agent SDK. This is the default. |
+| `codex` | Codex CLI in a disposable read-only clone |
+| `pi` | Pi CLI (Nous DeepSeek models) |
+| `osprey` | Osprey CLI |
+
+Select a backend with `--backend`. The selection order, highest first, is:
+
+**CLI `--backend` > config-file phase override > config-file global > built-in default.**
+
+There is no environment-variable tier. `DAYDREAM_MODEL` and `DAYDREAM_BACKEND` are not read.
+
+### Extensions
+
+A fork can extend daydream. A top-level `daydream_ext` package exposes a `register(registry)` function. The function can add phases, reorder flow steps, override prompts, and register stack rules. The extension API is version 5. Verify an extension with `daydream ext validate`. See [docs/extensions.md](docs/extensions.md).
 
 ## Configuration
 
-Per-phase model/backend selection and global defaults live in a config file, read from the **target repo root** at two sources, merged per-key (the dotfile wins on scalar conflicts):
+Configuration lives in the target repository root. Daydream reads two sources and merges them per key:
 
-- `pyproject.toml` under `[tool.daydream]` (lower precedence)
-- `.daydream.toml` at the repo root, using bare top-level keys (higher precedence)
+1. `pyproject.toml` under `[tool.daydream]` — lower precedence
+2. `.daydream.toml` at the repository root — higher precedence
+
+The dotfile uses bare top-level keys. It wins on scalar conflicts.
 
 ```toml
 # pyproject.toml  →  [tool.daydream]
 [tool.daydream]
 model = "claude-opus-5"     # global default across phases
-backend = "claude"            # global default backend
+backend = "claude"          # global default backend
 
-[tool.daydream.phases.fix]    # per-phase override
+[tool.daydream.phases.fix]  # per-phase override
 backend = "codex"
 model = "gpt-5.6-terra"
 reasoning_effort = "medium"
-
-[tool.daydream.phases.review]
-model = "claude-opus-5"
 ```
-
-Supervisor settings are config-file-only:
-
-| Key | Default | Semantics |
-|-----|---------|-----------|
-| `supervisor` | `"off"` | Findings supervisor mode: `"off"`, `"rules"`, or `"llm"`. |
-| `supervisor_deny_globs` | `[]` | Repository-relative globs shared by findings and tool rules. |
-| `tool_supervisor` | `"off"` | Built-in tool policy mode: `"off"` or `"rules"`. |
-| `tool_bash_deny` | `[]` | Regular expressions for Bash commands the built-in policy vetoes. |
-
-The uncovered-diff-file sweep (a second-pass reviewer over diff files no
-per-stack reviewer read) is configured with file-config keys in the same two
-sources:
-
-| Key | Default | Semantics |
-|-----|---------|-----------|
-| `uncovered_sweep` | `true` | Toggle the sweep. `false` disables the second pass entirely. |
-| `uncovered_sweep_max_files` | `10` | Cap on how many uncovered files are swept in one run; files beyond the cap are recorded in `coverage-stats.json` as `sweep_skipped_capacity` (and named in `sweep_skipped_capacity_files`) rather than silently dropped. `0` sweeps nothing. |
-| `uncovered_sweep_min_hunk_lines` | `5` | A file counts as sweepable only when its hunks contain at least this many added/removed lines. `0` removes the floor (every uncovered file is eligible). |
-
-The fix-phase anti-degradation quality gate (issue #315) is configured with
-file-config keys in the same two sources:
-
-| Key | Default | Semantics |
-|-----|---------|-----------|
-| `quality_gate_enabled` | `true` | Toggle the fix-phase anti-degradation quality gate. `false` skips the computation and writes `{"enabled": false}`. |
-| `quality_gate_erosion_delta` | `0.05` | Per-file erosion-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
-| `quality_gate_verbosity_delta` | `0.05` | Per-file verbosity-delta threshold above which a fixed file is flagged. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
-| `quality_gate_erosion_absolute` | `0.05` | Absolute post-fix erosion threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
-| `quality_gate_verbosity_absolute` | `0.05` | Absolute post-fix verbosity threshold used when no pre-fix baseline exists. Clamped to finite non-negative values; an invalid value (negative, `NaN`, `inf`) falls back to the default. |
-
-The gate is fail-open: a flagged file (or an unavailable verdict) surfaces as a
-warning plus a manifest record, never an aborted run.
-
-Resolution precedence is the standard **CLI > config file > default**. All four
-quality-gate thresholds are clamped to finite non-negative numbers at parse
-time and again at resolution time: a negative value would flag every unchanged
-file (a zero delta exceeds it) and a `NaN`/`inf` value would silently disable
-the metric, so any
-invalid value degrades to the named default.
-
-HuggingFace trajectory upload is opt-in, and its destination is selected by the
-operator only, across two sources (highest first): the `--trajectory-hub-repo`
-CLI flag, then the `DAYDREAM_TRAJECTORY_HUB_REPO` env var. A `trajectory_hub_repo`
-key in the target checkout's file config is ignored and can never select a
-destination. When unset, nothing leaves your machine. When set, every run's
-complete archive bundle (`~/.daydream/archive/runs/<session_id>/`) is uploaded
-to that dataset repo as a per-run folder keyed by session id, provided the
-`huggingface_hub` package is installed and `HF_TOKEN` is set; if either is
-missing (or the upload fails), the run is never aborted — a one-line warning
-is emitted and the bundle is left un-uploaded. On the first upload the dataset
-repo is created private; an already-existing repo is reused with its current
-visibility (a pre-existing public repo is re-used but triggers a warning):
-
-```sh
-# env var (remote/hosted deployments: one line in the bootstrap profile)
-export DAYDREAM_TRAJECTORY_HUB_REPO="existential-birds/daydream-trajectories"
-export HF_TOKEN="hf_..."   # required for upload to proceed
-```
-
-The LLM supervisor uses one batched call. Configure its model under
-`[tool.daydream.phases.supervise]` (or `[phases.supervise]` in `.daydream.toml`).
 
 ```toml
 # .daydream.toml  (top-level keys; no [tool.daydream] prefix)
@@ -331,206 +286,130 @@ model = "claude-opus-5"
 backend = "codex"
 ```
 
-Phase names are the flow-step config keys (`exploration`, `intent`, `wonder`,
-`per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`,
-`pr_feedback`, `supervise`, …); any name is accepted, including phases a fork defines through the
-[extension seam](docs/extensions.md), which lists the per-flow key tables.
-Resolution precedence, highest first:
+The resolution order, highest first, is:
 
 **CLI > config file (phase, then global) > built-in per-backend default.**
 
-So `--model` beats a `[tool.daydream.phases.*]` override, which beats the
-per-backend table in `daydream/config.py`. The same order applies to backend
-selection via `--backend` / config / the `claude` fallback. (There is no
-environment-variable tier. `DAYDREAM_MODEL`/`DAYDREAM_BACKEND` are not read.)
+### Per-phase settings
 
-### Reasoning Effort
+Phase names are the flow-step config keys: `exploration`, `intent`, `wonder`, `per_stack_review`, `arbiter`, `merge`, `review`, `parse`, `fix`, `test`, `verify`, `pr_feedback`, `supervise`, and more. Any name is accepted, including phases a fork defines.
 
-`reasoning_effort` is accepted as a global key and per-phase, alongside
-`model`/`backend`. All three backends consume it through their own native knob:
+### Reasoning effort
+
+`reasoning_effort` is accepted as a global key and per phase. The accepted levels are `low`, `medium`, `high`, `xhigh`, and `max`. Each backend maps the level to its own knob:
 
 | Backend | Knob |
 |---------|------|
-| `claude` | `ClaudeAgentOptions.effort` → the CLI's `--effort` |
+| `claude` | `ClaudeAgentOptions.effort` → CLI `--effort` |
 | `codex` | `-c model_reasoning_effort=<level>` |
 | `pi` | `--thinking <level>` |
 
-The accepted levels are `low`, `medium`, `high`, `xhigh`, and `max` — the
-intersection of the three drivers' vocabularies, so any level is valid for any
-backend. (Codex additionally accepts `none`, and Pi `off`/`minimal`; those are
-usable via config but have no built-in default.)
-
-Resolution precedence, highest first:
+The resolution order, highest first, is:
 
 **`--reasoning-effort` > config file (phase, then global) > built-in per-phase default.**
 
-The built-in defaults come from two independently-tuned tables, so changing one
-flow never moves the other.
+### Supervisor settings
 
-**Review/fix pipeline** (`DEEP_PHASE_DEFAULT_EFFORT`) — Codex only. Claude and
-Pi have no entry, so these phases pass no flag and each driver keeps its own
-ambient default.
+Supervisor settings are config-file-only:
 
-| Effort | Phases |
-|--------|--------|
-| `low` | `parse`, `exploration` |
-| `medium` | `fix`, `test`, `verify`, `suppression`, `supervise`, `merge`, `intent` |
-| `high` | `per_stack_review`, `review`, `wonder`, `pr_feedback` |
-| `xhigh` | `arbiter` |
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `supervisor` | `"off"` | Findings supervisor mode: `"off"`, `"rules"`, or `"llm"`. |
+| `supervisor_deny_globs` | `[]` | Repository-relative globs shared by findings and tool rules. |
+| `tool_supervisor` | `"off"` | Built-in tool policy mode: `"off"` or `"rules"`. |
+| `tool_bash_deny` | `[]` | Regular expressions for Bash commands the policy vetoes. |
 
-**Improve advisor** (`IMPROVE_PHASE_DEFAULT_EFFORT`) — all three backends,
-because the flow runs unattended and nothing it produces is reviewed in the
-moment.
+Configure the LLM supervisor model under `[tool.daydream.phases.supervise]`.
 
-| Effort | Phases |
-|--------|--------|
-| `low` | `recon` |
-| `high` | `audit` |
-| `xhigh` | `vet` |
-| `max` | `plan_write` |
+### Uncovered-diff-file sweep
 
-`plan_write` is pinned to `max` on every backend. It covers plan authoring
-and plan repair — the phases whose output is executed
-later by a weaker agent with no context beyond the plan file, so every
-ambiguity left in a plan is paid for downstream.
+A second-pass reviewer covers diff files that no per-stack reviewer read:
 
-The improve flow runs with **no wall-clock budget**. Its turns are
-long by design and a budget abort returns partial output that reads as
-complete.
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `uncovered_sweep` | `true` | Toggle the second pass. |
+| `uncovered_sweep_max_files` | `10` | Cap on swept files per run. `0` sweeps nothing. |
+| `uncovered_sweep_min_hunk_lines` | `5` | Minimum added/removed hunk lines to be sweepable. `0` removes the floor. |
 
-When no tier supplies a value the flag is not passed at all, and the backend
-applies its own ambient default (for Codex, `model_reasoning_effort` from
-`~/.codex/config.toml`; for Pi, the `PI_THINKING` environment variable).
+### Quality gate
 
-For the `pi` backend, an unset daydream model leaves Pi's own configured
-`defaultModel` intact. The built-in `deepseek/deepseek-v4-flash-0731` value
-(nous provider) is used only when neither daydream nor Pi has selected a model.
+The fix-phase anti-degradation quality gate prevents a fix from degrading a file:
 
-Pi accepts `PI_PROVIDER`, `PI_API_KEY`, and `PI_THINKING` as compatibility
-overrides. `PI_THINKING` is Pi's ambient default and is used only when no
-resolved `reasoning_effort` applies; a per-phase level always outranks it. For
-the built-in `nous` and `zai` providers, daydream passes `PI_API_KEY` to the
-child process as `NOUS_API_KEY` / `ZAI_API_KEY`; credentials are never placed
-in process arguments. Providers without a known native credential environment
-variable must be configured through Pi directly instead of `PI_API_KEY`.
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `quality_gate_enabled` | `true` | Toggle the gate. |
+| `quality_gate_erosion_delta` | `0.05` | Per-file erosion-delta threshold. |
+| `quality_gate_verbosity_delta` | `0.05` | Per-file verbosity-delta threshold. |
+| `quality_gate_erosion_absolute` | `0.05` | Absolute post-fix erosion threshold. |
+| `quality_gate_verbosity_absolute` | `0.05` | Absolute post-fix verbosity threshold. |
 
-The Pi default moved from a z.ai GLM model (`glm-5.2` on the `zai` provider)
-to `deepseek/deepseek-v4-flash-0731` on the built-in `nous` provider. To
-migrate an existing z.ai setup: unset `PI_PROVIDER` (or set it to `nous`) and
-either drop the pinned `glm-*` model or switch it to a model the nous
-registry serves. A pinned `glm-*` model with `PI_PROVIDER` unset, or
-`PI_PROVIDER` set (e.g. `zai`) with no configured model, is a stale pairing:
-daydream warns about it and the run fails at runtime unless the provider
-serves the model.
+The gate is fail-open. A flagged file surfaces as a warning plus a manifest record. It never aborts a run. Daydream clamps the thresholds to finite non-negative numbers. An invalid value degrades to the named default.
 
-Daydream schedules Pi fan-outs with a default concurrency hint of 10 for
-standard and deep workflows; quick improve remains serial. Set
-`DAYDREAM_PI_FANOUT_CONCURRENCY` to a positive integer to lower or raise the
-Pi hint. Each workflow still applies its own ceiling, so this setting is not a
-process-global Pi limit.
+### Cost pricing
 
-Claude and Codex share a hint of eight, overridden the same way with
-`DAYDREAM_FANOUT_CONCURRENCY`. A non-integer or non-positive value warns and
-falls back to eight. Pi keeps its own variable because its default differs; the
-value is a property of the endpoint serving the turns, not of daydream, so
-swapping `--backend` must not silently change how many turns it asks for.
+When a backend does not report a USD cost directly, daydream synthesizes the cost from token counts. The resolution order, highest first, is:
 
-### Cost Pricing
+**backend-reported cost > user `prices.toml` > built-in price table > `-`.**
 
-When a backend does not report a USD cost directly (notably Codex), daydream
-synthesizes cost from token counts using a price table. Anthropic-backed runs use
-the cost the Claude SDK already supplies and typically do not pass through this path.
-
-Per-model cost is resolved in this order, highest first:
-
-**backend-reported `cost_usd` > user `prices.toml` > built-in price table > `-` (with footnote).**
-
-A model present in neither the user file nor the built-in table renders `-` with
-the "not in the price table" footnote rather than a fabricated cost.
-
-To override or extend the built-in prices, create `~/.daydream/prices.toml`. The
-`DAYDREAM_PRICES_FILE` environment variable overrides that path (a test seam and
-power-user escape hatch). The schema is one `[prices."<model>"]` table per model;
-each requires `input` and `output` (USD per 1M tokens) and accepts an optional
-`cached_input` that defaults to `input`. All prices must be non-negative. Overrides
-replace a built-in entry wholesale per model. There is no per-field merge.
+To override the built-in prices, create `~/.daydream/prices.toml`:
 
 ```toml
-# ~/.daydream/prices.toml: USD per 1M tokens. User entries override built-ins per-model.
+# USD per 1M tokens. User entries override built-ins per model.
 [prices."gpt-5.6-sol"]
 input = 4.50
 cached_input = 0.45
 output = 27.00
-
-[prices."my-custom-model"]
-input = 2.00
-output = 8.00        # cached_input optional → defaults to input
 ```
 
-## GitHub App Identity
+The `DAYDREAM_PRICES_FILE` environment variable overrides that path.
 
-By default, GitHub reads and writes (PR comments, feedback replies) run under
-whatever identity the `gh` CLI is authenticated as. To post as a bot you own,
-supply GitHub App credentials via environment variables:
+## GitHub App identity
+
+By default, GitHub reads and writes run under the identity of the `gh` CLI. To post as a bot, supply GitHub App credentials:
 
 ```bash
-export DAYDREAM_APP_ID=12345                                   # from the App settings page
-export DAYDREAM_APP_PRIVATE_KEY="$(cat daydream-bot.private-key.pem)"  # raw PEM content, not a file path
+export DAYDREAM_APP_ID=12345
+export DAYDREAM_APP_PRIVATE_KEY="$(cat daydream-bot.private-key.pem)"  # raw PEM content
 ```
 
-When both are set, each run mints a short-lived installation access token
-scoped to the target repository and injects it into every `gh` subprocess.
-Posts are attributed to `<app-slug>[bot]`, and the active identity (bot or
-human) is displayed before any GitHub action.
+When both variables are set, each run mints a short-lived installation access token. Daydream attributes posts to `<app-slug>[bot]`. It displays the active identity before any GitHub action.
 
-One-time setup: create a GitHub App (minimum permissions: Pull Requests
-read/write, Issues read/write, Contents read, Metadata read, Actions
-read/write), generate a private key from the App settings page, and install the
-App on the target repository's org or user.
+The behavior notes are:
 
-In GitHub Actions:
+- Neither variable set → ambient `gh` identity.
+- Only one set → abort with an error naming the missing one.
+- Posting runs abort if daydream cannot determine owner/repo, or if token minting fails.
+- Daydream redacts the private key and minted tokens from logs and trajectory files.
 
-```yaml
-env:
-  DAYDREAM_APP_ID: ${{ vars.DAYDREAM_APP_ID }}
-  DAYDREAM_APP_PRIVATE_KEY: ${{ secrets.DAYDREAM_APP_PRIVATE_KEY }}
+## Self-hosted review bot
+
+Daydream can run as a self-hosted PR review bot. It runs in your own repository's GitHub Actions and posts under your own GitHub App identity. The `daydream setup` command automates most of the install: App registration, secret deposit, and a workflow PR. Clicking **Install** on the new App stays manual, because GitHub requires it.
+
+```bash
+daydream setup /path/to/repo --repo OWNER/REPO    # one-command bot setup
+daydream setup /path/to/repo --verify             # read-only install audit
 ```
 
-Behavior notes:
+See [docs/self-hosted-bot-setup.md](docs/self-hosted-bot-setup.md) for details.
 
-- Neither var set → ambient `gh` identity, exactly as before (the App identity is opt-in).
-- Setting only one of the two vars aborts with an error naming the missing one.
-- Posting runs (`--comment`, `feedback`, and the default deep review) abort if the owner/repo
-  cannot be determined or token minting fails. daydream never silently falls
-  back to posting under your personal identity. Non-posting runs fall back to
-  the ambient identity and continue.
-- The private key and minted tokens are redacted from logs and trajectory files.
+## Non-interactive mode
 
-## Self-hosted Review Bot
+`--non-interactive` runs unattended. It takes each prompt's safe default. On a test failure it writes a `handoff.md` and exits non-zero. Otherwise it declines fixes and exits zero. It is orthogonal to `--yes`: `--non-interactive` controls whether daydream may block on stdin, while `--yes` pre-decides every yes/no gate as "yes". A non-TTY or CI environment auto-enables non-interactive mode.
 
-Daydream can run as a self-hosted PR review bot in your own repository's GitHub Actions, posting under your own GitHub App identity. The `daydream setup` command automates most of the install (App registration via manifest flow, secret deposit, workflow PR); clicking **Install** on the new App stays manual because GitHub requires it. See the [setup guide](docs/self-hosted-bot-setup.md) for details.
-
-## Output Files
+## Output files
 
 | Path | Description |
 |------|-------------|
-| `.daydream/runs/<id>/trajectory.json` | ATIF v1.7 trajectory (customize with `--trajectory`) |
+| `.daydream/runs/<id>/trajectory.json` | ATIF v1.7 trajectory |
 | `.daydream/runs/<id>/trajectories/` | Forked sub-trajectories from parallel fan-outs |
 | `.daydream/diff.patch` | Unified diff captured at run start |
-| `.daydream/deep/` | Deep pipeline artifacts: intent, per-stack reviews, merged report |
-| `.daydream/exploration/` | Cached pre-scan grounding; survives the run and is reused by the next one |
-| `.daydream/exploration/cache-key` | Key the cached pre-scan was produced from (format version + head SHA + diff + tier + depth) |
+| `.daydream/deep/` | Deep pipeline artifacts |
+| `.daydream/exploration/` | Cached pre-scan grounding |
 | `.review-output.md` | Review findings (removed with `--cleanup`) |
 | `~/.daydream/archive/runs/<id>/` | Archived run: manifest, trajectory, review output, evaluation, deep artifacts |
 | `~/.daydream/archive/index.db` | SQLite index for cross-project querying |
 
-`.daydream/exploration/` is reused on an **exact** key match regardless of
-uncommitted worktree edits: the key intentionally excludes uncommitted edits
-(format version + head SHA + diff + tier + depth), so an exact-key hit on a dirty tree serves
-exploration computed before those edits. Near-matches never count — a stale hit
-would misground every review prompt. The `--shallow` and `--review` flows still
-delete the directory, so alternating flows degrades to a cache miss (never to
-stale grounding — the key file is deleted with the directory).
+The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` flows delete the directory. Alternating flows degrade to a cache miss, never to stale grounding.
 
 ## Development
 
