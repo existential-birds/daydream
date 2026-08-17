@@ -6,13 +6,6 @@ Daydream is an automated code-review agent. It reviews a code change, applies fi
 
 The goal of daydream is an open-weight code-review model. Daydream trains this model on the trajectory archive that it collects from its own runs. Training is a staged recipe: reward construction, then SFT cold-start, then RFT (rejection fine-tuning), then online RL. Daydream benchmarks the model against commercial code-review bots on a held-out PR replay corpus.
 
-## How to read this document
-
-This document serves two audiences:
-
-- **Machine learning researchers.** Read the [Training data](#training-data) section. It explains how to collect, score, and project trajectories into datasets. You use these datasets to train your own code-review model.
-- **Software engineers.** Read the [Quick start](#quick-start) and [Usage](#usage) sections. They show how to run daydream on your project.
-
 ## Requirements
 
 Daydream requires the following tools:
