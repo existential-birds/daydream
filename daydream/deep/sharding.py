@@ -119,19 +119,41 @@ def shard_stacks(
     original ``stack_name``. The structural meta-stack is passed through
     unchanged.
 
-    The byte bound (``max_bytes``), total fan-out cap (``fanout_cap``),
-    dependency-aware co-location and bounded frontier (``graph`` /
-    ``frontier_max``) are filled in by subsequent tasks; this task implements
-    the file-count split and deterministic naming.
+    The byte bound (``max_bytes``) and total fan-out cap (``fanout_cap``) are
+    enforced here; dependency-aware co-location and the bounded frontier
+    (``graph`` / ``frontier_max``) are filled in by a later task.
     """
     out: list[StackAssignment] = []
+    structural: list[StackAssignment] = []
+    unsharded: list[StackAssignment] = []
+    sharded: list[tuple[StackAssignment, list[StackAssignment]]] = []
     for stack in stacks:
         if stack.stack_name == STRUCTURE_STACK_NAME:
-            out.append(stack)
+            # Structural meta-stack: never sharded, never counted against the cap.
+            structural.append(stack)
         elif len(stack.files) <= max_files and _changed_bytes(diff, stack.files) <= max_bytes:
-            out.append(stack)
+            unsharded.append(stack)
         elif len(stack.files) > max_files:
-            out.extend(_split_by_file_count(stack, max_files))
+            sharded.append((stack, _split_by_file_count(stack, max_files)))
         else:
-            out.extend(_split_by_bytes(stack, diff, max_bytes, max_files))
+            sharded.append((stack, _split_by_bytes(stack, diff, max_bytes, max_files)))
+
+    # Fan-out cap = merge-down. Total review tasks = unsharded non-structural
+    # stacks + shards. If that exceeds ``fanout_cap``, return the largest
+    # shardable stacks to unsplit (by descending shard count, ties by
+    # ``stack_name`` ascending) until total <= cap. Structural is never merged.
+    total = len(unsharded) + sum(len(shards) for _, shards in sharded)
+    if total > fanout_cap and sharded:
+        excess = total - fanout_cap
+        for stack, shards in sorted(sharded, key=lambda t: (-len(t[1]), t[0].stack_name)):
+            if excess <= 0:
+                break
+            sharded.remove((stack, shards))
+            unsharded.append(stack)
+            excess -= len(shards) - 1
+
+    out.extend(structural)
+    out.extend(unsharded)
+    for _, shards in sharded:
+        out.extend(shards)
     return out

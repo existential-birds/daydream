@@ -226,3 +226,20 @@ def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
     assert all(len(s.files) >= 1 for s in shards)
     union = [f for s in shards for f in s.files]
     assert sorted(union) == ["a.py", "b.py", "c.py"]  # still no drop/dup
+
+
+def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
+    """Issue #731: total review tasks (shards + unsplit non-structural stacks)
+    never exceeds the fan-out cap; everything is still assigned exactly once."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    # Two oversized stacks would each yield 6 shards = 12 tasks; cap=4.
+    py = StackAssignment(stack_name="python", skill_invocation="s", files=[f"p{i}.py" for i in range(12)])
+    rs = StackAssignment(stack_name="rust", skill_invocation="s", files=[f"r{i}.rs" for i in range(12)])
+    out = shard_stacks([py, rs], "", max_files=2, max_bytes=10**9, fanout_cap=4, frontier_max=8)
+    # Total review tasks (shards + unsplit stacks) never exceeds the cap.
+    assert len(out) <= 4
+    # Everything still assigned exactly once.
+    union = [f for s in out for f in s.files]
+    assert sorted(union) == sorted([f"p{i}.py" for i in range(12)] + [f"r{i}.rs" for i in range(12)])
