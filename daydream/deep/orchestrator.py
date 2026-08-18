@@ -28,6 +28,10 @@ from rich.markup import escape as escape_markup
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt, run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
+    DEFAULT_DEEP_SHARD_FANOUT_CAP,
+    DEFAULT_DEEP_SHARD_FRONTIER_MAX,
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
+    DEFAULT_DEEP_SHARD_MAX_FILES,
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
@@ -39,11 +43,6 @@ from daydream.config import (
     DEFAULT_UNCOVERED_SWEEP_ENABLED,
     DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
     DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
-    DEFAULT_DEEP_SHARD_FANOUT_CAP,
-    DEFAULT_DEEP_SHARD_ENABLED,
-    DEFAULT_DEEP_SHARD_FRONTIER_MAX,
-    DEFAULT_DEEP_SHARD_MAX_BYTES,
-    DEFAULT_DEEP_SHARD_MAX_FILES,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
@@ -85,6 +84,7 @@ from daydream.deep.dedup import (
     build_dedup_candidates,
     build_record_dedup_candidates,
 )
+from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.render import render_held_section, render_report
 from daydream.deep.scope_issues import (
@@ -92,6 +92,7 @@ from daydream.deep.scope_issues import (
     _resolve_changed_files,
     _revert_out_of_scope_edits,
 )
+from daydream.deep.sharding import shard_stacks
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -3953,6 +3954,30 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         if mode == "shallow":
             stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
 
+        # Issue #731: deep-review sharding. Runs AFTER the tiny-diff/shallow
+        # collapse passes (which must stay byte-identical) and BEFORE
+        # ``ctx.data["stacks"]`` is published below. Skipped whenever
+        # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
+        # folded everything into one stack) and off by default (forensic mode
+        # passes the stack list through untouched). ``build_import_graph`` is
+        # fail-open (never raises; returns ``{}`` on any failure); byte sizing
+        # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+        sharding_enabled = _deep_shard_enabled(config)
+        if sharding_enabled and not single_stack_mode:
+            try:
+                import_graph = build_import_graph(changed_files, target_dir)
+            except Exception:
+                import_graph = {}
+            stacks = shard_stacks(
+                stacks,
+                diff,
+                max_files=_deep_shard_max_files(config),
+                max_bytes=_deep_shard_max_bytes(config),
+                fanout_cap=_deep_shard_fanout_cap(config),
+                frontier_max=_deep_shard_frontier_max(config),
+                graph=import_graph,
+            )
+
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
@@ -4021,6 +4046,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 "dd": dd,
                 "stacks": stacks,
                 "single_stack_mode": single_stack_mode,
+                # Issue #731: when sharding is enabled the per-stack phase writes
+                # structured coverage receipts and the uncovered sweep consumes
+                # them (Tasks 8/10). Off by default -> forensic byte-identical.
+                "coverage_receipts_enabled": sharding_enabled,
                 "intent_path": _intent_path(dd),
                 "alts_path": _alternatives_path(dd),
                 "log": log,
