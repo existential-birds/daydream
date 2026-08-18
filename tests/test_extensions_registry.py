@@ -149,7 +149,8 @@ def test_renderer_slot_override_and_lookup() -> None:
     assert reg.renderer_if_registered("finding") is None
     with pytest.raises(UnresolvedExtensionError):
         reg.renderer("finding")
-    fn = lambda finding, ctx: "X"
+    def fn(finding, ctx):
+        return "X"
     reg.override_renderer("finding", fn)
     assert reg.renderer("finding") is fn
     assert reg.renderer_if_registered("finding") is fn

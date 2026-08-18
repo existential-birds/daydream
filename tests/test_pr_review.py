@@ -64,20 +64,21 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
 
 
 def test_finding_renderer_falls_back_and_warns_on_error(caplog) -> None:
-    from daydream.extensions import Registry, set_registry
+    from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     def boom(finding, ctx):
         raise RuntimeError("boom")
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", boom)
+    prev = get_registry()
     set_registry(reg)
     try:
         with caplog.at_level("WARNING"):
             body = _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
                                                    severity="high", confidence="HIGH", fingerprint="a" * 64))
     finally:
-        set_registry(Registry())
+        set_registry(prev)
     assert body == (SNAP / "inline.md").read_text()      # byte-identical default
     assert "finding" in caplog.text and "boom" in caplog.text
 
@@ -86,7 +87,7 @@ _FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_c
 
 
 def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monkeypatch) -> None:
-    from daydream.extensions import Registry, set_registry
+    from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
@@ -98,13 +99,14 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monk
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("summary", summary_renderer)
+    prev = get_registry()
     set_registry(reg)
     try:
         classified = pr_review._ClassifiedIssues(
             body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
         payload = build_payload(pr, classified)
     finally:
-        set_registry(Registry())
+        set_registry(prev)
     body = payload["body"]
     assert "**Custom Summary**" in body
     assert "<summary>b.py — File note</summary>" in body   # metadata drove the label
@@ -113,25 +115,26 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monk
 
 
 def test_custom_finding_renderer_flows_into_summary_section(pr, monkeypatch) -> None:
-    from daydream.extensions import Registry, set_registry
+    from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
+    prev = get_registry()
     set_registry(reg)
     try:
         classified = pr_review._ClassifiedIssues(
             body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
         body = build_payload(pr, classified)["body"]
     finally:
-        set_registry(Registry())
+        set_registry(prev)
     assert "CUSTOM::summary::File note" in body               # finding override reaches the summary section
     assert parse_finding_markers(body) == ["b" * 64]           # host marker still injected
 
 
 def test_summary_renderer_falls_back_and_warns_on_error(pr, monkeypatch, caplog) -> None:
-    from daydream.extensions import Registry, set_registry
+    from daydream.extensions import Registry, get_registry, set_registry
     from daydream.extensions.builtins import register_builtins
     monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
 
@@ -145,12 +148,13 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr, monkeypatch, caplog)
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
                                confidence="MEDIUM", severity="low", fingerprint="b" * 64)])
     default_body = build_payload(pr, classified)["body"]       # baseline via builtins
+    prev = get_registry()
     set_registry(reg)
     try:
         with caplog.at_level("WARNING"):
             body = build_payload(pr, classified)["body"]
     finally:
-        set_registry(Registry())
+        set_registry(prev)
     assert body == default_body                                 # byte-identical fallback
     assert "summary" in caplog.text and "kaboom" in caplog.text
 
