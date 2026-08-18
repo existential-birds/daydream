@@ -142,3 +142,15 @@ def test_comment_contract_types_are_frozen_and_public() -> None:
     assert ctx.placement == "summary" and sc.findings[0].body_block == "X"
     for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
         assert name in ext.__all__
+
+
+def test_renderer_slot_override_and_lookup() -> None:
+    reg = Registry()
+    assert reg.renderer_if_registered("finding") is None
+    with pytest.raises(UnresolvedExtensionError):
+        reg.renderer("finding")
+    fn = lambda finding, ctx: "X"
+    reg.override_renderer("finding", fn)
+    assert reg.renderer("finding") is fn
+    assert reg.renderer_if_registered("finding") is fn
+    assert reg.renderer_names() == ("finding",)
