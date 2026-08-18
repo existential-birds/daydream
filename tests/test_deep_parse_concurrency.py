@@ -198,14 +198,23 @@ async def test_shard_names_flow_through_parse_and_sort_deterministically(
     from daydream.runner import run
 
     install_stub_backend(monkeypatch, shard_many_python_target)
-    for _ in range(2):  # two identical runs -> identical shard set, stable order
-        rc = await run(make_config(shard_many_python_target, deep_shard_enabled=True,
-                                   deep_shard_max_files=1, deep_shard_max_bytes=10**9))
-        assert rc == 0
     deep = shard_many_python_target / ".daydream" / "deep"
     # Shard record files sort stably (python#0 < python#1 ... < structure), so
     # parse fan-out and merge consume them in a fixed order regardless of
     # completion order (sorted iteration at orchestrator.py:1322).
-    names = sorted(p.name for p in deep.glob("stack-*-records.json"))
-    assert any(n.startswith("stack-python#") for n in names)
-    assert names == sorted(names)   # deterministic by construction
+    def shard_names() -> list[str]:
+        return sorted(p.name for p in deep.glob("stack-*-records.json"))
+
+    seen: list[list[str]] = []
+    for _ in range(2):  # two identical runs -> identical shard set, stable order
+        rc = await run(make_config(shard_many_python_target, deep_shard_enabled=True,
+                                   deep_shard_max_files=1, deep_shard_max_bytes=10**9))
+        assert rc == 0
+        names = shard_names()
+        assert any(n.startswith("stack-python#") for n in names)
+        assert names == sorted(names)   # deterministic by construction
+        seen.append(names)
+    # The stated determinism claim: both runs must produce the same shard set
+    # in the same order. A shard-naming or record-path nondeterminism
+    # regression flips this comparison.
+    assert seen[0] == seen[1]

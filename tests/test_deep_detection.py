@@ -215,7 +215,10 @@ def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    # 3 files but one huge hunk pushes total changed bytes over max_bytes.
+    # The split is forced by header-inclusive block sizing: each ``diff --git``
+    # block here is ~64-69 bytes (headers + one hunk line) and any two of them
+    # total ~130 > max_bytes=100. ``_per_file_change_bytes`` sizes the whole
+    # block, headers included, not just the hunk lines.
     diff = (
         "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'*2000\n"
         "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n"
@@ -248,22 +251,33 @@ def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     assert sorted(union) == sorted([f"p{i}.py" for i in range(12)] + [f"r{i}.rs" for i in range(12)])
 
 
-def test_shard_stacks_co_locates_dependent_files_when_room() -> None:
+def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path) -> None:
     """Issue #731: files sharing an import edge stay in the same shard when it
-    fits within the bounds."""
+    fits within the bounds. The graph comes from ``build_import_graph`` over
+    real on-disk files, and the edge pair (a.py, d.py) is non-adjacent in sorted
+    order -- without graph-driven co-location the sorted-singleton fallback
+    packs [a,b]/[c,d] and this assertion fails, so dropping co-location is
+    caught."""
+    from pathlib import Path
+
+    from daydream.deep.dependency import build_import_graph
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
-    # b.py imports a.py (resolvable edge); the sharder gets a graph with that
-    # edge. 4 files / max_files=2 forces the shard; the {a,b} component fits a
-    # shard so b.py stays co-located with its dependency a.py.
+    # d.py imports a.py (a resolvable edge). 4 files / max_files=2 forces the
+    # shard; the {a,d} component fits one shard so d.py stays co-located with
+    # its dependency a.py.
     stack = StackAssignment(stack_name="python", skill_invocation="s",
                             files=["a.py", "b.py", "c.py", "d.py"])
-    graph = {"a.py": set(), "b.py": {"a.py"}, "c.py": set(), "d.py": set()}
+    root = Path(tmp_path)
+    for name in ("a.py", "b.py", "c.py"):
+        (root / name).write_text("x = 1\n")
+    (root / "d.py").write_text("import a\n")
+    graph = build_import_graph(["a.py", "b.py", "c.py", "d.py"], root)
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9,
                        fanout_cap=16, frontier_max=8, graph=graph)
     shards = [s for s in out if s.stack_name.startswith("python#")]
-    edge_shard = next(s for s in shards if "b.py" in s.files)
+    edge_shard = next(s for s in shards if "d.py" in s.files)
     assert "a.py" in edge_shard.files            # co-located when size permits
 
 
@@ -282,15 +296,22 @@ def test_shard_stacks_fail_open_without_graph() -> None:
     assert len(set(union)) == len(union)  # no duplicate primary assignment
 
 
-def test_shard_stacks_populates_bounded_frontier() -> None:
-    """Issue #731: cross-shard shared files surface as a bounded frontier."""
+def test_shard_stacks_populates_bounded_frontier(tmp_path) -> None:
+    """Issue #731: cross-shard shared files surface as a bounded frontier,
+    derived from a real ``build_import_graph`` over on-disk files."""
+    from pathlib import Path
+
+    from daydream.deep.dependency import build_import_graph
     from daydream.deep.detection import StackAssignment
     from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python", skill_invocation="s",
                             files=[f"m{i}.py" for i in range(8)])
     # m4..m7 all import m0 (a shared interface in shard 0).
-    graph = {f"m{i}.py": ({"m0.py"} if i >= 4 else set()) for i in range(8)}
+    root = Path(tmp_path)
+    for i in range(8):
+        (root / f"m{i}.py").write_text("import m0\n" if i >= 4 else "x = 1\n")
+    graph = build_import_graph([f"m{i}.py" for i in range(8)], root)
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=3, graph=graph)
     frontier_shards = [s for s in out if getattr(s, "frontier_files", [])]
     assert frontier_shards, "cross-shard shared files must surface as a frontier"
@@ -298,16 +319,40 @@ def test_shard_stacks_populates_bounded_frontier() -> None:
 
 
 def test_build_import_graph_resolves_python_edges(tmp_path) -> None:
-    """Issue #731: tree-sitter resolves python import edges; unknown grammars
-    fail open to singletons."""
+    """Issue #731: tree-sitter resolves python import edges, absolute and
+    relative; unknown grammars fail open to singletons."""
     from pathlib import Path
 
     from daydream.deep.dependency import build_import_graph
 
     (tmp_path / "a.py").write_text("import b\n")
     (tmp_path / "b.py").write_text("x = 1\n")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "mod.py").write_text("from .util import helper\n")
+    (tmp_path / "pkg" / "util.py").write_text("def helper(): pass\n")
     (tmp_path / "notes.txt").write_text("no grammar\n")
-    graph = build_import_graph(["a.py", "b.py", "notes.txt"], Path(tmp_path))
-    assert "b.py" in graph["a.py"]          # import edge resolved
+    graph = build_import_graph(["a.py", "b.py", "pkg/mod.py", "pkg/util.py", "notes.txt"], Path(tmp_path))
+    assert "b.py" in graph["a.py"]          # absolute import edge resolved
     assert graph["b.py"] == set()           # no outgoing edge
+    assert "pkg/util.py" in graph["pkg/mod.py"]  # 'from .util import helper' edge
     assert "notes.txt" in graph             # unknown grammar -> fail-open singleton
+
+
+def test_build_import_graph_resolves_multilanguage_edges(tmp_path) -> None:
+    """Issue #731: tree-sitter resolves .ts/.go/.rs import edges too, so the
+    dependency graph is not inert outside python."""
+    from pathlib import Path
+
+    from daydream.deep.dependency import build_import_graph
+
+    (tmp_path / "a.ts").write_text('import { b } from "./b"\n')
+    (tmp_path / "b.ts").write_text("export const b = 1;\n")
+    (tmp_path / "a.go").write_text('package a\nimport "b"\n')
+    (tmp_path / "b.go").write_text("package b\n")
+    (tmp_path / "a.rs").write_text("use b::c;\n")
+    (tmp_path / "b.rs").write_text("pub fn c() {}\n")
+    files = ["a.ts", "b.ts", "a.go", "b.go", "a.rs", "b.rs"]
+    graph = build_import_graph(files, Path(tmp_path))
+    assert "b.ts" in graph["a.ts"]          # './b' resolves to sibling b.ts
+    assert "b.go" in graph["a.go"]          # go import path -> b.go
+    assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs

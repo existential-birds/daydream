@@ -19,29 +19,31 @@ from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 
 
-def _per_file_change_bytes(diff: str, file: str) -> int:
-    """Return the changed-byte size of ``file`` from a full unified ``diff``.
+def _file_change_bytes(diff: str) -> dict[str, int]:
+    """Map every changed file to its changed-byte size (single diff parse).
 
-    Splits ``diff`` into ``diff --git`` blocks and returns ``len(block.encode(
-    "utf-8"))`` for the block whose post-state path matches ``file``. A file
-    with no resolvable block sizes as 1 byte (still assigned, never dropped).
-    Mirrors the shared ``_diff_block_path`` / ``_DIFF_BLOCK_SPLIT`` parse used
-    by ``prompts._diff_blocks_for_files``.
+    Splits ``diff`` into ``diff --git`` blocks exactly once and records
+    ``len(block.encode("utf-8"))`` under the block's post-state path (first
+    matching block wins). A file absent from the map sizes as 1 byte (still
+    assigned, never dropped). Mirrors the shared ``_diff_block_path`` /
+    ``_DIFF_BLOCK_SPLIT`` parse used by ``prompts._diff_blocks_for_files``.
     """
+    sizes: dict[str, int] = {}
     for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if _diff_block_path(block) == file:
-            return len(block.encode("utf-8"))
-    return 1
+        path = _diff_block_path(block)
+        if path is not None:
+            sizes.setdefault(path, len(block.encode("utf-8")))
+    return sizes
 
 
-def _changed_bytes(diff: str, files: list[str]) -> int:
-    """Total changed-byte size of ``files`` across ``diff``."""
-    return sum(_per_file_change_bytes(diff, f) for f in files)
+def _changed_bytes(sizes: dict[str, int], files: list[str]) -> int:
+    """Total changed-byte size of ``files`` from a pre-parsed sizes map."""
+    return sum(sizes.get(f, 1) for f in files)
 
 
 def _pack_shards(
     stack: StackAssignment,
-    diff: str,
+    sizes: dict[str, int],
     max_files: int,
     max_bytes: int,
     blocks: list[list[str]],
@@ -69,11 +71,8 @@ def _pack_shards(
             )
 
     for block in blocks:
-        size = sum(_per_file_change_bytes(diff, f) for f in block)
-        fits = (
-            len(current) + len(block) <= max_files
-            and (current_bytes == 0 or current_bytes + size <= max_bytes)
-        )
+        size = sum(sizes.get(f, 1) for f in block)
+        fits = len(current) + len(block) <= max_files and current_bytes + size <= max_bytes
         if current and not fits:
             emit(current)
             current, current_bytes = [], 0
@@ -84,7 +83,7 @@ def _pack_shards(
             continue
         # Block too large for a (possibly fresh) shard: split per-file.
         for f in block:
-            fsize = _per_file_change_bytes(diff, f)
+            fsize = sizes.get(f, 1)
             if current and (
                 len(current) >= max_files or (current_bytes > 0 and current_bytes + fsize > max_bytes)
             ):
@@ -145,6 +144,7 @@ def shard_stacks(
     meta-stack is passed through unchanged. Total tasks never exceed
     ``fanout_cap`` (largest shardable stacks are returned unsplit to stay under).
     """
+    sizes = _file_change_bytes(diff)
     structural: list[StackAssignment] = []
     unsharded: list[StackAssignment] = []
     sharded: list[tuple[StackAssignment, list[StackAssignment]]] = []
@@ -154,7 +154,7 @@ def shard_stacks(
         if stack.stack_name == STRUCTURE_STACK_NAME:
             structural.append(stack)
             continue
-        if len(stack.files) <= max_files and _changed_bytes(diff, stack.files) <= max_bytes:
+        if len(stack.files) <= max_files and _changed_bytes(sizes, stack.files) <= max_bytes:
             unsharded.append(stack)
             continue
         # Co-locate when a non-empty graph is available, else sorted singletons.
@@ -162,7 +162,7 @@ def shard_stacks(
             blocks = co_locate_groups(stack.files, edges)
         else:
             blocks = [[f] for f in sorted(stack.files)]
-        shards = _pack_shards(stack, diff, max_files, max_bytes, blocks)
+        shards = _pack_shards(stack, sizes, max_files, max_bytes, blocks)
         _assign_frontiers(shards, edges, frontier_max)
         sharded.append((stack, shards))
 

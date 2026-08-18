@@ -36,20 +36,32 @@ _GRAPH_BUILD_WALL_BUDGET_S = 5.0
 def _resolve_import(import_str: str, file: str) -> list[str]:
     """Best-effort map an import string to candidate repo-relative changed paths.
 
-    ``import a.b.c`` -> ``a/b/c.py`` (and package ``a/b/c/__init__.py``);
-    relative ``.``/``..`` prefixes resolve against the importing file's own
-    directory. Returns an empty list when nothing resolvable (fail-open).
+    Python dotted names (``import a.b`` -> ``a/b.py`` plus the package
+    ``a/b/__init__.py``); relative ``.``/``..`` prefixes resolve against the
+    importing file's own directory (``from .x import y`` in ``pkg/a.py`` ->
+    ``pkg/x.py``); TypeScript ``./x``/``../x`` specifiers resolve to sibling
+    ``.ts``/``.tsx``/``.jsx`` files; Go ``import "pkg/x"`` and Rust ``use x::y``
+    resolve to ``.go``/``.rs`` files. Returns an empty list when nothing
+    resolvable (fail-open).
     """
-    text = import_str
+    suffix = PurePosixPath(file).suffix.lower()
+    text = import_str.strip()
+    # The python relative-import query captures the whole ``from .x import y``
+    # statement; keep only the module name that follows ``from``.
+    if text.startswith("from ") and " import " in text:
+        text = text[len("from ") : text.index(" import ")].strip()
     rel_dots = 0
     while text.startswith("."):
         rel_dots += 1
         text = text[1:]
-    parts = [p for p in text.strip().split(".") if p]
+    text = text.lstrip("/")
+    if suffix == ".py":
+        parts = [p for p in text.split(".") if p]
+    else:
+        parts = [p for p in text.replace("::", "/").split("/") if p]
     if not parts:
         # ``from . import x``-style: no module path to resolve.
         return []
-    candidates = ["/".join(parts) + ".py", "/".join(parts) + "/__init__.py"]
     if rel_dots == 0:
         base_rel = ""
     else:
@@ -58,6 +70,26 @@ def _resolve_import(import_str: str, file: str) -> list[str]:
         if up:
             dir_parts = dir_parts[:-up]
         base_rel = "/".join(dir_parts)
+    if suffix == ".py":
+        stems = ["/".join(parts)]
+        suffixes: tuple[str, ...] = (".py", "/__init__.py")
+    elif suffix in (".ts", ".tsx", ".jsx"):
+        stems = ["/".join(parts)]
+        suffixes = (".ts", ".tsx", ".jsx", "/index.ts", "/index.tsx", "/index.jsx")
+    elif suffix == ".go":
+        stems = ["/".join(parts)]
+        suffixes = (".go",)
+    elif suffix == ".rs":
+        while parts and parts[0] in ("crate", "self", "super"):
+            parts.pop(0)
+        if not parts:
+            return []
+        # The first path segment names the module file (``b.rs``/``b/mod.rs``).
+        stems = ["/".join(parts[:1])]
+        suffixes = (".rs", "/mod.rs")
+    else:
+        return []
+    candidates = [stem + sfx for stem in stems for sfx in suffixes]
     return [(base_rel + "/" + c) if base_rel else c for c in candidates]
 
 

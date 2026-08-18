@@ -11,16 +11,6 @@
       "description": "seeded finding 1"
     },
     {
-      "file": "src/service/mod02.py",
-      "severity": "low",
-      "description": "seeded finding 2"
-    },
-    {
-      "file": "src/service/mod03.py",
-      "severity": "low",
-      "description": "seeded finding 3"
-    },
-    {
       "file": "src/service/mod04.py",
       "severity": "high",
       "description": "seeded finding 4"
@@ -31,16 +21,6 @@
       "description": "seeded finding 5"
     },
     {
-      "file": "src/service/mod06.py",
-      "severity": "low",
-      "description": "seeded finding 6"
-    },
-    {
-      "file": "src/service/mod07.py",
-      "severity": "low",
-      "description": "seeded finding 7"
-    },
-    {
       "file": "src/service/mod08.py",
       "severity": "high",
       "description": "seeded finding 8"
@@ -49,11 +29,6 @@
       "file": "src/service/mod09.py",
       "severity": "medium",
       "description": "seeded finding 9"
-    },
-    {
-      "file": "src/service/mod10.py",
-      "severity": "low",
-      "description": "seeded finding 10"
     },
     {
       "file": "src/service/mod11.py",

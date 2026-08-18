@@ -123,7 +123,14 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
         records = json.loads(records_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    findings = records.get("issues") if isinstance(records, dict) else None
+    if isinstance(records, dict):
+        findings = records.get("issues")
+    elif isinstance(records, list):
+        # Production per-stack records are a bare JSON list (the raw parse
+        # output); the dict-with-"issues" shape is the legacy/unit-test form.
+        findings = records
+    else:
+        findings = None
     if not isinstance(findings, list):
         return None
     files: set[str] = set()
@@ -148,7 +155,13 @@ def _receipt_covered_files(
     multiple types counts once per type it satisfies).
     """
     covered: set[str] = set()
-    counts = {"inline_hunk_reviewed": 0, "dependency_frontier_read": 0}
+    # Per-evidence-type covered sets so a file present in N shards' lists is
+    # counted once per type, not once per (shard, type) -- the "once per type
+    # it satisfies" contract in the docstring (finding 2).
+    covered_by_type: dict[str, set[str]] = {
+        "inline_hunk_reviewed": set(),
+        "dependency_frontier_read": set(),
+    }
     diff_set = set(diff_files)
     for stack_name, receipt in receipts.items():
         records_path = per_stack_records_path(deep_dir_path, stack_name)
@@ -164,7 +177,8 @@ def _receipt_covered_files(
                     _path_component_matches(ff, f) for ff in finding_files
                 ):
                     covered.add(f)
-                    counts[evidence_key] += 1
+                    covered_by_type[evidence_key].add(f)
+    counts = {key: len(files) for key, files in covered_by_type.items()}
     return covered, counts
 
 
@@ -200,8 +214,9 @@ def compute_uncovered_files(
     Returns:
         ``(uncovered_files, stats)`` where ``stats`` is the coverage dict
         (``files_in_diff`` / ``files_read_by_reviewers`` / ``coverage_ratio`` /
-        ``uncovered_files`` / ``coverage_by_evidence``) and ``uncovered_files``
-        is its sorted list of diff files no review agent covered.
+        ``uncovered_files``) plus ``coverage_by_evidence`` only when ``receipts``
+        is provided, and ``uncovered_files`` is its sorted list of diff files
+        no review agent covered.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
@@ -216,22 +231,29 @@ def compute_uncovered_files(
         )
 
     covered = {df for df in diff_files if any(_path_component_matches(r, df) for r in review_reads)}
-    coverage_by_evidence: dict[str, int] = {"source_read": len(covered)}
+    source_covered = len(covered)
     if receipts:
         receipt_covered, receipt_counts = _receipt_covered_files(
             diff_files, receipts, daydream_dir / "deep"
         )
         covered |= receipt_covered
-        coverage_by_evidence.update(receipt_counts)
     uncovered = sorted(set(diff_files) - covered)
 
-    return uncovered, {
+    stats: dict[str, Any] = {
         "files_in_diff": len(diff_files),
         "files_read_by_reviewers": len(covered),
         "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
         "uncovered_files": uncovered,
-        "coverage_by_evidence": coverage_by_evidence,
     }
+    if receipts:
+        # Issue #731: per-evidence-type counts surface ONLY when sharding was
+        # enabled this run (receipts provided); absent otherwise (finding 3), so
+        # the Reads-only path stays byte-identical to today's stats artifact.
+        stats["coverage_by_evidence"] = {
+            "source_read": source_covered,
+            **receipt_counts,
+        }
+    return uncovered, stats
 
 
 def diff_block_for_file(diff: str, file: str) -> str | None:

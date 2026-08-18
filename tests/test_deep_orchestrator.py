@@ -8007,8 +8007,9 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     """Sharding is forensic-off by default: DEFAULT_DEEP_SHARD_ENABLED = False.
 
     Mirrors the ``_uncovered_sweep_max_files`` resolver tests: precedence is
-    RunConfig attr > file-config scalar > built-in default, and the enable
-    toggle is truthiness-resolved (``_precision_mode`` pattern).
+    RunConfig attr > file-config scalar > built-in default, and an explicit
+    set-to-False on the RunConfig tier force-off a file-config-enabled repo
+    (``_resolve_config_value`` pattern).
     """
     from daydream.config import DEFAULT_DEEP_SHARD_ENABLED
     from daydream.deep.orchestrator import _deep_shard_enabled
@@ -8027,6 +8028,9 @@ def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
     fc = DaydreamFileConfig(deep_shard_enabled=True)
     cfg = RunConfig(target=str(tmp_path), file_config=fc)
     assert _deep_shard_enabled(cfg) is True
+    # Explicit RunConfig False (highest tier) force-off a file-config-enabled repo.
+    cfg = RunConfig(target=str(tmp_path), file_config=fc, deep_shard_enabled=False)
+    assert _deep_shard_enabled(cfg) is False
 
 
 def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
@@ -8082,7 +8086,18 @@ async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
 async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
     multi_stack_target: Path, monkeypatch, install_backend,
 ) -> None:
-    """Issue #731: enabled runs surface per-evidence coverage in the sweep stats."""
+    """Issue #731: an inline-grounded, finding-referenced file is NOT swept.
+
+    The outcome the sweep-evidence gate exists to prove: ``api.py`` is
+    inline-grounded in its shard's receipt AND the shard's parsed records
+    carry a finding for it, so it must be absent from the pre-sweep uncovered
+    set (and therefore never dispatched to the second-pass sweep). A stack
+    whose records do NOT reference its inline file (``App.tsx``) stays
+    uncovered -- the gate is selective, not blanket coverage. The
+    ``inline_hunk_reviewed`` count of exactly 1 is only populated when the
+    receipts plumbing actually wrote and consumed receipts, so the assertion
+    also fails when that plumbing breaks.
+    """
     from daydream.runner import RunConfig, run
 
     install_stub_backend(monkeypatch, multi_stack_target)
@@ -8093,7 +8108,17 @@ async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
     assert exit_code == 0
     deep = multi_stack_target / ".daydream" / "deep"
     stats = json.loads((deep / "coverage-stats.json").read_text())
-    assert "coverage_by_evidence" in stats["pre_sweep"]  # evidence surfaced in report
+    pre_sweep = stats["pre_sweep"]
+    # The gate's outcome: api.py was inline-grounded AND referenced by a
+    # parsed finding, so it is not uncovered and never swept.
+    assert "api.py" not in pre_sweep["uncovered_files"]
+    # The gate is selective: App.tsx is inlined too, but no parsed finding
+    # references it, so it stays uncovered (evidence requires a finding match,
+    # never assignment alone).
+    assert "App.tsx" in pre_sweep["uncovered_files"]
+    # Per-evidence counts are populated only when the receipts were written
+    # and consumed; broken plumbing yields no inline evidence at all.
+    assert pre_sweep["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
 
 
 async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
