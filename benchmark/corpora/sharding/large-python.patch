@@ -1,0 +1,224 @@
+diff --git a/src/service/mod00.py b/src/service/mod00.py
+--- a/src/service/mod00.py
++++ b/src/service/mod00.py
+@@ -1,4 +1,6 @@
+ def handler_0(payload):
+-    return process(payload, mode='old0')
++    # hunk 0: 0 bytes of simulated change context
++    return process(payload, mode='new0', retries=3)
+
+diff --git a/src/service/mod01.py b/src/service/mod01.py
+--- a/src/service/mod01.py
++++ b/src/service/mod01.py
+@@ -1,4 +1,6 @@
+ def handler_1(payload):
+-    return process(payload, mode='old1')
++    # hunk 1: 40 bytes of simulated change context
++    return process(payload, mode='new1', retries=3)
+
+diff --git a/src/service/mod02.py b/src/service/mod02.py
+--- a/src/service/mod02.py
++++ b/src/service/mod02.py
+@@ -1,4 +1,6 @@
+ def handler_2(payload):
+-    return process(payload, mode='old2')
++    # hunk 2: 80 bytes of simulated change context
++    return process(payload, mode='new2', retries=3)
+
+diff --git a/src/service/mod03.py b/src/service/mod03.py
+--- a/src/service/mod03.py
++++ b/src/service/mod03.py
+@@ -1,4 +1,6 @@
+ def handler_3(payload):
+-    return process(payload, mode='old3')
++    # hunk 3: 120 bytes of simulated change context
++    return process(payload, mode='new3', retries=3)
+
+diff --git a/src/service/mod04.py b/src/service/mod04.py
+--- a/src/service/mod04.py
++++ b/src/service/mod04.py
+@@ -1,4 +1,6 @@
+ def handler_4(payload):
+-    return process(payload, mode='old4')
++    # hunk 4: 160 bytes of simulated change context
++    return process(payload, mode='new4', retries=3)
+
+diff --git a/src/service/mod05.py b/src/service/mod05.py
+--- a/src/service/mod05.py
++++ b/src/service/mod05.py
+@@ -1,4 +1,6 @@
+ def handler_5(payload):
+-    return process(payload, mode='old5')
++    # hunk 5: 200 bytes of simulated change context
++    return process(payload, mode='new5', retries=3)
+
+diff --git a/src/service/mod06.py b/src/service/mod06.py
+--- a/src/service/mod06.py
++++ b/src/service/mod06.py
+@@ -1,4 +1,6 @@
+ def handler_6(payload):
+-    return process(payload, mode='old6')
++    # hunk 6: 240 bytes of simulated change context
++    return process(payload, mode='new6', retries=3)
+
+diff --git a/src/service/mod07.py b/src/service/mod07.py
+--- a/src/service/mod07.py
++++ b/src/service/mod07.py
+@@ -1,4 +1,6 @@
+ def handler_7(payload):
+-    return process(payload, mode='old7')
++    # hunk 7: 280 bytes of simulated change context
++    return process(payload, mode='new7', retries=3)
+
+diff --git a/src/service/mod08.py b/src/service/mod08.py
+--- a/src/service/mod08.py
++++ b/src/service/mod08.py
+@@ -1,4 +1,6 @@
+ def handler_8(payload):
+-    return process(payload, mode='old8')
++    # hunk 8: 320 bytes of simulated change context
++    return process(payload, mode='new8', retries=3)
+
+diff --git a/src/service/mod09.py b/src/service/mod09.py
+--- a/src/service/mod09.py
++++ b/src/service/mod09.py
+@@ -1,4 +1,6 @@
+ def handler_9(payload):
+-    return process(payload, mode='old9')
++    # hunk 9: 360 bytes of simulated change context
++    return process(payload, mode='new9', retries=3)
+
+diff --git a/src/service/mod10.py b/src/service/mod10.py
+--- a/src/service/mod10.py
++++ b/src/service/mod10.py
+@@ -1,4 +1,6 @@
+ def handler_10(payload):
+-    return process(payload, mode='old10')
++    # hunk 10: 400 bytes of simulated change context
++    return process(payload, mode='new10', retries=3)
+
+diff --git a/src/service/mod11.py b/src/service/mod11.py
+--- a/src/service/mod11.py
++++ b/src/service/mod11.py
+@@ -1,4 +1,6 @@
+ def handler_11(payload):
+-    return process(payload, mode='old11')
++    # hunk 11: 440 bytes of simulated change context
++    return process(payload, mode='new11', retries=3)
+
+diff --git a/src/service/mod12.py b/src/service/mod12.py
+--- a/src/service/mod12.py
++++ b/src/service/mod12.py
+@@ -1,4 +1,6 @@
+ def handler_12(payload):
+-    return process(payload, mode='old12')
++    # hunk 12: 480 bytes of simulated change context
++    return process(payload, mode='new12', retries=3)
+
+diff --git a/src/service/mod13.py b/src/service/mod13.py
+--- a/src/service/mod13.py
++++ b/src/service/mod13.py
+@@ -1,4 +1,6 @@
+ def handler_13(payload):
+-    return process(payload, mode='old13')
++    # hunk 13: 520 bytes of simulated change context
++    return process(payload, mode='new13', retries=3)
+
+diff --git a/src/service/mod14.py b/src/service/mod14.py
+--- a/src/service/mod14.py
++++ b/src/service/mod14.py
+@@ -1,4 +1,6 @@
+ def handler_14(payload):
+-    return process(payload, mode='old14')
++    # hunk 14: 560 bytes of simulated change context
++    return process(payload, mode='new14', retries=3)
+
+diff --git a/src/service/mod15.py b/src/service/mod15.py
+--- a/src/service/mod15.py
++++ b/src/service/mod15.py
+@@ -1,4 +1,6 @@
+ def handler_15(payload):
+-    return process(payload, mode='old15')
++    # hunk 15: 600 bytes of simulated change context
++    return process(payload, mode='new15', retries=3)
+
+diff --git a/src/service/mod16.py b/src/service/mod16.py
+--- a/src/service/mod16.py
++++ b/src/service/mod16.py
+@@ -1,4 +1,6 @@
+ def handler_16(payload):
+-    return process(payload, mode='old16')
++    # hunk 16: 640 bytes of simulated change context
++    return process(payload, mode='new16', retries=3)
+
+diff --git a/src/service/mod17.py b/src/service/mod17.py
+--- a/src/service/mod17.py
++++ b/src/service/mod17.py
+@@ -1,4 +1,6 @@
+ def handler_17(payload):
+-    return process(payload, mode='old17')
++    # hunk 17: 680 bytes of simulated change context
++    return process(payload, mode='new17', retries=3)
+
+diff --git a/src/service/mod18.py b/src/service/mod18.py
+--- a/src/service/mod18.py
++++ b/src/service/mod18.py
+@@ -1,4 +1,6 @@
+ def handler_18(payload):
+-    return process(payload, mode='old18')
++    # hunk 18: 720 bytes of simulated change context
++    return process(payload, mode='new18', retries=3)
+
+diff --git a/src/service/mod19.py b/src/service/mod19.py
+--- a/src/service/mod19.py
++++ b/src/service/mod19.py
+@@ -1,4 +1,6 @@
+ def handler_19(payload):
+-    return process(payload, mode='old19')
++    # hunk 19: 760 bytes of simulated change context
++    return process(payload, mode='new19', retries=3)
+
+diff --git a/src/service/mod20.py b/src/service/mod20.py
+--- a/src/service/mod20.py
++++ b/src/service/mod20.py
+@@ -1,4 +1,6 @@
+ def handler_20(payload):
+-    return process(payload, mode='old20')
++    # hunk 20: 800 bytes of simulated change context
++    return process(payload, mode='new20', retries=3)
+
+diff --git a/src/service/mod21.py b/src/service/mod21.py
+--- a/src/service/mod21.py
++++ b/src/service/mod21.py
+@@ -1,4 +1,6 @@
+ def handler_21(payload):
+-    return process(payload, mode='old21')
++    # hunk 21: 840 bytes of simulated change context
++    return process(payload, mode='new21', retries=3)
+
+diff --git a/src/service/mod22.py b/src/service/mod22.py
+--- a/src/service/mod22.py
++++ b/src/service/mod22.py
+@@ -1,4 +1,6 @@
+ def handler_22(payload):
+-    return process(payload, mode='old22')
++    # hunk 22: 880 bytes of simulated change context
++    return process(payload, mode='new22', retries=3)
+
+diff --git a/src/service/mod23.py b/src/service/mod23.py
+--- a/src/service/mod23.py
++++ b/src/service/mod23.py
+@@ -1,4 +1,6 @@
+ def handler_23(payload):
+-    return process(payload, mode='old23')
++    # hunk 23: 920 bytes of simulated change context
++    return process(payload, mode='new23', retries=3)
+
+diff --git a/src/service/mod24.py b/src/service/mod24.py
+--- a/src/service/mod24.py
++++ b/src/service/mod24.py
+@@ -1,4 +1,6 @@
+ def handler_24(payload):
+-    return process(payload, mode='old24')
++    # hunk 24: 960 bytes of simulated change context
++    return process(payload, mode='new24', retries=3)
