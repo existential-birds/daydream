@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from daydream.pr_review import (
     ParsedIssue,
     PRInfo,
     _format_body_section,
+    _format_file_level_body,
     _format_inline_body,
     _parse_hunks,
     alt_issues_to_parsed,
@@ -30,6 +32,18 @@ from tests.harness.git_helpers import git as _git
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
 gh_required = pytest.mark.skipif(not _gh_available, reason="gh CLI not installed")
+
+SNAP = Path(__file__).parent / "fixtures" / "comment_snapshots"
+
+
+def test_finding_and_summary_markdown_is_byte_stable() -> None:
+    i = ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
+                    severity="high", confidence="HIGH", fingerprint="a" * 64)
+    assert _format_inline_body(i) == (SNAP / "inline.md").read_text()
+    assert _format_file_level_body(replace(i, is_cross_stack=True)) == (SNAP / "file_level.md").read_text()
+    section = _format_body_section([replace(i, line=None),
+                                    replace(i, path="b.py", line=None, fingerprint="b" * 64)])
+    assert section == (SNAP / "summary_body.md").read_text()
 
 
 def test_structural_item_becomes_parsed_issue():
