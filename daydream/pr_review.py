@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -37,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.extensions import CommentFinding, FindingRenderContext, get_registry
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
@@ -46,6 +48,9 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from daydream.findings import ArtifactFinding
+
+
+_logger = logging.getLogger(__name__)
 
 
 # --- Data shapes ------------------------------------------------------------
@@ -717,12 +722,80 @@ def _issue_header(issue: ParsedIssue, *, prefix: str = "", always_bold: bool = F
     return header or tags
 
 
+def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -> str:
+    """Render the inner human block for one finding (header + body + agent prompt).
+
+    Placement-parameterized (``"inline"``, ``"file_level"``, ``"summary"``) so
+    it reproduces today's inline, file-level, and summary inner text exactly.
+    It never emits :data:`DAYDREAM_FOOTER` or the hidden finding marker — those
+    stay host-owned and are injected by the callers.
+    """
+    issue = ParsedIssue(
+        path=finding.path,
+        line=finding.line,
+        title=finding.title,
+        body=finding.body,
+        is_cross_stack=finding.is_cross_stack,
+        confidence=finding.confidence,
+        severity=finding.severity,
+        fingerprint=finding.fingerprint,
+    )
+    if ctx.placement == "inline":
+        parts = [p for p in (_issue_header(issue), issue.body) if p]
+        parts.append(_build_agent_prompt(issue))
+        return "\n\n".join(parts)
+    prefix = "[cross-stack] " if issue.is_cross_stack else ""
+    if ctx.placement == "summary":
+        summary_parts = [_issue_header(issue, prefix=prefix, always_bold=True)]
+        if issue.body:
+            summary_parts.append(f"\n{issue.body}\n")
+        summary_parts.append(_build_agent_prompt(issue))
+        return "\n".join(summary_parts)
+    # file_level (default placement).
+    header = _issue_header(issue, prefix=prefix, always_bold=True)
+    parts = [p for p in (header, issue.body) if p]
+    parts.append(_build_agent_prompt(issue))
+    return "\n\n".join(parts)
+
+
+def _comment_finding(issue: ParsedIssue) -> CommentFinding:
+    """Map an internal :class:`ParsedIssue` to the public :class:`CommentFinding`."""
+    return CommentFinding(
+        path=issue.path,
+        line=issue.line,
+        title=issue.title,
+        body=issue.body,
+        is_cross_stack=issue.is_cross_stack,
+        severity=issue.severity,
+        confidence=issue.confidence,
+        fingerprint=issue.fingerprint,
+    )
+
+
+def _render_finding(issue: ParsedIssue, placement: str) -> str:
+    """Render one finding's inner block through the registered ``"finding"`` renderer.
+
+    Falls back to :func:`default_render_finding` (and warns) when the custom
+    renderer raises or returns a non-``str``/empty result, so a broken fork
+    can never break posting.
+    """
+    cf = _comment_finding(issue)
+    ctx = FindingRenderContext(placement=placement)
+    try:
+        result = get_registry().renderer("finding")(cf, ctx)
+    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
+        _logger.warning("custom 'finding' renderer failed (%s); using default", exc)
+        return default_render_finding(cf, ctx)
+    if not isinstance(result, str) or not result:
+        _logger.warning(
+            "custom 'finding' renderer failed (returned %r); using default", result
+        )
+        return default_render_finding(cf, ctx)
+    return result
+
+
 def _format_inline_body(issue: ParsedIssue) -> str:
-    header_line = _issue_header(issue)
-    parts = [p for p in (header_line, issue.body) if p]
-    agent_prompt = _build_agent_prompt(issue)
-    parts.append(agent_prompt)
-    parts.append(DAYDREAM_FOOTER)
+    parts = [_render_finding(issue, "inline"), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
@@ -735,11 +808,7 @@ def _format_file_level_body(issue: ParsedIssue) -> str:
     as an inline comment, so the labeler's author check and fingerprint join
     recognise it without any read-side special-casing.
     """
-    prefix = "[cross-stack] " if issue.is_cross_stack else ""
-    header = _issue_header(issue, prefix=prefix, always_bold=True)
-    parts = [p for p in (header, issue.body) if p]
-    parts.append(_build_agent_prompt(issue))
-    parts.append(DAYDREAM_FOOTER)
+    parts = [_render_finding(issue, "file_level"), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()

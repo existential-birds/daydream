@@ -46,6 +46,42 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
     assert section == (SNAP / "summary_body.md").read_text()
 
 
+def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -> None:
+    from daydream.extensions import Registry, get_registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+    reg = Registry()
+    register_builtins(reg)
+    reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
+    prev = get_registry()
+    set_registry(reg)
+    try:
+        body = _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64))
+    finally:
+        set_registry(prev)
+    assert "CUSTOM::inline::T" in body            # custom content used
+    assert DAYDREAM_FOOTER in body                 # host still injects footer
+    assert parse_finding_markers(body) == ["a" * 64]  # host still injects marker
+
+
+def test_finding_renderer_falls_back_and_warns_on_error(caplog) -> None:
+    from daydream.extensions import Registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+    def boom(finding, ctx):
+        raise RuntimeError("boom")
+    reg = Registry()
+    register_builtins(reg)
+    reg.override_renderer("finding", boom)
+    set_registry(reg)
+    try:
+        with caplog.at_level("WARNING"):
+            body = _format_inline_body(ParsedIssue(path="a.py", line=3, title="T", body="B rationale",
+                                                   severity="high", confidence="HIGH", fingerprint="a" * 64))
+    finally:
+        set_registry(Registry())
+    assert body == (SNAP / "inline.md").read_text()      # byte-identical default
+    assert "finding" in caplog.text and "boom" in caplog.text
+
+
 def test_structural_item_becomes_parsed_issue():
     items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,
               "description": "1k-line file", "severity": "high",
