@@ -387,6 +387,18 @@ DEFAULT_UNCOVERED_SWEEP_ENABLED: bool = True
 DEFAULT_UNCOVERED_SWEEP_MAX_FILES: int = 10
 DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5
 
+# Issue #731: deep-review sharding + coverage-evidence gated uncovered sweep.
+# Splits oversized per-language stacks into bounded, dependency-aware shards
+# that ride the existing ``stack_name``-keyed pipeline. Default-OFF until the
+# sharding/coversweep benchmark gate passes (spec :42-44) -- forensic mode is
+# the default and must stay byte-identical; the benchmark harness lives in
+# ``bench/sharding-benchmark.py``.
+DEFAULT_DEEP_SHARD_ENABLED: bool = False
+DEFAULT_DEEP_SHARD_MAX_FILES: int = 20
+DEFAULT_DEEP_SHARD_MAX_BYTES: int = 65536
+DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
+DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
+
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
 # ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` and
 # ``skill_invocation=STRUCTURE_SKILL`` so the structural reviewer always runs

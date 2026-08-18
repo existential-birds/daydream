@@ -8001,3 +8001,58 @@ def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> 
     cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
     assert _uncovered_sweep_max_files(cfg) == 7
     assert _uncovered_sweep_min_hunk_lines(cfg) == 2
+
+
+def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
+    """Sharding is forensic-off by default: DEFAULT_DEEP_SHARD_ENABLED = False.
+
+    Mirrors the ``_uncovered_sweep_max_files`` resolver tests: precedence is
+    RunConfig attr > file-config scalar > built-in default, and the enable
+    toggle is truthiness-resolved (``_precision_mode`` pattern).
+    """
+    from daydream.config import DEFAULT_DEEP_SHARD_ENABLED
+    from daydream.deep.orchestrator import _deep_shard_enabled
+    from daydream.runner import RunConfig
+
+    assert DEFAULT_DEEP_SHARD_ENABLED is False
+    # Default off (forensic mode): no RunConfig attr, no file config.
+    cfg = RunConfig(target=str(tmp_path))
+    assert _deep_shard_enabled(cfg) is False
+    # RunConfig True (highest tier) enables.
+    cfg = RunConfig(target=str(tmp_path), deep_shard_enabled=True)
+    assert _deep_shard_enabled(cfg) is True
+    # File-config True with no RunConfig override enables.
+    from daydream.config_file import DaydreamFileConfig
+
+    fc = DaydreamFileConfig(deep_shard_enabled=True)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _deep_shard_enabled(cfg) is True
+
+
+def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
+    """The per-shard file bound resolves with RunConfig > file-config > default
+    and degrades malformed ints to the named default (never raises)."""
+    from daydream.config import DEFAULT_DEEP_SHARD_MAX_FILES
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _deep_shard_max_files
+    from daydream.runner import RunConfig
+
+    # Default.
+    cfg = RunConfig(target=str(tmp_path))
+    assert _deep_shard_max_files(cfg) == DEFAULT_DEEP_SHARD_MAX_FILES
+
+    # RunConfig int override wins.
+    cfg = RunConfig(target=str(tmp_path), deep_shard_max_files=5)
+    assert _deep_shard_max_files(cfg) == 5
+
+    # Float must degrade, not raise.
+    cfg = RunConfig(
+        target=str(tmp_path),
+        deep_shard_max_files=2.5,  # type: ignore[arg-type]
+    )
+    assert _deep_shard_max_files(cfg) == DEFAULT_DEEP_SHARD_MAX_FILES
+
+    # File-config override applies when no RunConfig attr is set.
+    fc = DaydreamFileConfig(deep_shard_max_files=7)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _deep_shard_max_files(cfg) == 7

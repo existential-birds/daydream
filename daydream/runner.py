@@ -289,6 +289,16 @@ class RunConfig:
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
+    # Issue #731: deep-review sharding (split oversized per-language stacks into
+    # bounded, dependency-aware shards that ride the stack_name-keyed pipeline).
+    # CLI-tier overrides; ``None`` falls through to the file-config scalar then
+    # the orchestrator default. Default-off (DEFAULT_DEEP_SHARD_ENABLED=False)
+    # until the sharding/coversweep benchmark gate passes.
+    deep_shard_enabled: bool | None = None
+    deep_shard_max_files: int | None = None
+    deep_shard_max_bytes: int | None = None
+    deep_shard_fanout_cap: int | None = None
+    deep_shard_frontier_max: int | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

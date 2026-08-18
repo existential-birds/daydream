@@ -39,6 +39,11 @@ from daydream.config import (
     DEFAULT_UNCOVERED_SWEEP_ENABLED,
     DEFAULT_UNCOVERED_SWEEP_MAX_FILES,
     DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES,
+    DEFAULT_DEEP_SHARD_FANOUT_CAP,
+    DEFAULT_DEEP_SHARD_ENABLED,
+    DEFAULT_DEEP_SHARD_FRONTIER_MAX,
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
+    DEFAULT_DEEP_SHARD_MAX_FILES,
     DEFAULT_WALL_BUDGET_S,
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
@@ -335,6 +340,58 @@ def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
     )
     coerced = _coerce_non_negative_int(value)
     return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+
+def _deep_shard_enabled(config: RunConfig) -> bool:
+    """Resolve the deep-review sharding toggle (issue #731).
+
+    Precedence mirrors ``_precision_mode``: 1) ``RunConfig.deep_shard_enabled``
+    (CLI tier), 2) ``DaydreamFileConfig.deep_shard_enabled`` (file-config
+    scalar), 3) built-in default :data:`DEFAULT_DEEP_SHARD_ENABLED` (False --
+    forensic default until the benchmark gate passes). Uses truthiness rather
+    than ``is not None`` so an explicit set-to-False just falls through to the
+    default, matching the other opt-in toggles.
+    """
+    if config.deep_shard_enabled:
+        return True
+    file_config = config.file_config
+    if file_config is not None and file_config.deep_shard_enabled:
+        return True
+    return False
+
+
+def _deep_shard_int(config: RunConfig, attr: str, default: int) -> int:
+    """Resolve an integer sharding bound, coercing-and-degrading (issue #731).
+
+    Integer-only non-negative: ``0`` is preserved where meaningful while a
+    negative value, a float, a bool, or any non-int degrades to the named
+    default -- mirroring ``config_file._coerce_non_negative_int`` (reused,
+    import read-only) so a directly-constructed ``RunConfig`` cannot smuggle an
+    invalid bound into the sharder.
+    """
+    value = _resolve_config_value(config, attr, default)
+    coerced = _coerce_non_negative_int(value)
+    return coerced if coerced is not None else default
+
+
+def _deep_shard_max_files(config: RunConfig) -> int:
+    """Resolve the per-shard max file-count bound (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
+
+
+def _deep_shard_max_bytes(config: RunConfig) -> int:
+    """Resolve the per-shard max changed-byte bound (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES)
+
+
+def _deep_shard_fanout_cap(config: RunConfig) -> int:
+    """Resolve the total shard fan-out cap (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
+
+
+def _deep_shard_frontier_max(config: RunConfig) -> int:
+    """Resolve the per-shard cross-shard frontier cap (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:

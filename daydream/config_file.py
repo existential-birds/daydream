@@ -133,6 +133,11 @@ class DaydreamFileConfig:
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
+    deep_shard_enabled: bool | None = None
+    deep_shard_max_files: int | None = None
+    deep_shard_max_bytes: int | None = None
+    deep_shard_fanout_cap: int | None = None
+    deep_shard_frontier_max: int | None = None
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
@@ -373,6 +378,14 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     uncovered_sweep: bool | None = (
         raw_uncovered_sweep if isinstance(raw_uncovered_sweep, bool) else None
     )
+    # deep_shard_enabled: bool only, same degrade-to-None rule as precision_mode
+    # so an accidental ``deep_shard_enabled = 1`` is treated as unset, not
+    # enabled. The shard bounds are non-negative ints (reject bool/float via
+    # _coerce_non_negative_int, mirroring uncovered_sweep_max_files).
+    raw_deep_shard_enabled = merged.get("deep_shard_enabled")
+    deep_shard_enabled: bool | None = (
+        raw_deep_shard_enabled if isinstance(raw_deep_shard_enabled, bool) else None
+    )
     # quality_gate_enabled: bool only, same degrade-to-None rule. The delta AND
     # absolute thresholds are finite non-negative floats (reject bool, coerce
     # ints, reject negative / NaN / inf) via _coerce_quality_threshold.
@@ -409,6 +422,11 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         uncovered_sweep=uncovered_sweep,
         uncovered_sweep_max_files=_coerce_non_negative_int(merged.get("uncovered_sweep_max_files")),
         uncovered_sweep_min_hunk_lines=_coerce_non_negative_int(merged.get("uncovered_sweep_min_hunk_lines")),
+        deep_shard_enabled=deep_shard_enabled,
+        deep_shard_max_files=_coerce_non_negative_int(merged.get("deep_shard_max_files")),
+        deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
+        deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
+        deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
         quality_gate_enabled=quality_gate_enabled,
         quality_gate_erosion_delta=_coerce_quality_threshold(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_quality_threshold(merged.get("quality_gate_verbosity_delta")),
