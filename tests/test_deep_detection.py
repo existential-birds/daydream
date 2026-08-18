@@ -251,6 +251,50 @@ def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     assert sorted(union) == sorted([f"p{i}.py" for i in range(12)] + [f"r{i}.rs" for i in range(12)])
 
 
+def test_shard_stacks_fanout_cap_single_shard_split_never_wastes_reduction() -> None:
+    """Issue #731 fix: a stack that packs into exactly one shard (a single
+    oversized file -- never split mid-file) is unsplit-equivalent, keeps its
+    original name, and never eats a cap-reduction; the cap still holds while
+    a reducible sharded stack remains."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    # big.py's diff block exceeds max_bytes=100 but holds a single file, so it
+    # packs into exactly one shard ("never split a file").
+    big_diff = (
+        "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n@@ -1 +1 @@\n+"
+        + "x" * 80
+        + "\n"
+    )
+    huge = StackAssignment(stack_name="python", skill_invocation="s", files=["big.py"])
+    many = StackAssignment(stack_name="rust", skill_invocation="s", files=[f"r{i}.rs" for i in range(12)])
+    out = shard_stacks([huge, many], big_diff, max_files=2, max_bytes=100, fanout_cap=4, frontier_max=8)
+    # The single-shard stack stays unsplit under its original name.
+    assert any(s.stack_name == "python" and s.files == ["big.py"] for s in out)
+    # Total tasks (shards + unsplit) never exceed the cap.
+    assert len(out) <= 4
+    union = [f for s in out for f in s.files]
+    assert sorted(union) == sorted(["big.py"] + [f"r{i}.rs" for i in range(12)])
+
+
+def test_shard_stacks_fanout_cap_irreducible_when_unsplit_stacks_outnumber_cap() -> None:
+    """Issue #731 fix: when the unsplit non-structural stacks alone outnumber
+    the cap, no shard exists to un-split and the total necessarily exceeds it
+    (files are never dropped or merged); every stack is still assigned once."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stacks = [
+        StackAssignment(stack_name=f"s{i}", skill_invocation="s", files=[f"f{i}.py"])
+        for i in range(18)
+    ]
+    out = shard_stacks(stacks, "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+    # No shard exists to un-split; the floor is the distinct-stack count.
+    assert len(out) == 18
+    union = [f for s in out for f in s.files]
+    assert sorted(union) == sorted([f"f{i}.py" for i in range(18)])
+
+
 def test_shard_stacks_co_locates_dependent_files_when_room(tmp_path) -> None:
     """Issue #731: files sharing an import edge stay in the same shard when it
     fits within the bounds. The graph comes from ``build_import_graph`` over

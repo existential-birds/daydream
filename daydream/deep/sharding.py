@@ -142,7 +142,13 @@ def shard_stacks(
     files surface as a bounded frontier. Stacks at/under every bound are
     returned unsplit with their original ``stack_name``; the structural
     meta-stack is passed through unchanged. Total tasks never exceed
-    ``fanout_cap`` (largest shardable stacks are returned unsplit to stay under).
+    ``fanout_cap`` whenever the unsplit stacks alone fit under it: when the
+    total exceeds the cap, the largest sharded stacks are returned unsplit
+    (each un-split removes ``len(shards) - 1`` tasks) until it fits. A stack
+    that packs into a single shard -- one oversized file is never split -- is
+    unsplit-equivalent and keeps its original name. When the unsplit
+    non-structural stacks alone outnumber ``fanout_cap``, the total necessarily
+    exceeds it (files are never dropped or merged).
     """
     sizes = _file_change_bytes(diff)
     structural: list[StackAssignment] = []
@@ -163,11 +169,21 @@ def shard_stacks(
         else:
             blocks = [[f] for f in sorted(stack.files)]
         shards = _pack_shards(stack, sizes, max_files, max_bytes, blocks)
+        if len(shards) == 1:
+            # One oversized file forms its own shard ("never split a file");
+            # that shard is unsplit-equivalent, so keep the stack unsplit under
+            # its original name -- it can never reduce the fan-out excess.
+            unsharded.append(stack)
+            continue
         _assign_frontiers(shards, edges, frontier_max)
         sharded.append((stack, shards))
 
     total = len(unsharded) + sum(len(shards) for _, shards in sharded)
     if total > fanout_cap and sharded:
+        # ``sharded`` holds only multi-shard packs (single-shard packs stay in
+        # ``unsharded`` above), so every un-split removes >= 1 task and the
+        # total provably fits the cap unless the unsplit stacks alone outnumber
+        # it -- in which case no shard exists to un-split.
         excess = total - fanout_cap
         for stack, shards in sorted(sharded, key=lambda t: (-len(t[1]), t[0].stack_name)):
             if excess <= 0:

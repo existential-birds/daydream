@@ -140,6 +140,11 @@ def evaluate_diff(
     # --- seeded ground truth (per-finding) + simulated merged output. -------
     shard_owned: set[str] = {f for s in shards for f in s.files}
     seeded_keys = {_finding_key(g) for g in ground_truth}
+    # Hoisted per-file ground-truth membership (mirrors ``seeded_keys``): the
+    # evidence gate and the unseeded-changed draw below need O(1) file
+    # membership instead of rebuilding ``{g["file"] for g in ground_truth}``
+    # per file per shard.
+    seeded_files = {g["file"] for g in ground_truth}
     # Detected: seeded findings on shard-owned files that the sim "catches".
     detected = [
         g for g in ground_truth
@@ -147,10 +152,7 @@ def evaluate_diff(
     ]
     # Spurious: ~10% of the detected set, from changed files with no seeded
     # finding (a reviewer flagging a real diff file that is not a true positive).
-    unseeded_changed = [
-        f for f in changed
-        if not any(g["file"] == f for g in ground_truth)
-    ]
+    unseeded_changed = [f for f in changed if f not in seeded_files]
     n_spurious = round(_FALSE_POSITIVE_FRACTION * len(detected))
     spurious_files = unseeded_changed[:n_spurious]
     spurious = [{"file": f, "severity": "low", "description": "spurious"} for f in spurious_files]
@@ -164,8 +166,27 @@ def evaluate_diff(
     false_positive_rate = len(false_positives) / len(all_merged) if all_merged else 0.0
 
     # --- sweep rate: today (Reads-only) vs. coverage-evidence rules. --------
-    sweep_today = len(changed) / len(changed) if changed else 0.0  # no reads -> all swept
-    evidence_covered = {f for s in shards for f in s.files if f in {g["file"] for g in ground_truth}}
+    sweep_today = 1.0 if changed else 0.0  # no reads -> all swept
+    # Coverage-evidence gate (mirrors ``_receipt_covered_files`` in
+    # deep/coverage.py): a file counts as covered only when a COMPLETED
+    # shard's parsed records reference it -- assignment alone never counts,
+    # and a shard whose records never materialized (incomplete/truncated)
+    # contributes zero evidence (fail-open: its files get swept). The sim's
+    # per-shard parsed records are the detected findings on the shard's own
+    # files, so a finding the sim's detection model missed confers no coverage.
+    shard_parsed: dict[str, set[str]] = {}
+    for s in shards:
+        shard_parsed[s.stack_name] = {
+            g["file"] for g in detected if g["file"] in s.files
+        }
+    evidence_covered: set[str] = set()
+    for s in shards:
+        parsed = shard_parsed.get(s.stack_name)
+        if parsed is None:
+            continue  # incomplete/truncated shard: zero inline/frontier evidence
+        for f in s.files:
+            if f in seeded_files and f in parsed:
+                evidence_covered.add(f)
     swept_evidence = len(changed) - len(evidence_covered)
     sweep_evidence = swept_evidence / len(changed) if changed else 0.0
 

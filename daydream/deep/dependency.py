@@ -10,7 +10,7 @@ sorted-singleton packing, so no file is ever dropped.
 from __future__ import annotations
 
 import time
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from daydream.tree_sitter_index import (
     _query_for_language,
@@ -94,7 +94,7 @@ def _resolve_import(import_str: str, file: str) -> list[str]:
 
 
 def build_import_graph(
-    changed_files: list[str], repo_root
+    changed_files: list[str], repo_root: Path
 ) -> dict[str, set[str]]:
     """Parse each changed file and return ``{file: set_of_changed_files_it_imports}``.
 

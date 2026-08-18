@@ -136,7 +136,16 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
     files: set[str] = set()
     for finding in findings:
         if isinstance(finding, dict) and isinstance(finding.get("file"), str):
-            files.add(finding["file"])
+            file = finding["file"]
+            # A leading ``./`` is a legal path spelling since the grammar
+            # relaxed (#572/#573); the reviewed-diff file set and the receipt
+            # lists are always bare. Normalize once here (mirroring the fix
+            # gate at orchestrator.py) so a ``./x`` finding contributes
+            # inline/frontier evidence instead of failing every path-component
+            # match and getting swept.
+            if file.startswith("./"):
+                file = file[2:]
+            files.add(file)
     return files
 
 
