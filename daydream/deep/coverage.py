@@ -17,6 +17,7 @@ module. The sweep prompt builder lives here, NOT in ``daydream.deep.prompts``
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +50,30 @@ def _path_component_matches(absolute: str, relative: str) -> bool:
     so it never inherits that false positive (issue #316 owns the analyzer).
     """
     return absolute == relative or absolute.endswith("/" + relative)
+
+
+def coverage_receipt_path(deep_dir: Path) -> Path:
+    """Path to the run's structured coverage receipts (issue #731).
+
+    Written at prompt-build time by ``phase_per_stack_reviews`` when sharding
+    is enabled and consumed by ``compute_uncovered_files`` (Task 9/10).
+    """
+    return deep_dir / "coverage-receipts.json"
+
+
+def write_coverage_receipts(
+    deep_dir: Path, receipts: dict[str, dict[str, list[str]]]
+) -> None:
+    """Write the deterministic per-shard coverage receipts (issue #731).
+
+    ``receipts`` maps ``stack_name`` -> ``{"assigned_files", "inline_files",
+    "frontier_files"}``. JSON with sorted keys so the receipt is stable across
+    runs (deterministic evidence for the sweep gate).
+    """
+    deep_dir.mkdir(parents=True, exist_ok=True)
+    coverage_receipt_path(deep_dir).write_text(
+        json.dumps(receipts, sort_keys=True), encoding="utf-8"
+    )
 
 
 def _completed_read_paths(

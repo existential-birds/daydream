@@ -1320,3 +1320,38 @@ def test_cross_file_instructions_contain_no_banned_words() -> None:
     banned = ("defer", "todo", "partial", "future", "tbd", "out of scope", "follow-up")
     found = [word for word in banned if word in lower]
     assert not found, f"banned words leaked into cross-file instruction text: {found}"
+
+
+# --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
+
+
+def test_inline_grounded_files_when_blocks_fit() -> None:
+    """Issue #731: files whose hunks inline are inline-grounded (evidence)."""
+    from daydream.deep.prompts import inline_grounded_files
+
+    diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'\n"
+            "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n")
+    assert inline_grounded_files(diff, ["a.py", "b.py"]) == {"a.py", "b.py"}
+
+
+def test_inline_grounded_files_empty_when_over_budget_or_absent() -> None:
+    """Issue #731: a file with no resolvable diff block is not grounded."""
+    from daydream.deep.prompts import inline_grounded_files
+
+    assert inline_grounded_files("", ["ghost.py"]) == set()  # no block -> not grounded
+
+
+def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
+    """Issue #731: frontier files surface as cross-shard interface reads."""
+    from daydream.deep.prompts import build_per_stack_prompt
+
+    p = _paths(tmp_path)
+    prompt = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python",
+        stack_name="python#0",
+        files=["a.py"],
+        frontier_files=["shared/iface.py"],
+        **p,
+    )
+    assert "shared/iface.py" in prompt
+    assert "cross-shard" in prompt or "interface file" in prompt

@@ -396,3 +396,14 @@ def test_build_uncovered_sweep_prompt_exploration_pointer(tmp_path: Path) -> Non
         exploration_dir=None,
     )
     assert "Pre-scan exploration results" not in prompt_no_dir
+
+
+def test_coverage_receipt_records_inline_and_frontier(tmp_path: Path) -> None:
+    """Issue #731: the deterministic coverage-receipts writer round-trips."""
+    from daydream.deep.coverage import coverage_receipt_path, write_coverage_receipts
+
+    deep = tmp_path / ".daydream" / "deep"
+    receipts = {"python#0": {"assigned_files": ["a.py"], "inline_files": ["a.py"],
+                             "frontier_files": ["shared/iface.py"]}}
+    write_coverage_receipts(deep, receipts)
+    assert json.loads(coverage_receipt_path(deep).read_text()) == receipts

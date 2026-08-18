@@ -344,6 +344,19 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
     return result
 
 
+def inline_grounded_files(diff: str, files: list[str]) -> set[str]:
+    """Return the set of ``files`` inline-grounded in ``diff`` (issue #731).
+
+    A shard's inline grounding is all-or-nothing: ``_diff_blocks_for_files``
+    returns the concatenated blocks or ``None`` (over the byte budget / no
+    matching blocks). Returns ``set(files)`` when the blocks fit, else
+    ``set()``. Pure and deterministic; feeds the coverage-evidence receipt.
+    """
+    if _diff_blocks_for_files(diff, files) is not None:
+        return set(files)
+    return set()
+
+
 @dataclass
 class DeepDiffBoundInfo:
     """Truncation statistics for one ``bound_deep_diff`` call.
@@ -503,6 +516,22 @@ def _diff_instruction(
     return f"{_full_diff_pointer(diff_path)}\nFocus on hunks that touch your stack's files: {joined}."
 
 
+def _frontier_read_instruction(frontier_files: list[str]) -> str:
+    """Cross-shard interface read instruction for a sharded stack (issue #731).
+
+    Names the sibling-shard files a shard's review depends on and instructs the
+    agent to Read them for cross-shard context; these become
+    ``dependency_frontier_read`` coverage-evidence candidates.
+    """
+    joined = ", ".join(frontier_files)
+    return (
+        f"Cross-shard interface file(s): this shard's review targets reference "
+        f"files assigned to sibling shards. Read the following cross-shard "
+        f"interface file(s) for context (they are NOT part of this shard's "
+        f"review targets): {joined}."
+    )
+
+
 def build_per_stack_prompt(
     *,
     skill_invocation: str,
@@ -518,6 +547,7 @@ def build_per_stack_prompt(
     inline_diff: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
+    frontier_files: list[str] | None = None,
 ) -> str:
     """Assemble the per-stack review prompt.
 
@@ -558,6 +588,8 @@ def build_per_stack_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction(stack_name, files))
+    if frontier_files:
+        parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
@@ -1082,6 +1114,7 @@ def build_generic_fallback_prompt(
     inline_diff: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
+    frontier_files: list[str] | None = None,
 ) -> str:
     """Assemble the generic-fallback review prompt (no skill invocation).
 
@@ -1125,6 +1158,8 @@ def build_generic_fallback_prompt(
     parts.append(_confidence_and_convention_instructions())
     parts.append(_dependency_impact_instructions())
     parts.append(_stack_scope_instruction("generic-fallback", files))
+    if frontier_files:
+        parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
     parts.append(
         "Review these files for correctness, clarity, and consistency with the "

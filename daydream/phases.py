@@ -3220,6 +3220,7 @@ async def phase_per_stack_reviews(
     diff_text: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
+    write_coverage_receipts: bool = False,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -3270,6 +3271,34 @@ async def phase_per_stack_reviews(
     )
     prior_commits = _prior_daydream_commits(work)
 
+    # Issue #731: when sharding is enabled, write the deterministic coverage
+    # receipts BEFORE the task group spawns (pre-task-group, sequential). Each
+    # stack records what it was assigned, which files were inline-grounded
+    # (all-or-nothing per ``inline_grounded_files``) and its bounded cross-shard
+    # frontier. The structural stack is never inlined (`:3276-3297`) so its
+    # inline evidence is empty. Default False keeps the forensic path
+    # byte-identical (no receipt file written).
+    if write_coverage_receipts:
+        from daydream.deep.coverage import write_coverage_receipts as _write_coverage_receipts
+        from daydream.deep.prompts import inline_grounded_files as _inline_grounded_files
+
+        receipts: dict[str, dict[str, list[str]]] = {}
+        for stack in stacks:
+            if stack.stack_name == STRUCTURE_STACK_NAME:
+                inline_files: list[str] = []
+            else:
+                inline_files = sorted(
+                    _inline_grounded_files(diff_text, stack.files)
+                    if diff_text is not None
+                    else set()
+                )
+            receipts[stack.stack_name] = {
+                "assigned_files": list(stack.files),
+                "inline_files": inline_files,
+                "frontier_files": list(stack.frontier_files),
+            }
+        _write_coverage_receipts(deep_dir_path, receipts)
+
     async with anyio.create_task_group() as tg:
         for stack in stacks:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
@@ -3318,6 +3347,7 @@ async def phase_per_stack_reviews(
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
                         include_alternatives=include_alternatives,
+                        frontier_files=stack.frontier_files,
                     )
                 else:
                     # Route the raw Beagle stack key through the backend
@@ -3336,6 +3366,7 @@ async def phase_per_stack_reviews(
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
                         include_alternatives=include_alternatives,
+                        frontier_files=stack.frontier_files,
                     )
 
             # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).

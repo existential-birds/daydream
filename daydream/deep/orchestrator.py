@@ -1276,6 +1276,9 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 include_alternatives=include_alternatives,
+                # Issue #731: write structured coverage receipts only when
+                # sharding is enabled for this run (off by default).
+                write_coverage_receipts=bool(ctx.data.get("coverage_receipts_enabled", False)),
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
