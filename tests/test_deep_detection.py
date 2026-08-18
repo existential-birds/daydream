@@ -204,3 +204,25 @@ def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
     stack = StackAssignment(stack_name="python", skill_invocation="s", files=["a.py", "b.py"])
     out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
     assert out == [stack]
+
+
+def test_shard_stacks_splits_by_changed_bytes_not_file_count() -> None:
+    """Issue #731: an oversized *byte* budget forces a split even when the file
+    count is within ``max_files``; the union is still exact (no drop/dup)."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    # 3 files but one huge hunk pushes total changed bytes over max_bytes.
+    diff = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'*2000\n"
+        "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n"
+        "diff --git a/c.py b/c.py\n--- a/c.py\n+++ b/c.py\n@@ -1 +1 @@\n+'z'\n"
+    )
+    stack = StackAssignment(stack_name="python", skill_invocation="s",
+                            files=["a.py", "b.py", "c.py"])
+    out = shard_stacks([stack], diff, max_files=100, max_bytes=100, fanout_cap=16, frontier_max=8)
+    shards = [s for s in out if s.stack_name.startswith("python#")]
+    assert len(shards) >= 2                     # byte budget forces a split
+    assert all(len(s.files) >= 1 for s in shards)
+    union = [f for s in shards for f in s.files]
+    assert sorted(union) == ["a.py", "b.py", "c.py"]  # still no drop/dup
