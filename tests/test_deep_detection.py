@@ -243,3 +243,52 @@ def test_shard_stacks_fanout_cap_limits_total_tasks() -> None:
     # Everything still assigned exactly once.
     union = [f for s in out for f in s.files]
     assert sorted(union) == sorted([f"p{i}.py" for i in range(12)] + [f"r{i}.rs" for i in range(12)])
+
+
+def test_shard_stacks_co_locates_dependent_files_when_room() -> None:
+    """Issue #731: files sharing an import edge stay in the same shard when it
+    fits within the bounds."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    # b.py imports a.py (resolvable edge); the sharder gets a graph with that
+    # edge. 4 files / max_files=2 forces the shard; the {a,b} component fits a
+    # shard so b.py stays co-located with its dependency a.py.
+    stack = StackAssignment(stack_name="python", skill_invocation="s",
+                            files=["a.py", "b.py", "c.py", "d.py"])
+    graph = {"a.py": set(), "b.py": {"a.py"}, "c.py": set(), "d.py": set()}
+    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9,
+                       fanout_cap=16, frontier_max=8, graph=graph)
+    shards = [s for s in out if s.stack_name.startswith("python#")]
+    edge_shard = next(s for s in shards if "b.py" in s.files)
+    assert "a.py" in edge_shard.files            # co-located when size permits
+
+
+def test_shard_stacks_fail_open_without_graph() -> None:
+    """Issue #731: an empty/missing graph never drops a file; each file gets
+    exactly one assignment (deterministic sorted-singleton packing)."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stack = StackAssignment(stack_name="python", skill_invocation="s",
+                            files=[f"m{i}.py" for i in range(5)])
+    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8, graph={})
+    union = [f for s in out for f in s.files]
+    assert sorted(union) == sorted(stack.files)   # no graph -> every file still assigned once
+    # A file with no resolvable edge still gets exactly one assignment (fallback).
+    assert len(set(union)) == len(union)  # no duplicate primary assignment
+
+
+def test_shard_stacks_populates_bounded_frontier() -> None:
+    """Issue #731: cross-shard shared files surface as a bounded frontier."""
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stack = StackAssignment(stack_name="python", skill_invocation="s",
+                            files=[f"m{i}.py" for i in range(8)])
+    # m4..m7 all import m0 (a shared interface in shard 0).
+    graph = {f"m{i}.py": ({"m0.py"} if i >= 4 else set()) for i in range(8)}
+    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=3, graph=graph)
+    frontier_shards = [s for s in out if getattr(s, "frontier_files", [])]
+    assert frontier_shards, "cross-shard shared files must surface as a frontier"
+    assert all(len(s.frontier_files) <= 3 for s in out)   # bounded

@@ -14,6 +14,7 @@ of all changed files and must never be split or counted against the fan-out cap.
 from __future__ import annotations
 
 from daydream.config import STRUCTURE_STACK_NAME
+from daydream.deep.dependency import co_locate_groups
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 
@@ -38,66 +39,87 @@ def _changed_bytes(diff: str, files: list[str]) -> int:
     return sum(_per_file_change_bytes(diff, f) for f in files)
 
 
-def _split_by_file_count(stack: StackAssignment, max_files: int) -> list[StackAssignment]:
-    """Split ``stack`` into consecutive ``max_files``-sized shards in sorted order."""
-    files = sorted(stack.files)
-    shards: list[StackAssignment] = []
-    for start in range(0, len(files), max_files):
-        chunk = files[start : start + max_files]
-        shards.append(
-            StackAssignment(
-                stack_name=f"{stack.stack_name}#{len(shards)}",
-                skill_invocation=stack.skill_invocation,
-                files=chunk,
-                is_docs_only=stack.is_docs_only,
-                frontier_files=[],
-            )
-        )
-    return shards
-
-
-def _split_by_bytes(
-    stack: StackAssignment, diff: str, max_bytes: int, max_files: int
+def _pack_shards(
+    stack: StackAssignment,
+    diff: str,
+    max_files: int,
+    max_bytes: int,
+    blocks: list[list[str]],
 ) -> list[StackAssignment]:
-    """Greedily pack ``stack``'s sorted files into shards up to ``max_bytes``.
+    """Pack ``blocks`` (whole components or singleton files) into bounded shards.
 
-    Fill shards in sorted-file order up to ``max_bytes``; a single oversized file
-    forms its own shard (never split a file). Files-per-shard never exceeds
-    ``max_files`` either.
+    Files-per-shard never exceeds ``max_files`` nor the byte budget; a block
+    larger than the bound splits deterministically into consecutive shards (a
+    single oversized file forms its own shard -- never split a file).
     """
-    files = sorted(stack.files)
     shards: list[StackAssignment] = []
     current: list[str] = []
     current_bytes = 0
 
-    def flush() -> None:
-        nonlocal current, current_bytes
-        if current:
+    def emit(cur: list[str]) -> None:
+        if cur:
             shards.append(
                 StackAssignment(
                     stack_name=f"{stack.stack_name}#{len(shards)}",
                     skill_invocation=stack.skill_invocation,
-                    files=current,
+                    files=list(cur),
                     is_docs_only=stack.is_docs_only,
                     frontier_files=[],
                 )
             )
-        current = []
-        current_bytes = 0
 
-    for file in files:
-        size = _per_file_change_bytes(diff, file)
+    for block in blocks:
+        size = sum(_per_file_change_bytes(diff, f) for f in block)
         fits = (
-            len(current) < max_files
+            len(current) + len(block) <= max_files
             and (current_bytes == 0 or current_bytes + size <= max_bytes)
         )
         if current and not fits:
-            flush()
-        current.append(file)
-        current_bytes += size
-    flush()
+            emit(current)
+            current, current_bytes = [], 0
+            fits = len(block) <= max_files and size <= max_bytes
+        if fits:
+            current.extend(block)
+            current_bytes += size
+            continue
+        # Block too large for a (possibly fresh) shard: split per-file.
+        for f in block:
+            fsize = _per_file_change_bytes(diff, f)
+            if current and (
+                len(current) >= max_files or (current_bytes > 0 and current_bytes + fsize > max_bytes)
+            ):
+                emit(current)
+                current, current_bytes = [], 0
+            current.append(f)
+            current_bytes += fsize
+    emit(current)
     return shards
 
+
+def _assign_frontiers(
+    shards: list[StackAssignment], edges: dict[str, set[str]], frontier_max: int
+) -> None:
+    """Populate each shard's bounded cross-shard frontier in place.
+
+    ``frontier_files`` of a shard = the (sorted) set of files in *other* shards
+    of the same language sharing an undirected import edge with this shard's
+    files, capped at ``frontier_max``. Frontier files are never added to primary
+    ``files`` (union of primary sets stays the changed set).
+    """
+    adjacency: dict[str, set[str]] = {}
+    for src, deps in edges.items():
+        adjacency.setdefault(src, set()).update(deps)
+        for dep in deps:
+            adjacency.setdefault(dep, set()).add(src)
+
+    for shard in shards:
+        shard_set = set(shard.files)
+        frontier: set[str] = set()
+        for f in shard.files:
+            for nbr in adjacency.get(f, set()):
+                if nbr not in shard_set:
+                    frontier.add(nbr)
+        shard.frontier_files = sorted(frontier)[:frontier_max]
 
 
 def shard_stacks(
@@ -112,36 +134,38 @@ def shard_stacks(
 ) -> list[StackAssignment]:
     """Split oversized per-language stacks into bounded shards.
 
-    Pure and deterministic. Non-structural stacks whose file count exceeds
-    ``max_files`` are split into consecutive ``<name>#<i>`` shards in sorted-file
-    order; the union of all shard file sets equals the source stack's set with no
-    duplicates. Stacks at/under every bound are returned unsplit with their
-    original ``stack_name``. The structural meta-stack is passed through
-    unchanged.
-
-    The byte bound (``max_bytes``) and total fan-out cap (``fanout_cap``) are
-    enforced here; dependency-aware co-location and the bounded frontier
-    (``graph`` / ``frontier_max``) are filled in by a later task.
+    Pure and deterministic. Non-structural stacks whose file count or total
+    changed-byte size exceeds the bounds are split into consecutive
+    ``<name>#<i>`` shards; the union of all shard file sets equals the source
+    stack's set with no duplicates. When ``graph`` is provided and non-empty,
+    files are co-located by undirected import connected component (whole
+    components stay together when the shard has room) and cross-shard shared
+    files surface as a bounded frontier. Stacks at/under every bound are
+    returned unsplit with their original ``stack_name``; the structural
+    meta-stack is passed through unchanged. Total tasks never exceed
+    ``fanout_cap`` (largest shardable stacks are returned unsplit to stay under).
     """
-    out: list[StackAssignment] = []
     structural: list[StackAssignment] = []
     unsharded: list[StackAssignment] = []
     sharded: list[tuple[StackAssignment, list[StackAssignment]]] = []
+    edges: dict[str, set[str]] = graph or {}
+
     for stack in stacks:
         if stack.stack_name == STRUCTURE_STACK_NAME:
-            # Structural meta-stack: never sharded, never counted against the cap.
             structural.append(stack)
-        elif len(stack.files) <= max_files and _changed_bytes(diff, stack.files) <= max_bytes:
+            continue
+        if len(stack.files) <= max_files and _changed_bytes(diff, stack.files) <= max_bytes:
             unsharded.append(stack)
-        elif len(stack.files) > max_files:
-            sharded.append((stack, _split_by_file_count(stack, max_files)))
+            continue
+        # Co-locate when a non-empty graph is available, else sorted singletons.
+        if edges:
+            blocks = co_locate_groups(stack.files, edges)
         else:
-            sharded.append((stack, _split_by_bytes(stack, diff, max_bytes, max_files)))
+            blocks = [[f] for f in sorted(stack.files)]
+        shards = _pack_shards(stack, diff, max_files, max_bytes, blocks)
+        _assign_frontiers(shards, edges, frontier_max)
+        sharded.append((stack, shards))
 
-    # Fan-out cap = merge-down. Total review tasks = unsharded non-structural
-    # stacks + shards. If that exceeds ``fanout_cap``, return the largest
-    # shardable stacks to unsplit (by descending shard count, ties by
-    # ``stack_name`` ascending) until total <= cap. Structural is never merged.
     total = len(unsharded) + sum(len(shards) for _, shards in sharded)
     if total > fanout_cap and sharded:
         excess = total - fanout_cap
@@ -152,6 +176,7 @@ def shard_stacks(
             unsharded.append(stack)
             excess -= len(shards) - 1
 
+    out: list[StackAssignment] = []
     out.extend(structural)
     out.extend(unsharded)
     for _, shards in sharded:
