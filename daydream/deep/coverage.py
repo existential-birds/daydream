@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from daydream.deep.artifacts import per_stack_records_path
 from daydream.deep.prompts import (
     _DIFF_BLOCK_SPLIT,
     VERIFICATION_PROTOCOL_INSTRUCTION,
@@ -111,8 +112,67 @@ def _completed_read_paths(
     return paths
 
 
+def _parsed_finding_files(records_path: Path) -> set[str] | None:
+    """Set of ``file`` fields across a completed shard's parsed records.
+
+    Returns ``None`` when the records file is absent or unreadable -- an
+    incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
+    reviewer failed/omitted, so its files stay uncovered and get swept).
+    """
+    try:
+        records = json.loads(records_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    findings = records.get("issues") if isinstance(records, dict) else None
+    if not isinstance(findings, list):
+        return None
+    files: set[str] = set()
+    for finding in findings:
+        if isinstance(finding, dict) and isinstance(finding.get("file"), str):
+            files.add(finding["file"])
+    return files
+
+
+def _receipt_covered_files(
+    diff_files: list[str], receipts: dict[str, Any], deep_dir_path: Path
+) -> tuple[set[str], dict[str, int]]:
+    """Coverage from completed shards' inline/frontier evidence (issue #731).
+
+    A diff file is ``inline_hunk_reviewed``-covered when it is in a shard's
+    ``inline_files`` AND that shard's parsed records exist AND at least one
+    parsed finding ``_path_component_matches`` it. ``dependency_frontier_read``
+    is the same check over the shard's ``frontier_files``. Assignment/grounding
+    alone never counts; a shard without a records file contributes zero.
+
+    Returns the covered set plus per-evidence-type counts (a file covered by
+    multiple types counts once per type it satisfies).
+    """
+    covered: set[str] = set()
+    counts = {"inline_hunk_reviewed": 0, "dependency_frontier_read": 0}
+    diff_set = set(diff_files)
+    for stack_name, receipt in receipts.items():
+        records_path = per_stack_records_path(deep_dir_path, stack_name)
+        finding_files = _parsed_finding_files(records_path)
+        if finding_files is None:
+            continue  # incomplete shard contributes zero inline/frontier evidence
+        for evidence_key, files_key in (
+            ("inline_hunk_reviewed", "inline_files"),
+            ("dependency_frontier_read", "frontier_files"),
+        ):
+            for f in receipt.get(files_key, []) or []:
+                if f in diff_set and any(
+                    _path_component_matches(ff, f) for ff in finding_files
+                ):
+                    covered.add(f)
+                    counts[evidence_key] += 1
+    return covered, counts
+
+
 def compute_uncovered_files(
-    daydream_dir: Path, session_id: str | None
+    daydream_dir: Path,
+    session_id: str | None,
+    *,
+    receipts: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """Return the diff files no reviewer read, plus the coverage stats.
 
@@ -123,17 +183,25 @@ def compute_uncovered_files(
     covers ``api.py``, and an interrupted read never covers anything. Both
     rules fail open — a genuinely unread file is swept, never skipped.
 
+    Issue #731: when ``receipts`` (the structured coverage receipts written at
+    prompt-build time when sharding is enabled) is provided, a diff file is
+    additionally covered by ``inline_hunk_reviewed`` / ``dependency_frontier_read``
+    evidence per ``_receipt_covered_files``. When ``receipts`` is ``None`` (or
+    the file is absent) behavior is byte-identical to today (Reads only).
+
     Args:
         daydream_dir: The run's ``.daydream`` directory (parent of the
             ``deep/`` artifact dir).
         session_id: The run's recorder session id, or ``None`` to resolve the
             most recent trajectory.
+        receipts: Optional structured coverage receipts (issue #731); ``None``
+            keeps the forensic (Reads-only) path byte-identical.
 
     Returns:
         ``(uncovered_files, stats)`` where ``stats`` is the coverage dict
         (``files_in_diff`` / ``files_read_by_reviewers`` / ``coverage_ratio`` /
-        ``uncovered_files``) and ``uncovered_files`` is its sorted list of diff
-        files no review agent read.
+        ``uncovered_files`` / ``coverage_by_evidence``) and ``uncovered_files``
+        is its sorted list of diff files no review agent covered.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
@@ -148,6 +216,13 @@ def compute_uncovered_files(
         )
 
     covered = {df for df in diff_files if any(_path_component_matches(r, df) for r in review_reads)}
+    coverage_by_evidence: dict[str, int] = {"source_read": len(covered)}
+    if receipts:
+        receipt_covered, receipt_counts = _receipt_covered_files(
+            diff_files, receipts, daydream_dir / "deep"
+        )
+        covered |= receipt_covered
+        coverage_by_evidence.update(receipt_counts)
     uncovered = sorted(set(diff_files) - covered)
 
     return uncovered, {
@@ -155,6 +230,7 @@ def compute_uncovered_files(
         "files_read_by_reviewers": len(covered),
         "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
         "uncovered_files": uncovered,
+        "coverage_by_evidence": coverage_by_evidence,
     }
 
 
