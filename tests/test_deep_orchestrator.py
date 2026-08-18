@@ -8058,31 +8058,6 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     assert _deep_shard_max_files(cfg) == 7
 
 
-@pytest.fixture
-def shard_many_python_target(tmp_path: Path) -> Path:
-    """Git repo with three Python files + a docs diff on a feature branch.
-
-    Unlike ``multi_stack_target`` (one file per stack), this gives the python
-    stack several files so the sharder can split it with a small ``max_files``
-    bound -- the real-path precondition for issue #731's sharding tests.
-    """
-    project = tmp_path / "shard_many"
-    project.mkdir()
-    for i in range(3):
-        (project / f"mod{i}.py").write_text(f"def f{i}():\n    return {i}\n")
-    (project / "README.md").write_text("# Project\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    for i in range(3):
-        (project / f"mod{i}.py").write_text(f"def f{i}():\n    return 'x{i}'\n")
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
-
-
 async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
     shard_many_python_target: Path, monkeypatch, install_backend,
 ) -> None:

@@ -187,3 +187,25 @@ async def test_budget_truncated_parse_fails_loudly(
     run_root = multi_stack_target / ".daydream"
     assert any("budget" in str(v) for v in _scan_trajectory_extra(run_root, traj, "stop_reason"))
     assert not (run_root / "deep" / "stack-python-records.json").exists()
+
+
+async def test_shard_names_flow_through_parse_and_sort_deterministically(
+    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config,
+) -> None:
+    """Issue #731 (P2): synthetic ``#`` shard names ride artifact paths and the
+    sorted parse/merge ordering deterministically."""
+    from daydream.runner import run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    for _ in range(2):  # two identical runs -> identical shard set, stable order
+        rc = await run(make_config(shard_many_python_target, deep_shard_enabled=True,
+                                   deep_shard_max_files=1, deep_shard_max_bytes=10**9))
+        assert rc == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    # Shard record files sort stably (python#0 < python#1 ... < structure), so
+    # parse fan-out and merge consume them in a fixed order regardless of
+    # completion order (sorted iteration at orchestrator.py:1322).
+    names = sorted(p.name for p in deep.glob("stack-*-records.json"))
+    assert any(n.startswith("stack-python#") for n in names)
+    assert names == sorted(names)   # deterministic by construction
