@@ -39,3 +39,14 @@ def test_contract_doc_names_every_registered_surface() -> None:
         assert slot in doc, f"skill slot {slot!r} undocumented"
     for name in reg.prompt_names():
         assert name in doc, f"prompt {name!r} undocumented"
+
+
+def test_contract_doc_names_renderer_surface() -> None:
+    doc = CONTRACT_DOC.read_text()
+    reg = Registry()
+    register_builtins(reg)
+    assert "override_renderer" in doc
+    for name in reg.renderer_names():  # "finding", "summary"
+        assert name in doc, f"renderer slot {name!r} undocumented"
+    for fragment in ("CommentFinding", "SummaryContext", "host-owned", "falls back"):
+        assert fragment in doc

@@ -43,13 +43,17 @@ The `daydream.extensions` package exports these contract symbols:
 | `EXTENSION_API_VERSION` | Running extension contract version |
 | `MIN_SUPPORTED_EXTENSION_API_VERSION` | Oldest extension contract version still accepted (range floor) |
 | `BreakLoop` | End the current loop group and continue the flow |
+| `CommentFinding` | Public view of one review finding passed to a `"finding"` renderer |
 | `ExtensionError` | Base error for extension failures |
+| `FindingRenderContext` | Placement context (`"inline"`/`"file_level"`/`"summary"`) passed with a finding |
 | `ExtensionVersionError` | Error for an absent or incompatible extension version |
 | `FlowStep` | Named async flow step |
 | `LoopGroup` | Repeated ordered group of flow steps |
 | `Registry` | Per-run extension registry |
 | `StackRule` | Fork-defined changed-file-to-skill routing rule |
 | `Stop` | End a flow with an exit code |
+| `SummaryContext` | Input to a `"summary"` renderer (findings, agent prompt, review info) |
+| `SummaryFinding` | One finding in a `SummaryContext` (public finding plus host-rendered `body_block`) |
 | `ToolDecision` | Continue or veto a tool invocation |
 | `ToolSupervisor` | Callable protocol for tool supervision |
 | `UnresolvedExtensionError` | Error for a missing registered name |
@@ -432,6 +436,63 @@ validation is a host safety boundary, not a
 fork-selectable schema. A future release that renames this kwarg or replaces it
 with required typed command kwargs must follow the breaking-change version
 policy above.
+
+### Renderers
+
+`override_renderer(name, fn)` restyles the Markdown of PR review comments
+without touching `daydream/`. It mirrors `override_prompt`: the fork registers a
+callable against a slot name, and `pr_review` calls it in place of the built-in
+default. Two slots are registered by `register_builtins`:
+
+| Slot | Signature | Returns |
+|------|-----------|---------|
+| `"finding"` | `fn(finding: CommentFinding, ctx: FindingRenderContext) -> str` | The inner human block for one finding |
+| `"summary"` | `fn(ctx: SummaryContext) -> str` | The body between the approval line and the footer |
+
+The `"finding"` renderer is invoked for every inline comment, every file-level
+comment, and every finding inside the summary's by-file section;
+`ctx.placement` is `"inline"`, `"file_level"`, or `"summary"` respectively, so a
+fork can vary its output per placement. Its inputs:
+
+- `CommentFinding` — the public view of one finding: `path`, `line`
+  (`int | None`), `title`, `body`, `is_cross_stack`, `severity`
+  (`str | None`), `confidence` (`str | None`), `fingerprint` (`str | None`).
+- `FindingRenderContext` — `placement: str`.
+
+The `"summary"` renderer receives one `SummaryContext`:
+
+- `findings: tuple[SummaryFinding, ...]` — each `SummaryFinding` carries its
+  `finding: CommentFinding` and a `body_block: str` that the host has already
+  rendered (the finding marker is embedded in `body_block`).
+- `agent_prompt: str` — the consolidated agent prompt (empty when there is
+  nothing to fix).
+- `review_info: str` — the fully-wrapped review-info `<details>` block.
+
+#### Host-owned invariants
+
+Renderers return only the inner content. The host owns, and always injects
+around whatever a renderer returns, the parts that dedup and identity depend on:
+
+- the per-finding dedup marker,
+- the `DAYDREAM_FOOTER` trailer,
+- the `---` separators and `<details>` scaffolding,
+- the approval line, and
+- the review `event` decision (approve / comment / request-changes).
+
+A renderer therefore cannot drop the marker or footer, and a custom `"summary"`
+renderer that omits `body_block` still keeps the embedded markers because the
+host supplies those blocks.
+
+#### Fallback and warning
+
+The call goes through a safe wrapper. If the registered renderer raises any
+`Exception`, or returns a non-`str` (or empty) result, `pr_review`
+**falls back** to the built-in default renderer for that slot and logs a
+`logging.getLogger(__name__)` warning naming the slot (`"finding"` or
+`"summary"`) and the failure. Rendering never aborts the comment build. The
+built-in defaults (`default_render_finding`, `default_render_summary`) reproduce
+today's Markdown byte-for-byte, so an unregistered slot and a failed override
+both yield the stock output.
 
 ### Stable `ctx.data` keys
 
