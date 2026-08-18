@@ -8102,3 +8102,20 @@ async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
     # Union of shard file sets == the python changed-file set; no dup primary.
     shards = sorted(p for p in deep.glob("stack-python#*-records.json"))
     assert shards
+
+
+async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
+    multi_stack_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: enabled runs surface per-evidence coverage in the sweep stats."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, multi_stack_target)
+    exit_code = await run(RunConfig(
+        target=str(multi_stack_target), cleanup=False,
+        deep_shard_enabled=True, deep_shard_max_files=100, deep_shard_max_bytes=10**9,
+    ))
+    assert exit_code == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    assert "coverage_by_evidence" in stats["pre_sweep"]  # evidence surfaced in report

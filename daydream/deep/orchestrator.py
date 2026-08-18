@@ -75,6 +75,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.coverage import (
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
+    coverage_receipt_path,
     diff_block_for_file,
     filter_sweepable_files,
 )
@@ -1529,6 +1530,23 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
         )
 
 
+def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
+    """Load this run's coverage receipts for the sweep (issue #731).
+
+    Receipts are only written when sharding was enabled (``coverage_receipts_enabled``
+    in ``ctx.data``). Fail-open: a missing or malformed receipts file degrades
+    to ``None`` (never raises, never skips the sweep) and ``compute_uncovered_files``
+    takes its forensic Reads-only path -- byte-identical to today.
+    """
+    if not ctx.data.get("coverage_receipts_enabled"):
+        return None
+    try:
+        loaded = json.loads(coverage_receipt_path(ctx.data["dd"]).read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     """Run the uncovered-file sweep body (issue #309)."""
     config = ctx.config
@@ -1536,7 +1554,9 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     recorder = get_current_recorder()
     session_id = recorder.session_id if recorder is not None else None
 
-    uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
+    uncovered_files, coverage_stats = compute_uncovered_files(
+        dd.parent, session_id, receipts=_load_coverage_receipts(ctx)
+    )
 
     # Issue #644 — the sweep's block extraction must source the FULL on-disk
     # diff (``ctx.data["diff_path"]``, always written full at gather) because
@@ -1563,6 +1583,10 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
             "coverage_ratio": coverage_stats["coverage_ratio"],
             "uncovered_files": uncovered_files,
+            # Issue #731: per-evidence-type coverage counts (source_read /
+            # inline_hunk_reviewed / dependency_frontier_read), surfaced only
+            # when sharding was enabled this run (absent otherwise).
+            "coverage_by_evidence": coverage_stats.get("coverage_by_evidence", {}),
         },
         "attempted_files": swept_files,
         "completed_files": [],
