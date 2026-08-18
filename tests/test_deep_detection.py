@@ -149,3 +149,58 @@ def test_structure_stack_skipped_for_empty_diff() -> None:
     from daydream.deep.detection import detect_stacks
 
     assert detect_stacks([], skill_availability=set()) == []
+
+
+# --- Issue #731: deep-review sharding splitter ---
+
+
+def test_shard_stacks_splits_oversized_stack_by_file_count() -> None:
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stack = StackAssignment(
+        stack_name="python",
+        skill_invocation="beagle-python:review-python",
+        files=[f"src/m{i}.py" for i in range(6)],
+    )
+    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+    shards = [s for s in out if s.stack_name.startswith("python#")]
+    assert len(shards) == 3                      # 6 files / 2 per shard
+    assert [s.stack_name for s in shards] == ["python#0", "python#1", "python#2"]
+    union = [f for s in shards for f in s.files]
+    assert sorted(union) == sorted(stack.files)  # no file dropped, no duplicate
+    assert all(len(s.files) <= 2 for s in shards)
+
+
+def test_shard_stacks_never_splits_structure_meta_stack() -> None:
+    from daydream.config import STRUCTURE_STACK_NAME
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    structure = StackAssignment(
+        stack_name=STRUCTURE_STACK_NAME,
+        skill_invocation="beagle-core:review-structure",
+        files=[f"src/m{i}.py" for i in range(50)],
+    )
+    out = shard_stacks([structure], "", max_files=5, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+    assert [s for s in out if s.stack_name == STRUCTURE_STACK_NAME] == [structure]  # unchanged, single
+
+
+def test_shard_stacks_deterministic_names_and_assignments() -> None:
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stack = StackAssignment(stack_name="python", skill_invocation="s", files=[f"src/m{i}.py" for i in range(5)])
+    kw = dict(max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+    a = shard_stacks([stack], "", **kw)
+    b = shard_stacks([stack], "", **kw)
+    assert [(s.stack_name, s.files) for s in a] == [(s.stack_name, s.files) for s in b]
+
+
+def test_shard_stacks_under_bound_returns_original_unsplit() -> None:
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.sharding import shard_stacks
+
+    stack = StackAssignment(stack_name="python", skill_invocation="s", files=["a.py", "b.py"])
+    out = shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+    assert out == [stack]
