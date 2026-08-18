@@ -322,6 +322,7 @@ def shard_many_python_target(tmp_path: Path) -> Path:
     return project
 
 
+@pytest.fixture
 def rust_wire_target(tmp_path: Path) -> Path:
     """Git repo with a Rust + Markdown diff on a feature branch.
 

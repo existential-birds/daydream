@@ -191,9 +191,12 @@ def test_shard_stacks_deterministic_names_and_assignments() -> None:
     from daydream.deep.sharding import shard_stacks
 
     stack = StackAssignment(stack_name="python", skill_invocation="s", files=[f"src/m{i}.py" for i in range(5)])
-    kw = dict(max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
-    a = shard_stacks([stack], "", **kw)
-    b = shard_stacks([stack], "", **kw)
+
+    def _split() -> list:
+        return shard_stacks([stack], "", max_files=2, max_bytes=10**9, fanout_cap=16, frontier_max=8)
+
+    a = _split()
+    b = _split()
     assert [(s.stack_name, s.files) for s in a] == [(s.stack_name, s.files) for s in b]
 
 
