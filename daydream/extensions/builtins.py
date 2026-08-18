@@ -75,6 +75,7 @@ def _register_builtin_renderers(registry: Registry) -> None:
     from daydream import pr_review
 
     registry.override_renderer("finding", pr_review.default_render_finding)
+    registry.override_renderer("summary", pr_review.default_render_summary)
 
 
 def _register_builtin_flows(registry: Registry) -> None:

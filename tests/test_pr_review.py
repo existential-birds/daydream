@@ -82,6 +82,79 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog) -> None:
     assert "finding" in caplog.text and "boom" in caplog.text
 
 
+_FIXTURE = Path(__file__).parent / "fixtures" / "trajectories" / "single_phase_claude.json"
+
+
+def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr, monkeypatch) -> None:
+    from daydream.extensions import Registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+
+    def summary_renderer(ctx):
+        rows = [f"<details><summary>{f.finding.path} — {f.finding.title}</summary>\n{f.body_block}\n</details>"
+                for f in ctx.findings]
+        return "**Custom Summary**\n\n" + "\n".join(rows)
+
+    reg = Registry()
+    register_builtins(reg)
+    reg.override_renderer("summary", summary_renderer)
+    set_registry(reg)
+    try:
+        classified = pr_review._ClassifiedIssues(
+            body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
+        payload = build_payload(pr, classified)
+    finally:
+        set_registry(Registry())
+    body = payload["body"]
+    assert "**Custom Summary**" in body
+    assert "<summary>b.py — File note</summary>" in body   # metadata drove the label
+    assert parse_finding_markers(body) == ["b" * 64]         # host marker preserved inside the block
+    assert body.rstrip().endswith("</sub>")                  # host footer still last
+
+
+def test_custom_finding_renderer_flows_into_summary_section(pr, monkeypatch) -> None:
+    from daydream.extensions import Registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+    reg = Registry()
+    register_builtins(reg)
+    reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
+    set_registry(reg)
+    try:
+        classified = pr_review._ClassifiedIssues(
+            body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)])
+        body = build_payload(pr, classified)["body"]
+    finally:
+        set_registry(Registry())
+    assert "CUSTOM::summary::File note" in body               # finding override reaches the summary section
+    assert parse_finding_markers(body) == ["b" * 64]           # host marker still injected
+
+
+def test_summary_renderer_falls_back_and_warns_on_error(pr, monkeypatch, caplog) -> None:
+    from daydream.extensions import Registry, set_registry
+    from daydream.extensions.builtins import register_builtins
+    monkeypatch.setattr(pr_review, "_resolve_trajectory_paths", lambda _r: ([_FIXTURE], None))
+
+    def boom(ctx):
+        raise RuntimeError("kaboom")
+
+    reg = Registry()
+    register_builtins(reg)
+    reg.override_renderer("summary", boom)
+    classified = pr_review._ClassifiedIssues(
+        body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
+                               confidence="MEDIUM", severity="low", fingerprint="b" * 64)])
+    default_body = build_payload(pr, classified)["body"]       # baseline via builtins
+    set_registry(reg)
+    try:
+        with caplog.at_level("WARNING"):
+            body = build_payload(pr, classified)["body"]
+    finally:
+        set_registry(Registry())
+    assert body == default_body                                 # byte-identical fallback
+    assert "summary" in caplog.text and "kaboom" in caplog.text
+
+
 def test_structural_item_becomes_parsed_issue():
     items = [{"id": 1, "lens": "structural", "file": "big.py", "line": 1,
               "description": "1k-line file", "severity": "high",
