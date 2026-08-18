@@ -488,3 +488,34 @@ def test_incomplete_shard_receipt_does_not_cover(tmp_path: Path) -> None:
     receipts = json.loads(coverage_receipt_path(deep).read_text())
     uncovered, stats = compute_uncovered_files(daydream_dir, "sess-c", receipts=receipts)
     assert "api.py" in uncovered              # fail-open: missing completion -> swept
+
+
+def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
+    """Issue #731: a grounded-but-omitted file is swept, never skipped.
+
+    A completed shard grounded api.py + notes.txt inline, but its parsed
+    findings only reference api.py (notes.txt omitted). notes.txt must be
+    swept -- inline/frontier credit goes only to finding-referenced files.
+    """
+    from daydream.deep.coverage import compute_uncovered_files, write_coverage_receipts
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-d"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    receipts = {"python#0": {"assigned_files": ["api.py", "notes.txt"],
+                             "inline_files": ["api.py", "notes.txt"],
+                             "frontier_files": []}}
+    write_coverage_receipts(deep, receipts)
+    (deep / "stack-python#0-records.json").write_text(
+        json.dumps({"issues": [{"file": "api.py", "id": 1, "description": "d", "line": 1,
+                                "severity": "low", "confidence": "MEDIUM",
+                                "rationale": "r", "evidence": "e"}]})
+    )
+    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-d", receipts=receipts)
+    assert "notes.txt" in uncovered    # omitted by the reviewer -> swept, never skipped
+    assert "api.py" not in uncovered   # reviewed inline -> not swept
