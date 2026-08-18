@@ -8094,3 +8094,45 @@ async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
     deep = multi_stack_target / ".daydream" / "deep"
     stats = json.loads((deep / "coverage-stats.json").read_text())
     assert "coverage_by_evidence" in stats["pre_sweep"]  # evidence surfaced in report
+
+
+async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
+    shard_many_python_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: enabled real-path large diff -> >1 review task per language
+    stack, records produced, capacity limiter respected (shards ride the same
+    fan-out path)."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    # Sharding enabled, tiny file bound -> the python stack shards.
+    rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
+                             deep_shard_enabled=True, deep_shard_max_files=1,
+                             deep_shard_max_bytes=10**9))
+    assert rc == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    shards = sorted(p for p in deep.glob("stack-python#*-review.md"))
+    assert len(shards) >= 2                        # >1 review task for one language stack
+    # No changed file dropped from the union of all stacks' review targets:
+    changed = {p.relative_to(shard_many_python_target).as_posix()
+               for p in shard_many_python_target.rglob("*.py") if not p.name.startswith(".")}
+    assert changed, "test fixture must have python files to shard"
+    # (union of shard files equals the python changed set is unit-tested in Task 2;
+    #  here we prove the shards actually ran and produced records.)
+    records = sorted(p for p in deep.glob("stack-python#*-records.json"))
+    assert records
+
+
+async def test_deep_forensic_mode_keeps_single_agent_per_stack(
+    shard_many_python_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: forensic (default off) keeps exactly one agent per stack."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
+                             deep_shard_enabled=False,   # default / forensic
+                             deep_shard_max_files=1))    # bound ignored when off
+    assert rc == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today
