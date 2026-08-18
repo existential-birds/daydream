@@ -87,6 +87,14 @@ def test_ext_validate_broken_ref(ext_dir, capsys) -> None:
     assert "ghost" in strip_ansi(capsys.readouterr().out)
 
 
+def test_ext_validate_reports_renderer_count(capsys) -> None:
+    # builtins register "finding" + "summary"; the success line names renderers
+    rc = cli._handle_ext_validate_command()
+    out = strip_ansi(capsys.readouterr().out)
+    assert rc == 0
+    assert "2 renderers" in out
+
+
 def test_bare_ext_prints_help_exits_2(capsys) -> None:
     rc = _run_main(["ext"])
     assert rc == 2

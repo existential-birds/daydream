@@ -1481,6 +1481,9 @@ def _ext_resolve_failure(registry: "Registry") -> str | None:
     for rule in registry.stack_rules():
         if not rule.skill:
             return f"stack rule '{rule.stack_name}' has an empty skill invocation"
+    for name in registry.renderer_names():
+        if not callable(registry.renderer(name)):
+            return f"renderer slot '{name}' does not resolve to a callable"
     return None
 
 
@@ -1538,7 +1541,8 @@ def _handle_ext_validate_command() -> int:
         f"registry OK: {len(registry.phase_names())} phases, "
         f"{len(registry.flow_names())} flows, "
         f"{len(registry.skill_slots())} skill slots, "
-        f"{len(registry.prompt_names())} prompts"
+        f"{len(registry.prompt_names())} prompts, "
+        f"{len(registry.renderer_names())} renderers"
     )
     return 0
 
