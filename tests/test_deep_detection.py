@@ -292,3 +292,19 @@ def test_shard_stacks_populates_bounded_frontier() -> None:
     frontier_shards = [s for s in out if getattr(s, "frontier_files", [])]
     assert frontier_shards, "cross-shard shared files must surface as a frontier"
     assert all(len(s.frontier_files) <= 3 for s in out)   # bounded
+
+
+def test_build_import_graph_resolves_python_edges(tmp_path) -> None:
+    """Issue #731: tree-sitter resolves python import edges; unknown grammars
+    fail open to singletons."""
+    from pathlib import Path
+
+    from daydream.deep.dependency import build_import_graph
+
+    (tmp_path / "a.py").write_text("import b\n")
+    (tmp_path / "b.py").write_text("x = 1\n")
+    (tmp_path / "notes.txt").write_text("no grammar\n")
+    graph = build_import_graph(["a.py", "b.py", "notes.txt"], Path(tmp_path))
+    assert "b.py" in graph["a.py"]          # import edge resolved
+    assert graph["b.py"] == set()           # no outgoing edge
+    assert "notes.txt" in graph             # unknown grammar -> fail-open singleton
