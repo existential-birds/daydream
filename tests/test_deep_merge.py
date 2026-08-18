@@ -129,3 +129,18 @@ async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work
         dedup_candidates_path=tmp_path / "d.json",
     )
     assert all(c["agents"] is None for c in backend.calls)
+
+
+def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
+    """Issue #731 (P2): merge prompt references synthetic ``#`` shard paths."""
+    records = [tmp_path / "deep" / "stack-python#0-records.json",
+               tmp_path / "deep" / "stack-python#1-records.json"]
+    prompt = build_merge_prompt(
+        per_stack_records_paths=records,
+        intent_path=tmp_path / "i.md",
+        alternatives_path=tmp_path / "a.json",
+        dedup_candidates_path=tmp_path / "d.json",
+        output_path=tmp_path / "o.md",
+    )
+    for r in records:
+        assert str(r) in prompt

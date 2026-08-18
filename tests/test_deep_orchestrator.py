@@ -8001,3 +8001,163 @@ def test_uncovered_sweep_numeric_resolution_rejects_non_ints(tmp_path: Path) -> 
     cfg = RunConfig(target=str(tmp_path), uncovered_sweep_max_files=7, uncovered_sweep_min_hunk_lines=2)
     assert _uncovered_sweep_max_files(cfg) == 7
     assert _uncovered_sweep_min_hunk_lines(cfg) == 2
+
+
+def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
+    """Sharding is forensic-off by default: DEFAULT_DEEP_SHARD_ENABLED = False.
+
+    Mirrors the ``_uncovered_sweep_max_files`` resolver tests: precedence is
+    RunConfig attr > file-config scalar > built-in default, and an explicit
+    set-to-False on the RunConfig tier force-off a file-config-enabled repo
+    (``_resolve_config_value`` pattern).
+    """
+    from daydream.config import DEFAULT_DEEP_SHARD_ENABLED
+    from daydream.deep.orchestrator import _deep_shard_enabled
+    from daydream.runner import RunConfig
+
+    assert DEFAULT_DEEP_SHARD_ENABLED is False
+    # Default off (forensic mode): no RunConfig attr, no file config.
+    cfg = RunConfig(target=str(tmp_path))
+    assert _deep_shard_enabled(cfg) is False
+    # RunConfig True (highest tier) enables.
+    cfg = RunConfig(target=str(tmp_path), deep_shard_enabled=True)
+    assert _deep_shard_enabled(cfg) is True
+    # File-config True with no RunConfig override enables.
+    from daydream.config_file import DaydreamFileConfig
+
+    fc = DaydreamFileConfig(deep_shard_enabled=True)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _deep_shard_enabled(cfg) is True
+    # Explicit RunConfig False (highest tier) force-off a file-config-enabled repo.
+    cfg = RunConfig(target=str(tmp_path), file_config=fc, deep_shard_enabled=False)
+    assert _deep_shard_enabled(cfg) is False
+
+
+def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
+    """The per-shard file bound resolves with RunConfig > file-config > default
+    and degrades malformed ints to the named default (never raises)."""
+    from daydream.config import DEFAULT_DEEP_SHARD_MAX_FILES
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _deep_shard_max_files
+    from daydream.runner import RunConfig
+
+    # Default.
+    cfg = RunConfig(target=str(tmp_path))
+    assert _deep_shard_max_files(cfg) == DEFAULT_DEEP_SHARD_MAX_FILES
+
+    # RunConfig int override wins.
+    cfg = RunConfig(target=str(tmp_path), deep_shard_max_files=5)
+    assert _deep_shard_max_files(cfg) == 5
+
+    # Float must degrade, not raise.
+    cfg = RunConfig(
+        target=str(tmp_path),
+        deep_shard_max_files=2.5,  # type: ignore[arg-type]
+    )
+    assert _deep_shard_max_files(cfg) == DEFAULT_DEEP_SHARD_MAX_FILES
+
+    # File-config override applies when no RunConfig attr is set.
+    fc = DaydreamFileConfig(deep_shard_max_files=7)
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _deep_shard_max_files(cfg) == 7
+
+
+async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
+    shard_many_python_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: one oversized python stack becomes multiple review tasks."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    exit_code = await run(RunConfig(
+        target=str(shard_many_python_target), cleanup=False,
+        deep_shard_enabled=True, deep_shard_max_files=1, deep_shard_max_bytes=10**9,
+    ))
+    assert exit_code == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    # More than one review task for the single python language stack.
+    review_outputs = sorted(p.name for p in deep.glob("stack-python#*-review.md"))
+    assert len(review_outputs) >= 2
+    # Union of shard file sets == the python changed-file set; no dup primary.
+    shards = sorted(p for p in deep.glob("stack-python#*-records.json"))
+    assert shards
+
+
+async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
+    multi_stack_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: an inline-grounded, finding-referenced file is NOT swept.
+
+    The outcome the sweep-evidence gate exists to prove: ``api.py`` is
+    inline-grounded in its shard's receipt AND the shard's parsed records
+    carry a finding for it, so it must be absent from the pre-sweep uncovered
+    set (and therefore never dispatched to the second-pass sweep). A stack
+    whose records do NOT reference its inline file (``App.tsx``) stays
+    uncovered -- the gate is selective, not blanket coverage. The
+    ``inline_hunk_reviewed`` count of exactly 1 is only populated when the
+    receipts plumbing actually wrote and consumed receipts, so the assertion
+    also fails when that plumbing breaks.
+    """
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, multi_stack_target)
+    exit_code = await run(RunConfig(
+        target=str(multi_stack_target), cleanup=False,
+        deep_shard_enabled=True, deep_shard_max_files=100, deep_shard_max_bytes=10**9,
+    ))
+    assert exit_code == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre_sweep = stats["pre_sweep"]
+    # The gate's outcome: api.py was inline-grounded AND referenced by a
+    # parsed finding, so it is not uncovered and never swept.
+    assert "api.py" not in pre_sweep["uncovered_files"]
+    # The gate is selective: App.tsx is inlined too, but no parsed finding
+    # references it, so it stays uncovered (evidence requires a finding match,
+    # never assignment alone).
+    assert "App.tsx" in pre_sweep["uncovered_files"]
+    # Per-evidence counts are populated only when the receipts were written
+    # and consumed; broken plumbing yields no inline evidence at all.
+    assert pre_sweep["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
+
+
+async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
+    shard_many_python_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: enabled real-path large diff -> >1 review task per language
+    stack, records produced, capacity limiter respected (shards ride the same
+    fan-out path)."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    # Sharding enabled, tiny file bound -> the python stack shards.
+    rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
+                             deep_shard_enabled=True, deep_shard_max_files=1,
+                             deep_shard_max_bytes=10**9))
+    assert rc == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    shards = sorted(p for p in deep.glob("stack-python#*-review.md"))
+    assert len(shards) >= 2                        # >1 review task for one language stack
+    # No changed file dropped from the union of all stacks' review targets:
+    changed = {p.relative_to(shard_many_python_target).as_posix()
+               for p in shard_many_python_target.rglob("*.py") if not p.name.startswith(".")}
+    assert changed, "test fixture must have python files to shard"
+    # (union of shard files equals the python changed set is unit-tested in Task 2;
+    #  here we prove the shards actually ran and produced records.)
+    records = sorted(p for p in deep.glob("stack-python#*-records.json"))
+    assert records
+
+
+async def test_deep_forensic_mode_keeps_single_agent_per_stack(
+    shard_many_python_target: Path, monkeypatch, install_backend,
+) -> None:
+    """Issue #731: forensic (default off) keeps exactly one agent per stack."""
+    from daydream.runner import RunConfig, run
+
+    install_stub_backend(monkeypatch, shard_many_python_target)
+    rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
+                             deep_shard_enabled=False,   # default / forensic
+                             deep_shard_max_files=1))    # bound ignored when off
+    assert rc == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today

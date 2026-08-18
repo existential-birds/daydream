@@ -1,0 +1,104 @@
+{
+  "findings": [
+    {
+      "file": "src/service/mod00.py",
+      "severity": "high",
+      "description": "seeded finding 0"
+    },
+    {
+      "file": "src/service/mod01.py",
+      "severity": "medium",
+      "description": "seeded finding 1"
+    },
+    {
+      "file": "src/service/mod04.py",
+      "severity": "high",
+      "description": "seeded finding 4"
+    },
+    {
+      "file": "src/service/mod05.py",
+      "severity": "medium",
+      "description": "seeded finding 5"
+    },
+    {
+      "file": "src/service/mod08.py",
+      "severity": "high",
+      "description": "seeded finding 8"
+    },
+    {
+      "file": "src/service/mod09.py",
+      "severity": "medium",
+      "description": "seeded finding 9"
+    },
+    {
+      "file": "src/service/mod11.py",
+      "severity": "low",
+      "description": "seeded finding 11"
+    },
+    {
+      "file": "src/service/mod12.py",
+      "severity": "high",
+      "description": "seeded finding 12"
+    },
+    {
+      "file": "src/service/mod13.py",
+      "severity": "medium",
+      "description": "seeded finding 13"
+    },
+    {
+      "file": "src/service/mod14.py",
+      "severity": "low",
+      "description": "seeded finding 14"
+    },
+    {
+      "file": "src/service/mod15.py",
+      "severity": "low",
+      "description": "seeded finding 15"
+    },
+    {
+      "file": "src/service/mod16.py",
+      "severity": "high",
+      "description": "seeded finding 16"
+    },
+    {
+      "file": "src/service/mod17.py",
+      "severity": "medium",
+      "description": "seeded finding 17"
+    },
+    {
+      "file": "src/service/mod18.py",
+      "severity": "low",
+      "description": "seeded finding 18"
+    },
+    {
+      "file": "src/service/mod19.py",
+      "severity": "low",
+      "description": "seeded finding 19"
+    },
+    {
+      "file": "src/service/mod20.py",
+      "severity": "high",
+      "description": "seeded finding 20"
+    },
+    {
+      "file": "src/service/mod21.py",
+      "severity": "medium",
+      "description": "seeded finding 21"
+    },
+    {
+      "file": "src/service/mod22.py",
+      "severity": "low",
+      "description": "seeded finding 22"
+    },
+    {
+      "file": "src/service/mod23.py",
+      "severity": "low",
+      "description": "seeded finding 23"
+    },
+    {
+      "file": "src/service/mod24.py",
+      "severity": "high",
+      "description": "seeded finding 24"
+    }
+  ]
+}

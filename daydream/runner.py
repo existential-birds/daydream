@@ -214,6 +214,28 @@ class RunConfig:
             only when its hunks contain at least this many added/removed lines.
             ``None`` falls through to file config then
             ``DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES`` (5).
+        deep_shard_enabled: Issue #731. Toggle deep-review sharding, which splits
+            oversized non-structural language stacks into bounded,
+            dependency-aware shards that ride the existing ``stack_name``-keyed
+            pipeline. ``None`` falls through to ``file_config.deep_shard_enabled``
+            then the built-in default ``False``
+            (``DEFAULT_DEEP_SHARD_ENABLED``; precedence CLI > file > default,
+            resolved by ``_deep_shard_enabled``). Default-off until the
+            sharding/coversweep benchmark gate passes.
+        deep_shard_max_files: Issue #731. Per-shard cap on the number of files a
+            stack may hold before it is split into shards. ``None`` falls through
+            to file config then ``DEFAULT_DEEP_SHARD_MAX_FILES`` (20).
+        deep_shard_max_bytes: Issue #731. Per-shard cap on the on-disk diff bytes
+            a stack may hold before it is split into shards. ``None`` falls
+            through to file config then ``DEFAULT_DEEP_SHARD_MAX_BYTES`` (65536).
+        deep_shard_fanout_cap: Issue #731. Upper bound on the total number of
+            sharded review tasks; stacks beyond the cap are kept unsplit (the
+            largest sharded stacks are unsplit first). ``None`` falls through to
+            file config then ``DEFAULT_DEEP_SHARD_FANOUT_CAP`` (16).
+        deep_shard_frontier_max: Issue #731. Cap on the cross-shard interface
+            file list surfaced to a shard as context (never part of its primary
+            review targets). ``None`` falls through to file config then
+            ``DEFAULT_DEEP_SHARD_FRONTIER_MAX`` (8).
 
     """
 
@@ -289,6 +311,16 @@ class RunConfig:
     uncovered_sweep: bool | None = None
     uncovered_sweep_max_files: int | None = None
     uncovered_sweep_min_hunk_lines: int | None = None
+    # Issue #731: deep-review sharding (split oversized per-language stacks into
+    # bounded, dependency-aware shards that ride the stack_name-keyed pipeline).
+    # CLI-tier overrides; ``None`` falls through to the file-config scalar then
+    # the orchestrator default. Default-off (DEFAULT_DEEP_SHARD_ENABLED=False)
+    # until the sharding/coversweep benchmark gate passes.
+    deep_shard_enabled: bool | None = None
+    deep_shard_max_files: int | None = None
+    deep_shard_max_bytes: int | None = None
+    deep_shard_fanout_cap: int | None = None
+    deep_shard_frontier_max: int | None = None
 
 
 def _print_missing_skill_error(skill_name: str) -> None:

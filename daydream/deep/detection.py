@@ -85,6 +85,12 @@ class StackAssignment:
     skill_invocation: str | None
     files: list[str] = field(default_factory=list)
     is_docs_only: bool = False
+    # Issue #731: cross-shard frontier. For a shard with a synthetic ``#``
+    # ``stack_name``, the bounded set of files in *other* shards of the same
+    # language that share a tree-sitter import edge with this shard's files.
+    # Never added to ``files`` (union of primary sets stays the changed set).
+    # Empty for unsplit stacks and the structural meta-stack.
+    frontier_files: list[str] = field(default_factory=list)
 
 
 def _ext(path: str) -> str:

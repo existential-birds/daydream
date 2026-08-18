@@ -28,6 +28,11 @@ from rich.markup import escape as escape_markup
 from daydream.agent import console, get_assume, get_non_interactive, resolve_or_prompt, run_agent
 from daydream.backends import effective_fanout_concurrency
 from daydream.config import (
+    DEFAULT_DEEP_SHARD_ENABLED,
+    DEFAULT_DEEP_SHARD_FANOUT_CAP,
+    DEFAULT_DEEP_SHARD_FRONTIER_MAX,
+    DEFAULT_DEEP_SHARD_MAX_BYTES,
+    DEFAULT_DEEP_SHARD_MAX_FILES,
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
@@ -71,6 +76,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.coverage import (
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
+    coverage_receipt_path,
     diff_block_for_file,
     filter_sweepable_files,
 )
@@ -80,6 +86,7 @@ from daydream.deep.dedup import (
     build_dedup_candidates,
     build_record_dedup_candidates,
 )
+from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.render import render_held_section, render_report
 from daydream.deep.scope_issues import (
@@ -87,6 +94,7 @@ from daydream.deep.scope_issues import (
     _resolve_changed_files,
     _revert_out_of_scope_edits,
 )
+from daydream.deep.sharding import shard_stacks
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -335,6 +343,56 @@ def _uncovered_sweep_min_hunk_lines(config: RunConfig) -> int:
     )
     coerced = _coerce_non_negative_int(value)
     return coerced if coerced is not None else DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES
+
+
+def _deep_shard_enabled(config: RunConfig) -> bool:
+    """Resolve the deep-review sharding toggle (issue #731).
+
+    Precedence mirrors ``_resolve_config_value``: 1)
+    ``RunConfig.deep_shard_enabled`` (CLI tier), 2)
+    ``DaydreamFileConfig.deep_shard_enabled`` (file-config scalar), 3) built-in
+    default :data:`DEFAULT_DEEP_SHARD_ENABLED` (False -- forensic default until
+    the benchmark gate passes). Resolved via ``_resolve_config_value`` (``is
+    not None``, not truthiness) so an explicit set-to-False on the RunConfig
+    tier forces the feature off even when the file-config scalar enables it --
+    the CLI > file > default precedence holds for explicit False, per the
+    ``RunConfig.deep_shard_enabled`` field contract.
+    """
+    return _resolve_config_value(config, "deep_shard_enabled", DEFAULT_DEEP_SHARD_ENABLED)
+
+
+def _deep_shard_int(config: RunConfig, attr: str, default: int) -> int:
+    """Resolve an integer sharding bound, coercing-and-degrading (issue #731).
+
+    Integer-only non-negative: ``0`` is preserved where meaningful while a
+    negative value, a float, a bool, or any non-int degrades to the named
+    default -- mirroring ``config_file._coerce_non_negative_int`` (reused,
+    import read-only) so a directly-constructed ``RunConfig`` cannot smuggle an
+    invalid bound into the sharder.
+    """
+    value = _resolve_config_value(config, attr, default)
+    coerced = _coerce_non_negative_int(value)
+    return coerced if coerced is not None else default
+
+
+def _deep_shard_max_files(config: RunConfig) -> int:
+    """Resolve the per-shard max file-count bound (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
+
+
+def _deep_shard_max_bytes(config: RunConfig) -> int:
+    """Resolve the per-shard max changed-byte bound (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES)
+
+
+def _deep_shard_fanout_cap(config: RunConfig) -> int:
+    """Resolve the total shard fan-out cap (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP)
+
+
+def _deep_shard_frontier_max(config: RunConfig) -> int:
+    """Resolve the per-shard cross-shard frontier cap (issue #731)."""
+    return _deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX)
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
@@ -1218,6 +1276,9 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 include_alternatives=include_alternatives,
+                # Issue #731: write structured coverage receipts only when
+                # sharding is enabled for this run (off by default).
+                write_coverage_receipts=bool(ctx.data.get("coverage_receipts_enabled", False)),
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -1468,6 +1529,23 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
         )
 
 
+def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
+    """Load this run's coverage receipts for the sweep (issue #731).
+
+    Receipts are only written when sharding was enabled (``coverage_receipts_enabled``
+    in ``ctx.data``). Fail-open: a missing or malformed receipts file degrades
+    to ``None`` (never raises, never skips the sweep) and ``compute_uncovered_files``
+    takes its forensic Reads-only path -- byte-identical to today.
+    """
+    if not ctx.data.get("coverage_receipts_enabled"):
+        return None
+    try:
+        loaded = json.loads(coverage_receipt_path(ctx.data["dd"]).read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     """Run the uncovered-file sweep body (issue #309)."""
     config = ctx.config
@@ -1475,7 +1553,9 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     recorder = get_current_recorder()
     session_id = recorder.session_id if recorder is not None else None
 
-    uncovered_files, coverage_stats = compute_uncovered_files(dd.parent, session_id)
+    uncovered_files, coverage_stats = compute_uncovered_files(
+        dd.parent, session_id, receipts=_load_coverage_receipts(ctx)
+    )
 
     # Issue #644 — the sweep's block extraction must source the FULL on-disk
     # diff (``ctx.data["diff_path"]``, always written full at gather) because
@@ -1502,6 +1582,10 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
             "coverage_ratio": coverage_stats["coverage_ratio"],
             "uncovered_files": uncovered_files,
+            # Issue #731: per-evidence-type coverage counts (source_read /
+            # inline_hunk_reviewed / dependency_frontier_read), surfaced only
+            # when sharding was enabled this run (absent otherwise).
+            "coverage_by_evidence": coverage_stats.get("coverage_by_evidence", {}),
         },
         "attempted_files": swept_files,
         "completed_files": [],
@@ -3896,6 +3980,30 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
         if mode == "shallow":
             stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
 
+        # Issue #731: deep-review sharding. Runs AFTER the tiny-diff/shallow
+        # collapse passes (which must stay byte-identical) and BEFORE
+        # ``ctx.data["stacks"]`` is published below. Skipped whenever
+        # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
+        # folded everything into one stack) and off by default (forensic mode
+        # passes the stack list through untouched). ``build_import_graph`` is
+        # fail-open (never raises; returns ``{}`` on any failure); byte sizing
+        # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+        sharding_enabled = _deep_shard_enabled(config)
+        if sharding_enabled and not single_stack_mode:
+            try:
+                import_graph = build_import_graph(changed_files, target_dir)
+            except Exception:
+                import_graph = {}
+            stacks = shard_stacks(
+                stacks,
+                diff,
+                max_files=_deep_shard_max_files(config),
+                max_bytes=_deep_shard_max_bytes(config),
+                fanout_cap=_deep_shard_fanout_cap(config),
+                frontier_max=_deep_shard_frontier_max(config),
+                graph=import_graph,
+            )
+
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
@@ -3964,6 +4072,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 "dd": dd,
                 "stacks": stacks,
                 "single_stack_mode": single_stack_mode,
+                # Issue #731: when sharding is enabled the per-stack phase writes
+                # structured coverage receipts and the uncovered sweep consumes
+                # them (Tasks 8/10). Off by default -> forensic byte-identical.
+                "coverage_receipts_enabled": sharding_enabled,
                 "intent_path": _intent_path(dd),
                 "alts_path": _alternatives_path(dd),
                 "log": log,
