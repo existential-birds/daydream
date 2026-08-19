@@ -188,6 +188,19 @@ def test_merge_contexts_dedups_file_info():
     assert merged.affected_files[0].summary == "this is a much longer summary"
 
 
+def test_merge_contexts_prefers_static_provenance_on_tie():
+    static = ExplorationContext(
+        affected_files=[FileInfo("a.py", "modified", "", provenance="static")]
+    )
+    llm = ExplorationContext(
+        affected_files=[FileInfo("a.py", "modified", "a much longer LLM summary", provenance="llm")]
+    )
+    merged = merge_contexts(static, llm)
+    assert len(merged.affected_files) == 1
+    assert merged.affected_files[0].summary == "a much longer LLM summary"
+    assert merged.affected_files[0].provenance == "static"
+
+
 def test_merge_contexts_dedups_dependencies():
     dep = Dependency("a.py", "b.py", "imports")
     a = ExplorationContext(dependencies=[dep])

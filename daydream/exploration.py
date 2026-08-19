@@ -8,7 +8,7 @@ exploration failures.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -261,7 +261,8 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
     """Fold multiple partial ExplorationContext instances into one.
 
     De-duplication rules:
-    - FileInfo: keyed on (path, role); the entry with the longer summary wins.
+    - FileInfo: keyed on (path, role); the entry with the longer summary wins,
+      while static provenance wins when either duplicate is static.
     - Convention: keyed on name; first occurrence wins.
     - Dependency: keyed on (source, target, relationship).
     - guidelines: keyed on string identity.
@@ -272,12 +273,19 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
         list fields, even when called with a single argument).
     """
     files_by_key: dict[tuple[str, str], FileInfo] = {}
+    static_keys: set[tuple[str, str]] = set()
     for ctx in contexts:
         for f in ctx.affected_files:
             key = (f.path, f.role)
+            if f.provenance == "static":
+                static_keys.add(key)
             existing = files_by_key.get(key)
             if existing is None or len(f.summary) > len(existing.summary):
                 files_by_key[key] = f
+    for key in static_keys:
+        winner = files_by_key[key]
+        if winner.provenance != "static":
+            files_by_key[key] = replace(winner, provenance="static")
 
     seen_conv: set[str] = set()
     conventions: list[Convention] = []
