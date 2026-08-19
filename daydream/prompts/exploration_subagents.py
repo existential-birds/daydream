@@ -112,7 +112,7 @@ TEST_MAPPER_SCHEMA: dict[str, Any] = {
                     "summary": {"type": "string"},
                     "source_file": {"type": "string"},
                 },
-                "required": ["path", "role", "summary"],
+                "required": ["path", "role", "summary", "source_file"],
                 "additionalProperties": False,
             },
         },
