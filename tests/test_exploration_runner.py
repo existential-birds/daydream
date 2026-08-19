@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import json
 import pytest
 
 from daydream.backends import AgentEvent, ResultEvent
-from daydream.exploration import FileInfo
+from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
     count_changed_files,
     pre_scan,
@@ -72,6 +73,30 @@ def test_test_mapper_prompt_instructs_mapping():
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=cwd) in prompt
     assert "<diff>" not in prompt
     assert "If a Bash tool is available, you may also run `git diff" in prompt
+
+
+def test_test_mapper_schema_has_source_file_property():
+    props = TEST_MAPPER_SCHEMA["properties"]["affected_files"]["items"]["properties"]
+    assert "source_file" in props
+    assert props["source_file"] == {"type": "string"}
+
+
+def test_test_mapper_rows_carry_source_file_into_test_map_json(tmp_path):
+    ctx = ExplorationContext(
+        affected_files=[
+            FileInfo(
+                "tests/test_a.py",
+                "test",
+                "covers a.py",
+                provenance="llm",
+                source_file="daydream/a.py",
+            )
+        ]
+    )
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+    data = json.loads((exploration_dir / "test-map.json").read_text())
+    assert {"test_file": "tests/test_a.py", "source_file": "daydream/a.py"} in data["test_mapping"]
 
 
 def test_schemas_are_valid_objects():

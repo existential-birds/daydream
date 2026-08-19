@@ -42,12 +42,14 @@ class FileInfo:
         role: Relationship to the diff -- "modified", "imported_by", "imports", "test".
         summary: Brief description of the file's purpose.
         provenance: Origin of the row (``static`` or ``llm``).
+        source_file: Source file covered by a test row, when known.
     """
 
     path: str
     role: str
     summary: str = ""
     provenance: str = "static"
+    source_file: str = ""
 
 
 @dataclass
@@ -173,6 +175,14 @@ class ExplorationContext:
             ],
         }
         (exploration_dir / "exploration.json").write_text(json.dumps(exploration_data, indent=2) + "\n")
+        test_mapping = [
+            {"test_file": f.path, "source_file": f.source_file}
+            for f in self.affected_files
+            if f.role == "test" and f.source_file
+        ]
+        (exploration_dir / "test-map.json").write_text(
+            json.dumps({"test_mapping": test_mapping}, indent=2) + "\n"
+        )
 
         if self.affected_files:
             lines = ["# Affected Files", _BOUNDARY_BLOCKQUOTE, "",
