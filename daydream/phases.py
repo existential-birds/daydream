@@ -1139,9 +1139,11 @@ def _exploration_pointer(exploration_dir: Path | None) -> str:
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Pre-scan exploration results are available in {exploration_dir}/.\n"
-        f"Read {exploration_dir}/summary.md for an index of what was found.\n"
-        f"Reference individual files as needed during your review — "
-        f"do NOT read them all up front.\n"
+        f"Read {exploration_dir}/affected_files.md for the deterministic index of files relevant to this review "
+        f"(paths, roles, import relationships).\n"
+        f"{exploration_dir}/summary.md is a counts-only index; reference individual exploration files as needed.\n"
+        f"Reference files as needed; do NOT read them all up front under {exploration_dir}/ — "
+        f"but you MUST read in full all assigned source files.\n"
     )
 
 

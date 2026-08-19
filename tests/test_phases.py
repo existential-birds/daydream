@@ -2254,6 +2254,17 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
 
 
+def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_path):
+    from daydream.phases import _exploration_pointer
+
+    exploration_dir = tmp_path / "exploration"
+    pointer = _exploration_pointer(exploration_dir)
+    assert "affected_files.md" in pointer
+    assert "do NOT read them all up front" in pointer
+    assert "assigned source files" in pointer
+    assert _exploration_pointer(None) == ""
+
+
 def test_exploration_pointer_marks_results_untrusted(tmp_path):
     from daydream.phases import _exploration_pointer
     from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
