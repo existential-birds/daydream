@@ -1,5 +1,6 @@
 """Tests for the extension Registry (daydream/extensions)."""
 
+from dataclasses import FrozenInstanceError
 from typing import Any
 
 import pytest
@@ -115,3 +116,42 @@ def test_tool_supervisor_registration_rejects_async_callable_object() -> None:
     with pytest.raises(ExtensionError, match="tool supervisor.*synchronous"):
         reg.register_tool_supervisor(AsyncSupervisor())
     assert reg.tool_supervisor_if_registered() is None
+
+
+def test_comment_contract_types_are_frozen_and_public() -> None:
+    import daydream.extensions as ext
+
+    cf = ext.CommentFinding(
+        path="a.py",
+        line=3,
+        title="T",
+        body="B",
+        is_cross_stack=False,
+        severity="high",
+        confidence="HIGH",
+        fingerprint="a" * 64,
+    )
+    with pytest.raises(FrozenInstanceError):
+        cf.path = "x"  # type: ignore[misc]
+    ctx = ext.FindingRenderContext(placement="summary")
+    sc = ext.SummaryContext(
+        findings=(ext.SummaryFinding(finding=cf, body_block="X"),),
+        agent_prompt="P",
+        review_info="I",
+    )
+    assert ctx.placement == "summary" and sc.findings[0].body_block == "X"
+    for name in ("CommentFinding", "FindingRenderContext", "SummaryFinding", "SummaryContext"):
+        assert name in ext.__all__
+
+
+def test_renderer_slot_override_and_lookup() -> None:
+    reg = Registry()
+    assert reg.renderer_if_registered("finding") is None
+    with pytest.raises(UnresolvedExtensionError):
+        reg.renderer("finding")
+    def fn(finding, ctx):
+        return "X"
+    reg.override_renderer("finding", fn)
+    assert reg.renderer("finding") is fn
+    assert reg.renderer_if_registered("finding") is fn
+    assert reg.renderer_names() == ("finding",)

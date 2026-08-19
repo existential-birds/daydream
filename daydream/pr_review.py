@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -37,6 +38,13 @@ from typing import TYPE_CHECKING, Any
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.extensions import (
+    CommentFinding,
+    FindingRenderContext,
+    SummaryContext,
+    SummaryFinding,
+    get_registry,
+)
 from daydream.git_ops import GitError
 from daydream.pr_comment_renderer import render_run_info_block
 from daydream.trajectory import TrajectoryRecorder, get_current_recorder
@@ -46,6 +54,9 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from daydream.findings import ArtifactFinding
+
+
+_logger = logging.getLogger(__name__)
 
 
 # --- Data shapes ------------------------------------------------------------
@@ -706,7 +717,7 @@ def _severity_emoji(severity: str | None) -> str:
     return _SEVERITY_EMOJI.get(severity.lower(), "")
 
 
-def _issue_header(issue: ParsedIssue, *, prefix: str = "", always_bold: bool = False) -> str:
+def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool = False) -> str:
     """Compose the emoji/title/tag header line for one issue."""
     emoji = _severity_emoji(issue.severity)
     title_prefix = f"{emoji} " if emoji else ""
@@ -717,12 +728,72 @@ def _issue_header(issue: ParsedIssue, *, prefix: str = "", always_bold: bool = F
     return header or tags
 
 
+def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -> str:
+    """Render the inner human block for one finding (header + body + agent prompt).
+
+    Placement-parameterized (``"inline"``, ``"file_level"``, ``"summary"``) so
+    it reproduces today's inline, file-level, and summary inner text exactly.
+    It never emits :data:`DAYDREAM_FOOTER` or the hidden finding marker — those
+    stay host-owned and are injected by the callers.
+    """
+    if ctx.placement == "inline":
+        parts = [p for p in (_issue_header(finding), finding.body) if p]
+        parts.append(_build_agent_prompt(finding))
+        return "\n\n".join(parts)
+    prefix = "[cross-stack] " if finding.is_cross_stack else ""
+    if ctx.placement == "summary":
+        summary_parts = [_issue_header(finding, prefix=prefix, always_bold=True)]
+        if finding.body:
+            summary_parts.append(f"\n{finding.body}\n")
+        summary_parts.append(_build_agent_prompt(finding))
+        return "\n".join(summary_parts)
+    # file_level (default placement).
+    header = _issue_header(finding, prefix=prefix, always_bold=True)
+    parts = [p for p in (header, finding.body) if p]
+    parts.append(_build_agent_prompt(finding))
+    return "\n\n".join(parts)
+
+
+def _comment_finding(issue: ParsedIssue) -> CommentFinding:
+    """Map an internal :class:`ParsedIssue` to the public :class:`CommentFinding`."""
+    return CommentFinding(
+        path=issue.path,
+        line=issue.line,
+        title=issue.title,
+        body=issue.body,
+        is_cross_stack=issue.is_cross_stack,
+        severity=issue.severity,
+        confidence=issue.confidence,
+        fingerprint=issue.fingerprint,
+    )
+
+
+def _render_finding(issue: ParsedIssue, placement: str) -> str:
+    """Render one finding's inner block through the registered ``"finding"`` renderer.
+
+    Falls back to :func:`default_render_finding` (and warns) when the custom
+    renderer raises or returns a non-``str``/empty result, so a broken fork
+    can never break posting.
+    """
+    cf = _comment_finding(issue)
+    ctx = FindingRenderContext(placement=placement)
+    _fn = get_registry().renderer("finding")
+    _label = "builtin" if _fn is default_render_finding else "custom"
+    try:
+        result = _fn(cf, ctx)
+    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
+        _logger.warning("%s 'finding' renderer failed (%s); using default", _label, exc)
+        return default_render_finding(cf, ctx)
+    if not isinstance(result, str) or not result:
+        _logger.warning(
+            "%s 'finding' renderer failed (returned %r); using default", _label, result
+        )
+        return default_render_finding(cf, ctx)
+    return result
+
+
 def _format_inline_body(issue: ParsedIssue) -> str:
-    header_line = _issue_header(issue)
-    parts = [p for p in (header_line, issue.body) if p]
-    agent_prompt = _build_agent_prompt(issue)
-    parts.append(agent_prompt)
-    parts.append(DAYDREAM_FOOTER)
+    parts = [_render_finding(issue, "inline"), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
@@ -735,17 +806,13 @@ def _format_file_level_body(issue: ParsedIssue) -> str:
     as an inline comment, so the labeler's author check and fingerprint join
     recognise it without any read-side special-casing.
     """
-    prefix = "[cross-stack] " if issue.is_cross_stack else ""
-    header = _issue_header(issue, prefix=prefix, always_bold=True)
-    parts = [p for p in (header, issue.body) if p]
-    parts.append(_build_agent_prompt(issue))
-    parts.append(DAYDREAM_FOOTER)
+    parts = [_render_finding(issue, "file_level"), DAYDREAM_FOOTER]
     if issue.fingerprint:
         parts.append(finding_marker(issue.fingerprint))
     return "\n\n".join(parts).strip()
 
 
-def _format_tag_line(issue: ParsedIssue) -> str:
+def _format_tag_line(issue: CommentFinding) -> str:
     """Render severity/confidence badges for a single issue, if set."""
     bits: list[str] = []
     if issue.severity:
@@ -755,7 +822,7 @@ def _format_tag_line(issue: ParsedIssue) -> str:
     return " · ".join(bits)
 
 
-def _build_agent_prompt(issue: ParsedIssue) -> str:
+def _build_agent_prompt(issue: CommentFinding) -> str:
     """Build a collapsible AI-agent-friendly prompt for a single issue."""
     loc = f"`{issue.path}`"
     if issue.line:
@@ -777,41 +844,107 @@ def _build_agent_prompt(issue: ParsedIssue) -> str:
     )
 
 
-def _group_by_file(issues: list[ParsedIssue]) -> dict[str, list[ParsedIssue]]:
-    """Group issues by file path, preserving insertion order."""
-    groups: dict[str, list[ParsedIssue]] = {}
-    for issue in issues:
-        groups.setdefault(issue.path, []).append(issue)
-    return groups
+def _summary_body_block(issue: ParsedIssue) -> str:
+    """Render one non-inline finding's block for the summary section.
+
+    Routes the inner human block through the ``"finding"`` renderer seam
+    (placement ``"summary"``) then appends the host-owned finding marker. The
+    result is byte-identical to the finding's flattened header/body/prompt/marker
+    sequence in the pre-seam summary section.
+    """
+    block = _render_finding(issue, "summary")
+    if issue.fingerprint:
+        block = f"{block}\n{finding_marker(issue.fingerprint)}"
+    return block
 
 
-def _format_body_section(body_only: list[ParsedIssue]) -> str:
-    if not body_only:
+def _render_body_section(findings: tuple[SummaryFinding, ...]) -> str:
+    """Assemble the by-file collapsible ``<details>`` non-inline findings section.
+
+    Shared by :func:`_format_body_section` (the ``ParsedIssue`` entry point) and
+    :func:`default_render_summary` (the ``SummaryContext`` entry point). Consumes
+    each finding's host-rendered ``body_block`` (marker already embedded) as a
+    single unit, preserving the exact whitespace of the pre-seam layout.
+    """
+    if not findings:
         return ""
-    grouped = _group_by_file(body_only)
-    total = len(body_only)
+    grouped: dict[str, list[SummaryFinding]] = {}
+    for sf in findings:
+        grouped.setdefault(sf.finding.path, []).append(sf)
+    total = len(findings)
     parts: list[str] = [
         "<details>",
         f"<summary>📋 Non-inline findings ({total})</summary><blockquote>\n",
     ]
-    for filepath, file_issues in grouped.items():
+    for filepath, file_findings in grouped.items():
         parts.append("<details>")
         parts.append(
-            f"<summary>{filepath} ({len(file_issues)})</summary><blockquote>\n"
+            f"<summary>{filepath} ({len(file_findings)})</summary><blockquote>\n"
         )
-        for i, issue in enumerate(file_issues):
-            prefix = "[cross-stack] " if issue.is_cross_stack else ""
-            parts.append(_issue_header(issue, prefix=prefix, always_bold=True))
-            if issue.body:
-                parts.append(f"\n{issue.body}\n")
-            parts.append(_build_agent_prompt(issue))
-            if issue.fingerprint:
-                parts.append(finding_marker(issue.fingerprint))
-            if i < len(file_issues) - 1:
+        for i, sf in enumerate(file_findings):
+            parts.append(sf.body_block)
+            if i < len(file_findings) - 1:
                 parts.append("\n---\n")
         parts.append("\n</blockquote></details>")
     parts.append("\n</blockquote></details>")
     return "\n".join(parts)
+
+
+def _summary_findings(body_only: list[ParsedIssue]) -> tuple[SummaryFinding, ...]:
+    """Map non-inline :class:`ParsedIssue` objects to public :class:`SummaryFinding`s."""
+    return tuple(
+        SummaryFinding(finding=_comment_finding(issue), body_block=_summary_body_block(issue))
+        for issue in body_only
+    )
+
+
+def _format_body_section(body_only: list[ParsedIssue]) -> str:
+    """Render the by-file non-inline findings section from internal issues.
+
+    Retained as the ``ParsedIssue`` entry point (approval-snapshot guard);
+    delegates to :func:`_render_body_section` so the default summary renderer
+    and this path share one scaffolding implementation.
+    """
+    return _render_body_section(_summary_findings(body_only))
+
+
+def default_render_summary(ctx: SummaryContext) -> str:
+    """Render the summary body between the approval line and the footer.
+
+    Reproduces today's markdown byte-for-byte: ``**Code Review Summary**``, the
+    by-file non-inline findings section, the consolidated agent prompt (when
+    non-empty), then the fully-wrapped review-info block. Never emits the
+    approval line, the ``event`` decision, or :data:`DAYDREAM_FOOTER` — those
+    stay host-owned in :func:`build_payload`.
+    """
+    chunks: list[str] = ["**Code Review Summary**"]
+    section = _render_body_section(ctx.findings)
+    if section:
+        chunks.append(section)
+    if ctx.agent_prompt:
+        chunks.append(ctx.agent_prompt)
+    chunks.append(ctx.review_info)
+    return "\n\n".join(chunks)
+
+
+def _render_summary(ctx: SummaryContext) -> str:
+    """Render the summary body through the registered ``"summary"`` renderer.
+
+    Falls back to :func:`default_render_summary` (and warns) when the custom
+    renderer raises or returns a non-``str``/empty result, so a broken fork can
+    never break posting.
+    """
+    try:
+        result = get_registry().renderer("summary")(ctx)
+    except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
+        _logger.warning("custom 'summary' renderer failed (%s); using default", exc)
+        return default_render_summary(ctx)
+    if not isinstance(result, str) or not result:
+        _logger.warning(
+            "custom 'summary' renderer failed (returned %r); using default", result
+        )
+        return default_render_summary(ctx)
+    return result
 
 
 def _count_labels(
@@ -1010,18 +1143,10 @@ def build_payload(
 
     clean = _is_clean_review(classified, approve_on_clean)
 
-    body_chunks: list[str] = []
-    if clean:
-        body_chunks.insert(0, "✅ **Deep review passed with no high/medium findings.**")
-    body_chunks.append("**Code Review Summary**")
-
-    body_section = _format_body_section(classified.body_only)
-    if body_section:
-        body_chunks.append(body_section)
-
-    # Consolidated AI agent prompt.
-    if not classified.is_empty():
-        body_chunks.append(_build_consolidated_prompt(classified, pr))
+    # Consolidated AI agent prompt (host-built; empty means "omit").
+    agent_prompt = (
+        _build_consolidated_prompt(classified, pr) if not classified.is_empty() else ""
+    )
 
     # Collapsible review info: enriched run-info (rollup + per-phase
     # breakdown + version footer, owned by the renderer) followed by the
@@ -1042,13 +1167,24 @@ def build_payload(
     review_info = enriched_run_info
     if extra_info_lines:
         review_info = f"{review_info}\n\n" + "\n".join(extra_info_lines)
-    body_chunks.append(
+    review_info_block = (
         "<details>\n"
         "<summary>ℹ️ Review info</summary>\n\n"
         f"{review_info}\n\n"
         "</details>"
     )
 
+    summary_ctx = SummaryContext(
+        findings=_summary_findings(classified.body_only),
+        agent_prompt=agent_prompt,
+        review_info=review_info_block,
+    )
+    summary_body = _render_summary(summary_ctx)
+
+    body_chunks: list[str] = []
+    if clean:
+        body_chunks.append("✅ **Deep review passed with no high/medium findings.**")
+    body_chunks.append(summary_body)
     # DAYDREAM_FOOTER is the bottom-of-comment "🧙 Posted by daydream"
     # badge — distinct from the renderer's "Generated by daydream" line
     # inside the review-info block.
