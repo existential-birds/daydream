@@ -1046,12 +1046,12 @@ class Invocation:
             # under-count; codex/pi re-state totals equal to the per-message
             # sum -> delta 0, so the restatement never double-counts. Never
             # negative, never subtraction.
-            delta = {
-                "prompt": max(0, (event.input_tokens or 0) - self._inv_metrics_sum["prompt"]),
-                "completion": max(0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"]),
-                "cached": max(0, (event.cached_tokens or 0) - self._inv_metrics_sum["cached"]),
-                "cost": max(0.0, (event.cost_usd or 0.0) - self._inv_metrics_sum["cost"]),
-            }
+            delta_prompt = max(0, (event.input_tokens or 0) - int(self._inv_metrics_sum["prompt"]))
+            delta_completion = max(
+                0, (event.output_tokens or 0) - int(self._inv_metrics_sum["completion"])
+            )
+            delta_cached = max(0, (event.cached_tokens or 0) - int(self._inv_metrics_sum["cached"]))
+            delta_cost = max(0.0, (event.cost_usd or 0.0) - float(self._inv_metrics_sum["cost"]))
             self._ensure_open_step()
             assert self._open_step_dict is not None
             target = self._open_step_dict
@@ -1067,14 +1067,14 @@ class Invocation:
                 reasoning = None
                 if (
                     event.reasoning_tokens is not None
-                    and event.reasoning_tokens <= delta["completion"]
+                    and event.reasoning_tokens <= delta_completion
                 ):
                     reasoning = _reasoning_extra(event.reasoning_tokens)
                 target["_metrics"] = Metrics(
-                    prompt_tokens=delta["prompt"],
-                    completion_tokens=delta["completion"],
-                    cached_tokens=delta["cached"],
-                    cost_usd=None if event.cost_usd is None else delta["cost"],
+                    prompt_tokens=delta_prompt,
+                    completion_tokens=delta_completion,
+                    cached_tokens=delta_cached,
+                    cost_usd=None if event.cost_usd is None else delta_cost,
                     extra=reasoning,
                 )
             else:
@@ -1104,10 +1104,10 @@ class Invocation:
             # total should sum). A CostEvent-only backend (no MetricsEvents at
             # all) still accumulates its full totals via the delta.
             self.recorder._accumulate_metrics(
-                prompt_tokens=delta["prompt"],
-                completion_tokens=delta["completion"],
-                cached_tokens=delta["cached"],
-                cost_usd=None if event.cost_usd is None else delta["cost"],
+                prompt_tokens=delta_prompt,
+                completion_tokens=delta_completion,
+                cached_tokens=delta_cached,
+                cost_usd=None if event.cost_usd is None else delta_cost,
             )
         elif isinstance(event, ResultEvent):
             self._close_open_step()
