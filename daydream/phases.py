@@ -65,6 +65,7 @@ from daydream.trajectory import (
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
+    from daydream.deep.dedup import ExternalDuplicatePair
     from daydream.deep.detection import StackAssignment
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
@@ -1677,6 +1678,42 @@ async def phase_verify_recommendations(
     return output_path, payload
 
 
+async def _adjudicate_external_dedup_batch(
+    backend: Backend,
+    work: WorkContext,
+    pairs: list["ExternalDuplicatePair"],
+) -> list[Any]:
+    """Adjudicate one batch of external-dedup candidate pairs.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the agent cwd.
+        pairs: The batch's candidate pairs, in candidate order.
+
+    Returns:
+        The batch's raw verdict entries, or an empty list when the agent
+        returned nothing parseable.
+    """
+    prompt = get_registry().prompt("external-dedup")(pairs=pairs, cwd=work.repo)
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=EXTERNAL_DEDUP_VERDICTS_SCHEMA,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        phase=DaydreamPhase.DEDUP,
+        read_only=True,
+    )
+    candidate: Any = result
+    if isinstance(result, str):
+        try:
+            candidate = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            candidate = None
+    return candidate.get("verdicts", []) if isinstance(candidate, dict) else []
+
+
 async def phase_dedup_external(
     backend: Backend,
     work: WorkContext,
@@ -1701,13 +1738,29 @@ async def phase_dedup_external(
 
     Safe degradation: a GitHub failure fetching competitor comments warns and
     suppresses nothing (matches the reconcile posture). No candidates → no agent
-    call. The trajectory captures the adjudication automatically via ``run_agent``.
+    call. The candidate set is sharded into prompt-sized batches by
+    :func:`daydream.deep.dedup.batch_external_dedup_pairs` and every batch is
+    adjudicated: one batch is a single call, several fan out under the capacity
+    limiter with a forked trajectory each. Verdicts are consumed in batch order,
+    so suppression does not depend on which shard finishes first. A failed shard
+    never suppresses anything: the phase warns naming the unadjudicated pairs
+    when at least one shard succeeded, and re-raises the lowest-numbered failed
+    batch's exception when every shard failed (so a lone batch's failure
+    propagates as it always has). The trajectory captures the adjudication
+    automatically via ``run_agent``.
 
     Returns:
         The number of items suppressed.
+
+    Raises:
+        Exception: The first failed batch's error, when no shard succeeded.
     """
     from daydream.deep.artifacts import external_dedup_path
-    from daydream.deep.dedup import EXTERNAL_DEDUP_DISPOSITION, build_external_dedup_candidates
+    from daydream.deep.dedup import (
+        EXTERNAL_DEDUP_DISPOSITION,
+        batch_external_dedup_pairs,
+        build_external_dedup_candidates,
+    )
     from daydream.reconcile import fetch_external_findings
 
     doc = json.loads(merged_items_path.read_text())
@@ -1726,25 +1779,51 @@ async def phase_dedup_external(
         sidecar.write_text(json.dumps({"suppressed": []}, indent=2))
         return 0
 
-    prompt = get_registry().prompt("external-dedup")(pairs=candidates, cwd=work.repo)
-    result, _, _ = await run_agent(
-        backend,
-        work.repo,
-        prompt,
-        output_schema=EXTERNAL_DEDUP_VERDICTS_SCHEMA,
-        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
-        wall_budget_s=DEFAULT_WALL_BUDGET_S,
-        phase=DaydreamPhase.DEDUP,
-        read_only=True,
-    )
+    batches = batch_external_dedup_pairs(candidates)
+    batch_verdicts: list[list[Any]] = [[] for _ in batches]
+    shard_failures: dict[int, Exception] = {}
 
-    candidate: Any = result
-    if isinstance(result, str):
+    async def _adjudicate_shard(index: int) -> None:
         try:
-            candidate = json.loads(result)
-        except (json.JSONDecodeError, ValueError):
-            candidate = None
-    verdicts = candidate.get("verdicts", []) if isinstance(candidate, dict) else []
+            batch_verdicts[index] = await _adjudicate_external_dedup_batch(backend, work, batches[index])
+        except Exception as exc:  # noqa: BLE001 -- held per shard, re-raised below when no shard succeeded
+            shard_failures[index] = exc
+
+    if len(batches) == 1:
+        await _adjudicate_shard(0)
+    else:
+        recorder = get_current_recorder()
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, backend))
+        async with anyio.create_task_group() as tg:
+            for batch_index in range(len(batches)):
+                async def _task(index: int = batch_index) -> None:
+                    async with limiter, maybe_fork(recorder, f"external-dedup-{index}"):
+                        await _adjudicate_shard(index)
+
+                tg.start_soon(_task)
+        if recorder is not None:
+            recorder.create_dispatch_step(phase=DaydreamPhase.DEDUP)
+
+    if len(shard_failures) == len(batches):
+        raise shard_failures[min(shard_failures)]
+
+    if shard_failures:
+        unadjudicated = sum(len(batches[index]) for index in shard_failures)
+        reasons = "; ".join(
+            f"{type(shard_failures[index]).__name__}: {shard_failures[index]}"
+            for index in sorted(shard_failures)
+        )
+        print_warning(
+            console,
+            f"External-bot dedup: {len(shard_failures)} of {len(batches)} adjudicator shard(s) failed, "
+            f"leaving {unadjudicated} candidate pair(s) unadjudicated; those findings stay in the "
+            f"report ({reasons}).",
+        )
+
+    # Verdicts are concatenated in batch order, never completion order, so the
+    # first high-confidence duplicate for an item is the same one a single
+    # oversized call would have produced.
+    verdicts = [entry for batch in batch_verdicts for entry in batch]
 
     # Only item_ids that were actually emitted as candidates are eligible for
     # suppression. This bounds the set so hallucinated item_ids from the LLM

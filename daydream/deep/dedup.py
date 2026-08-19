@@ -41,11 +41,17 @@ _SIM_THRESHOLD = 0.5
 # window is deliberately generous because the LLM makes the final call and
 # competitor bots often anchor a few lines off from daydream.
 _EXTERNAL_LINE_WINDOW = 10
+# Pairs per adjudicator call. Every pair re-embeds the competitor body under
+# ``prompts._EXTERNAL_BODY_BUDGET_BYTES`` (2 KiB), so this batch size bounds the
+# embedded bodies of one prompt at ~96 KiB — comfortably inside every backend's
+# context while keeping the shard count (and the fan-out) small for the ordinary
+# handful-of-pairs case.
+_EXTERNAL_PAIRS_PER_BATCH = 48
 
 # Disposition marker set on a merged item that was suppressed because an
 # external bot already posted the same finding. Shared across phases.py
-# (writer), pr_review.py and benchmark/mapping.py (readers) so a typo/rename
-# in one site can't silently break suppression.
+# (writer), pr_review.py, deep/orchestrator.py and benchmark/mapping.py
+# (readers) so a typo/rename in one site can't silently break suppression.
 EXTERNAL_DEDUP_DISPOSITION = "deduped-vs-external"
 
 
@@ -215,6 +221,34 @@ def build_external_dedup_candidates(
             )
     pairs.sort(key=lambda p: (p.item_id, p.external_url))
     return pairs
+
+
+def batch_external_dedup_pairs(
+    pairs: Sequence[ExternalDuplicatePair],
+    *,
+    max_per_batch: int = _EXTERNAL_PAIRS_PER_BATCH,
+) -> list[list[ExternalDuplicatePair]]:
+    """Split a candidate set into prompt-sized batches, in order.
+
+    Every pair lands in exactly one batch, so sharding bounds prompt size
+    without reducing coverage. The ``(item_id, external_url)`` order emitted by
+    :func:`build_external_dedup_candidates` is preserved within and across
+    batches, which is what makes the concatenated verdicts of the shards
+    equivalent to one oversized call.
+
+    Args:
+        pairs: Candidate pairs in ``(item_id, external_url)`` order.
+        max_per_batch: Max pairs adjudicated by a single agent call.
+
+    Returns:
+        The batches, or an empty list when there are no pairs.
+
+    Raises:
+        ValueError: If ``max_per_batch`` is not positive.
+    """
+    if max_per_batch < 1:
+        raise ValueError("max_per_batch must be >= 1")
+    return [list(pairs[i : i + max_per_batch]) for i in range(0, len(pairs), max_per_batch)]
 
 
 def build_dedup_candidates(

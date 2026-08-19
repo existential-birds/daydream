@@ -81,6 +81,7 @@ from daydream.deep.coverage import (
     filter_sweepable_files,
 )
 from daydream.deep.dedup import (
+    EXTERNAL_DEDUP_DISPOSITION,
     CandidatePair,
     RecordDuplicatePair,
     build_dedup_candidates,
@@ -2334,14 +2335,16 @@ async def _step_dedup_external(ctx: FlowContext) -> None:
         # updated items file so the locally-written report matches what
         # findings-out/post-review will actually emit.
         doc = json.loads(ctx.data["items_file"].read_text())
-        kept = [item for item in doc.get("items", []) if item.get("disposition") != "deduped-vs-external"]
+        kept = [item for item in doc.get("items", []) if item.get("disposition") != EXTERNAL_DEDUP_DISPOSITION]
         held = doc.get("held", [])
         report = render_report(kept)
         held_section = render_held_section(held)
         if held_section:
             report = report.rstrip() + "\n\n" + held_section + "\n"
         merged_report_path(ctx.data["dd"]).write_text(report)
-        ctx.data["merged_report"].write_text(report)
+        review_output = ctx.data.get("merged_report")
+        if review_output is not None:
+            review_output.write_text(report)
 
     return None
 
@@ -3777,7 +3780,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_spine_single_merge),
     FlowStep(name="load-items", run=_step_load_items, enabled=_spine_enabled),
     FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_spine_supervise),
-    FlowStep(name="dedup-external", run=_step_dedup_external, config_phase="dedup", enabled=_spine_dedup_external),
+    FlowStep(name="external-dedup", run=_step_dedup_external, config_phase="dedup", enabled=_spine_dedup_external),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_spine_findings_out),
     FlowStep(name="post-review", run=_step_post_review, enabled=_spine_before_fix),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).

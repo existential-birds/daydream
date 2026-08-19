@@ -289,7 +289,7 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 13 | `single-stack-merge` | `single-stack-merge` |
 | 14 | `load-items` | `load-items` |
 | 15 | `supervise` | `supervise` |
-| 16 | `dedup-external` | `dedup` |
+| 16 | `external-dedup` | `dedup` |
 | 17 | `findings-out` | `findings-out` |
 | 18 | `post-review` | `post-review` |
 | 19 | `fix-gate` | `fix-gate` |

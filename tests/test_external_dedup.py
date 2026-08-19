@@ -2,7 +2,8 @@
 
 Covers the four layers of the feature:
   1. ``reconcile.fetch_external_findings`` — competitor-comment inventory + author filter.
-  2. ``deep.dedup.build_external_dedup_candidates`` — location pre-filter.
+  2. ``deep.dedup.build_external_dedup_candidates`` — location pre-filter, and
+     ``batch_external_dedup_pairs`` — the prompt-sized sharding of the pair set.
   3. ``phases.phase_dedup_external`` — the adjudicated suppression (real path: real
      temp files + merged-items.json, mocking only the GitHub fetch and the agent seam).
   4. ``pr_review.parsed_issues_from_items`` — the disposition is honored so suppressed
@@ -10,7 +11,7 @@ Covers the four layers of the feature:
   5. ``deep.orchestrator._spine_dedup_external`` — enable gate (opt-in + resume guard).
   6. ``deep.orchestrator._step_dedup_external`` — PR resolution branches and GitError
      handling.
-  7. The full ``dedup-external`` FlowStep, driven end-to-end through
+  7. The full ``external-dedup`` FlowStep, driven end-to-end through
      ``runner.run`` with only the ``gh`` subprocess boundary faked (``fake_gh``),
      exercising the real step→phase wiring and the real GraphQL fetch.
 """
@@ -18,15 +19,21 @@ Covers the four layers of the feature:
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
+import anyio
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import ResultEvent
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.dedup import build_external_dedup_candidates
+from daydream.deep.dedup import (
+    _EXTERNAL_PAIRS_PER_BATCH,
+    batch_external_dedup_pairs,
+    build_external_dedup_candidates,
+)
 from daydream.pr_review import parsed_issues_from_items
 from daydream.reconcile import ExternalComment, fetch_external_findings
 from tests.conftest import ExtDir
@@ -125,6 +132,35 @@ def test_candidates_file_level_fallback_when_line_unknown() -> None:
     # Item has no line -> same-file comment still pairs (LLM adjudicates).
     pairs = build_external_dedup_candidates([_item(1, "a.py", None)], [_ext("a.py", 999)])
     assert len(pairs) == 1
+
+
+# --- batch_external_dedup_pairs -------------------------------------------
+
+
+def test_batch_external_pairs_covers_every_pair_in_order() -> None:
+    comments = [_ext("a.py", None, url=f"https://gh/c/{i:03d}") for i in range(6)]
+    items = [_item(i, "a.py", None) for i in range(1, 31)]
+    pairs = build_external_dedup_candidates(items, comments)
+    assert len(pairs) == 180  # 30 items x 6 comments
+
+    batches = batch_external_dedup_pairs(pairs)
+
+    expected_full, remainder = divmod(len(pairs), _EXTERNAL_PAIRS_PER_BATCH)
+    assert len(batches) == expected_full + (1 if remainder else 0)
+    assert [len(b) for b in batches[:-1]] == [_EXTERNAL_PAIRS_PER_BATCH] * expected_full
+    assert len(batches[-1]) == (remainder or _EXTERNAL_PAIRS_PER_BATCH)
+    # Nothing lost, nothing duplicated, original order preserved.
+    assert [pair for batch in batches for pair in batch] == pairs
+
+
+def test_batch_external_pairs_single_batch_when_under_the_bound() -> None:
+    pairs = build_external_dedup_candidates([_item(1, "a.py", None)], [_ext("a.py", None)])
+    assert batch_external_dedup_pairs(pairs) == [pairs]
+
+
+def test_batch_external_pairs_rejects_non_positive_bound() -> None:
+    with pytest.raises(ValueError):
+        batch_external_dedup_pairs([], max_per_batch=0)
 
 
 # --- parsed_issues_from_items honors the disposition ----------------------
@@ -259,14 +295,14 @@ async def test_phase_dedup_external_no_candidates_skips_agent(
     assert json.loads((deep_dir / "external-dedup.json").read_text()) == {"suppressed": []}
 
 
-# --- dedup-external FlowStep, driven end-to-end via runner.run -------------
+# --- external-dedup FlowStep, driven end-to-end via runner.run -------------
 #
 # The tests above call ``phase_dedup_external`` directly (mocking
 # ``reconcile.fetch_external_findings``) or call ``_step_dedup_external``
 # directly (mocking ``phase_dedup_external``). Neither exercises the real
 # ``FlowStep`` dispatch into the real phase, nor the real GraphQL fetch. This
 # test registers a tiny fork flow that seeds merged-items.json and then runs
-# the *real* built-in ``dedup-external`` step through ``runner.run``, faking
+# the *real* built-in ``external-dedup`` step through ``runner.run``, faking
 # only the ``gh`` subprocess boundary (``fake_gh``) and the agent seam.
 
 _SEED_DEDUP_FLOW_EXT = """
@@ -280,18 +316,19 @@ async def _seed(ctx):
     deep_dir.mkdir(parents=True, exist_ok=True)
     items_file = deep_dir / "merged-items.json"
     items = [
-        {"id": 1, "file": "api.py", "line": 1, "description": "off-by-one in loop", "severity": "high"},
-        {"id": 2, "file": "App.tsx", "line": 1, "description": "unique daydream finding", "severity": "high"},
+        {"id": 1, "file": "api.py", "line": 1, "description": "off-by-one in loop", "severity": "high",
+         "lens": "per-stack"},
+        {"id": 2, "file": "App.tsx", "line": 1, "description": "unique daydream finding", "severity": "high",
+         "lens": "per-stack"},
     ]
     items_file.write_text(json.dumps({"items": items, "held": []}))
     ctx.data["items_file"] = items_file
     ctx.data["dd"] = deep_dir
-    ctx.data["merged_report"] = deep_dir / "merged-report.md"
 
 
 def register(r):
     r.register_phase(FlowStep(name="seed-dedup", run=_seed))
-    r.set_flow("dedup-real-path", ["seed-dedup", "dedup-external"])
+    r.set_flow("dedup-real-path", ["seed-dedup", "external-dedup"])
 """
 
 
@@ -356,6 +393,293 @@ async def test_dedup_external_step_wires_to_real_phase_and_fetch_via_runner_run(
 
     sidecar = json.loads((multi_stack_target / ".daydream" / "deep" / "external-dedup.json").read_text())
     assert sidecar["suppressed"][0]["id"] == 1
+
+    # The step re-renders the deep-dir report from the surviving items even
+    # though this flow never ran ``load-items``, so ctx.data has no
+    # ``merged_report`` repo-root copy to update.
+    report = (multi_stack_target / ".daydream" / "deep" / "review-output.md").read_text()
+    assert "off-by-one in loop" not in report
+    assert "unique daydream finding" in report
+
+
+# --- sharded adjudication (>1 batch) --------------------------------------
+#
+# Item 1 of ``_SEED_DEDUP_FLOW_EXT`` pairs with every ``api.py`` comment, so a
+# chatty competitor bot is the way to force more than one adjudicator shard.
+
+_SHARD_COMMENT_COUNT = _EXTERNAL_PAIRS_PER_BATCH + 3
+# The last URL of each batch: batch 0 ends at index _EXTERNAL_PAIRS_PER_BATCH-1
+# because build_external_dedup_candidates sorts by (item_id, external_url) and
+# the zero-padded URLs sort numerically.
+_FIRST_SHARD_MARKER = f"https://gh/c/{_EXTERNAL_PAIRS_PER_BATCH - 1:03d}"
+_LAST_SHARD_MARKER = f"https://gh/c/{_SHARD_COMMENT_COUNT - 1:03d}"
+
+
+def _shard_verdict(external_ref: str) -> dict[str, Any]:
+    return {
+        "verdicts": [
+            {"item_id": 1, "external_ref": external_ref, "duplicate": True,
+             "confidence": "high", "reason": "same off-by-one"},
+        ]
+    }
+
+
+class _PerShardBackend(ScriptedBackend):
+    """Routes each shard's turn by a URL marker unique to that shard's prompt.
+
+    A mapped value is either the structured output to return or an exception to
+    raise. ``delays`` lets a test invert completion order relative to batch
+    order; ``completed`` records the order shards actually finished in.
+    """
+
+    def __init__(self, by_marker: dict[str, Any], *, delays: dict[str, float] | None = None) -> None:
+        super().__init__()
+        self._by_marker = by_marker
+        self._delays = delays or {}
+        self.completed: list[str] = []
+
+    async def execute(  # type: ignore[override]
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: Any = None,
+        agents: Any = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": output_schema,
+                           "continuation": continuation, "agents": agents, "max_turns": max_turns,
+                           "read_only": read_only, "persist_session": persist_session})
+        matches = [marker for marker in self._by_marker if marker in prompt]
+        assert len(matches) == 1, f"prompt matched {matches}, expected exactly one shard marker"
+        marker = matches[0]
+        delay = self._delays.get(marker, 0.0)
+        if delay:
+            await anyio.sleep(delay)
+        self.completed.append(marker)
+        outcome = self._by_marker[marker]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        yield ResultEvent(structured_output=outcome, continuation=None)
+
+
+def _serve_chatty_bot(fake_gh: FakeGh, count: int = _SHARD_COMMENT_COUNT) -> None:
+    fake_gh.set_response(
+        "graphql_threads",
+        value=_ext_page([
+            _ext_thread("api.py", 3, author="greptile-apps", body=f"concern {i}",
+                        url=f"https://gh/c/{i:03d}")
+            for i in range(count)
+        ]),
+    )
+
+
+async def test_dedup_external_shards_adjudicate_every_pair_via_runner_run(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+) -> None:
+    """Every candidate pair is adjudicated, across as many shards as it takes.
+
+    The suppressing verdict is returned only by the *second* shard and cites a
+    URL that exists only in that shard's batch, so the assertion can only pass
+    if the tail of the candidate set really reached an adjudicator.
+    """
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    _serve_chatty_bot(fake_gh)
+
+    backend = _PerShardBackend({
+        _FIRST_SHARD_MARKER: {"verdicts": []},
+        _LAST_SHARD_MARKER: _shard_verdict(_LAST_SHARD_MARKER),
+    })
+    install_backend(backend)
+
+    rc = await runner.run(
+        make_config(
+            multi_stack_target,
+            pr_number=7,
+            flow_name="dedup-real-path",
+            file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+        )
+    )
+
+    assert rc == 0
+    prompts = backend.prompts
+    assert len(prompts) == 2
+    # The union of the delivered prompts covers every candidate pair.
+    adjudicated = {
+        f"https://gh/c/{i:03d}"
+        for i in range(_SHARD_COMMENT_COUNT)
+        if any(f"external_ref=https://gh/c/{i:03d}" in p for p in prompts)
+    }
+    assert len(adjudicated) == _SHARD_COMMENT_COUNT
+    assert sum(p.count("external_ref=https://gh/c/") for p in prompts) == _SHARD_COMMENT_COUNT
+
+    by_id = {item["id"]: item
+             for item in json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
+             ["items"]}
+    assert by_id[1]["disposition"] == "deduped-vs-external"
+    assert by_id[1]["external_ref"] == _LAST_SHARD_MARKER
+    assert "disposition" not in by_id[2]
+
+
+async def test_dedup_external_failed_shard_warns_and_suppresses_nothing_via_runner_run(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shard whose agent call raises loses only its own pairs, and says so.
+
+    The other shard succeeds, which is what makes this the warn path rather
+    than the propagate path.
+    """
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    _serve_chatty_bot(fake_gh)
+
+    warnings: list[str] = []
+    monkeypatch.setattr("daydream.phases.print_warning", lambda _console, message: warnings.append(message))
+
+    # The failing shard is the one that would have suppressed item 1: its
+    # verdict is lost, so nothing is suppressed at all.
+    backend = _PerShardBackend({
+        _FIRST_SHARD_MARKER: {"verdicts": []},
+        _LAST_SHARD_MARKER: RuntimeError("adjudicator exploded"),
+    })
+    install_backend(backend)
+
+    rc = await runner.run(
+        make_config(
+            multi_stack_target,
+            pr_number=7,
+            flow_name="dedup-real-path",
+            file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+        )
+    )
+
+    assert rc == 0
+    unadjudicated = _SHARD_COMMENT_COUNT - _EXTERNAL_PAIRS_PER_BATCH
+    assert any(
+        f"leaving {unadjudicated} candidate pair(s) unadjudicated" in w and "adjudicator exploded" in w
+        for w in warnings
+    ), warnings
+
+    items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
+    assert all("disposition" not in item for item in items)
+    sidecar = json.loads((multi_stack_target / ".daydream" / "deep" / "external-dedup.json").read_text())
+    assert sidecar == {"suppressed": []}
+
+
+async def test_dedup_external_all_shards_failed_propagates_first_batch_error(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+) -> None:
+    """No shard succeeded → the adjudication accomplished nothing, so it raises.
+
+    The lowest-numbered failed batch's exception is the one that propagates, so
+    the error a run reports is deterministic.
+    """
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    _serve_chatty_bot(fake_gh)
+
+    install_backend(_PerShardBackend({
+        _FIRST_SHARD_MARKER: RuntimeError("batch 0 exploded"),
+        _LAST_SHARD_MARKER: RuntimeError("batch 1 exploded"),
+    }))
+
+    with pytest.raises(RuntimeError, match="batch 0 exploded"):
+        await runner.run(
+            make_config(
+                multi_stack_target,
+                pr_number=7,
+                flow_name="dedup-real-path",
+                file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+            )
+        )
+
+    items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
+    assert all("disposition" not in item for item in items)
+
+
+async def test_dedup_external_single_batch_failure_propagates(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+) -> None:
+    """One candidate pair → one batch; its failure propagates as it always has."""
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    fake_gh.set_response("graphql_threads", value=_ext_page([
+        _ext_thread("api.py", 3, author="greptile-apps", body="loop overruns by one",
+                    url="https://gh/c/000"),
+    ]))
+    install_backend(ScriptedBackend(script=[(RuntimeError("adjudicator exploded"),)]))
+
+    with pytest.raises(RuntimeError, match="adjudicator exploded"):
+        await runner.run(
+            make_config(
+                multi_stack_target,
+                pr_number=7,
+                flow_name="dedup-real-path",
+                file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+            )
+        )
+
+
+async def test_dedup_external_suppression_follows_batch_order_not_completion_order(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+) -> None:
+    """Both shards vote to suppress item 1; the first batch's verdict must win.
+
+    The second shard is scripted to finish first, so a completion-ordered
+    assembly would write its ``external_ref`` instead.
+    """
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    _serve_chatty_bot(fake_gh)
+
+    backend = _PerShardBackend(
+        {
+            _FIRST_SHARD_MARKER: _shard_verdict(_FIRST_SHARD_MARKER),
+            _LAST_SHARD_MARKER: _shard_verdict(_LAST_SHARD_MARKER),
+        },
+        delays={_FIRST_SHARD_MARKER: 0.2},
+    )
+    install_backend(backend)
+
+    rc = await runner.run(
+        make_config(
+            multi_stack_target,
+            pr_number=7,
+            flow_name="dedup-real-path",
+            file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+        )
+    )
+
+    assert rc == 0
+    assert backend.completed == [_LAST_SHARD_MARKER, _FIRST_SHARD_MARKER]
+    by_id = {item["id"]: item
+             for item in json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
+             ["items"]}
+    assert by_id[1]["external_ref"] == _FIRST_SHARD_MARKER
 
 
 # --- _spine_dedup_external (enable gate) -------------------------------------
