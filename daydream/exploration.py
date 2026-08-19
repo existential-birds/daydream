@@ -40,11 +40,13 @@ class FileInfo:
         path: Relative file path.
         role: Relationship to the diff -- "modified", "imported_by", "imports", "test".
         summary: Brief description of the file's purpose.
+        provenance: Origin of the row (``static`` or ``llm``).
     """
 
     path: str
     role: str
     summary: str = ""
+    provenance: str = "static"
 
 
 @dataclass

@@ -193,6 +193,14 @@ def test_single_tier_dependency_tracer_only(tmp_path):
     assert "daydream/extra.py" in paths
 
 
+def test_specialist_rows_carry_llm_provenance(tmp_path):
+    diff_text = (FIXTURES / "python_multifile.diff").read_text()
+    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
+    by_path = {f.path: f for f in ctx.affected_files}
+    assert by_path["daydream/extra.py"].provenance == "llm"
+
+
 def test_parallel_tier_launches_three_agents(tmp_path):
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
