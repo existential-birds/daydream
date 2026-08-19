@@ -1307,6 +1307,23 @@ async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_batched_adds_test_map_source_hint(tmp_path, make_work, silence_console):
+    import json as _json
+
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    test_map = tmp_path / "test-map.json"
+    test_map.write_text(
+        _json.dumps({"test_mapping": [{"test_file": "tests/test_app.py", "source_file": "daydream/app.py"}]})
+    )
+    backend = ScriptedBackend()
+    items = [{"file": "tests/test_app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map_path=test_map)
+    assert any("daydream/app.py" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
 async def test_phase_fix_parallel_forwards_exploration_pointer(tmp_path, make_work, silence_console):
     from daydream.phases import phase_fix_parallel
 

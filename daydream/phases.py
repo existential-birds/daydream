@@ -1722,6 +1722,31 @@ def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
     return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
 
 
+def _build_test_map_hints(items: list[dict[str, Any]], test_map_path: Path | None) -> str:
+    """Return source-file hints for mapped test findings, degrading silently on a bad optional map."""
+    if test_map_path is None:
+        return ""
+    try:
+        data = json.loads(test_map_path.read_text())
+        mappings = data["test_mapping"]
+        if not isinstance(mappings, list):
+            raise TypeError("test_mapping must be a list")
+        by_test = {
+            str(row["test_file"]): str(row["source_file"])
+            for row in mappings
+            if isinstance(row, dict) and row.get("test_file") and row.get("source_file")
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+    hints = [
+        f"This test covers {by_test[item['file']]} — read it to understand the expected behavior."
+        for item in items
+        if isinstance(item.get("file"), str) and item["file"] in by_test
+    ]
+    return "\n" + "\n".join(hints) if hints else ""
+
+
 def _build_intent_suffix(intent_path: Path | None) -> str:
     """Build the confirmed-author-intent block for a fix prompt.
 
@@ -1874,6 +1899,7 @@ async def phase_fix(
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
+    test_map_path: Path | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1898,6 +1924,8 @@ async def phase_fix(
             prose boundary still applies.
         exploration_dir: Optional pre-scan directory whose deterministic
             ``affected_files.md`` index is pointed out to the fixer.
+        test_map_path: Optional ``test-map.json`` used to identify the source
+            covered by a test-file finding. Invalid maps are ignored.
     """
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
@@ -1924,6 +1952,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
             f"\nPre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
             "for the structural/import file map before fixing."
         )
+    prompt += _build_test_map_hints([item], test_map_path)
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
     # deliberate decision. A read failure skips the block; it is never coerced
@@ -1967,6 +1996,7 @@ async def phase_fix_batched(
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
+    test_map_path: Path | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1993,12 +2023,15 @@ async def phase_fix_batched(
             legacy/resume callers leaves the prompt without the clause.
         exploration_dir: Optional pre-scan directory whose deterministic
             ``affected_files.md`` index is pointed out to the fixer.
+        test_map_path: Optional ``test-map.json`` used to identify source files
+            covered by test-file findings. Invalid maps are ignored.
     """
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
             changed_files=changed_files, exploration_dir=exploration_dir,
+            test_map_path=test_map_path,
         )
         return
 
@@ -2035,6 +2068,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
             f"\nPre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
             "for the structural/import file map before fixing."
         )
+    prompt += _build_test_map_hints(items, test_map_path)
 
     prompt += _build_intent_suffix(intent_path)
     for idx, item in enumerate(items, start=1):
@@ -2088,6 +2122,7 @@ async def phase_fix_parallel(
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     changed_files: set[str] | None = None,
     exploration_dir: Path | None = None,
+    test_map_path: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -2131,6 +2166,8 @@ async def phase_fix_parallel(
             legacy/resume callers (no diff context) leaves prompts unchanged.
         exploration_dir: Optional pre-scan directory forwarded to every fix
             call so prompts point at its deterministic ``affected_files.md``.
+        test_map_path: Optional ``test-map.json`` forwarded to every fix call
+            for source-file context hints. Invalid maps are ignored.
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
@@ -2218,6 +2255,7 @@ async def phase_fix_parallel(
                 intent_path=intent_path,
                 changed_files=changed_files,
                 exploration_dir=exploration_dir,
+                test_map_path=test_map_path,
             )
             budget.record_item()
 
@@ -2261,6 +2299,7 @@ async def phase_fix_parallel(
                                         intent_path=intent_path,
                                         changed_files=changed_files,
                                         exploration_dir=exploration_dir,
+                                        test_map_path=test_map_path,
                                     )
                                     budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
