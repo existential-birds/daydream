@@ -1306,6 +1306,17 @@ async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_
     assert backend.prompts == []
 
 
+@pytest.mark.asyncio
+async def test_phase_fix_batched_prompt_includes_evidence(tmp_path, make_work, silence_console):
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1], 1)
+    assert any("tests/test_app.py:10" in prompt for prompt in backend.prompts)
+
+
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
@@ -1350,6 +1361,13 @@ class TestBuildFixPrompt:
         assert "if a correct fix needs another file, edit it and say which and why" in result
         # foo.py deduped to a single entry.
         assert result.count("- src/foo.py") == 1
+
+    def test_build_fix_prompt_threads_evidence_exemplar(self):
+        from daydream.phases import _build_fix_prompt
+
+        items = [{"file": "src/app.py", "evidence": "tests/test_deep_orchestrator.py:526"}]
+        prompt = _build_fix_prompt("tests failed", items, repo=None)
+        assert "tests/test_deep_orchestrator.py:526" in prompt
 
     def test_none_feedback_items_omits_file_section(self):
         from daydream.phases import _build_fix_prompt

@@ -136,7 +136,8 @@ def _build_fix_prompt(
 
     Args:
         test_output: Raw test output text.
-        feedback_items: Optional list of feedback items with 'file' keys.
+        feedback_items: Optional list of feedback items with 'file' and
+            optional 'evidence' exemplar keys.
         repo: Optional repo root; listed files are mapped to absolute paths when
             they exist under it, so the fix agent's first Read hits.
         concise_mode: When True, tighten action directives to suppress verbose
@@ -161,6 +162,10 @@ def _build_fix_prompt(
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+        evidence = [str(item.get("evidence", "")) for item in feedback_items if item.get("evidence")]
+        if evidence:
+            evidence_list = "\n".join(f"- {value}" for value in evidence)
+            parts.append(f"\nEvidence exemplars:\n{evidence_list}")
 
     if concise_mode:
         parts.append("\nFix the failures.")
@@ -1894,6 +1899,8 @@ async def phase_fix(
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
     line = item.get("line", "Unknown")
+    evidence = item.get("evidence", "")
+    evidence_line = f"\nEvidence: {evidence}" if evidence else ""
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
@@ -1903,7 +1910,7 @@ async def phase_fix(
 {description}
 
 File: {file_ref}
-Line: {line}
+Line: {line}{evidence_line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
@@ -2001,7 +2008,10 @@ async def phase_fix_batched(
     for idx, item in enumerate(items, start=1):
         desc = item.get("description", "No description")
         line = item.get("line", "Unknown")
+        evidence = item.get("evidence", "")
         findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
+        if evidence:
+            findings_block += f"   Evidence: {evidence}\n"
 
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
