@@ -29,7 +29,10 @@ from daydream.phases import (
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -1155,6 +1158,7 @@ def build_external_dedup_prompt(
         "  - Do NOT write, edit, or move files. You may inspect the cited code to "
         "judge, but most pairs can be decided from the two texts alone."
     )
+    parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
     parts.append("Candidate pairs:\n\n" + _render_external_pairs(pairs))
     parts.append(
         "Emit exactly one verdict per candidate pair. Each verdict MUST echo the "
@@ -1162,6 +1166,22 @@ def build_external_dedup_prompt(
         "empty `verdicts` array — this is NOT an error."
     )
     return "\n\n".join(parts)
+
+
+# Per-comment byte budget for competitor bodies re-embedded in the adjudicator
+# prompt. A single external comment can be paired against every overlapping
+# daydream item (see build_external_dedup_candidates), so an unbounded body is
+# repeated once per pair.
+_EXTERNAL_BODY_BUDGET_BYTES = 2_048
+
+
+def _bound_external_body(body: str, budget: int = _EXTERNAL_BODY_BUDGET_BYTES) -> str:
+    """Truncate a competitor comment body to a UTF-8 byte budget."""
+    encoded = body.encode("utf-8")
+    if len(encoded) <= budget:
+        return body
+    truncated = encoded[:budget].decode("utf-8", errors="ignore")
+    return f"{truncated}\n[... truncated, {len(encoded) - budget} bytes omitted ...]"
 
 
 def _render_external_pairs(pairs: list[Any]) -> str:
@@ -1176,7 +1196,7 @@ def _render_external_pairs(pairs: list[Any]) -> str:
             f"### item_id={pair.item_id}  external_ref={pair.external_url}\n"
             f"- daydream finding ({loc}): {pair.item_description}\n"
             f"- competitor comment ({pair.external_author}, {ext_loc}):\n"
-            f"{pair.external_body}"
+            f"{_bound_external_body(pair.external_body)}"
         )
     return "\n\n".join(blocks)
 

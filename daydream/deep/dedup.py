@@ -24,6 +24,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from daydream.repository_paths import canonicalize_directory_scope
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -39,6 +41,12 @@ _SIM_THRESHOLD = 0.5
 # window is deliberately generous because the LLM makes the final call and
 # competitor bots often anchor a few lines off from daydream.
 _EXTERNAL_LINE_WINDOW = 10
+
+# Disposition marker set on a merged item that was suppressed because an
+# external bot already posted the same finding. Shared across phases.py
+# (writer), pr_review.py and benchmark/mapping.py (readers) so a typo/rename
+# in one site can't silently break suppression.
+EXTERNAL_DEDUP_DISPOSITION = "deduped-vs-external"
 
 
 @dataclass(frozen=True)
@@ -180,15 +188,16 @@ def build_external_dedup_candidates(
     pairs: list[ExternalDuplicatePair] = []
     for item in items:
         item_id = item.get("id")
-        if not isinstance(item_id, int):
+        if not isinstance(item_id, int) or isinstance(item_id, bool):
             continue
         path = str(item.get("file", ""))
         if not path:
             continue
+        canonical_path = canonicalize_directory_scope(path)
         raw_line = item.get("line")
         item_line = raw_line if isinstance(raw_line, int) and not isinstance(raw_line, bool) else None
         for ext in external_comments:
-            if ext.path != path:
+            if canonicalize_directory_scope(ext.path) != canonical_path:
                 continue
             if item_line is not None and ext.line is not None and abs(item_line - ext.line) > line_window:
                 continue

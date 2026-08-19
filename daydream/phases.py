@@ -1707,7 +1707,7 @@ async def phase_dedup_external(
         The number of items suppressed.
     """
     from daydream.deep.artifacts import external_dedup_path
-    from daydream.deep.dedup import build_external_dedup_candidates
+    from daydream.deep.dedup import EXTERNAL_DEDUP_DISPOSITION, build_external_dedup_candidates
     from daydream.reconcile import fetch_external_findings
 
     doc = json.loads(merged_items_path.read_text())
@@ -1751,6 +1751,14 @@ async def phase_dedup_external(
     # cannot suppress daydream findings that were never part of the dedup input.
     candidate_ids: frozenset[int] = frozenset(p.item_id for p in candidates)
 
+    # Bound external_ref the same way item_id is bounded: only URLs that were
+    # actually offered as candidates for that item_id are trusted. Otherwise the
+    # LLM could write an arbitrary, unverified URL into merged-items.json and
+    # the audit sidecar.
+    external_urls_by_item: dict[int, set[str]] = {}
+    for p in candidates:
+        external_urls_by_item.setdefault(p.item_id, set()).add(p.external_url)
+
     # An item is suppressed on the first high-confidence duplicate verdict for it.
     suppress: dict[int, str] = {}
     for entry in verdicts:
@@ -1764,13 +1772,16 @@ async def phase_dedup_external(
             and entry.get("confidence") == "high"
             and item_id not in suppress
         ):
-            suppress[item_id] = str(entry.get("external_ref", ""))
+            external_ref = str(entry.get("external_ref", ""))
+            if external_ref not in external_urls_by_item.get(item_id, frozenset()):
+                external_ref = ""
+            suppress[item_id] = external_ref
 
     suppressed_records: list[dict[str, Any]] = []
     for item in items:
         item_id = item.get("id")
         if isinstance(item_id, int) and item_id in suppress:
-            item["disposition"] = "deduped-vs-external"
+            item["disposition"] = EXTERNAL_DEDUP_DISPOSITION
             item["external_ref"] = suppress[item_id]
             suppressed_records.append(
                 {"id": item_id, "file": item.get("file"), "external_ref": suppress[item_id]}

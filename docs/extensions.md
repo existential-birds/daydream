@@ -391,7 +391,7 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
-| `dedup-external` | `pairs`, `cwd` |
+| `external-dedup` | `pairs`, `cwd` |
 | `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |

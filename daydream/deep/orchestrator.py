@@ -2318,7 +2318,7 @@ async def _step_dedup_external(ctx: FlowContext) -> None:
         return None
 
     async with phase_scope(DaydreamPhase.DEDUP):
-        await phase_dedup_external(
+        suppressed_count = await phase_dedup_external(
             ctx.backend_for("dedup"),
             ctx.work,
             merged_items_path=ctx.data["items_file"],
@@ -2327,6 +2327,22 @@ async def _step_dedup_external(ctx: FlowContext) -> None:
             pr_number=pr.number,
             bot_logins=bot_logins,
         )
+
+    if suppressed_count:
+        # The report rendered during `supervise` predates this step, so it
+        # still lists items just suppressed above. Re-render from the
+        # updated items file so the locally-written report matches what
+        # findings-out/post-review will actually emit.
+        doc = json.loads(ctx.data["items_file"].read_text())
+        kept = [item for item in doc.get("items", []) if item.get("disposition") != "deduped-vs-external"]
+        held = doc.get("held", [])
+        report = render_report(kept)
+        held_section = render_held_section(held)
+        if held_section:
+            report = report.rstrip() + "\n\n" + held_section + "\n"
+        merged_report_path(ctx.data["dd"]).write_text(report)
+        ctx.data["merged_report"].write_text(report)
+
     return None
 
 

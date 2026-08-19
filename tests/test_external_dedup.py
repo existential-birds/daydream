@@ -10,6 +10,9 @@ Covers the four layers of the feature:
   5. ``deep.orchestrator._spine_dedup_external`` — enable gate (opt-in + resume guard).
   6. ``deep.orchestrator._step_dedup_external`` — PR resolution branches and GitError
      handling.
+  7. The full ``dedup-external`` FlowStep, driven end-to-end through
+     ``runner.run`` with only the ``gh`` subprocess boundary faked (``fake_gh``),
+     exercising the real step→phase wiring and the real GraphQL fetch.
 """
 
 from __future__ import annotations
@@ -20,12 +23,15 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops
+from daydream import git_ops, runner
 from daydream.backends import ResultEvent
+from daydream.config_file import DaydreamFileConfig
 from daydream.deep.dedup import build_external_dedup_candidates
 from daydream.pr_review import parsed_issues_from_items
 from daydream.reconcile import ExternalComment, fetch_external_findings
+from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
+from tests.harness.fake_gh import FakeGh
 
 # --- fetch_external_findings ----------------------------------------------
 
@@ -251,6 +257,105 @@ async def test_phase_dedup_external_no_candidates_skips_agent(
     )
     assert suppressed == 0
     assert json.loads((deep_dir / "external-dedup.json").read_text()) == {"suppressed": []}
+
+
+# --- dedup-external FlowStep, driven end-to-end via runner.run -------------
+#
+# The tests above call ``phase_dedup_external`` directly (mocking
+# ``reconcile.fetch_external_findings``) or call ``_step_dedup_external``
+# directly (mocking ``phase_dedup_external``). Neither exercises the real
+# ``FlowStep`` dispatch into the real phase, nor the real GraphQL fetch. This
+# test registers a tiny fork flow that seeds merged-items.json and then runs
+# the *real* built-in ``dedup-external`` step through ``runner.run``, faking
+# only the ``gh`` subprocess boundary (``fake_gh``) and the agent seam.
+
+_SEED_DEDUP_FLOW_EXT = """
+import json
+
+from daydream.extensions import FlowStep
+
+
+async def _seed(ctx):
+    deep_dir = ctx.work.repo / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True, exist_ok=True)
+    items_file = deep_dir / "merged-items.json"
+    items = [
+        {"id": 1, "file": "api.py", "line": 1, "description": "off-by-one in loop", "severity": "high"},
+        {"id": 2, "file": "App.tsx", "line": 1, "description": "unique daydream finding", "severity": "high"},
+    ]
+    items_file.write_text(json.dumps({"items": items, "held": []}))
+    ctx.data["items_file"] = items_file
+    ctx.data["dd"] = deep_dir
+    ctx.data["merged_report"] = deep_dir / "merged-report.md"
+
+
+def register(r):
+    r.register_phase(FlowStep(name="seed-dedup", run=_seed))
+    r.set_flow("dedup-real-path", ["seed-dedup", "dedup-external"])
+"""
+
+
+def _serve_open_pr(fake_gh: FakeGh, target: Path) -> None:
+    fake_gh.serve_pr_view(
+        {
+            "number": 7,
+            "state": "OPEN",
+            "headRefName": "feature",
+            "baseRefName": "main",
+            "headRefOid": git_ops.head_sha(target),
+            "baseRefOid": git_ops.merge_base(target, "main"),
+            "url": "https://github.com/acme/widgets/pull/7",
+            "body": "",
+        }
+    )
+
+
+async def test_dedup_external_step_wires_to_real_phase_and_fetch_via_runner_run(
+    ext_dir: ExtDir,
+    multi_stack_target: Path,
+    fake_gh: FakeGh,
+    install_backend: Any,
+    make_config: Any,
+) -> None:
+    """Real ``FlowStep`` dispatch into the real phase, real fetch, faked ``gh``.
+
+    Only the ``gh`` subprocess boundary is faked (via ``fake_gh``, which
+    intercepts ``subprocess.run`` inside ``git_ops``); ``reconcile.fetch_external_findings``,
+    ``phases.phase_dedup_external``, and ``_step_dedup_external`` all run for real.
+    """
+    ext_dir.write_module(_SEED_DEDUP_FLOW_EXT)
+    _serve_open_pr(fake_gh, multi_stack_target)
+    # greptile already flagged api.py near the item-1 location.
+    page = _ext_page([_ext_thread("api.py", 3, author="greptile-apps",
+                                  body="loop overruns by one", url="https://gh/c/1")])
+    fake_gh.set_response("graphql_threads", value=page)
+
+    verdicts = {
+        "verdicts": [
+            {"item_id": 1, "external_ref": "https://gh/c/1", "duplicate": True,
+             "confidence": "high", "reason": "same off-by-one"},
+        ]
+    }
+    install_backend(ScriptedBackend(events=(ResultEvent(structured_output=verdicts, continuation=None),)))
+
+    rc = await runner.run(
+        make_config(
+            multi_stack_target,
+            pr_number=7,
+            flow_name="dedup-real-path",
+            file_config=DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"]),
+        )
+    )
+
+    assert rc == 0
+    items_file = multi_stack_target / ".daydream" / "deep" / "merged-items.json"
+    by_id = {item["id"]: item for item in json.loads(items_file.read_text())["items"]}
+    assert by_id[1]["disposition"] == "deduped-vs-external"
+    assert by_id[1]["external_ref"] == "https://gh/c/1"
+    assert "disposition" not in by_id[2]
+
+    sidecar = json.loads((multi_stack_target / ".daydream" / "deep" / "external-dedup.json").read_text())
+    assert sidecar["suppressed"][0]["id"] == 1
 
 
 # --- _spine_dedup_external (enable gate) -------------------------------------
