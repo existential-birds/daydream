@@ -7,6 +7,9 @@ Covers the four layers of the feature:
      temp files + merged-items.json, mocking only the GitHub fetch and the agent seam).
   4. ``pr_review.parsed_issues_from_items`` — the disposition is honored so suppressed
      items never reach the PR or the findings artifact.
+  5. ``deep.orchestrator._spine_dedup_external`` — enable gate (opt-in + resume guard).
+  6. ``deep.orchestrator._step_dedup_external`` — PR resolution branches and GitError
+     handling.
 """
 
 from __future__ import annotations
@@ -64,14 +67,17 @@ def test_fetch_external_findings_filters_by_author(monkeypatch: pytest.MonkeyPat
     assert found[0].line == 10
 
 
-def test_fetch_external_findings_falls_back_to_original_line(
+def test_fetch_external_findings_ignores_original_line(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    # originalLine is a base-commit coordinate; we must not store it in
+    # ExternalComment.line (head-commit space) — the downstream filter uses
+    # file-level matching when line is None.
     page = _ext_page([_ext_thread("a.py", None, original=42, author="greptile-apps",
                                   body="x", url="u1")])
     monkeypatch.setattr(git_ops, "gh_api", lambda *a, **k: page)
     found = fetch_external_findings(tmp_path, "o/r", 7, bot_logins=["greptile-apps"])
-    assert found[0].line == 42
+    assert found[0].line is None
 
 
 def test_fetch_external_findings_empty_bots_makes_no_call(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -245,3 +251,233 @@ async def test_phase_dedup_external_no_candidates_skips_agent(
     )
     assert suppressed == 0
     assert json.loads((deep_dir / "external-dedup.json").read_text()) == {"suppressed": []}
+
+
+# --- _spine_dedup_external (enable gate) -------------------------------------
+
+
+def _make_flow_ctx(tmp_path: Path, **run_config_kwargs: Any) -> Any:
+    """Build a minimal FlowContext for spine-gate unit tests."""
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+
+    config = RunConfig(target=str(tmp_path), **run_config_kwargs)
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="",
+        head_branch=None,
+        head_sha="",
+        is_ephemeral=False,
+        run_id="test",
+    )
+    return FlowContext(config=config, work=work, registry=Registry(), data={})
+
+
+def test_spine_dedup_external_off_by_default(tmp_path: Path) -> None:
+    """No ``external_review_bots`` configured → step is disabled."""
+    from daydream.deep.orchestrator import _spine_dedup_external
+
+    assert _spine_dedup_external(_make_flow_ctx(tmp_path)) is False
+
+
+def test_spine_dedup_external_on_when_bots_configured(tmp_path: Path) -> None:
+    """Non-empty ``external_review_bots`` on a fresh run enables the step."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _spine_dedup_external
+
+    fc = DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"])
+    assert _spine_dedup_external(_make_flow_ctx(tmp_path, file_config=fc)) is True
+
+
+def test_spine_dedup_external_off_on_fix_resume(tmp_path: Path) -> None:
+    """``--start-at fix`` resume must not re-fetch competitor comments."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.deep.orchestrator import _spine_dedup_external
+
+    fc = DaydreamFileConfig(external_review_bots=["greptile-apps[bot]"])
+    assert _spine_dedup_external(_make_flow_ctx(tmp_path, file_config=fc, start_at="fix")) is False
+
+
+# --- _step_dedup_external (orchestrator wiring) ------------------------------
+
+
+def _make_step_ctx(tmp_path: Path, items_file: Path, deep_dir: Path,
+                   bot_logins: list[str], pr_number: int | None = None) -> Any:
+    """Build a FlowContext wired with the data keys _step_dedup_external reads."""
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.runner import RunConfig
+    from daydream.workspace import WorkContext
+
+    fc = DaydreamFileConfig(external_review_bots=bot_logins)
+    config = RunConfig(target=str(tmp_path), file_config=fc, pr_number=pr_number,
+                       non_interactive=True, cleanup=False, archive=False)
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="",
+        head_branch=None,
+        head_sha="",
+        is_ephemeral=False,
+        run_id="test",
+    )
+    ctx = FlowContext(config=config, work=work, registry=Registry(),
+                      data={"items_file": items_file, "dd": deep_dir})
+    return ctx
+
+
+def _fake_pr() -> Any:
+    """Minimal PRInfo-like object with the fields _step_dedup_external uses."""
+    from daydream.pr_review import PRInfo
+
+    return PRInfo(number=7, head_sha="abc", base_sha="def", base_ref="main",
+                  owner="myorg", repo="myrepo", url="https://gh/pr/7")
+
+
+@pytest.mark.asyncio
+async def test_step_dedup_external_git_error_warns_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
+) -> None:
+    """GitError during PR resolution → warns, does not call phase_dedup_external."""
+    silence_console("daydream.deep.orchestrator")
+    from daydream import pr_review
+    from daydream.deep.orchestrator import _step_dedup_external
+    from daydream.git_ops import GitError
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    items_file = deep_dir / "merged-items.json"
+    items_file.write_text(json.dumps({"items": [], "held": []}))
+
+    def _raise_git_error(*a: Any, **k: Any) -> None:
+        raise GitError("no remote")
+
+    monkeypatch.setattr(pr_review, "find_open_pr", _raise_git_error)
+
+    called = []
+
+    async def _no_call(*a: Any, **k: Any) -> int:
+        called.append(True)
+        return 0
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _no_call)
+
+    ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
+    result = await _step_dedup_external(ctx)
+
+    assert result is None  # warn-and-continue: step does not Stop the flow
+    assert called == []    # phase_dedup_external must not be invoked
+
+
+@pytest.mark.asyncio
+async def test_step_dedup_external_no_pr_warns_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
+) -> None:
+    """No resolvable PR → warns, does not call phase_dedup_external."""
+    silence_console("daydream.deep.orchestrator")
+    from daydream import pr_review
+    from daydream.deep.orchestrator import _step_dedup_external
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    items_file = deep_dir / "merged-items.json"
+    items_file.write_text(json.dumps({"items": [], "held": []}))
+
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda *a, **k: None)
+
+    called = []
+
+    async def _no_call(*a: Any, **k: Any) -> int:
+        called.append(True)
+        return 0
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _no_call)
+
+    ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
+    result = await _step_dedup_external(ctx)
+
+    assert result is None
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_step_dedup_external_open_pr_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
+) -> None:
+    """No pinned pr_number → uses find_open_pr and delegates to phase_dedup_external."""
+    silence_console("daydream.deep.orchestrator")
+    from daydream import pr_review
+    from daydream.deep.orchestrator import _step_dedup_external
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    items_file = deep_dir / "merged-items.json"
+    items_file.write_text(json.dumps({"items": [], "held": []}))
+
+    pr = _fake_pr()
+    monkeypatch.setattr(pr_review, "find_open_pr", lambda *a, **k: pr)
+
+    calls: list[dict[str, Any]] = []
+
+    async def _record(*a: Any, **k: Any) -> int:
+        calls.append({"repo_slug": k.get("repo_slug"), "pr_number": k.get("pr_number"),
+                       "bot_logins": k.get("bot_logins")})
+        return 0
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _record)
+
+    ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
+    result = await _step_dedup_external(ctx)
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0]["repo_slug"] == "myorg/myrepo"
+    assert calls[0]["pr_number"] == 7
+    assert calls[0]["bot_logins"] == ["greptile-apps[bot]"]
+
+
+@pytest.mark.asyncio
+async def test_step_dedup_external_pinned_pr_number_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
+) -> None:
+    """Pinned ``--pr-number`` → uses find_pr_by_number (not find_open_pr)."""
+    silence_console("daydream.deep.orchestrator")
+    from daydream import pr_review
+    from daydream.deep.orchestrator import _step_dedup_external
+
+    deep_dir = tmp_path / ".daydream" / "deep"
+    deep_dir.mkdir(parents=True)
+    items_file = deep_dir / "merged-items.json"
+    items_file.write_text(json.dumps({"items": [], "held": []}))
+
+    pr = _fake_pr()
+    find_by_number_calls: list[int] = []
+
+    def _find_by_number(target_dir: Path, number: int) -> Any:
+        find_by_number_calls.append(number)
+        return pr
+
+    monkeypatch.setattr(pr_review, "find_pr_by_number", _find_by_number)
+    # find_open_pr must not be called on the pinned path.
+    def _must_not_be_called(*a: Any, **k: Any) -> None:
+        raise AssertionError("find_open_pr must not be called on the pinned-pr-number path")
+
+    monkeypatch.setattr(pr_review, "find_open_pr", _must_not_be_called)
+
+    async def _noop(*a: Any, **k: Any) -> int:
+        return 0
+
+    monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _noop)
+
+    ctx = _make_step_ctx(tmp_path, items_file, deep_dir,
+                         bot_logins=["greptile-apps[bot]"], pr_number=42)
+    result = await _step_dedup_external(ctx)
+
+    assert result is None
+    assert find_by_number_calls == [42]

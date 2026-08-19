@@ -65,8 +65,9 @@ class ExternalComment:
 
     Attributes:
         path: Repo-relative file the comment is anchored to.
-        line: Anchored line in the head commit, or None when GitHub reports
-            neither ``line`` nor ``originalLine`` (an outdated/file-level thread).
+        line: Anchored line in the head commit, or None when GitHub does not
+            report a head-commit line (outdated or file-level thread). The
+            downstream filter uses a file-level match in that case.
         body: The comment's markdown body.
         url: Permalink to the comment (for the audit sidecar / ``external_ref``).
         author: The comment author's login, as reported by GraphQL.
@@ -271,9 +272,11 @@ def fetch_external_findings(
     tolerant comparator. Read-only; used by the external-dedup phase to
     suppress daydream findings that a faster competitor bot already posted.
 
-    ``line`` falls back to ``originalLine`` when GitHub reports the thread
-    against the original diff (outdated thread); it is None when neither is
-    present, in which case the finding can only match at file level.
+    ``line`` is taken only from GitHub's ``line`` field (head-commit
+    coordinate). ``originalLine`` (base-commit, set on outdated threads) is
+    intentionally ignored to avoid mixing coordinate spaces; when ``line`` is
+    absent ``ExternalComment.line`` is None and the downstream filter falls
+    back to file-level matching.
 
     Returns:
         Competitor comments in discovery order. Empty when *bot_logins* is
@@ -298,8 +301,7 @@ def fetch_external_findings(
                 continue
             line = thread.get("line")
             if not isinstance(line, int):
-                original = thread.get("originalLine")
-                line = original if isinstance(original, int) else None
+                line = None
             for comment in thread["comments"]["nodes"]:
                 login = (comment.get("author") or {}).get("login")
                 if not any(bot_login_matches(login, bot) for bot in bot_logins):

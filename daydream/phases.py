@@ -1746,6 +1746,11 @@ async def phase_dedup_external(
             candidate = None
     verdicts = candidate.get("verdicts", []) if isinstance(candidate, dict) else []
 
+    # Only item_ids that were actually emitted as candidates are eligible for
+    # suppression. This bounds the set so hallucinated item_ids from the LLM
+    # cannot suppress daydream findings that were never part of the dedup input.
+    candidate_ids: frozenset[int] = frozenset(p.item_id for p in candidates)
+
     # An item is suppressed on the first high-confidence duplicate verdict for it.
     suppress: dict[int, str] = {}
     for entry in verdicts:
@@ -1754,6 +1759,7 @@ async def phase_dedup_external(
         item_id = entry.get("item_id")
         if (
             isinstance(item_id, int)
+            and item_id in candidate_ids
             and entry.get("duplicate") is True
             and entry.get("confidence") == "high"
             and item_id not in suppress

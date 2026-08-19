@@ -59,6 +59,8 @@ def merged_items_to_review_comments(
     """
     out: list[dict[str, Any]] = []
     for raw in doc.get("items", []):
+        if raw.get("disposition") == "deduped-vs-external":
+            continue
         fields = extract_item_fields(raw)
         if fields is None:
             continue
