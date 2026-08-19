@@ -838,16 +838,6 @@ class Invocation:
     _inv_metrics_sum: dict[str, float | int] = field(
         default_factory=lambda: {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0}
     )
-    # Set-once per invocation: did any MetricsEvent already carry tokens / cost?
-    # A trailing CostEvent that re-states what MetricsEvents reported must not
-    # accumulate again (codex re-states per turn, pi re-states the summed
-    # totals). Each retry attempt mints a fresh Invocation (agent.py opens
-    # `recorder.invocation(...)` inside the attempt loop), so these flags start
-    # False per attempt and each attempt's MetricsEvent/CostEvent de-dupe
-    # independently while the recorder-level tally still sums every billed
-    # attempt.
-    _tokens_from_metrics: bool = False
-    _cost_from_metrics: bool = False
 
     def observe_user_step(self, prompt: str) -> None:
         """Append a user Step at invocation start (MAP-01, Pitfall 4).
@@ -1030,9 +1020,6 @@ class Invocation:
             # Aggregate into recorder-level totals for FinalMetrics (MAP-07),
             # and into the invocation-level sum the CostEvent delta reconciles
             # against (issue #747).
-            self._tokens_from_metrics = True
-            if event.cost_usd is not None:
-                self._cost_from_metrics = True
             if event.prompt_tokens is not None:
                 self._inv_metrics_sum["prompt"] += event.prompt_tokens
             if event.completion_tokens is not None:
@@ -1071,13 +1058,24 @@ class Invocation:
             existing = target["_metrics"]
             if existing is None:
                 # #192: reasoning_tokens (subset of completion_tokens) via
-                # Metrics.extra — vendored Metrics has no field (D-03).
+                # Metrics.extra — vendored Metrics has no field (D-03). The
+                # fresh step E holds only the residual delta this CostEvent
+                # adds beyond the invocation's per-message sum, so
+                # ``Σ steps == recorder total`` holds (issue #747). Reasoning
+                # stays a subset: only carried when it does not exceed the
+                # step's completion.
+                reasoning = None
+                if (
+                    event.reasoning_tokens is not None
+                    and event.reasoning_tokens <= delta["completion"]
+                ):
+                    reasoning = _reasoning_extra(event.reasoning_tokens)
                 target["_metrics"] = Metrics(
-                    prompt_tokens=event.input_tokens,
-                    completion_tokens=event.output_tokens,
-                    cached_tokens=event.cached_tokens,
-                    cost_usd=event.cost_usd,
-                    extra=_reasoning_extra(event.reasoning_tokens),
+                    prompt_tokens=delta["prompt"],
+                    completion_tokens=delta["completion"],
+                    cached_tokens=delta["cached"],
+                    cost_usd=None if event.cost_usd is None else delta["cost"],
+                    extra=reasoning,
                 )
             else:
                 # MetricsEvent already populated this step. Prefer the
