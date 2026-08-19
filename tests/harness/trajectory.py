@@ -43,6 +43,22 @@ def read_trajectory(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def step_token_sum(traj: dict[str, Any], key: str) -> int:
+    """Sum ``metrics[key]`` across agent steps that carry it.
+
+    Reconciliation invariant: the step-level rollup's per-dimension sum must
+    equal the recorder's final_metrics total (``Σ steps == final``). Steps
+    whose ``metrics`` block is absent, or which lack the requested key, are
+    skipped so a phantom all-zero residual step can never contribute a zero
+    line item to the sum.
+    """
+    return sum(
+        s["metrics"][key]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get(key)
+    )
+
+
 def observe_text_and_result(inv: Invocation, text: str = "output") -> None:
     """Observe a TextEvent + ResultEvent to produce a minimal agent step."""
     inv.observe(TextEvent(text=text))

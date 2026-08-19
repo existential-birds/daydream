@@ -29,7 +29,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory, step_token_sum
 
 # -- Per-phase session totals (one run_agent call per phase) -----------------
 # Claude-shaped stream: near-constant single-digit completion_tokens per
@@ -132,8 +132,7 @@ async def test_reconciled_totals_not_per_message_collapse(tmp_path: Path) -> Non
 
     final = traj["final_metrics"]
     assert final["total_completion_tokens"] == sum(_PHASE_SESSION_TOTALS)
-    step_sum = sum(s["metrics"]["completion_tokens"] for s in traj["steps"]
-                   if s.get("metrics") and s["metrics"].get("completion_tokens"))
+    step_sum = step_token_sum(traj, "completion_tokens")
     assert final["total_completion_tokens"] == step_sum
 
 
@@ -145,8 +144,7 @@ async def test_final_metrics_sum_matches_per_step_totals(tmp_path: Path) -> None
 
     final = traj["final_metrics"]
     assert final["total_completion_tokens"] == sum(_PHASE_SESSION_TOTALS)  # 181_737
-    step_sum = sum(s["metrics"]["completion_tokens"] for s in traj["steps"]
-                   if s.get("metrics") and s["metrics"].get("completion_tokens"))
+    step_sum = step_token_sum(traj, "completion_tokens")
     assert final["total_completion_tokens"] == step_sum
     # Prompt: per-call authoritative CostEvent total (600) per phase.
     assert final["total_prompt_tokens"] == 600 * 3  # 1800
@@ -412,11 +410,7 @@ async def test_step_metrics_sum_equals_final_metrics(tmp_path: Path) -> None:
     """The ``final == Σ steps`` invariant holds once steps accumulate."""
     traj = await _drive_one(tmp_path, _MetricsOnlyBackend(turns=3, in_tok=100, out_tok=10))
 
-    step_sum = sum(
-        s["metrics"]["prompt_tokens"]
-        for s in traj["steps"]
-        if s.get("metrics") and s["metrics"].get("prompt_tokens")
-    )
+    step_sum = step_token_sum(traj, "prompt_tokens")
     assert traj["final_metrics"]["total_prompt_tokens"] == step_sum == 300
 
 

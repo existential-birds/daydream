@@ -31,8 +31,8 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder, read_trajectory
+from daydream.trajectory import DaydreamPhase, Invocation
+from tests.harness.trajectory import make_recorder, read_trajectory, step_token_sum
 
 
 @dataclass
@@ -124,6 +124,22 @@ async def _run_tool_agent(
 
 
 
+def _observe_claude_shape(inv: Invocation) -> None:
+    """Shared Claude-shaped observe() body: 5 per-message single-digit
+    MetricsEvents (one per turn) + the authoritative session-total CostEvent
+    + ResultEvent. Both claude-shape tests replay this so a future token
+    dimension is added in exactly one place."""
+    for i, c in enumerate((12, 9, 11, 8, 10)):
+        inv.observe(TextEvent(text=f"turn {i}"))
+        inv.observe(MetricsEvent(message_id=f"m{i}", prompt_tokens=100,
+                                 completion_tokens=c, cached_tokens=None,
+                                 cost_usd=None))
+        inv.observe(TurnEndEvent(message_id=f"m{i}"))
+    inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
+                          output_tokens=66_737, cached_tokens=None))
+    inv.observe(ResultEvent(structured_output=None, continuation=None))
+
+
 @pytest.mark.asyncio
 async def test_claude_shape_final_reflects_session_total(tmp_path):
     """Claude-shaped stream: per-message single-digit completion + authoritative
@@ -132,15 +148,7 @@ async def test_claude_shape_final_reflects_session_total(tmp_path):
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            for i, c in enumerate((12, 9, 11, 8, 10)):
-                inv.observe(TextEvent(text=f"turn {i}"))
-                inv.observe(MetricsEvent(message_id=f"m{i}", prompt_tokens=100,
-                                         completion_tokens=c, cached_tokens=None,
-                                         cost_usd=None))
-                inv.observe(TurnEndEvent(message_id=f"m{i}"))
-            inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
-                                  output_tokens=66_737, cached_tokens=None))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            _observe_claude_shape(inv)
     traj = read_trajectory(recorder.path)
     assert traj["final_metrics"]["total_completion_tokens"] == 66_737
 
@@ -152,19 +160,10 @@ async def test_claude_shape_step_sum_equals_final(tmp_path):
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            for i, c in enumerate((12, 9, 11, 8, 10)):
-                inv.observe(TextEvent(text=f"turn {i}"))
-                inv.observe(MetricsEvent(message_id=f"m{i}", prompt_tokens=100,
-                                         completion_tokens=c, cached_tokens=None,
-                                         cost_usd=None))
-                inv.observe(TurnEndEvent(message_id=f"m{i}"))
-            inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
-                                  output_tokens=66_737, cached_tokens=None))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            _observe_claude_shape(inv)
     traj = read_trajectory(recorder.path)
     final = traj["final_metrics"]
-    step_sum = sum(s["metrics"]["completion_tokens"] for s in traj["steps"]
-                   if s.get("metrics") and s["metrics"].get("completion_tokens"))
+    step_sum = step_token_sum(traj, "completion_tokens")
     assert step_sum == 66_737
     assert final["total_completion_tokens"] == step_sum
 
@@ -175,9 +174,13 @@ async def test_multi_turn_turns_each_own_step(tmp_path):
     records >2 steps and one metrics-bearing step per turn (not one collapsed)."""
     traj = await _run_tool_agent(tmp_path, turns=3, tools_per_turn=8)
     assert traj["final_metrics"]["total_steps"] > 2
-    metric_steps = [s for s in traj["steps"]
-                    if s["source"] == "agent" and s.get("metrics")]
-    assert len(metric_steps) >= 3   # one per turn, not collapsed to 1
+    # One metrics-bearing step per turn: the per-message single-digit (10)
+    # steps are the per-turn MetricsEvents; the CostEvent residual step
+    # (completion 66707) is reconciliation, not a turn, so it is excluded.
+    turn_steps = [s for s in traj["steps"]
+                  if s["source"] == "agent" and s.get("metrics")
+                  and s["metrics"].get("completion_tokens") == 10]
+    assert len(turn_steps) == 3   # exactly one per turn, not collapsed
 
 
 @pytest.mark.asyncio
@@ -198,8 +201,7 @@ async def test_pi_shape_no_step_level_double_count(tmp_path):
             inv.observe(ResultEvent(structured_output=None, continuation=None))
     traj = read_trajectory(recorder.path)
     final = traj["final_metrics"]
-    step_sum = sum(s["metrics"]["completion_tokens"] for s in traj["steps"]
-                   if s.get("metrics") and s["metrics"].get("completion_tokens"))
+    step_sum = step_token_sum(traj, "completion_tokens")
     step_cost = sum(s["metrics"].get("cost_usd") or 0 for s in traj["steps"]
                     if s.get("metrics"))
     assert final["total_completion_tokens"] == 30
