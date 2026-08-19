@@ -70,6 +70,29 @@ class _MockBackend:
         return f"/{skill_key}"
 
 
+async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
+    """Real-path run_agent with a Write-heavy tool call: a 16 KB content payload
+    in the tool arguments (like _run_tool_agent, one turn)."""
+    events: list[AgentEvent] = [
+        TextEvent(text="turn 0"),
+        ToolStartEvent(id="w1", name="Write",
+                       input={"file_path": "/tmp/f.txt", "content": content}),
+        ToolResultEvent(id="w1", output="ok", is_error=False),
+        MetricsEvent(message_id="m0", prompt_tokens=100, completion_tokens=10,
+                     cached_tokens=None, cost_usd=None),
+        TurnEndEvent(message_id="m0"),
+        CostEvent(cost_usd=0.5, input_tokens=600,
+                  output_tokens=66_737, cached_tokens=None),
+        ResultEvent(structured_output=None, continuation=None),
+    ]
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        await run_agent(
+            _MockBackend(events=events), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
+        )
+    return read_trajectory(recorder.path)
+
+
 async def _run_tool_agent(
     tmp_path: Path, *, turns: int, tools_per_turn: int
 ) -> dict[str, Any]:
@@ -183,3 +206,12 @@ async def test_pi_shape_no_step_level_double_count(tmp_path):
     assert step_sum == 30               # not 60
     assert final["total_cost_usd"] == pytest.approx(0.75)
     assert step_cost == pytest.approx(0.75)  # not 1.5
+
+
+@pytest.mark.asyncio
+async def test_16kb_write_reports_real_completion(tmp_path):
+    """A Write-heavy agent (16 KB content in tool arguments) reports a real
+    total_completion_tokens magnitude, not double digits (the pre-fix bug)."""
+    traj = await _run_write_agent(tmp_path, content="x" * 16_000)
+    completion = traj["final_metrics"]["total_completion_tokens"]
+    assert completion >= 1_000   # right order of magnitude; pre-fix it was ~50
