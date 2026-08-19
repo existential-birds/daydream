@@ -31,7 +31,6 @@ from daydream.backends import (
 from daydream.trajectory import DaydreamPhase
 from tests.harness.trajectory import make_recorder, read_trajectory
 
-
 # -- Per-phase session totals (one run_agent call per phase) -----------------
 # Claude-shaped stream: near-constant single-digit completion_tokens per
 # message, with the authoritative whole-call session total on the CostEvent.
