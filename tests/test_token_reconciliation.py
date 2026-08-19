@@ -215,3 +215,41 @@ async def test_16kb_write_reports_real_completion(tmp_path):
     traj = await _run_write_agent(tmp_path, content="x" * 16_000)
     completion = traj["final_metrics"]["total_completion_tokens"]
     assert completion >= 1_000   # right order of magnitude; pre-fix it was ~50
+
+
+def _tool_argument_floor(traj):
+    """floor = SUM(len(json.dumps(tool_call['arguments'])) / 4) over recorded calls."""
+    total = 0
+    for s in traj["steps"]:
+        for tc in s.get("tool_calls") or []:
+            total += len(json.dumps(tc["arguments"]))
+    return total // 4
+
+
+@pytest.mark.asyncio
+async def test_tool_argument_invariant_holds_real_path(tmp_path):
+    """total_completion_tokens >= floor on a real-path Write-heavy run (passes post-fix)."""
+    traj = await _run_write_agent(tmp_path, content="y" * 16_000)
+    assert traj["final_metrics"]["total_completion_tokens"] >= _tool_argument_floor(traj)
+
+
+def test_tool_argument_invariant_fails_pre_fix_bundle():
+    """The gate is non-trivial: a hand-built pre-fix bundle (collapsed total) FAILS it."""
+    traj = _pre_fix_bundle()   # total_completion_tokens=50, one Write call with 16KB args
+    completion = traj["final_metrics"]["total_completion_tokens"]
+    assert completion < _tool_argument_floor(traj)
+
+
+def _pre_fix_bundle() -> dict[str, Any]:
+    """Minimal ATIF-shaped dict with a collapsed pre-fix completion total."""
+    return {
+        "final_metrics": {"total_completion_tokens": 50},
+        "steps": [{
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": "w1",
+                "function_name": "Write",
+                "arguments": {"file_path": "/tmp/f", "content": "z" * 16_000},
+            }],
+        }],
+    }
