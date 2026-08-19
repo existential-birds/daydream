@@ -745,6 +745,17 @@ async def run_agent(
                                 if inv is not None:
                                     inv.observe(event)
 
+                            elif isinstance(event, TurnEndEvent):
+                                # Per-turn close (issue #747): forward the
+                                # turn boundary so each turn's already-emitted
+                                # MetricsEvent lands on its own Step instead of
+                                # collapsing into one. Pure recorder
+                                # forwarding — no UI, no logging. The recorder's
+                                # no-open-step no-op guard prevents empty-step
+                                # invention.
+                                if inv is not None:
+                                    inv.observe(event)
+
                             elif isinstance(event, ResultEvent):
                                 # Capture the structured result unconditionally: the log-mode
                                 # print is an additive side effect, never a substitute for

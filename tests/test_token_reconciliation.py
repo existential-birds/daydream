@@ -13,6 +13,7 @@ emitted MetricsEvent lands on its own Step.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,72 @@ from daydream.backends import (
 )
 from daydream.trajectory import DaydreamPhase
 from tests.harness.trajectory import make_recorder, read_trajectory
+
+
+@dataclass
+class _MockBackend:
+    """Minimal Backend replaying a canned event list (mirrors the MockBackend
+    in tests/test_multi_turn_tokens.py)."""
+
+    model = "mock-model"
+    fanout_concurrency = 4
+    events: list[AgentEvent]
+
+    def execute(
+        self,
+        cwd: Path,
+        prompt: str,
+        output_schema: dict[str, Any] | None = None,
+        continuation: ContinuationToken | None = None,
+        agents: dict[str, Any] | None = None,
+        max_turns: int | None = None,
+        read_only: bool = False,
+        persist_session: bool = True,
+    ) -> Any:
+        events = self.events
+
+        async def _gen() -> Any:
+            for event in events:
+                yield event
+
+        return _gen()
+
+    async def cancel(self) -> None:
+        return None
+
+    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
+        return f"/{skill_key}"
+
+
+async def _run_tool_agent(
+    tmp_path: Path, *, turns: int, tools_per_turn: int
+) -> dict[str, Any]:
+    """Real-path run_agent: per turn a TextEvent, tools_per_turn tool pairs, a
+    MetricsEvent (single-digit completion), and a TurnEndEvent; then a CostEvent
+    carrying the authoritative session total and a ResultEvent."""
+    events: list[AgentEvent] = []
+    for turn in range(turns):
+        events.append(TextEvent(text=f"turn {turn}"))
+        for j in range(tools_per_turn):
+            events.append(ToolStartEvent(
+                id=f"t{turn}-{j}", name="Bash", input={"command": "x"}
+            ))
+            events.append(ToolResultEvent(id=f"t{turn}-{j}", output="ok", is_error=False))
+        events.append(MetricsEvent(
+            message_id=f"m{turn}", prompt_tokens=100, completion_tokens=10,
+            cached_tokens=None, cost_usd=None,
+        ))
+        events.append(TurnEndEvent(message_id=f"m{turn}"))
+    events.append(CostEvent(cost_usd=0.5, input_tokens=600,
+                            output_tokens=66_737, cached_tokens=None))
+    events.append(ResultEvent(structured_output=None, continuation=None))
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        await run_agent(
+            _MockBackend(events=events), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
+        )
+    return read_trajectory(recorder.path)
+
 
 
 @pytest.mark.asyncio
@@ -77,6 +144,17 @@ async def test_claude_shape_step_sum_equals_final(tmp_path):
                    if s.get("metrics") and s["metrics"].get("completion_tokens"))
     assert step_sum == 66_737
     assert final["total_completion_tokens"] == step_sum
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_turns_each_own_step(tmp_path):
+    """run_agent forwards TurnEndEvent (fix B): a 24-tool-call, 3-turn agent
+    records >2 steps and one metrics-bearing step per turn (not one collapsed)."""
+    traj = await _run_tool_agent(tmp_path, turns=3, tools_per_turn=8)
+    assert traj["final_metrics"]["total_steps"] > 2
+    metric_steps = [s for s in traj["steps"]
+                    if s["source"] == "agent" and s.get("metrics")]
+    assert len(metric_steps) >= 3   # one per turn, not collapsed to 1
 
 
 @pytest.mark.asyncio
