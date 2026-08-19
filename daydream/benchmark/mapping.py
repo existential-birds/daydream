@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from daydream.deep.dedup import EXTERNAL_DEDUP_DISPOSITION
 from daydream.pr_review import extract_item_fields
 
 _RANKS: dict[str, int] = {"low": 1, "medium": 2, "high": 3}
@@ -59,6 +60,8 @@ def merged_items_to_review_comments(
     """
     out: list[dict[str, Any]] = []
     for raw in doc.get("items", []):
+        if raw.get("disposition") == EXTERNAL_DEDUP_DISPOSITION:
+            continue
         fields = extract_item_fields(raw)
         if fields is None:
             continue

@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any
 import daydream
 from daydream import git_ops
 from daydream.agent import get_assume, get_non_interactive, resolve_or_prompt
+from daydream.deep.dedup import EXTERNAL_DEDUP_DISPOSITION
 from daydream.extensions import (
     CommentFinding,
     FindingRenderContext,
@@ -338,6 +339,11 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """
     out: list[ParsedIssue] = []
     for raw in items:
+        # Items suppressed by the external-bot dedup phase stay in
+        # merged-items.json (audit trail) but must never reach the PR or the
+        # findings-out artifact — both build ParsedIssues through this function.
+        if raw.get("disposition") == EXTERNAL_DEDUP_DISPOSITION:
+            continue
         fields = extract_item_fields(raw)
         if fields is None:
             continue

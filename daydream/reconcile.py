@@ -55,6 +55,32 @@ class PriorFinding:
 
 
 @dataclass
+class ExternalComment:
+    """One inline review comment authored by another review bot.
+
+    Recovered from the PR's review threads so daydream can suppress its own
+    findings that duplicate a competitor bot's (e.g. greptile, coderabbit).
+    Unlike `PriorFinding` there is no shared fingerprint marker — matching is
+    semantic, driven by ``path``/``line`` plus LLM adjudication downstream.
+
+    Attributes:
+        path: Repo-relative file the comment is anchored to.
+        line: Anchored line in the head commit, or None when GitHub does not
+            report a head-commit line (outdated or file-level thread). The
+            downstream filter uses a file-level match in that case.
+        body: The comment's markdown body.
+        url: Permalink to the comment (for the audit sidecar / ``external_ref``).
+        author: The comment author's login, as reported by GraphQL.
+    """
+
+    path: str
+    line: int | None
+    body: str
+    url: str
+    author: str
+
+
+@dataclass
 class ReconcilePlan:
     """Partition of current fingerprints against prior findings.
 
@@ -82,6 +108,26 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
           isResolved
           comments(first: 100) {
             nodes { id databaseId body isMinimized author { login } viewerDidAuthor }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_EXTERNAL_THREADS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          path
+          line
+          originalLine
+          comments(first: 100) {
+            nodes { body url author { login } }
           }
         }
       }
@@ -214,6 +260,66 @@ def fetch_prior_findings(
                 comment_node_id=review.get("node_id"),
             )
     return prior
+
+
+def fetch_external_findings(
+    target_dir: Path, repo_slug: str, pr_number: int, *, bot_logins: Sequence[str]
+) -> list[ExternalComment]:
+    """Inventory inline comments on a PR authored by other review bots.
+
+    Paginates ``pullRequest.reviewThreads`` and keeps every comment whose
+    ``author.login`` matches one of *bot_logins* via the ``[bot]``-suffix
+    tolerant comparator. Read-only; used by the external-dedup phase to
+    suppress daydream findings that a faster competitor bot already posted.
+
+    ``line`` is taken only from GitHub's ``line`` field (head-commit
+    coordinate). ``originalLine`` (base-commit, set on outdated threads) is
+    intentionally ignored to avoid mixing coordinate spaces; when ``line`` is
+    absent ``ExternalComment.line`` is None and the downstream filter falls
+    back to file-level matching.
+
+    Returns:
+        Competitor comments in discovery order. Empty when *bot_logins* is
+        empty (feature off) — no GitHub call is made in that case.
+
+    Raises:
+        GitError: If a GitHub API call fails.
+    """
+    if not bot_logins:
+        return []
+    owner, name = repo_slug.split("/", 1)
+    found: list[ExternalComment] = []
+
+    cursor: str | None = None
+    while True:
+        variables = {"owner": owner, "name": name, "number": pr_number, "cursor": cursor}
+        response = _graphql(target_dir, _EXTERNAL_THREADS_QUERY, variables, idempotent=True)
+        threads = response["data"]["repository"]["pullRequest"]["reviewThreads"]
+        for thread in threads["nodes"]:
+            path = thread.get("path")
+            if not path:
+                continue
+            line = thread.get("line")
+            if not isinstance(line, int):
+                line = None
+            for comment in thread["comments"]["nodes"]:
+                login = (comment.get("author") or {}).get("login")
+                if not any(bot_login_matches(login, bot) for bot in bot_logins):
+                    continue
+                found.append(
+                    ExternalComment(
+                        path=str(path),
+                        line=line,
+                        body=comment.get("body") or "",
+                        url=comment.get("url") or "",
+                        author=str(login or ""),
+                    )
+                )
+        page_info = threads["pageInfo"]
+        if not page_info["hasNextPage"]:
+            break
+        cursor = page_info["endCursor"]
+    return found
 
 
 def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> ReconcilePlan:

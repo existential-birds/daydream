@@ -81,6 +81,7 @@ from daydream.deep.coverage import (
     filter_sweepable_files,
 )
 from daydream.deep.dedup import (
+    EXTERNAL_DEDUP_DISPOSITION,
     CandidatePair,
     RecordDuplicatePair,
     build_dedup_candidates,
@@ -118,6 +119,7 @@ from daydream.phases import (
     phase_commit_push,
     phase_commit_push_auto,
     phase_cross_stack_merge,
+    phase_dedup_external,
     phase_fetch_pr_feedback,
     phase_fix,
     phase_fix_parallel,
@@ -2283,6 +2285,70 @@ async def _step_supervise(ctx: FlowContext) -> None:
     return None
 
 
+def _external_review_bots(ctx: FlowContext) -> list[str]:
+    """Configured competitor review-bot logins (empty when the feature is off)."""
+    file_config = ctx.config.file_config
+    return list(file_config.external_review_bots) if file_config is not None else []
+
+
+async def _step_dedup_external(ctx: FlowContext) -> None:
+    """Suppress merged items already posted by a competitor review bot.
+
+    Resolves the target PR the same way the findings-out / post steps do
+    (pinned ``--pr-number`` else the current branch's open PR), then delegates
+    to :func:`daydream.phases.phase_dedup_external`. Runs before ``findings-out``
+    and ``post-review`` so both the Phase-B artifact and the posted review
+    already exclude suppressed items. No resolvable PR → warn and suppress
+    nothing (never blocks the run).
+    """
+    from daydream import pr_review
+    from daydream.git_ops import GitError
+
+    bot_logins = _external_review_bots(ctx)
+    target_dir = ctx.work.repo
+    try:
+        if ctx.config.pr_number is not None:
+            pr = pr_review.find_pr_by_number(target_dir, ctx.config.pr_number)
+        else:
+            pr = pr_review.find_open_pr(target_dir)
+    except GitError as exc:
+        print_warning(console, f"External-bot dedup skipped: could not resolve target PR ({exc}).")
+        return None
+    if pr is None:
+        print_warning(console, "External-bot dedup skipped: no PR resolvable for this branch.")
+        return None
+
+    async with phase_scope(DaydreamPhase.DEDUP):
+        suppressed_count = await phase_dedup_external(
+            ctx.backend_for("dedup"),
+            ctx.work,
+            merged_items_path=ctx.data["items_file"],
+            deep_dir=ctx.data["dd"],
+            repo_slug=f"{pr.owner}/{pr.repo}",
+            pr_number=pr.number,
+            bot_logins=bot_logins,
+        )
+
+    if suppressed_count:
+        # The report rendered during `supervise` predates this step, so it
+        # still lists items just suppressed above. Re-render from the
+        # updated items file so the locally-written report matches what
+        # findings-out/post-review will actually emit.
+        doc = json.loads(ctx.data["items_file"].read_text())
+        kept = [item for item in doc.get("items", []) if item.get("disposition") != EXTERNAL_DEDUP_DISPOSITION]
+        held = doc.get("held", [])
+        report = render_report(kept)
+        held_section = render_held_section(held)
+        if held_section:
+            report = report.rstrip() + "\n\n" + held_section + "\n"
+        merged_report_path(ctx.data["dd"]).write_text(report)
+        review_output = ctx.data.get("merged_report")
+        if review_output is not None:
+            review_output.write_text(report)
+
+    return None
+
+
 async def _step_post_review(ctx: FlowContext) -> Stop | None:
     """Offer to post findings as inline PR review comments; ``--comment`` auto-posts.
 
@@ -3653,6 +3719,16 @@ def _spine_findings_out(ctx: FlowContext) -> bool:
     return _spine_enabled(ctx) and _findings_out_enabled(ctx)
 
 
+def _spine_dedup_external(ctx: FlowContext) -> bool:
+    """External-bot dedup runs on the posting path only, and only when configured.
+
+    Gated by ``_spine_before_fix`` (the same resume gate as ``post-review``) so a
+    ``--start-at fix`` resume does not re-fetch competitor comments, and by a
+    non-empty ``external_review_bots`` config so it is strictly opt-in.
+    """
+    return _spine_before_fix(ctx) and bool(_external_review_bots(ctx))
+
+
 # The deep pipeline as a registered flow (D-07):
 #
 #     [feedback prefix: fetch -> parse -> fix-items -> commit-push -> respond]
@@ -3704,6 +3780,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="single-stack-merge", run=_step_single_stack_merge, enabled=_spine_single_merge),
     FlowStep(name="load-items", run=_step_load_items, enabled=_spine_enabled),
     FlowStep(name="supervise", run=_step_supervise, config_phase="supervise", enabled=_spine_supervise),
+    FlowStep(name="external-dedup", run=_step_dedup_external, config_phase="dedup", enabled=_spine_dedup_external),
     FlowStep(name="findings-out", run=_step_findings_out, enabled=_spine_findings_out),
     FlowStep(name="post-review", run=_step_post_review, enabled=_spine_before_fix),
     # Fix cycle: loop + shallow modes only (review/comment stop after post-review).

@@ -289,13 +289,14 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 13 | `single-stack-merge` | `single-stack-merge` |
 | 14 | `load-items` | `load-items` |
 | 15 | `supervise` | `supervise` |
-| 16 | `findings-out` | `findings-out` |
-| 17 | `post-review` | `post-review` |
-| 18 | `fix-gate` | `fix-gate` |
-| 19 | `verify` | `verify` |
-| 20 | `fix` | `fix` |
-| 21 | `test` | `test` |
-| 22 | `commit` | `fix` |
+| 16 | `external-dedup` | `dedup` |
+| 17 | `findings-out` | `findings-out` |
+| 18 | `post-review` | `post-review` |
+| 19 | `fix-gate` | `fix-gate` |
+| 20 | `verify` | `verify` |
+| 21 | `fix` | `fix` |
+| 22 | `test` | `test` |
+| 23 | `commit` | `fix` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble: `feedback` runs only the prefix (steps 1-5, ending at
@@ -377,7 +378,7 @@ the `stack:<name>` slots (or a fork `StackRule`), never from a `phase:*` slot.
 
 ### Prompts
 
-The 14 registered prompt names and the exact kwargs their builders receive
+The 15 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -394,6 +395,7 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
+| `external-dedup` | `pairs`, `cwd` |
 | `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |

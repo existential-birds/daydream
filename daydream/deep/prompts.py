@@ -29,7 +29,10 @@ from daydream.phases import (
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+)
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -1098,6 +1101,104 @@ def build_verification_prompt(
         "`unverified_assumptions` is an empty array."
     )
     return "\n\n".join(parts)
+
+
+def build_external_dedup_prompt(
+    *,
+    pairs: list[Any],
+    cwd: Path,
+) -> str:
+    """Assemble the external-bot dedup adjudicator prompt.
+
+    Given location-overlapping (daydream finding, competitor-bot comment) pairs,
+    the agent decides for each pair whether both describe the SAME underlying
+    issue. The goal is to avoid double-reporting an issue another review bot
+    (e.g. greptile) already flagged on the PR.
+
+    Conservative by contract: ``duplicate=true`` with ``confidence="high"`` is
+    the ONLY verdict that suppresses a daydream finding. A near-miss (same area,
+    different issue) or any doubt must be ``duplicate=false`` — a duplicate
+    comment is a smaller cost than silently dropping a finding daydream uniquely
+    caught.
+
+    The verdict schema reaches the backend via ``output_schema``; it is not
+    dumped here. Each verdict MUST echo the ``item_id`` and ``external_ref`` of
+    the pair it judges so the host can fold it back.
+
+    Args:
+        pairs: ``ExternalDuplicatePair`` instances (rendered inline). Read as
+            ``Any`` to avoid importing ``daydream.deep.dedup`` into this pure
+            prompt module.
+        cwd: Absolute working directory (grounds any code inspection).
+    """
+    parts: list[str] = []
+    parts.append(
+        "You are the external-dedup adjudicator. Another automated code-review "
+        "bot has already left inline comments on this pull request. For each "
+        "candidate pair below — one daydream finding and one competitor-bot "
+        "comment anchored to the same file and nearby lines — decide whether "
+        "they describe the SAME underlying issue.\n\n"
+        f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}"
+    )
+    parts.append(
+        "Decision rule (be conservative):\n"
+        "  - `duplicate=true`, `confidence=\"high\"` ONLY when both clearly flag "
+        "the same defect at the same place. This is the only verdict that "
+        "suppresses the daydream finding.\n"
+        "  - If they touch the same code but flag DIFFERENT issues, or you are "
+        "unsure, return `duplicate=false`. Keeping a possible duplicate is far "
+        "cheaper than dropping a real, unique finding.\n"
+        "  - Wording will differ between the two bots — judge the underlying "
+        "issue, not the phrasing."
+    )
+    parts.append(
+        "Read-only contract (MANDATORY):\n"
+        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
+        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
+        "  - Do NOT write, edit, or move files. You may inspect the cited code to "
+        "judge, but most pairs can be decided from the two texts alone."
+    )
+    parts.append(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY)
+    parts.append("Candidate pairs:\n\n" + _render_external_pairs(pairs))
+    parts.append(
+        "Emit exactly one verdict per candidate pair. Each verdict MUST echo the "
+        "`item_id` and `external_ref` shown for its pair. Empty input yields an "
+        "empty `verdicts` array — this is NOT an error."
+    )
+    return "\n\n".join(parts)
+
+
+# Per-comment byte budget for competitor bodies re-embedded in the adjudicator
+# prompt. A single external comment can be paired against every overlapping
+# daydream item (see build_external_dedup_candidates), so an unbounded body is
+# repeated once per pair.
+_EXTERNAL_BODY_BUDGET_BYTES = 2_048
+
+
+def _bound_external_body(body: str, budget: int = _EXTERNAL_BODY_BUDGET_BYTES) -> str:
+    """Truncate a competitor comment body to a UTF-8 byte budget."""
+    encoded = body.encode("utf-8")
+    if len(encoded) <= budget:
+        return body
+    truncated = encoded[:budget].decode("utf-8", errors="ignore")
+    return f"{truncated}\n[... truncated, {len(encoded) - budget} bytes omitted ...]"
+
+
+def _render_external_pairs(pairs: list[Any]) -> str:
+    """Render candidate pairs as a stable, numbered block for the adjudicator."""
+    if not pairs:
+        return "(no candidate pairs)"
+    blocks: list[str] = []
+    for pair in pairs:
+        loc = f"{pair.item_file}" + (f":{pair.item_line}" if pair.item_line is not None else "")
+        ext_loc = f"line {pair.external_line}" if pair.external_line is not None else "file-level"
+        blocks.append(
+            f"### item_id={pair.item_id}  external_ref={pair.external_url}\n"
+            f"- daydream finding ({loc}): {pair.item_description}\n"
+            f"- competitor comment ({pair.external_author}, {ext_loc}):\n"
+            f"{_bound_external_body(pair.external_body)}"
+        )
+    return "\n\n".join(blocks)
 
 
 def build_generic_fallback_prompt(
