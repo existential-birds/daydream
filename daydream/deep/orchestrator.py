@@ -3072,6 +3072,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 group_max_wall_s=group_wall_s,
                 group_max_serial_items=group_serial,
                 changed_files=changed_files,
+                exploration_dir=ctx.data.get("exploration_dir"),
             )
         except UnconfinedFindingError as exc:
             # Issue #574: the phase's preflight confinement gate raises on an

@@ -1307,6 +1307,20 @@ async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_parallel_forwards_exploration_pointer(tmp_path, make_work, silence_console):
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "affected_files.md").write_text("# Affected Files\n")
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
+    assert any("affected_files.md" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
 async def test_phase_fix_batched_prompt_includes_evidence(tmp_path, make_work, silence_console):
     from daydream.phases import phase_fix_batched
 

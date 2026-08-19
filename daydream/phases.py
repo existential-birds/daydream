@@ -1873,6 +1873,7 @@ async def phase_fix(
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1895,6 +1896,8 @@ async def phase_fix(
             the prompt so the prose scope boundary is also concrete. ``None``
             (legacy/resume callers) leaves the prompt without the clause; the
             prose boundary still applies.
+        exploration_dir: Optional pre-scan directory whose deterministic
+            ``affected_files.md`` index is pointed out to the fixer.
     """
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
@@ -1916,6 +1919,11 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
+    if exploration_dir is not None:
+        prompt += (
+            f"\nPre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
+            "for the structural/import file map before fixing."
+        )
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
     # deliberate decision. A read failure skips the block; it is never coerced
@@ -1958,6 +1966,7 @@ async def phase_fix_batched(
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1982,12 +1991,14 @@ async def phase_fix_batched(
             forwarded to the single-item delegation and appended to the batched
             prompt as an explicit "Allowed files" clause. ``None`` for
             legacy/resume callers leaves the prompt without the clause.
+        exploration_dir: Optional pre-scan directory whose deterministic
+            ``affected_files.md`` index is pointed out to the fixer.
     """
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
-            changed_files=changed_files,
+            changed_files=changed_files, exploration_dir=exploration_dir,
         )
         return
 
@@ -2019,6 +2030,11 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
+    if exploration_dir is not None:
+        prompt += (
+            f"\nPre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
+            "for the structural/import file map before fixing."
+        )
 
     prompt += _build_intent_suffix(intent_path)
     for idx, item in enumerate(items, start=1):
@@ -2071,6 +2087,7 @@ async def phase_fix_parallel(
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -2112,6 +2129,8 @@ async def phase_fix_parallel(
             forwarded to every ``phase_fix_batched`` / ``phase_fix`` call so each
             prompt carries an explicit "Allowed files" clause. ``None`` for
             legacy/resume callers (no diff context) leaves prompts unchanged.
+        exploration_dir: Optional pre-scan directory forwarded to every fix
+            call so prompts point at its deterministic ``affected_files.md``.
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
@@ -2198,6 +2217,7 @@ async def phase_fix_parallel(
                 console_lock=_console_lock,
                 intent_path=intent_path,
                 changed_files=changed_files,
+                exploration_dir=exploration_dir,
             )
             budget.record_item()
 
@@ -2240,6 +2260,7 @@ async def phase_fix_parallel(
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
                                         changed_files=changed_files,
+                                        exploration_dir=exploration_dir,
                                     )
                                     budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes
