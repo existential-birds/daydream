@@ -29,7 +29,7 @@ from daydream.phases import (
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -633,22 +633,25 @@ def build_structural_prompt(
         alternatives_path: Path to TTT alternatives.json.
         output_path: Where the agent must write its review.
         cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Accepted for signature symmetry with
-            ``build_per_stack_prompt``; intentionally ignored in the prompt
-            body because the structural reviewer discovers context via tool
-            calls, not pre-injected pointers.
+        exploration_dir: When present, points the reviewer at the deterministic
+            structural/import index in ``affected_files.md``.
         prior_commits: Oneline log of prior daydream commits on this branch.
         intent_authoritative: Issue #279. When True, the context pointers
             include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
             the intent phase was grounded by a fresh, head-matched PR description.
     """
-    del exploration_dir  # accepted for signature symmetry; intentionally unused.
     joined = ", ".join(files)
     parts: list[str] = []
     settled = _settled_decisions_block(prior_commits)
     if settled:
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
+    if exploration_dir is not None:
+        parts.append(
+            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            f"Read {exploration_dir / 'affected_files.md'} for the deterministic structural/import index "
+            f"(paths, roles, and import relationships) relevant to this review."
+        )
     parts.append(
         _context_pointers(
             intent_path=intent_path,
