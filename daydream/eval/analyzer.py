@@ -620,7 +620,7 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
 
 
 def analyze_exploration_utilization(trajectories: dict) -> dict:
-    """Check whether review agents referenced exploration artifacts."""
+    """Check whether review agents read the deterministic ``affected_files.md`` artifact."""
     results: list[dict] = []
 
     for traj in trajectories["forked"]:
@@ -636,7 +636,7 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
             if tc["function_name"] in ("Read", "Grep"):
                 total_reads += 1
                 path = tc["arguments"].get("file_path") or tc["arguments"].get("path", "")
-                if "/exploration/" in path:
+                if "affected_files.md" in path:
                     exploration_refs.append(path)
 
         results.append({

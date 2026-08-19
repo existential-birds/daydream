@@ -198,6 +198,25 @@ def _read_traj(source_file: str, *read_paths: str) -> dict:
     }
 
 
+def test_exploration_utilization_counts_only_deterministic_artifact():
+    from daydream.eval.analyzer import analyze_exploration_utilization
+
+    trajectories = {
+        "main": None,
+        "forked": [
+            _read_traj("deep-python.json", "/repo/.daydream/exploration/summary.md"),
+            _read_traj("deep-ts.json", "/repo/.daydream/exploration/affected_files.md"),
+            _read_traj("deep-rust.json", "/repo/.daydream/exploration/conventions.md"),
+        ],
+    }
+    result = analyze_exploration_utilization(trajectories)
+    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
+    assert by_agent["deep-python"]["utilized"] is False
+    assert by_agent["deep-ts"]["utilized"] is True
+    assert by_agent["deep-rust"]["utilized"] is False
+    assert result["reviewers_utilizing_exploration"] == 1
+
+
 def test_grounding_rate_is_undefined_with_zero_findings():
     """A review that produced NO findings has an undefined grounding rate.
 
