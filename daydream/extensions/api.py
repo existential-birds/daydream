@@ -106,6 +106,53 @@ class LoopGroup:
 
 
 @dataclass(frozen=True)
+class CommentFinding:
+    """A single review finding, as passed to a ``"finding"`` renderer.
+
+    Mirrors the public fields of the internal ``ParsedIssue``.
+    """
+
+    path: str
+    line: int | None
+    title: str
+    body: str
+    is_cross_stack: bool
+    severity: str | None
+    confidence: str | None
+    fingerprint: str | None
+
+
+@dataclass(frozen=True)
+class FindingRenderContext:
+    """Placement context passed alongside a finding to a ``"finding"`` renderer.
+
+    ``placement`` is one of ``"inline"``, ``"file_level"``, or ``"summary"``.
+    """
+
+    placement: str
+
+
+@dataclass(frozen=True)
+class SummaryFinding:
+    """One entry in the summary findings section.
+
+    ``body_block`` is host-rendered with the finding marker already embedded.
+    """
+
+    finding: CommentFinding
+    body_block: str
+
+
+@dataclass(frozen=True)
+class SummaryContext:
+    """Input to the ``"summary"`` renderer."""
+
+    findings: tuple[SummaryFinding, ...]
+    agent_prompt: str
+    review_info: str
+
+
+@dataclass(frozen=True)
 class StackRule:
     """A fork-registered stack: changed-file globs routed to a review skill."""
 

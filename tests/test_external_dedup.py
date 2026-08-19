@@ -474,9 +474,8 @@ async def test_step_dedup_external_git_error_warns_and_continues(
     monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _no_call)
 
     ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
-    result = await _step_dedup_external(ctx)
-
-    assert result is None  # warn-and-continue: step does not Stop the flow
+    # Returns None (warn-and-continue): the step never Stops the flow.
+    await _step_dedup_external(ctx)
     assert called == []    # phase_dedup_external must not be invoked
 
 
@@ -505,9 +504,7 @@ async def test_step_dedup_external_no_pr_warns_and_continues(
     monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _no_call)
 
     ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
-    result = await _step_dedup_external(ctx)
-
-    assert result is None
+    await _step_dedup_external(ctx)
     assert called == []
 
 
@@ -538,9 +535,7 @@ async def test_step_dedup_external_open_pr_path(
     monkeypatch.setattr("daydream.deep.orchestrator.phase_dedup_external", _record)
 
     ctx = _make_step_ctx(tmp_path, items_file, deep_dir, bot_logins=["greptile-apps[bot]"])
-    result = await _step_dedup_external(ctx)
-
-    assert result is None
+    await _step_dedup_external(ctx)
     assert len(calls) == 1
     assert calls[0]["repo_slug"] == "myorg/myrepo"
     assert calls[0]["pr_number"] == 7
@@ -582,7 +577,5 @@ async def test_step_dedup_external_pinned_pr_number_path(
 
     ctx = _make_step_ctx(tmp_path, items_file, deep_dir,
                          bot_logins=["greptile-apps[bot]"], pr_number=42)
-    result = await _step_dedup_external(ctx)
-
-    assert result is None
+    await _step_dedup_external(ctx)
     assert find_by_number_calls == [42]

@@ -18,11 +18,12 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops, runner
+from daydream import git_ops, pr_review, runner
 from daydream.backends import ResultEvent, TextEvent, ToolStartEvent
 from daydream.deep.orchestrator import _step_post_review
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
+from daydream.pr_review import ParsedIssue
 from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
@@ -866,3 +867,34 @@ async def test_flow_shallow_routes_to_shallow_helper(
 
     assert rc == 0
     assert backend.parse_calls >= 1  # shallow pipeline ran
+
+
+def test_ext_dir_renderer_override_reaches_pr_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``$DAYDREAM_EXT_DIR`` fork's finding renderer reaches ``pr_review``.
+
+    Adds no production code: proves the discovery -> registry -> pr_review path
+    end-to-end. The fork registers a custom ``finding`` renderer via
+    ``override_renderer``; the host still injects its footer around the custom
+    inner block.
+    """
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    (ext / "__init__.py").write_text(
+        "DAYDREAM_EXT_API = 5\n"
+        "def register(r):\n"
+        "    r.override_renderer('finding', lambda finding, ctx: f'EXT::{ctx.placement}::{finding.title}')\n"
+    )
+    monkeypatch.setenv("DAYDREAM_EXT_DIR", str(ext))
+    from daydream.extensions import build_registry, get_registry, set_registry
+
+    prev = get_registry()
+    set_registry(build_registry())
+    try:
+        body = pr_review._format_inline_body(
+            ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64)
+        )
+    finally:
+        set_registry(prev)
+    assert "EXT::inline::T" in body and pr_review.DAYDREAM_FOOTER in body

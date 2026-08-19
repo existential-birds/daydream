@@ -29,6 +29,7 @@ def register_builtins(registry: Registry) -> None:
 
     _register_improve_builtins(registry)
     _register_builtin_prompts(registry)
+    _register_builtin_renderers(registry)
     _register_builtin_flows(registry)
 
 
@@ -68,6 +69,14 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
     registry.override_prompt("external-dedup", deep_prompts.build_external_dedup_prompt)
+
+
+def _register_builtin_renderers(registry: Registry) -> None:
+    """Seed the built-in comment renderers (byte-identical to today's markdown)."""
+    from daydream import pr_review
+
+    registry.override_renderer("finding", pr_review.default_render_finding)
+    registry.override_renderer("summary", pr_review.default_render_summary)
 
 
 def _register_builtin_flows(registry: Registry) -> None:

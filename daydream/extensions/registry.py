@@ -36,6 +36,7 @@ class Registry:
         self._flows: dict[str, list[FlowEntry]] = {}
         self._skills: dict[str, str] = {}
         self._prompts: dict[str, Callable[..., str]] = {}
+        self._renderers: dict[str, Callable[..., str]] = {}
         self._stack_rules: dict[str, StackRule] = {}
         self._tool_supervisor: ToolSupervisor | None = None
 
@@ -159,6 +160,29 @@ class Registry:
     def prompt_names(self) -> tuple[str, ...]:
         """Return every registered prompt name in registration order."""
         return tuple(self._prompts)
+
+    # -- renderers --------------------------------------------------------
+
+    def override_renderer(self, name: str, fn: Callable[..., str]) -> None:
+        """Upsert the comment renderer for a named slot."""
+        if not callable(fn):
+            raise ExtensionError(f"renderer '{name}' must be callable")
+        self._renderers[name] = fn
+
+    def renderer(self, name: str) -> Callable[..., str]:
+        """Return the named renderer, or raise ``UnresolvedExtensionError``."""
+        try:
+            return self._renderers[name]
+        except KeyError:
+            raise UnresolvedExtensionError(f"renderer '{name}' is not registered; {_VALIDATE_HINT}") from None
+
+    def renderer_if_registered(self, name: str) -> Callable[..., str] | None:
+        """Return the named renderer, or None; never raises."""
+        return self._renderers.get(name)
+
+    def renderer_names(self) -> tuple[str, ...]:
+        """Return every registered renderer name in registration order."""
+        return tuple(self._renderers)
 
     # -- tool supervision -------------------------------------------------
 
