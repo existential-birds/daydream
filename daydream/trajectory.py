@@ -831,6 +831,13 @@ class Invocation:
     _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
     _stop_reason: str | None = None
     _error_subtype: str | None = None
+    # Per-invocation sum of the MetricsEvent values observed so far (issue
+    # #747). The CostEvent handler reconciles each CostEvent's totals against
+    # this sum (per-dimension take-max delta) instead of trusting the collapsed
+    # per-message digits or blindly re-accumulating restated totals.
+    _inv_metrics_sum: dict[str, float | int] = field(
+        default_factory=lambda: {"prompt": 0, "completion": 0, "cached": 0, "cost": 0.0}
+    )
     # Set-once per invocation: did any MetricsEvent already carry tokens / cost?
     # A trailing CostEvent that re-states what MetricsEvents reported must not
     # accumulate again (codex re-states per turn, pi re-states the summed
@@ -1020,10 +1027,20 @@ class Invocation:
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
-            # Aggregate into recorder-level totals for FinalMetrics (MAP-07).
+            # Aggregate into recorder-level totals for FinalMetrics (MAP-07),
+            # and into the invocation-level sum the CostEvent delta reconciles
+            # against (issue #747).
             self._tokens_from_metrics = True
             if event.cost_usd is not None:
                 self._cost_from_metrics = True
+            if event.prompt_tokens is not None:
+                self._inv_metrics_sum["prompt"] += event.prompt_tokens
+            if event.completion_tokens is not None:
+                self._inv_metrics_sum["completion"] += event.completion_tokens
+            if event.cached_tokens is not None:
+                self._inv_metrics_sum["cached"] += event.cached_tokens
+            if event.cost_usd is not None:
+                self._inv_metrics_sum["cost"] += event.cost_usd
             self.recorder._accumulate_metrics(
                 prompt_tokens=event.prompt_tokens,
                 completion_tokens=event.completion_tokens,
@@ -1034,6 +1051,20 @@ class Invocation:
             # End-of-call signal — also fold per-step metrics onto the open
             # Step so the renderer's per-step rollup sees real cost / tokens
             # (Bug C: previously CostEvent only updated _final_totals).
+            #
+            # Per-dimension take-max delta (issue #747): the amount by which
+            # this CostEvent's total EXCEEDS the invocation's per-message sum.
+            # Claude's authoritative session total exceeds the collapsed
+            # per-message single digits -> positive delta repairs the
+            # under-count; codex/pi re-state totals equal to the per-message
+            # sum -> delta 0, so the restatement never double-counts. Never
+            # negative, never subtraction.
+            delta = {
+                "prompt": max(0, (event.input_tokens or 0) - self._inv_metrics_sum["prompt"]),
+                "completion": max(0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"]),
+                "cached": max(0, (event.cached_tokens or 0) - self._inv_metrics_sum["cached"]),
+                "cost": max(0.0, (event.cost_usd or 0.0) - self._inv_metrics_sum["cost"]),
+            }
             self._ensure_open_step()
             assert self._open_step_dict is not None
             target = self._open_step_dict
@@ -1069,16 +1100,16 @@ class Invocation:
             if event.model_name:
                 target["_model_name"] = event.model_name
                 self.recorder._upgrade_model_name(event.model_name)
-            # Aggregate into recorder-level totals, but only for the dimensions
-            # no MetricsEvent already reported this invocation — codex re-states
-            # each turn's tokens/cost here and pi re-states the summed totals,
-            # so unconditional accumulation double-counts. A CostEvent-only
-            # backend still accumulates fully.
+            # Aggregate the delta into recorder-level totals: per-dimension
+            # take-max at the per-invocation level, summed across invocations
+            # (a multi-phase run shares one recorder, so each phase's session
+            # total should sum). A CostEvent-only backend (no MetricsEvents at
+            # all) still accumulates its full totals via the delta.
             self.recorder._accumulate_metrics(
-                prompt_tokens=None if self._tokens_from_metrics else event.input_tokens,
-                completion_tokens=None if self._tokens_from_metrics else event.output_tokens,
-                cached_tokens=None if self._tokens_from_metrics else event.cached_tokens,
-                cost_usd=None if self._cost_from_metrics else event.cost_usd,
+                prompt_tokens=delta["prompt"],
+                completion_tokens=delta["completion"],
+                cached_tokens=delta["cached"],
+                cost_usd=None if event.cost_usd is None else delta["cost"],
             )
         elif isinstance(event, ResultEvent):
             self._close_open_step()
