@@ -1481,6 +1481,9 @@ def _ext_resolve_failure(registry: "Registry") -> str | None:
     for rule in registry.stack_rules():
         if not rule.skill:
             return f"stack rule '{rule.stack_name}' has an empty skill invocation"
+    for name in registry.prompt_names():
+        if not callable(registry.prompt(name)):
+            return f"prompt slot '{name}' does not resolve to a callable"
     for name in registry.renderer_names():
         if not callable(registry.renderer(name)):
             return f"renderer slot '{name}' does not resolve to a callable"

@@ -45,8 +45,8 @@ The `daydream.extensions` package exports these contract symbols:
 | `BreakLoop` | End the current loop group and continue the flow |
 | `CommentFinding` | Public view of one review finding passed to a `"finding"` renderer |
 | `ExtensionError` | Base error for extension failures |
-| `FindingRenderContext` | Placement context (`"inline"`/`"file_level"`/`"summary"`) passed with a finding |
 | `ExtensionVersionError` | Error for an absent or incompatible extension version |
+| `FindingRenderContext` | Placement context (`"inline"`/`"file_level"`/`"summary"`) passed with a finding |
 | `FlowStep` | Named async flow step |
 | `LoopGroup` | Repeated ordered group of flow steps |
 | `Registry` | Per-run extension registry |
@@ -479,9 +479,13 @@ around whatever a renderer returns, the parts that dedup and identity depend on:
 - the approval line, and
 - the review `event` decision (approve / comment / request-changes).
 
-A renderer therefore cannot drop the marker or footer, and a custom `"summary"`
-renderer that omits `body_block` still keeps the embedded markers because the
-host supplies those blocks.
+A renderer therefore cannot drop the footer, `<details>` scaffolding, approval
+line, or `event` decision. However, **the per-finding dedup marker lives inside
+`body_block`** (it is embedded by the host before `body_block` is passed to the
+renderer via `SummaryFinding`). A custom `"summary"` renderer that omits
+`body_block` from its output will drop those markers, causing duplicate
+re-posting on the next run. Always include `body_block` verbatim in the
+rendered output.
 
 #### Fallback and warning
 

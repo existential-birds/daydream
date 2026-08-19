@@ -717,7 +717,7 @@ def _severity_emoji(severity: str | None) -> str:
     return _SEVERITY_EMOJI.get(severity.lower(), "")
 
 
-def _issue_header(issue: ParsedIssue, *, prefix: str = "", always_bold: bool = False) -> str:
+def _issue_header(issue: CommentFinding, *, prefix: str = "", always_bold: bool = False) -> str:
     """Compose the emoji/title/tag header line for one issue."""
     emoji = _severity_emoji(issue.severity)
     title_prefix = f"{emoji} " if emoji else ""
@@ -736,31 +736,21 @@ def default_render_finding(finding: CommentFinding, ctx: FindingRenderContext) -
     It never emits :data:`DAYDREAM_FOOTER` or the hidden finding marker — those
     stay host-owned and are injected by the callers.
     """
-    issue = ParsedIssue(
-        path=finding.path,
-        line=finding.line,
-        title=finding.title,
-        body=finding.body,
-        is_cross_stack=finding.is_cross_stack,
-        confidence=finding.confidence,
-        severity=finding.severity,
-        fingerprint=finding.fingerprint,
-    )
     if ctx.placement == "inline":
-        parts = [p for p in (_issue_header(issue), issue.body) if p]
-        parts.append(_build_agent_prompt(issue))
+        parts = [p for p in (_issue_header(finding), finding.body) if p]
+        parts.append(_build_agent_prompt(finding))
         return "\n\n".join(parts)
-    prefix = "[cross-stack] " if issue.is_cross_stack else ""
+    prefix = "[cross-stack] " if finding.is_cross_stack else ""
     if ctx.placement == "summary":
-        summary_parts = [_issue_header(issue, prefix=prefix, always_bold=True)]
-        if issue.body:
-            summary_parts.append(f"\n{issue.body}\n")
-        summary_parts.append(_build_agent_prompt(issue))
+        summary_parts = [_issue_header(finding, prefix=prefix, always_bold=True)]
+        if finding.body:
+            summary_parts.append(f"\n{finding.body}\n")
+        summary_parts.append(_build_agent_prompt(finding))
         return "\n".join(summary_parts)
     # file_level (default placement).
-    header = _issue_header(issue, prefix=prefix, always_bold=True)
-    parts = [p for p in (header, issue.body) if p]
-    parts.append(_build_agent_prompt(issue))
+    header = _issue_header(finding, prefix=prefix, always_bold=True)
+    parts = [p for p in (header, finding.body) if p]
+    parts.append(_build_agent_prompt(finding))
     return "\n\n".join(parts)
 
 
@@ -787,14 +777,16 @@ def _render_finding(issue: ParsedIssue, placement: str) -> str:
     """
     cf = _comment_finding(issue)
     ctx = FindingRenderContext(placement=placement)
+    _fn = get_registry().renderer("finding")
+    _label = "builtin" if _fn is default_render_finding else "custom"
     try:
-        result = get_registry().renderer("finding")(cf, ctx)
+        result = _fn(cf, ctx)
     except Exception as exc:  # noqa: BLE001 - any fork error degrades to the default
-        _logger.warning("custom 'finding' renderer failed (%s); using default", exc)
+        _logger.warning("%s 'finding' renderer failed (%s); using default", _label, exc)
         return default_render_finding(cf, ctx)
     if not isinstance(result, str) or not result:
         _logger.warning(
-            "custom 'finding' renderer failed (returned %r); using default", result
+            "%s 'finding' renderer failed (returned %r); using default", _label, result
         )
         return default_render_finding(cf, ctx)
     return result
@@ -820,7 +812,7 @@ def _format_file_level_body(issue: ParsedIssue) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _format_tag_line(issue: ParsedIssue) -> str:
+def _format_tag_line(issue: CommentFinding) -> str:
     """Render severity/confidence badges for a single issue, if set."""
     bits: list[str] = []
     if issue.severity:
@@ -830,7 +822,7 @@ def _format_tag_line(issue: ParsedIssue) -> str:
     return " · ".join(bits)
 
 
-def _build_agent_prompt(issue: ParsedIssue) -> str:
+def _build_agent_prompt(issue: CommentFinding) -> str:
     """Build a collapsible AI-agent-friendly prompt for a single issue."""
     loc = f"`{issue.path}`"
     if issue.line:

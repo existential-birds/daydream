@@ -165,6 +165,8 @@ class Registry:
 
     def override_renderer(self, name: str, fn: Callable[..., str]) -> None:
         """Upsert the comment renderer for a named slot."""
+        if not callable(fn):
+            raise ExtensionError(f"renderer '{name}' must be callable")
         self._renderers[name] = fn
 
     def renderer(self, name: str) -> Callable[..., str]:
