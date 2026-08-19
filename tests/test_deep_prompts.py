@@ -349,19 +349,28 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
     from daydream.deep.prompts import build_structural_prompt
 
     exploration_dir = tmp_path / "exploration"
-    kwargs = {
-        "skill_invocation": "/beagle-core:review-structure",
-        "files": ["main.py"],
-        "diff_path": tmp_path / "diff.patch",
-        "intent_path": tmp_path / "intent.md",
-        "alternatives_path": tmp_path / "alternatives.json",
-        "output_path": tmp_path / "out.md",
-        "cwd": tmp_path,
-    }
-    prompt = build_structural_prompt(exploration_dir=exploration_dir, **kwargs)
+    prompt = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["main.py"],
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        output_path=tmp_path / "out.md",
+        exploration_dir=exploration_dir,
+        cwd=tmp_path,
+    )
     assert str(exploration_dir / "affected_files.md") in prompt
 
-    prompt_none = build_structural_prompt(exploration_dir=None, **kwargs)
+    prompt_none = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["main.py"],
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        output_path=tmp_path / "out.md",
+        exploration_dir=None,
+        cwd=tmp_path,
+    )
     assert "affected_files.md" not in prompt_none
 
 
