@@ -1,6 +1,9 @@
 # tests/test_exploration.py
 """Tests for exploration context data structures and prompt rendering."""
 
+from __future__ import annotations
+
+import json
 from unittest.mock import patch
 
 import pytest
@@ -270,6 +273,25 @@ def test_write_to_dir_creates_all_files(tmp_path):
     # Boundary sits directly below the top-level heading, before the table/data.
     affected = (exploration_dir / "affected_files.md").read_text()
     assert affected.index(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) < affected.index("src/app.py")
+
+
+def test_write_to_dir_emits_exploration_json_with_provenance(tmp_path):
+    ctx = ExplorationContext(
+        affected_files=[
+            FileInfo("src/app.py", "modified", "Main entry point", provenance="static"),
+            FileInfo("tests/test_app.py", "test", "covers app", provenance="llm"),
+        ],
+        conventions=[Convention("snake_case", "all funcs snake_case", "CLAUDE.md")],
+        dependencies=[Dependency("app.py", "utils.py", "imports")],
+    )
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+    data = json.loads((exploration_dir / "exploration.json").read_text())
+    rows = {row["path"]: row for row in data["affected_files"]}
+    assert rows["src/app.py"]["provenance"] == "static"
+    assert rows["tests/test_app.py"]["provenance"] == "llm"
+    assert data["conventions"][0]["name"] == "snake_case"
+    assert data["dependencies"][0]["target"] == "utils.py"
 
 
 def test_write_to_dir_empty_context(tmp_path):
