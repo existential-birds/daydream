@@ -348,7 +348,7 @@ CACHE_KEY_FILENAME = "cache-key"
 
 # Bump when the artifact generator changes (e.g. a new boundary rendering) so
 # upgrades force regeneration instead of serving pre-upgrade artifacts on a key match.
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 
 def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str) -> str:
