@@ -1068,6 +1068,30 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
     "additionalProperties": False,
 }
 
+EXTERNAL_DEDUP_VERDICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "external_ref": {"type": "string"},
+                    "duplicate": {"type": "boolean"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["item_id", "external_ref", "duplicate", "confidence", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+
 def _confidence_and_convention_instructions() -> str:
     """Prompt language for QUAL-02 confidence, QUAL-03 conventions, QUAL-04 error handling.
 
@@ -1651,6 +1675,111 @@ async def phase_verify_recommendations(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     return output_path, payload
+
+
+async def phase_dedup_external(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    merged_items_path: Path,
+    deep_dir: Path,
+    repo_slug: str,
+    pr_number: int,
+    bot_logins: list[str],
+) -> int:
+    """Suppress merged items that duplicate a competitor bot's PR comments.
+
+    Fetches inline comments authored by the configured *bot_logins* (e.g.
+    greptile), pairs each with location-overlapping merged items, and — only
+    when there is at least one candidate — runs a read-only adjudicator that
+    decides per pair whether both describe the same underlying issue. Items with
+    a high-confidence ``duplicate`` verdict are marked
+    ``disposition="deduped-vs-external"`` (with ``external_ref``) in place in
+    ``merged-items.json`` and recorded in the audit sidecar
+    (:func:`daydream.deep.artifacts.external_dedup_path`). The item stays in the
+    file — the PR poster and findings-out artifact skip it on the disposition.
+
+    Safe degradation: a GitHub failure fetching competitor comments warns and
+    suppresses nothing (matches the reconcile posture). No candidates → no agent
+    call. The trajectory captures the adjudication automatically via ``run_agent``.
+
+    Returns:
+        The number of items suppressed.
+    """
+    from daydream.deep.artifacts import external_dedup_path
+    from daydream.deep.dedup import build_external_dedup_candidates
+    from daydream.reconcile import fetch_external_findings
+
+    doc = json.loads(merged_items_path.read_text())
+    items: list[dict[str, Any]] = doc.get("items", [])
+
+    try:
+        external = fetch_external_findings(work.repo, repo_slug, pr_number, bot_logins=bot_logins)
+    except GitError as exc:
+        print_warning(console, f"External-bot dedup skipped: could not fetch competitor comments ({exc}).")
+        return 0
+
+    candidates = build_external_dedup_candidates(items, external)
+    sidecar = external_dedup_path(deep_dir)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    if not candidates:
+        sidecar.write_text(json.dumps({"suppressed": []}, indent=2))
+        return 0
+
+    prompt = get_registry().prompt("external-dedup")(pairs=candidates, cwd=work.repo)
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=EXTERNAL_DEDUP_VERDICTS_SCHEMA,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        phase=DaydreamPhase.DEDUP,
+        read_only=True,
+    )
+
+    candidate: Any = result
+    if isinstance(result, str):
+        try:
+            candidate = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            candidate = None
+    verdicts = candidate.get("verdicts", []) if isinstance(candidate, dict) else []
+
+    # An item is suppressed on the first high-confidence duplicate verdict for it.
+    suppress: dict[int, str] = {}
+    for entry in verdicts:
+        if not isinstance(entry, dict):
+            continue
+        item_id = entry.get("item_id")
+        if (
+            isinstance(item_id, int)
+            and entry.get("duplicate") is True
+            and entry.get("confidence") == "high"
+            and item_id not in suppress
+        ):
+            suppress[item_id] = str(entry.get("external_ref", ""))
+
+    suppressed_records: list[dict[str, Any]] = []
+    for item in items:
+        item_id = item.get("id")
+        if isinstance(item_id, int) and item_id in suppress:
+            item["disposition"] = "deduped-vs-external"
+            item["external_ref"] = suppress[item_id]
+            suppressed_records.append(
+                {"id": item_id, "file": item.get("file"), "external_ref": suppress[item_id]}
+            )
+
+    if suppressed_records:
+        merged_items_path.write_text(json.dumps(doc, indent=2))
+    sidecar.write_text(json.dumps({"suppressed": suppressed_records}, indent=2))
+    if suppressed_records:
+        print_info(
+            console,
+            f"External-bot dedup: suppressed {len(suppressed_records)} finding(s) already posted by "
+            f"{', '.join(sorted(bot_logins))}.",
+        )
+    return len(suppressed_records)
 
 
 # Shared scope/precedence/contract guardrails appended to every fix prompt

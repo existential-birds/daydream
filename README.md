@@ -325,6 +325,28 @@ Supervisor settings are config-file-only:
 
 Configure the LLM supervisor model under `[tool.daydream.phases.supervise]`.
 
+### External-bot dedup
+
+When daydream reviews a PR that other review bots also comment on, it can suppress its own
+findings that duplicate a competitor bot's. Because daydream's deep review typically finishes
+after faster bots, their inline comments are already on the PR when daydream reaches its post
+step; it fetches those comments, pairs each with a location-overlapping daydream finding, and
+runs a conservative LLM adjudicator that suppresses a finding only on a high-confidence
+same-issue verdict. Suppressed findings stay in `merged-items.json` marked
+`disposition="deduped-vs-external"` (and are listed in `.daydream/deep/external-dedup.json`),
+so they are dropped from the posted review and the findings artifact but remain auditable.
+
+Config-file-only, opt-in — empty means the feature is off:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `external_review_bots` | `[]` | GitHub logins of other review bots to dedup against, e.g. `["greptile-apps[bot]", "coderabbitai[bot]"]`. The `[bot]` suffix is matched tolerantly. |
+
+```toml
+[tool.daydream]
+external_review_bots = ["greptile-apps[bot]", "coderabbitai[bot]"]
+```
+
 ### Uncovered-diff-file sweep
 
 A second-pass reviewer covers diff files that no per-stack reviewer read:

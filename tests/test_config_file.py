@@ -22,6 +22,18 @@ def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
     assert load_file_config(tmp_path).improve_service_roots == []
 
 
+def test_external_review_bots_parses_from_tool_daydream(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.daydream]\nexternal_review_bots = ["greptile-apps[bot]", "coderabbitai[bot]"]\n'
+    )
+    cfg = load_file_config(tmp_path)
+    assert cfg.external_review_bots == ["greptile-apps[bot]", "coderabbitai[bot]"]
+
+
+def test_external_review_bots_absent_defaults_empty(tmp_path: Path) -> None:
+    assert load_file_config(tmp_path).external_review_bots == []
+
+
 def test_improve_github_issue_publishing_is_explicitly_configurable(
     tmp_path: Path,
 ) -> None:

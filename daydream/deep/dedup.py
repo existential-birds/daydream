@@ -22,13 +22,23 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from daydream.reconcile import ExternalComment
 
 _STOP_WORDS = frozenset(
     {"the", "a", "an", "is", "on", "in", "of", "to", "for", "and", "or", "with", "by"}
 )
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]+")
 _SIM_THRESHOLD = 0.5
+# Line proximity gate for the external-bot pre-filter. Two anchored findings on
+# the same file within this many lines are LLM-adjudicated for same-issue; the
+# window is deliberately generous because the LLM makes the final call and
+# competitor bots often anchor a few lines off from daydream.
+_EXTERNAL_LINE_WINDOW = 10
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,90 @@ class RecordDuplicatePair:
     record_b_description: str
     record_b_source: str
     similarity: float
+
+
+@dataclass(frozen=True)
+class ExternalDuplicatePair:
+    """A merged item paired with a competitor bot's overlapping inline comment.
+
+    The pre-filter gates only on location (same file, line within
+    ``_EXTERNAL_LINE_WINDOW``, or file-level when either line is unknown); the
+    LLM adjudicates whether they truly describe the same issue. No title
+    similarity gate — the external body is another bot's prose with no
+    comparable title field.
+
+    Attributes:
+        item_id: The merged item's integer id (matches the adjudication verdict).
+        item_file: The item's file field.
+        item_line: The item's line, or None.
+        item_description: The item's description (kept verbatim for the prompt).
+        external_body: The competitor comment's markdown body.
+        external_line: The competitor comment's anchored line, or None.
+        external_url: Permalink to the competitor comment.
+        external_author: The competitor comment author's login.
+    """
+
+    item_id: int
+    item_file: str
+    item_line: int | None
+    item_description: str
+    external_body: str
+    external_line: int | None
+    external_url: str
+    external_author: str
+
+
+def build_external_dedup_candidates(
+    items: list[dict[str, Any]],
+    external_comments: Sequence[ExternalComment],
+    *,
+    line_window: int = _EXTERNAL_LINE_WINDOW,
+) -> list[ExternalDuplicatePair]:
+    """Pair merged items with location-overlapping competitor-bot comments.
+
+    A pair is emitted when the item and comment share a ``file`` AND either both
+    lines are known and within ``line_window``, or at least one line is unknown
+    (file-level fallback — the same path is enough to warrant LLM adjudication).
+
+    Args:
+        items: Canonical merged items (``id``, ``file``, ``line``,
+            ``description`` keys).
+        external_comments: Competitor comments from
+            :func:`daydream.reconcile.fetch_external_findings`.
+        line_window: Max line distance for two anchored findings to pair.
+
+    Returns:
+        Deterministically-ordered pairs, sorted by ``(item_id, external_url)``.
+    """
+    pairs: list[ExternalDuplicatePair] = []
+    for item in items:
+        item_id = item.get("id")
+        if not isinstance(item_id, int):
+            continue
+        path = str(item.get("file", ""))
+        if not path:
+            continue
+        raw_line = item.get("line")
+        item_line = raw_line if isinstance(raw_line, int) and not isinstance(raw_line, bool) else None
+        for ext in external_comments:
+            if ext.path != path:
+                continue
+            if item_line is not None and ext.line is not None and abs(item_line - ext.line) > line_window:
+                continue
+            pairs.append(
+                ExternalDuplicatePair(
+                    item_id=item_id,
+                    item_file=path,
+                    item_line=item_line,
+                    item_description=str(item.get("description", "")),
+                    external_body=ext.body,
+                    external_line=ext.line,
+                    external_url=ext.url,
+                    external_author=ext.author,
+                )
+            )
+    pairs.sort(key=lambda p: (p.item_id, p.external_url))
+    return pairs
 
 
 def build_dedup_candidates(

@@ -104,6 +104,19 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "dedup-candidates.json"
 
 
+def external_dedup_path(deep_dir_path: Path) -> Path:
+    """External-bot dedup audit sidecar (JSON).
+
+    Records every merged item suppressed because a competitor review bot
+    (e.g. greptile) already posted the same finding: the item id, the matched
+    comment URL, and the adjudicator's reason. Written by
+    ``phase_dedup_external`` for auditability; the suppression itself is also
+    marked in-place on the item in ``merged-items.json``
+    (``disposition="deduped-vs-external"``).
+    """
+    return deep_dir_path / "external-dedup.json"
+
+
 def merged_report_path(deep_dir_path: Path) -> Path:
     """Rendered human review report inside the deep artifact directory.
 

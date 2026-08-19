@@ -327,6 +327,11 @@ def parsed_issues_from_items(items: list[dict[str, Any]]) -> list[ParsedIssue]:
     """
     out: list[ParsedIssue] = []
     for raw in items:
+        # Items suppressed by the external-bot dedup phase stay in
+        # merged-items.json (audit trail) but must never reach the PR or the
+        # findings-out artifact — both build ParsedIssues through this function.
+        if raw.get("disposition") == "deduped-vs-external":
+            continue
         fields = extract_item_fields(raw)
         if fields is None:
             continue

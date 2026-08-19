@@ -67,6 +67,7 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("suppression", deep_prompts.build_suppression_prompt)
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
+    registry.override_prompt("external-dedup", deep_prompts.build_external_dedup_prompt)
 
 
 def _register_builtin_flows(registry: Registry) -> None:

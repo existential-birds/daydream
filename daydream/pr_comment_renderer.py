@@ -53,6 +53,7 @@ _PHASE_LABELS: dict[str, str] = {
     "deep": "Deep Review",
     "exploration": "Exploration",
     "verify": "Verify Recommendations",
+    "dedup": "External-Bot Dedup",
     "recon": "Reconnaissance",
     "audit": "Audit",
     "vet": "Vet Findings",

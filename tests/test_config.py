@@ -21,6 +21,7 @@ PHASE_NAMES = {
     "arbiter",
     "suppression",
     "supervise",
+    "dedup",
     "parse",
     "fix",
     "test",
