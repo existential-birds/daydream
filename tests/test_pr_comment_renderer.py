@@ -7,6 +7,7 @@ called out in S2.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -16,6 +17,7 @@ import pytest
 
 from daydream.pr_comment_renderer import _PHASE_LABELS, _format_duration, render_run_info_block
 from daydream.trajectory import DaydreamPhase
+from tests.harness.trajectory import make_recorder, observe_claude_shape
 
 # Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
 # synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
@@ -689,3 +691,44 @@ def test_phase_labels_covers_all_daydream_phases() -> None:
         assert phase.value in _PHASE_LABELS, (
             f"DaydreamPhase.{phase.name} (value={phase.value!r}) is missing from _PHASE_LABELS"
         )
+
+
+# -- Reconciled per-step metrics feed the per-phase rollup (issue #747) ------
+def _write_reconciled_trajectory(tmp_path: Path) -> Path:
+    """Build a trajectory through the real recorder whose per-step metrics were
+    reconciled (Σ steps == session total): per-turn single-digit MetricsEvents
+    + TurnEndEvent + a final CostEvent carrying the authoritative session total.
+    Includes the leading user step (step_id 1) the renderer/validator expects.
+    Returns the written trajectory path.
+    """
+
+    async def _build() -> Path:
+        # Price the fixture model (claude-sonnet-5 is a MODEL_PRICES key) so the
+        # cost-reconciliation half of the invariant is exercised: with the default
+        # unpriced 'opus' model, cost synthesis can never run, phase.cost_unknown
+        # flips True and the cost cell degrades to '—' (issue #747).
+        recorder = make_recorder(tmp_path, agent_model_name="claude-sonnet-5")
+        async with recorder:
+            async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+                inv.observe_user_step(prompt="go")
+                observe_claude_shape(inv)
+        return recorder.path
+
+    return asyncio.run(_build())
+
+
+def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -> None:
+    """A trajectory whose per-step metrics were reconciled (Σ == session total)
+    renders per-phase output tokens consistent with the session total, not the
+    collapsed per-message sum."""
+    path = _write_reconciled_trajectory(tmp_path)
+    rendered = render_run_info_block([path])
+    # The reconciled session total (rendered with thousand separators), not the
+    # collapsed per-message sum (~50).
+    assert "66,737 out" in rendered
+    assert "50 out" not in rendered   # no collapsed value leaks
+    # The priced fixture model lets cost synthesis run: the authoritative
+    # session cost_usd=0.5 renders (not '—'), so the cost-reconciliation half of
+    # the "consistent with session total" invariant is actually exercised.
+    assert "$0.50" in rendered
+    assert "Cost unavailable" not in rendered

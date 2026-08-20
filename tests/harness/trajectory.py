@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from daydream.archive.manifest import Manifest
-from daydream.backends import ResultEvent, TextEvent
+from daydream.backends import (
+    CostEvent,
+    MetricsEvent,
+    ResultEvent,
+    TextEvent,
+    TurnEndEvent,
+)
 from daydream.trajectory import (
     DaydreamRunFlow,
     Invocation,
@@ -41,6 +47,45 @@ def make_recorder(
 def read_trajectory(path: Path) -> dict[str, Any]:
     """Load the produced trajectory JSON from disk."""
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def step_token_sum(traj: dict[str, Any], key: str) -> int:
+    """Sum ``metrics[key]`` across agent steps that carry it.
+
+    Reconciliation invariant: the step-level rollup's per-dimension sum must
+    equal the recorder's final_metrics total (``Σ steps == final``). Steps
+    whose ``metrics`` block is absent, or which lack the requested key, are
+    skipped so a phantom all-zero residual step can never contribute a zero
+    line item to the sum.
+    """
+    return sum(
+        s["metrics"][key]
+        for s in traj["steps"]
+        if s.get("metrics") and s["metrics"].get(key)
+    )
+
+
+def observe_claude_shape(inv: Invocation) -> None:
+    """Observe a Claude-shaped stream: 5 per-message single-digit MetricsEvents
+    (one per turn) + the authoritative session-total CostEvent + ResultEvent.
+
+    Shared by the token-reconciliation and renderer tests so a future token
+    dimension is added in exactly one place (issue #747). The per-message
+    completion is a near-constant single digit (SDK bug shape) while the
+    CostEvent carries the authoritative whole-call session total — the exact
+    shape that exercises the reconciliation delta.
+    """
+    for i, c in enumerate((12, 9, 11, 8, 10)):
+        inv.observe(TextEvent(text=f"turn {i}"))
+        inv.observe(
+            MetricsEvent(message_id=f"m{i}", prompt_tokens=100,
+                         completion_tokens=c, cached_tokens=None,
+                         cost_usd=None)
+        )
+        inv.observe(TurnEndEvent(message_id=f"m{i}"))
+    inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
+                          output_tokens=66_737, cached_tokens=None))
+    inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
 def observe_text_and_result(inv: Invocation, text: str = "output") -> None:

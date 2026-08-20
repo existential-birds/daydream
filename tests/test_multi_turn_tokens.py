@@ -1,13 +1,11 @@
-"""TEST-06: Empirical multi-turn fixture verifying per-call token semantics.
+"""TEST-06: Empirical multi-turn fixture verifying session total reconciliation.
 
 Drives 3 sequential run_agent() calls through a MockBackend with known token
-values. Asserts each agent step's Metrics.prompt_tokens matches the per-call
-value (not cumulative). This is a gate test -- it passes or fails. No
-conditional delta-subtraction logic.
-
-Per Phase 2 D-14, we trust per-call semantics for claude-agent-sdk==0.1.52.
-If this test fails, the token extraction in backends/claude.py needs a
-last_seen_cumulative subtract step.
+values. Asserts the recorded final metrics reflect the authoritative per-call
+session totals (reconciled via per-dimension take-max delta, issue #747), NOT
+the collapsed per-message single digits — the under-count is caught, not
+blessed. This is a gate test -- it passes or fails. No conditional
+delta-subtraction logic.
 """
 
 from __future__ import annotations
@@ -15,7 +13,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 import pytest
 
@@ -31,21 +29,12 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, read_trajectory, step_token_sum
 
-
-# -- Token value constants for the 3-turn sequence --------------------------
-class _TurnTokens(TypedDict):
-    prompt_tokens: int
-    completion_tokens: int
-    cached_tokens: int
-    cost_usd: float
-
-
-TURN_1: _TurnTokens = {"prompt_tokens": 100, "completion_tokens": 20, "cached_tokens": 5, "cost_usd": 0.001}
-TURN_2: _TurnTokens = {"prompt_tokens": 150, "completion_tokens": 30, "cached_tokens": 10, "cost_usd": 0.002}
-TURN_3: _TurnTokens = {"prompt_tokens": 200, "completion_tokens": 40, "cached_tokens": 15, "cost_usd": 0.003}
-TURNS: list[_TurnTokens] = [TURN_1, TURN_2, TURN_3]
+# -- Per-phase session totals (one run_agent call per phase) -----------------
+# Claude-shaped stream: near-constant single-digit completion_tokens per
+# message, with the authoritative whole-call session total on the CostEvent.
+_PHASE_SESSION_TOTALS: list[int] = [66_737, 60_000, 55_000]
 PHASES = [DaydreamPhase.REVIEW, DaydreamPhase.FIX, DaydreamPhase.TEST]
 
 
@@ -84,17 +73,22 @@ class MockBackend:
 
 
 def _make_backend(turn_idx: int) -> MockBackend:
-    """Build a MockBackend for the given turn index (0, 1, 2)."""
-    t = TURNS[turn_idx]
+    """Claude-shaped mock: completion is a near-constant single digit per
+    message (SDK bug shape); the authoritative whole-call session total rides
+    the per-call CostEvent (mirrors the real claude-agent-sdk emission order:
+    MetricsEvent per message, then CostEvent)."""
     return MockBackend([
         TextEvent(text=f"turn {turn_idx + 1} output"),
         MetricsEvent(
-            message_id=f"msg_{turn_idx + 1:02d}",
-            prompt_tokens=t["prompt_tokens"],
-            completion_tokens=t["completion_tokens"],
-            cached_tokens=t["cached_tokens"],
-            cost_usd=t["cost_usd"],
+            message_id=f"msg_{turn_idx:02d}",
+            prompt_tokens=[100, 150, 200][turn_idx],
+            completion_tokens=12,   # near-constant single digit (SDK bug shape)
+            cached_tokens=None,
+            cost_usd=None,
         ),
+        TurnEndEvent(message_id=f"msg_{turn_idx:02d}"),
+        CostEvent(cost_usd=0.5, input_tokens=600,
+                  output_tokens=_PHASE_SESSION_TOTALS[turn_idx], cached_tokens=None),
         ResultEvent(structured_output=None, continuation=None),
     ])
 
@@ -110,37 +104,52 @@ async def _run_three_turns(tmp_path: Path) -> dict[str, Any]:
 
 
 async def test_per_call_token_values_not_cumulative(tmp_path: Path) -> None:
-    """SDK #112 gate: per-step prompt_tokens matches per-call value, not cumulative."""
+    """SDK #112 gate: per-turn step prompt_tokens matches the per-call value,
+    not cumulative (100, 250, 450)."""
     traj = await _run_three_turns(tmp_path)
     assert atif_validate(traj) is True
 
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 3
 
-    # Per-call values -- NOT cumulative (100, 250, 450)
-    assert agent_steps[0]["metrics"]["prompt_tokens"] == 100
-    assert agent_steps[1]["metrics"]["prompt_tokens"] == 150
-    assert agent_steps[2]["metrics"]["prompt_tokens"] == 200
-
-    assert agent_steps[0]["metrics"]["completion_tokens"] == 20
-    assert agent_steps[1]["metrics"]["completion_tokens"] == 30
-    assert agent_steps[2]["metrics"]["completion_tokens"] == 40
-
-    assert agent_steps[0]["metrics"]["cached_tokens"] == 5
-    assert agent_steps[1]["metrics"]["cached_tokens"] == 10
-    assert agent_steps[2]["metrics"]["cached_tokens"] == 15
+    # Per-call values -- NOT cumulative. Read off the per-turn steps only
+    # (completion == the near-constant single digit 12 distinguishes them from
+    # the residual CostEvent steps; do not index agent_steps[i], the residual
+    # steps shift indices).
+    turn_steps = [
+        s for s in agent_steps
+        if s.get("metrics")
+        and s["metrics"].get("prompt_tokens")
+        and s["metrics"].get("completion_tokens") == 12
+    ]
+    assert [s["metrics"]["prompt_tokens"] for s in turn_steps] == [100, 150, 200]
 
 
-async def test_final_metrics_sum_matches_per_step_totals(tmp_path: Path) -> None:
-    """FinalMetrics totals are the sum of per-step values across all 3 turns."""
+async def test_reconciled_totals_not_per_message_collapse(tmp_path: Path) -> None:
+    """The 3-phase run's final completion == Σ session totals (NOT Σ per-message
+    single digits), and final == Σ steps — the under-count is caught, not blessed."""
     traj = await _run_three_turns(tmp_path)
     assert atif_validate(traj) is True
 
     final = traj["final_metrics"]
-    assert final["total_prompt_tokens"] == 100 + 150 + 200  # 450
-    assert final["total_completion_tokens"] == 20 + 30 + 40  # 90
-    assert final["total_cached_tokens"] == 5 + 10 + 15  # 30
-    assert final["total_cost_usd"] == pytest.approx(0.001 + 0.002 + 0.003)  # 0.006
+    assert final["total_completion_tokens"] == sum(_PHASE_SESSION_TOTALS)
+    step_sum = step_token_sum(traj, "completion_tokens")
+    assert final["total_completion_tokens"] == step_sum
+
+
+async def test_final_metrics_sum_matches_per_step_totals(tmp_path: Path) -> None:
+    """FinalMetrics totals are the sum of per-step values across all 3 phases,
+    matching the reconciled session totals (not the collapsed single digits)."""
+    traj = await _run_three_turns(tmp_path)
+    assert atif_validate(traj) is True
+
+    final = traj["final_metrics"]
+    assert final["total_completion_tokens"] == sum(_PHASE_SESSION_TOTALS)  # 181_737
+    step_sum = step_token_sum(traj, "completion_tokens")
+    assert final["total_completion_tokens"] == step_sum
+    # Prompt: per-call authoritative CostEvent total (600) per phase.
+    assert final["total_prompt_tokens"] == 600 * 3  # 1800
+    # Cost: one CostEvent per phase.
+    assert final["total_cost_usd"] == pytest.approx(0.5 * 3)  # 1.5
 
 
 async def test_each_step_carries_correct_phase_label(tmp_path: Path) -> None:
@@ -149,11 +158,9 @@ async def test_each_step_carries_correct_phase_label(tmp_path: Path) -> None:
     assert atif_validate(traj) is True
 
     agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 3
-
-    assert agent_steps[0]["extra"]["daydream_phase"] == "review"
-    assert agent_steps[1]["extra"]["daydream_phase"] == "fix"
-    assert agent_steps[2]["extra"]["daydream_phase"] == "test"
+    # 2 metric-bearing steps per phase (per-turn step + residual CostEvent step).
+    phases = [s["extra"]["daydream_phase"] for s in agent_steps]
+    assert phases == ["review", "review", "fix", "fix", "test", "test"]
 
 
 # -- CostEvent must not re-count what MetricsEvents already reported ---------
@@ -403,11 +410,7 @@ async def test_step_metrics_sum_equals_final_metrics(tmp_path: Path) -> None:
     """The ``final == Σ steps`` invariant holds once steps accumulate."""
     traj = await _drive_one(tmp_path, _MetricsOnlyBackend(turns=3, in_tok=100, out_tok=10))
 
-    step_sum = sum(
-        s["metrics"]["prompt_tokens"]
-        for s in traj["steps"]
-        if s.get("metrics") and s["metrics"].get("prompt_tokens")
-    )
+    step_sum = step_token_sum(traj, "prompt_tokens")
     assert traj["final_metrics"]["total_prompt_tokens"] == step_sum == 300
 
 
