@@ -1368,3 +1368,14 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     )
     assert "shared/iface.py" in prompt
     assert "cross-shard" in prompt or "interface file" in prompt
+
+
+def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
+    """AC1: the per-stack builder emits the shared anti-confabulation gate."""
+    from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION, build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p,
+    )
+    assert VERIFICATION_PROTOCOL_INSTRUCTION in out

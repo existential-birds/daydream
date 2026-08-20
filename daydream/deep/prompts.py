@@ -594,6 +594,7 @@ def build_per_stack_prompt(
     parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
+    parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
