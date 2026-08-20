@@ -737,3 +737,66 @@ def test_resolve_per_stack_verdicts_clean_shard_read_is_clean() -> None:
         finding_files=set(),
     )
     assert out[0]["verdict"] == "clean"
+
+
+def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
+    """Issue #740 AC1: a clean verdict (empty findings) covers the file for the sweep.
+
+    A completed shard that read api.py and found nothing must still mark
+    api.py covered -- a clean review is indistinguishable from an unreviewed
+    file only under the old findings-only gate.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files, coverage_receipt_path, write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-clean"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
+                                                "inline_files": ["api.py"], "frontier_files": []}})
+    # Clean review: EMPTY issues, evidence-gated clean verdict for api.py.
+    (deep / "stack-python#0-records.json").write_text(json.dumps({
+        "issues": [],
+        "verdicts": [{"path": "api.py", "lines_read": 30, "verdict": "clean", "n_findings": 0}],
+    }))
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-clean", receipts=receipts)
+    assert "api.py" not in uncovered              # clean verdict -> covered, not swept
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
+
+
+def test_not_reviewed_verdict_never_credits(tmp_path: Path) -> None:
+    """Issue #740 AC6: an unread file (not_reviewed verdict) earns no coverage.
+
+    The anti-confabulation gate (#742/#756): a verdict array present but
+    resolving the file to not_reviewed must leave it swept, never credited.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files, coverage_receipt_path, write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-nr"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
+                                                "inline_files": ["api.py"], "frontier_files": []}})
+    # Verdict present but NOT a pass: the file was never read.
+    (deep / "stack-python#0-records.json").write_text(json.dumps({
+        "issues": [],
+        "verdicts": [{"path": "api.py", "lines_read": 0, "verdict": "not_reviewed", "n_findings": 0}],
+    }))
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-nr", receipts=receipts)
+    assert "api.py" in uncovered                  # not_reviewed -> swept, never credited
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 0

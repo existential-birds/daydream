@@ -152,6 +152,32 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
     """Set of ``file`` fields across a completed shard's parsed records.
 
     Returns ``None`` when the records file is absent or unreadable -- an
+    incomplete shard holds ZERO inline/frontier coverage (fail-open: the
+    review failed/omitted, so its files stay uncovered and get swept). This
+    helper is also the findings-only fallback used by :func:`_parsed_covered_files`
+    when a shard's records predate the evidence-gated ``verdicts`` array.
+    """
+    try:
+        records = json.loads(records_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    findings = _records_issues(records)
+    if findings is None:
+        return None
+    return _finding_files_from_records(findings)
+
+
+def _parsed_covered_files(records_path: Path) -> set[str] | None:
+    """Set of files a completed shard's evidence-gated verdicts mark covered.
+
+    A diff file is covered when the shard's persisted ``verdicts`` array
+    records it as ``clean`` or ``has_findings`` (the reviewer read it and the
+    verdict is evidence-backed, never raw declared self-report). An unread
+    file records ``not_reviewed`` and never enters the set. Legacy record
+    shapes -- a bare findings list, a dict without a ``verdicts`` key, or an
+    empty ``verdicts`` list -- fall back to the findings-only set (:func:`_parsed_finding_files`).
+
+    Returns ``None`` when the records file is absent or unreadable -- an
     incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
     reviewer failed/omitted, so its files stay uncovered and get swept).
     """
@@ -159,6 +185,20 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
         records = json.loads(records_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    if isinstance(records, dict):
+        verdicts = records.get("verdicts")
+        if isinstance(verdicts, list) and verdicts:
+            covered: set[str] = set()
+            for entry in verdicts:
+                if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
+                    continue
+                if entry.get("verdict") not in {"clean", "has_findings"}:
+                    continue  # not_reviewed (or any other) never credits
+                path = entry["path"]
+                if path.startswith("./"):
+                    path = path[2:]
+                covered.add(path)
+            return covered
     findings = _records_issues(records)
     if findings is None:
         return None
@@ -171,8 +211,11 @@ def _receipt_covered_files(
     """Coverage from completed shards' inline/frontier evidence (issue #731).
 
     A diff file is ``inline_hunk_reviewed``-covered when it is in a shard's
-    ``inline_files`` AND that shard's parsed records exist AND at least one
-    parsed finding ``_same_repo_relative`` it. ``dependency_frontier_read``
+    ``inline_files`` AND that shard's parsed records exist AND the shard's
+    evidence-gated ``verdicts`` array (or, for legacy records, at least one
+    parsed finding) marks it covered. A ``clean`` verdict -- a reviewed file
+    with no findings -- credits the file, so a clean review is never swept;
+    a ``not_reviewed`` verdict never credits. ``dependency_frontier_read``
     is the same check over the shard's ``frontier_files``. Assignment/grounding
     alone never counts; a shard without a records file contributes zero.
 
@@ -190,7 +233,7 @@ def _receipt_covered_files(
     diff_set = set(diff_files)
     for stack_name, receipt in receipts.items():
         records_path = per_stack_records_path(deep_dir_path, stack_name)
-        finding_files = _parsed_finding_files(records_path)
+        finding_files = _parsed_covered_files(records_path)
         if finding_files is None:
             continue  # incomplete shard contributes zero inline/frontier evidence
         for evidence_key, files_key in (
