@@ -737,3 +737,199 @@ def test_resolve_per_stack_verdicts_clean_shard_read_is_clean() -> None:
         finding_files=set(),
     )
     assert out[0]["verdict"] == "clean"
+
+
+def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
+    """Issue #740 AC1: a clean verdict (empty findings) covers the file for the sweep.
+
+    A completed shard that read api.py and found nothing must still mark
+    api.py covered -- a clean review is indistinguishable from an unreviewed
+    file only under the old findings-only gate.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-clean"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
+                                                "inline_files": ["api.py"], "frontier_files": []}})
+    # Clean review: EMPTY issues, evidence-gated clean verdict for api.py.
+    (deep / "stack-python#0-records.json").write_text(json.dumps({
+        "issues": [],
+        "verdicts": [{"path": "api.py", "lines_read": 30, "verdict": "clean", "n_findings": 0}],
+    }))
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-clean", receipts=receipts)
+    assert "api.py" not in uncovered              # clean verdict -> covered, not swept
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
+
+
+def test_not_reviewed_verdict_never_credits(tmp_path: Path) -> None:
+    """Issue #740 AC6: an unread file (not_reviewed verdict) earns no coverage.
+
+    The anti-confabulation gate (#742/#756): a verdict array present but
+    resolving the file to not_reviewed must leave it swept, never credited.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-nr"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
+                                                "inline_files": ["api.py"], "frontier_files": []}})
+    # Verdict present but NOT a pass: the file was never read.
+    (deep / "stack-python#0-records.json").write_text(json.dumps({
+        "issues": [],
+        "verdicts": [{"path": "api.py", "lines_read": 0, "verdict": "not_reviewed", "n_findings": 0}],
+    }))
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-nr", receipts=receipts)
+    assert "api.py" in uncovered                  # not_reviewed -> swept, never credited
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 0
+
+
+# --- Issue #740 round-2: frontier credit decoupled from listing shard's records ---
+
+
+def test_frontier_credited_when_lister_shard_lacks_records(tmp_path: Path) -> None:
+    """Issue #740: a frontier file is credited when ANY completed shard read it.
+
+    The cross-shard union rationale builds ``frontier_evidence`` from every
+    completed shard's covered set because a frontier file's read evidence lives
+    in a SIBLING shard, never the shard that merely lists it. Previously the
+    credit pass ``continue``d the whole per-receipt loop when the LISTING shard
+    had no records, suppressing ``dependency_frontier_read`` for files it
+    merely named. Now the frontier branch runs against the sibling union
+    independent of the lister's own record presence.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-fl"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    # python#0 merely LISTS api.py as a frontier and has NO records (incomplete
+    # lister). python#1 actually read api.py (its records cover it) but its own
+    # receipt lists no inline/frontier files, so only the sibling-union frontier
+    # branch on python#0 can credit api.py.
+    write_coverage_receipts(deep, {
+        "python#0": {"assigned_files": [], "inline_files": [], "frontier_files": ["api.py"]},
+        "python#1": {"assigned_files": [], "inline_files": [], "frontier_files": []},
+    })
+    # python#1 completed and read api.py -> union evidence covers it.
+    (deep / "stack-python#1-records.json").write_text(
+        json.dumps([{"file": "api.py", "id": 1, "description": "d", "line": 1,
+                     "severity": "low", "confidence": "MEDIUM",
+                     "rationale": "r", "evidence": "e"}])
+    )
+    # python#0's records file deliberately absent.
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-fl", receipts=receipts)
+    assert "api.py" not in uncovered          # frontier evidence covers it
+    assert stats["coverage_by_evidence"]["dependency_frontier_read"] == 1
+
+
+def test_frontier_not_credited_without_any_sibling_evidence(tmp_path: Path) -> None:
+    """Issue #740: frontier credit still requires real sibling evidence.
+
+    Decoupling the frontier branch from the lister's records must not credit a
+    frontier file when NO completed shard read it -- assignment/grounding alone
+    never counts. With both shards' records absent, api.py stays swept.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-fn"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {
+        "python#0": {"assigned_files": [], "inline_files": [], "frontier_files": ["api.py"]},
+        "python#1": {"assigned_files": [], "inline_files": [], "frontier_files": []},
+    })
+    # No completed shard: frontier_evidence stays empty.
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-fn", receipts=receipts)
+    assert "api.py" in uncovered              # no sibling evidence -> swept
+    assert stats["coverage_by_evidence"].get("dependency_frontier_read", 0) == 0
+
+
+# --- Issue #740 round-2: single canonical ./ strip ---
+
+
+def test_strip_dot_slash_normalizes_once() -> None:
+    """Issue #740: ``_strip_dot_slash`` is the single canonical ``./`` strip."""
+    from daydream.deep.coverage import _strip_dot_slash
+
+    assert _strip_dot_slash("api.py") == "api.py"
+    assert _strip_dot_slash("./api.py") == "api.py"
+    assert _strip_dot_slash("./dir/x.py") == "dir/x.py"
+    assert _strip_dot_slash("a/b/c.py") == "a/b/c.py"
+
+
+def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
+    """Issue #740: verdict-path and findings-fallback strips route through the helper.
+
+    Both ``_parsed_covered_files`` (verdict ``path`` entries) and the
+    findings fallback (``file`` fields) normalize a leading ``./`` the same
+    way, so a ``./x`` spelling credits the same file either way.
+    """
+    from daydream.deep.coverage import (
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
+    )
+
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-sc"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    deep = daydream_dir / "deep"
+    deep.mkdir(parents=True)
+    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
+                                                "inline_files": ["api.py"], "frontier_files": []}})
+    # Verdict path spelled with a leading ./ -- must still credit api.py.
+    (deep / "stack-python#0-records.json").write_text(json.dumps({
+        "issues": [],
+        "verdicts": [{"path": "./api.py", "lines_read": 10, "verdict": "clean", "n_findings": 0}],
+    }))
+    receipts = json.loads(coverage_receipt_path(deep).read_text())
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-sc", receipts=receipts)
+    assert "api.py" not in uncovered
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
+

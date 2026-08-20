@@ -394,8 +394,8 @@ DEFAULT_UNCOVERED_SWEEP_MIN_HUNK_LINES: int = 5
 # the default and must stay byte-identical; the benchmark harness lives in
 # ``bench/sharding-benchmark.py``.
 DEFAULT_DEEP_SHARD_ENABLED: bool = False
-DEFAULT_DEEP_SHARD_MAX_FILES: int = 20
-DEFAULT_DEEP_SHARD_MAX_BYTES: int = 65536
+DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
+DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
 DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
 DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
 

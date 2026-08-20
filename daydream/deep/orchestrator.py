@@ -1303,9 +1303,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 include_alternatives=include_alternatives,
-                # Issue #731: write structured coverage receipts only when
-                # sharding is enabled for this run (off by default).
-                write_coverage_receipts=bool(ctx.data.get("coverage_receipts_enabled", False)),
+                # Issue #731: always write deterministic coverage receipts so
+                # the sweep credits reviewed files on every run (decoupled from
+                # sharding; #740 updates the evidence gate and bounds).
+                write_coverage_receipts=True,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
@@ -1596,13 +1597,12 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
 def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
     """Load this run's coverage receipts for the sweep (issue #731).
 
-    Receipts are only written when sharding was enabled (``coverage_receipts_enabled``
-    in ``ctx.data``). Fail-open: a missing or malformed receipts file degrades
-    to ``None`` (never raises, never skips the sweep) and ``compute_uncovered_files``
-    takes its forensic Reads-only path -- byte-identical to today.
+    Receipts are written on every deep run (decoupled from sharding; the sweep
+    always attempts the load). Fail-open: a missing or malformed receipts file
+    degrades to ``None`` (never raises, never skips the sweep) and
+    ``compute_uncovered_files`` takes its forensic Reads-only path --
+    byte-identical to today's behavior without receipts.
     """
-    if not ctx.data.get("coverage_receipts_enabled"):
-        return None
     try:
         loaded = json.loads(coverage_receipt_path(ctx.data["dd"]).read_text(encoding="utf-8"))
         return loaded if isinstance(loaded, dict) else None
@@ -1647,8 +1647,9 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "coverage_ratio": coverage_stats["coverage_ratio"],
             "uncovered_files": uncovered_files,
             # Issue #731: per-evidence-type coverage counts (source_read /
-            # inline_hunk_reviewed / dependency_frontier_read), surfaced only
-            # when sharding was enabled this run (absent otherwise).
+            # inline_hunk_reviewed / dependency_frontier_read); receipts are
+            # written and loaded on every deep run (decoupled from sharding,
+            # #740), so the counts surface whenever the run produced them.
             "coverage_by_evidence": coverage_stats.get("coverage_by_evidence", {}),
         },
         "attempted_files": swept_files,
@@ -4220,10 +4221,6 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
                 "dd": dd,
                 "stacks": stacks,
                 "single_stack_mode": single_stack_mode,
-                # Issue #731: when sharding is enabled the per-stack phase writes
-                # structured coverage receipts and the uncovered sweep consumes
-                # them (Tasks 8/10). Off by default -> forensic byte-identical.
-                "coverage_receipts_enabled": sharding_enabled,
                 "intent_path": _intent_path(dd),
                 "alts_path": _alternatives_path(dd),
                 "log": log,
