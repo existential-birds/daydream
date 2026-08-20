@@ -1946,3 +1946,37 @@ def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(tmp_path: Pat
         assert m.per_stack_review_model is None, f"start_at={start_at}"
         assert "per_stack_review_backend" not in run, f"start_at={start_at}"
         assert "per_stack_review_model" not in run, f"start_at={start_at}"
+
+
+def test_manifest_splits_status_from_pipeline():
+    from daydream.archive.provenance import ExecutableProvenance
+    m = Manifest(
+        session_id="s-1", status="complete", archive_status="complete",
+        pipeline_status="failed", phase_states={
+            "merge": {"ran": True, "status": "failed"},
+            "fix": {"ran": False, "status": "absent"},
+            "test": {"ran": False, "status": "absent"},
+        },
+        daydream=ExecutableProvenance(version="0.27.0", install_source="git",
+                                      commit="abc", dirty=False,
+                                      container_digest="unknown"),
+    )
+    d = m.to_dict()
+    assert d["status"] == "complete"
+    assert d["archive_status"] == "complete"
+    assert d["pipeline_status"] == "failed"
+    assert d["phase_states"]["merge"]["status"] == "failed"
+    # Namespace separation: executable provenance never merged into git.*
+    assert d["daydream"]["version"] == "0.27.0"
+    assert d["git"]["head_sha"] is None  # target-repo sha stays in git.*
+    assert "commit" not in d["git"]
+
+
+def test_legacy_manifest_reads_new_fields_as_unknown():
+    legacy = {k: v for k, v in Manifest().to_dict().items()
+              if k not in ("archive_status", "pipeline_status", "phase_states", "daydream")}
+    # A raw manifest.json dict without the new keys still yields explicit
+    # unknown for consumers, never a KeyError and never a fabricated value.
+    assert legacy.get("pipeline_status", "unknown") == "unknown"
+    assert legacy.get("archive_status", "unknown") == "unknown"
+    assert legacy.get("daydream", "unknown") == "unknown"

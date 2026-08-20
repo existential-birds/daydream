@@ -4,6 +4,11 @@ Assembles a ``manifest.json`` from the recorder, run config, git context,
 and optional evaluation results. The manifest is the single source of
 truth for what's in an archive bundle.
 
+Provenance namespaces: ``git.*`` and ``code_context.*`` record provenance
+of the repository under review (target ``base_sha``/``head_sha``); the
+``daydream.*`` block records the immutable Daydream executable that
+produced the run. The two must never be conflated.
+
 Exports:
     MANIFEST_SCHEMA_VERSION: Current schema version string.
     Manifest: Dataclass representing the manifest.
@@ -126,7 +131,9 @@ class Manifest:
             key.
         session_id: UUID4 session identifier from the trajectory recorder.
         archived_at: ISO 8601 timestamp of when the archive was created.
-        status: Run status — ``complete``, ``partial``, or ``failed``.
+        status: Run status — ``complete`` alias of ``archive_status``, kept
+            byte-identical for backward compatibility (archive finalization),
+            never conflated with ``pipeline_status``.
         run_flow: Run flow type (normal, ttt, pr, deep).
         skill: Review skill used (python, react, etc.).
         model: Model name (opus, sonnet, haiku).
@@ -231,6 +238,25 @@ class Manifest:
     session_id: str = ""
     archived_at: str = ""
     status: str = "complete"
+    # archive_status is byte-identical to the legacy ``status`` alias (spec Key
+    # Decision 1): archive finalization, distinct from pipeline_status. Kept as a
+    # separate key so consumers distinguishing "cleanly archived" from "pipeline
+    # succeeded" do not repurpose the legacy field.
+    archive_status: str = "complete"
+    # pipeline_status is the pipeline-outcome signal: succeeded / failed /
+    # partial / cancelled / unknown. Distinct from archive_status: a run that
+    # merged-failed and never tested is cleanly archived but its pipeline
+    # failed.
+    pipeline_status: str = "unknown"
+    # Per-phase terminal states (``merge``/``fix``/``test``), each
+    # ``{"ran": bool, "status": str}`` where status is one of
+    # succeeded/failed/partial/absent/unknown. ``None``/omitted for legacy
+    # manifests.
+    phase_states: dict[str, Any] | None = None
+    # Executable provenance: the immutable Daydream executable that produced
+    # this run (vendor ``ExecutableProvenance``). Never merged into the
+    # target-repo ``git.*`` / ``code_context.*`` blocks.
+    daydream: Any | None = None
 
     # Run config
     run_flow: str = ""
@@ -296,6 +322,12 @@ class Manifest:
             "session_id": self.session_id,
             "archived_at": self.archived_at,
             "status": self.status,
+            "archive_status": self.archive_status,
+            "pipeline_status": self.pipeline_status,
+            **_omit_falsy(
+                daydream=self.daydream.to_dict() if self.daydream is not None else None,
+                phase_states=self.phase_states,
+            ),
             "run": {
                 "flow": self.run_flow,
                 "skill": self.skill,
