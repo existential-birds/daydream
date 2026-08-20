@@ -30,11 +30,12 @@ def render_report(items: list[dict[str, Any]]) -> str:
     """Render canonical items into the deep-review markdown report.
 
     Groups items by ``lens`` and emits, in order: ``## Structural Review``
-    (only when structural items exist), ``## Issues`` (per-stack lens), and
+    (only when structural items exist), ``## Issues`` (per-stack lens),
     ``## Cross-Stack Issues`` (cross-stack lens, each title prefixed with the
-    literal ``[cross-stack]``). A section is omitted entirely when it has no
-    items. Each finding line is ``N. [FILE:LINE] DESCRIPTION``, unbolded, where
-    ``N`` is the item's canonical ``id``.
+    literal ``[cross-stack]``), and ``## Wonder Findings`` (wonder lens). A
+    section is omitted entirely when it has no items. Each finding line is
+    ``N. [FILE:LINE] DESCRIPTION``, unbolded, where ``N`` is the item's
+    canonical ``id``.
 
     Args:
         items: Canonical merged finding items, each carrying ``id``, ``lens``,
@@ -43,23 +44,22 @@ def render_report(items: list[dict[str, Any]]) -> str:
     Returns:
         The rendered markdown report as a string.
     """
-    structural = [i for i in items if i.get("lens") == "structural"]
-    per_stack = [i for i in items if i.get("lens") == "per-stack"]
-    cross_stack = [i for i in items if i.get("lens") == "cross-stack"]
-
     sections: list[str] = ["# Review"]
 
-    if structural:
-        body = "\n".join(_finding_line(i) for i in structural)
-        sections.append(f"## Structural Review\n{body}")
+    # lens -> (section title, line prefix). One arm per lens; a section is
+    # emitted only when it has items.
+    lens_sections = [
+        ("structural", "## Structural Review", ""),
+        ("per-stack", "## Issues", ""),
+        ("cross-stack", "## Cross-Stack Issues", "[cross-stack] "),
+        ("wonder", "## Wonder Findings", ""),
+    ]
 
-    if per_stack:
-        body = "\n".join(_finding_line(i) for i in per_stack)
-        sections.append(f"## Issues\n{body}")
-
-    if cross_stack:
-        body = "\n".join(_finding_line(i, prefix="[cross-stack] ") for i in cross_stack)
-        sections.append(f"## Cross-Stack Issues\n{body}")
+    for lens, title, prefix in lens_sections:
+        rows = [i for i in items if i.get("lens") == lens]
+        if rows:
+            body = "\n".join(_finding_line(i, prefix=prefix) for i in rows)
+            sections.append(f"{title}\n{body}")
 
     return "\n\n".join(sections) + "\n"
 

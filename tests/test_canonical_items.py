@@ -36,3 +36,10 @@ def test_verdict_join_matches_after_collision_resolution():
     joined = _attach_verdicts(items, payload)
     assert joined[0].get("verifier_verdict") is None       # structural NOT mismatched
     assert joined[1]["verifier_verdict"] == "contradicts"  # right item got the verdict
+
+
+def test_schema_accepts_wonder_lens():
+    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
+            "confidence": "MEDIUM", "rationale": "r", "evidence": "a.py:4",
+            "lens": "wonder", "severity": "medium"}
+    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass

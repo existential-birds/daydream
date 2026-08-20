@@ -909,7 +909,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "confidence": {"type": "string", "enum": ["HIGH", "MEDIUM"]},
                     "rationale": {"type": "string"},
                     "evidence": {"type": "string"},
-                    "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural"]},
+                    "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
                 },
                 "required": [

@@ -21,6 +21,7 @@ from daydream.eval.analyzer import (
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
+    analyze_findings,
     analyze_grounding,
     analyze_quality,
     analyze_session,
@@ -1463,3 +1464,203 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path):
     assert result["scoped_files"] == 1
     assert list(result["per_file"]) == ["app.py"]
     assert result["erosion"] == 0.0
+
+
+# ----------------------------------------------------------------------------
+# Shipped-set findings metrics (issue #741): analyze_findings counts the
+# authoritative merged-items.json set, falling back to the merged review
+# regex count, then the pre-merge per-stack total.
+# ----------------------------------------------------------------------------
+
+def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
+    """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
+    items = []
+    for i in range(high):
+        items.append({
+            "id": i,
+            "description": f"high-{i}",
+            "file": "a.py",
+            "line": i + 1,
+            "confidence": "HIGH",
+            "rationale": "r",
+            "evidence": "a.py:1",
+            "lens": "per-stack",
+            "severity": "high",
+        })
+    for i in range(med):
+        items.append({
+            "id": high + i,
+            "description": f"med-{i}",
+            "file": "b.py",
+            "line": i + 1,
+            "confidence": "MEDIUM",
+            "rationale": "r",
+            "evidence": "b.py:1",
+            "lens": "per-stack",
+            "severity": "medium",
+        })
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+
+
+def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
+    """Write deep/f\"stack-{stack_name}-records.json\" = [{\"id\": i, \"confidence\": \"HIGH\"}]*n."""
+    records = [{"id": i, "confidence": "HIGH"} for i in range(n)]
+    (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
+
+
+def seed_review_output(deep: Path, *, count: int) -> None:
+    """Write deep/\"review-output.md\" with `count` lines matching ^\\d+\\.\\s+\\[."""
+    lines = [f"{i}. [HIGH] finding {i}" for i in range(1, count + 1)]
+    (deep / "review-output.md").write_text("\n".join(lines) + "\n")
+
+
+def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_shipped_items(deep, high=4, med=4)     # merged-items.json: 8 items (4 HIGH, 4 MEDIUM)
+    seed_stack_records(deep, "python", n=4)     # stack-python-records.json: 4 HIGH
+    out = analyze_findings(dd)
+    assert out["total"] == 8
+    assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+
+
+def test_shipped_count_includes_wonder_lens_items(tmp_path: Path):
+    # Issue #741: wonder-lens merged items are shipped findings and MUST count
+    # toward total_findings (they were dropped by the pre-fix renderer, inflating
+    # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    # 4 per-stack + 4 wonder = 8 shipped items.
+    items = []
+    for i in range(4):
+        items.append({
+            "id": i, "description": f"high-{i}", "file": "a.py", "line": i + 1,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
+            "lens": "per-stack", "severity": "high",
+        })
+    for i in range(4):
+        items.append({
+            "id": 4 + i, "description": f"wonder-{i}", "file": "w.py", "line": i + 1,
+            "confidence": "MEDIUM", "rationale": "r", "evidence": "w.py:1",
+            "lens": "wonder", "severity": "medium",
+        })
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    out = analyze_findings(dd)
+    assert out["total"] == 8                     # wonder items are counted (issue #741)
+    assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+
+
+def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path):
+    # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
+    # data-integrity error. A well-formed file with the wrong shape must surface
+    # that error too, not silently yield a bogus count behind the fallback.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    # ``items`` present but a non-list, and a top-level list, are both wrong
+    # shapes, as is a missing ``items`` key -- the writer always emits it.
+    (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
+    with pytest.raises(ValueError):
+        analyze_findings(dd)
+
+
+def test_shipped_count_missing_items_key_propagates(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "merged-items.json").write_text(json.dumps({}))
+    with pytest.raises(ValueError):
+        analyze_findings(dd)
+
+
+def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path):
+    # A *syntax*-invalid merged-items.json surfaces, not the fallback.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    (deep / "merged-items.json").write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        analyze_findings(dd)
+
+
+def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_review_output(deep, count=8)           # review-output.md: 8 numbered [ items
+    seed_stack_records(deep, "python", n=4)
+    out = analyze_findings(dd)
+    assert out["total"] == 8                    # from merged_finding_count regex, not per-stack
+
+
+def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    out = analyze_findings(dd)
+    assert out["total"] == 4                    # pre-merge fallback, never 0
+
+
+def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text(json.dumps([{"id": 1}, {"id": 2}]))
+    seed_stack_records(deep, "python", n=3)
+    seed_stack_records(deep, "uncovered", n=1)
+    seed_stack_records(deep, "structure", n=2)
+    out = analyze_findings(dd)
+    assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "uncovered": 1, "structure": 2}
+
+
+def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path):
+    # A present-but-malformed alternatives.json must not take down
+    # analyze_findings / analyze_session (it served wonder attribution either).
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text("{not json")
+    out = analyze_findings(dd)
+    assert out["per_lens"]["wonder"] == 0
+
+
+def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
+    out = analyze_findings(dd)
+    assert out["per_lens"]["wonder"] == 6
+    assert out["per_lens"]["per-stack"] == 0
+
+
+def seed_run_trajectory(dd: Path, session_id: str, *, total_cost_usd: float) -> None:
+    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with final metrics."""
+    run_dir = dd / "runs" / session_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(json.dumps({
+        "session_id": session_id,
+        "final_metrics": {"total_cost_usd": total_cost_usd},
+        "agent": {"name": "test"},
+        "extra": {},
+    }))
+
+
+def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path):
+    sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
+    dd = tmp_path / ".daydream"
+    seed_run_trajectory(dd, sid, total_cost_usd=18.2056)
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_shipped_items(deep, high=4, med=4)     # 8 shipped items, the a80b9373 shape
+    (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
+    res = analyze_session(dd, session_id=sid)
+    assert res["findings"]["total"] == 8
+    assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+    assert res["findings"]["per_lens"]["wonder"] == 6
+    assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)

@@ -642,8 +642,108 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
     return issues
 
 
+_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
+
+
+def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
+    """Attribute findings across the wonder / per-stack / uncovered / structure lenses.
+
+    ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
+    artifact); the existing ``stack-*-records.json`` glob buckets into
+    per-stack / uncovered / structure by stack name. These lens counts are raw,
+    pre-merge attribution -- they are *not* derived from the shipped
+    ``merged-items.json`` set, so they need not sum to, or relate to, the
+    shipped ``total`` reported by ``_shipped_counts``. The distinction is
+    deliberate and documented: reconciling a lens to the shipped set would hide
+    how many items survived merge/dedup, so report readers should treat the
+    lens as raw attribution rather than a partition of the shipped set.
+    """
+    per_lens = dict(_EMPTY_PER_LENS)
+    alts_path = deep_dir / "alternatives.json"
+    if alts_path.exists():
+        try:
+            alternatives = json.loads(alts_path.read_text())
+        except json.JSONDecodeError:
+            # A present-but-malformed alternatives.json must not take down
+            # analyze_findings / analyze_session; leave wonder attribution at 0.
+            alternatives = None
+        if isinstance(alternatives, list):
+            per_lens["wonder"] = len(alternatives)
+    for f in sorted(deep_dir.glob("stack-*-records.json")):
+        stack_name = f.stem.replace("stack-", "").replace("-records", "")
+        records = _records_issues_or_empty(json.loads(f.read_text()))
+        if stack_name == "uncovered":
+            per_lens["uncovered"] += len(records)
+        elif stack_name == "structure":
+            per_lens["structure"] += len(records)
+        else:
+            per_lens["per-stack"] += len(records)
+    return per_lens
+
+
+def _shipped_counts(
+    deep_dir: Path, all_findings: list[dict], merged_review: dict
+) -> tuple[int, dict[str, int]]:
+    """Select the shipped review set and report (total, by_confidence) together.
+
+    ``merged-items.json`` is authoritative when present (present-but-empty means
+    "shipped nothing"); every item it carries is shipped, including wonder-lens
+    findings (the renderer emits them, so they count -- issue #741). When that
+    file is absent the count falls back to the ``merged_finding_count`` regex on
+    ``review-output.md``; when neither exists it falls back to the pre-merge
+    per-stack total so archived runs never regress to zero. ``by_confidence``
+    is in every branch derived from the artifact that supplies ``total``.
+
+    A present-but-corrupt ``merged-items.json`` is a data-integrity error that
+    propagates rather than being silently hidden behind the fallback: a
+    *syntax*-invalid file surfaces ``JSONDecodeError`` from ``json.loads``, and a
+    well-formed file with the wrong shape (top-level non-object, or an ``items``
+    field that is not a list) raises ``ValueError`` from the explicit shape
+    check. Both are the same documented error class -- a bogus shipped set is
+    never silently counted.
+    """
+    merged_items_file = deep_dir / "merged-items.json"
+    if merged_items_file.exists():
+        merged = json.loads(merged_items_file.read_text())
+        # Shape-check before use so a well-formed-but-wrong-shape file (top-level
+        # non-object, or ``items`` not a list) is treated as the documented
+        # data-integrity error instead of silently yielding a bogus count. The
+        # writer always emits the ``items`` key, so a missing ``items`` is a
+        # wrong shape too -- only ``items": []`` is "shipped nothing".
+        if not isinstance(merged, dict) or not isinstance(merged.get("items"), list):
+            raise ValueError(
+                "merged-items.json must be an object whose ``items`` is a list; "
+                f"got top-level type {type(merged).__name__}"
+            )
+        merged_items = merged["items"]
+        # Every merged item is shipped: the renderer now emits wonder-lens
+        # findings too (issue #741), so the shipped set equals the posted
+        # review. A present-but-empty list means "shipped nothing".
+        by_confidence = dict(
+            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
+        )
+        return len(merged_items), by_confidence
+    if merged_review.get("merged_finding_count"):
+        # The review is the shipped rendering but carries no confidence values,
+        # so no confidence attribution is possible without another source. Return
+        # an empty rather than cross-mix the pre-merge per-stack confidences.
+        return merged_review["merged_finding_count"], {}
+    return len(all_findings), dict(
+        Counter(f.get("confidence", "UNKNOWN") for f in all_findings)
+    )
+
+
 def analyze_findings(daydream_dir: Path) -> dict:
-    """Parse per-stack records, dedup stats, and merged review."""
+    """Parse per-stack records, dedup stats, and merged review.
+
+    ``total``/``by_confidence`` report the shipped review set: ``merged-items.json``
+    is authoritative when present (it is the canonical set the posted review is
+    rendered from). When that file is absent, the count falls back to the
+    ``merged_finding_count`` regex on ``review-output.md``, then to the pre-merge
+    per-stack total so archived runs never regress to zero. ``per_lens`` attributes
+    findings across the wonder (``alternatives.json``), per-stack, uncovered, and
+    structure lenses.
+    """
     deep_dir = daydream_dir / "deep"
     if not deep_dir.is_dir():
         return {
@@ -653,24 +753,21 @@ def analyze_findings(daydream_dir: Path) -> dict:
             "stacks": [],
             "dedup": {},
             "merged_review": {},
+            "per_lens": dict(_EMPTY_PER_LENS),
         }
 
     all_findings: list[dict] = []
     stacks: list[dict] = []
 
+    per_lens = _bucketed_lens_counts(deep_dir)
+
     for f in sorted(deep_dir.glob("stack-*-records.json")):
         stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        loaded = json.loads(f.read_text())
-        # Issue #742: fresh-run per-stack records files carry the dict shape
-        # {"issues": [...], "verdicts": [...]}; findings are the issues list
-        # either way (legacy bare lists pass through).
-        records = _records_issues_or_empty(loaded)
+        records = _records_issues_or_empty(json.loads(f.read_text()))
         stacks.append({"name": stack_name, "finding_count": len(records)})
         for r in records:
             r["_stack"] = stack_name
             all_findings.append(r)
-
-    confidence_counts = Counter(f.get("confidence", "UNKNOWN") for f in all_findings)
 
     dedup_stats: dict = {}
     dedup_path = deep_dir / "dedup-candidates.json"
@@ -693,18 +790,28 @@ def analyze_findings(daydream_dir: Path) -> dict:
             re.findall(r"^\d+\.\s+\[", text, re.MULTILINE)
         )
 
+    total, by_confidence = _shipped_counts(deep_dir, all_findings, merged_review)
+
     return {
-        "total": len(all_findings),
-        "by_confidence": dict(confidence_counts),
+        "total": total,
+        "by_confidence": by_confidence,
         "findings": all_findings,
         "stacks": stacks,
         "dedup": dedup_stats,
         "merged_review": merged_review,
+        "per_lens": per_lens,
     }
 
 
 def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
     """Tier 1 grounding: verify cited files were actually read by the agent.
+
+    The denominator is the pre-merge per-stack finding list held in
+    ``findings_data["findings"]`` -- those are the records tagged with
+    ``_stack`` to match against a deep-stack reader -- not the shipped ``total``
+    from ``merged-items.json``. Shipped wonder/structural items are absent from
+    this set because they have no per-stack reader stream to ground to, so they
+    neither inflate the denominator nor get grounding credit here.
 
     ``grounding_rate`` is ``None`` over an empty finding set: the ratio is
     undefined, not perfect. It feeds the RL/SFT reward as a credit axis
@@ -1810,6 +1917,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
             "stacks": findings_data["stacks"],
             "dedup": findings_data["dedup"],
             "merged_review": findings_data.get("merged_review", {}),
+            "per_lens": findings_data.get("per_lens", {}),
         },
         "grounding": grounding,
         "exploration_utilization": exploration,
