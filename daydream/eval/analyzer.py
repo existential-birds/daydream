@@ -633,9 +633,11 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
         total_reads = 0
 
         for tc in calls:
-            if tc["function_name"] in ("Read", "Grep"):
-                total_reads += 1
-                path = tc["arguments"].get("file_path") or tc["arguments"].get("path", "")
+            read_paths = _read_paths_for_call(tc)
+            if not read_paths:
+                continue
+            total_reads += 1
+            for path in read_paths:
                 if "affected_files.md" in path:
                     exploration_refs.append(path)
 
