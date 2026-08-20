@@ -1515,7 +1515,9 @@ def seed_review_output(deep: Path, *, count: int) -> None:
 
 
 def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
-    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     seed_shipped_items(deep, high=4, med=4)     # merged-items.json: 8 items (4 HIGH, 4 MEDIUM)
     seed_stack_records(deep, "python", n=4)     # stack-python-records.json: 4 HIGH
     out = analyze_findings(dd)
@@ -1524,7 +1526,9 @@ def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
 
 
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
-    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     seed_review_output(deep, count=8)           # review-output.md: 8 numbered [ items
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
@@ -1532,14 +1536,18 @@ def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Pa
 
 
 def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
-    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
     assert out["total"] == 4                    # pre-merge fallback, never 0
 
 
 def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path):
-    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     (deep / "alternatives.json").write_text(json.dumps([{"id": 1}, {"id": 2}]))
     seed_stack_records(deep, "python", n=3)
     seed_stack_records(deep, "uncovered", n=1)
@@ -1549,7 +1557,9 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
 
 
 def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):
-    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
     out = analyze_findings(dd)
     assert out["per_lens"]["wonder"] == 6
@@ -1572,7 +1582,8 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path):
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
     dd = tmp_path / ".daydream"
     seed_run_trajectory(dd, sid, total_cost_usd=18.2056)
-    deep = dd / "deep"; deep.mkdir(parents=True)
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
     seed_shipped_items(deep, high=4, med=4)     # 8 shipped items, the a80b9373 shape
     (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
     res = analyze_session(dd, session_id=sid)
