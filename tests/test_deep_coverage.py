@@ -77,6 +77,46 @@ def _write_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
     )
 
 
+def _write_claude_fork(run_dir: Path, name: str, calls: list[dict]) -> None:
+    """Write one completed sibling trajectory with arbitrary Claude-spelled calls.
+
+    ``_write_fork`` is hardcoded to emit ``function_name: "Read"`` with
+    ``arguments.file_path``, so it cannot exercise the ``Bash``/``Grep``
+    spellings that Issue #739 routes through the live sweep. This helper writes
+    a single completed step whose calls carry matching
+    ``observation.results[].source_call_id``s (so they count as coverage) for
+    caller-supplied ``{"function_name", "arguments"}`` dicts.
+    """
+    trajectories_dir = run_dir / "trajectories"
+    trajectories_dir.mkdir(parents=True, exist_ok=True)
+    tool_calls = []
+    results = []
+    for i, call in enumerate(calls):
+        call_id = f"read-{i}"
+        tool_calls.append(
+            {
+                "tool_call_id": call_id,
+                "function_name": call["function_name"],
+                "arguments": call.get("arguments", {}),
+            }
+        )
+        results.append({"source_call_id": call_id, "content": "file content"})
+    (trajectories_dir / name).write_text(
+        json.dumps(
+            {
+                "session_id": run_dir.name,
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": tool_calls,
+                        "observation": {"results": results},
+                    }
+                ],
+            }
+        )
+    )
+
+
 def _write_interrupted_read_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
     """Write a sibling trajectory whose reads carry NO ToolResult observation.
 
@@ -608,3 +648,43 @@ def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
     uncovered, _ = compute_uncovered_files(daydream_dir, "sess-d", receipts=receipts)
     assert "notes.txt" in uncovered    # omitted by the reviewer -> swept, never skipped
     assert "api.py" not in uncovered   # reviewed inline -> not swept
+
+
+def test_compute_uncovered_files_counts_claude_bash_reads(tmp_path: Path) -> None:
+    """A Claude-spelled Bash sed read covers a diff file (AC3)."""
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-claude"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_claude_fork(run_dir, "deep-python.json", [
+        {"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' /repo/api.py"}},
+    ])
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-claude")
+
+    assert uncovered == ["notes.txt"]  # api.py read via Bash sed is covered, not swept
+    assert stats["files_read_by_reviewers"] == 1
+    assert stats["coverage_ratio"] == 0.5
+
+
+def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path) -> None:
+    """An import-only Grep does not, on its own, mark a file covered (AC2/AC3)."""
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(_DIFF)
+    run_dir = daydream_dir / "runs" / "sess-grep"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_claude_fork(run_dir, "deep-python.json", [
+        {"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "/repo/api.py"}},
+    ])
+    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-grep")
+
+    assert "api.py" in uncovered  # the import-only grep covers nothing
+    assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
+    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    assert "api.py" in swept  # the file is swept, never silently skipped
