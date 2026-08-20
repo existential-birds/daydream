@@ -802,12 +802,15 @@ FEEDBACK_SCHEMA: dict[str, Any] = {
 
 # Per-stack parse schema (issue #168). Identical to FEEDBACK_SCHEMA but carries a
 # required ``severity`` so the scoped Opus arbiter can select high-severity /
-# contested findings *before* the merge. The shared FEEDBACK_SCHEMA stays
+# contested findings *before* the merge, plus a per-file ``verdicts`` array
+# (issue #742) so a file marked ``clean`` in the review is distinguishable from
+# one never reviewed (``not_reviewed``). The shared FEEDBACK_SCHEMA stays
 # severity-free (the shallow loop and PR-feedback parse paths never need it);
 # only deep-mode's pre-merge per-stack parse opts into this richer record shape.
 #
 # Derived from FEEDBACK_SCHEMA to avoid silent drift: we deep-copy the base
-# schema and inject the extra ``severity`` field into the items sub-schema.
+# schema and inject the extra ``severity`` field into the items sub-schema and
+# the top-level ``verdicts`` array.
 PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = {
     "type": "string",
@@ -816,6 +819,23 @@ PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
+# Per-file verdicts (issue #742). Fail-open: NOT in ``required``, so records
+# written before this field existed (or a sweep record that never emits
+# verdicts) still parse.
+PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "path": _REPOSITORY_FILE_PATH_SCHEMA,
+            "lines_read": {"type": "integer"},
+            "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
+            "n_findings": {"type": "integer"},
+        },
+        "required": ["path", "lines_read", "verdict"],
+        "additionalProperties": False,
+    },
+}
 
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -1440,7 +1460,8 @@ async def phase_parse_feedback(
     *,
     input_path: Path | None = None,
     output_schema: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
+    include_verdicts: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Phase 2: Parse feedback from review output and return validated items.
 
     Args:
@@ -1460,9 +1481,18 @@ async def phase_parse_feedback(
             parses with the same schema so its anti-slop severity calibration
             survives merge (issue #314). When the schema requires a
             ``severity`` field, the prompt instructs the agent to extract it.
+        include_verdicts: When True (deep-mode's per-stack parse only, issue
+            #742), the declared per-file verdicts from the parse output are
+            surfaced alongside the issues list and the return is a
+            ``(feedback_items, verdicts)`` tuple; a malformed ``verdicts``
+            value (non-list / non-dict entries) is coerced to ``[]``
+            (fail-open, never raises, never fabricates verdicts). When False
+            (default), the return is the bare issues list, byte-identical to
+            today — shallow / PR-feedback / sweep callers are untouched.
 
     Returns:
         List of validated feedback items with id, description, file, line
+        — or, with ``include_verdicts=True``, a ``(items, verdicts)`` tuple.
 
     Note:
         Unparseable agent output degrades gracefully: an empty response, prose
@@ -1532,6 +1562,8 @@ If there are no actionable issues, return: {{"issues": []}}
             f"Agent returned no parseable issues (got {type(result).__name__}); "
             f"treating as no actionable issues. Preview: {preview}",
         )
+        if include_verdicts:
+            return [], []
         return []
 
     feedback_items = result["issues"]
@@ -1562,7 +1594,16 @@ If there are no actionable issues, return: {{"issues": []}}
     print_info(console, f"Found {issue_count} actionable {'issue' if issue_count == 1 else 'issues'}")
     if feedback_items:
         print_feedback_table(console, feedback_items)
-    return feedback_items
+    if not include_verdicts:
+        return feedback_items
+    # Per-file verdict surfacing (issue #742). Fail-open: a malformed
+    # ``verdicts`` value (non-list, or non-dict entries) coerces to ``[]`` —
+    # never raises, never fabricates verdicts.
+    declared = result.get("verdicts", [])
+    if not isinstance(declared, list):
+        declared = []
+    verdicts = [v for v in declared if isinstance(v, dict)]
+    return feedback_items, verdicts
 
 
 def _coerce_verdicts_payload(value: Any) -> dict[str, Any]:
