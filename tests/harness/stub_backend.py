@@ -225,10 +225,11 @@ class StubBackend:
     def _stack_scope_files(prompt: str) -> list[str]:
         """Extract the file list from a per-stack/generic scope instruction.
 
-        ``_stack_scope_instruction`` renders the files comma-joined on a single
-        line (``  api.py, README.md``), so the single line is split on commas.
+        ``_stack_scope_instruction`` renders the files comma-joined on the
+        ``Assigned files:`` marker line (``  Assigned files: api.py, README.md``),
+        so the single line is split on commas.
         """
-        m = re.search(r"Focus ONLY on these files:\n\s*([^\n]+)", prompt)
+        m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]

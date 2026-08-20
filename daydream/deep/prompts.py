@@ -233,10 +233,16 @@ def _context_pointers(
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     joined = ", ".join(files)
     return (
-        f"You are reviewing the {stack_name} stack. Focus ONLY on these files:\n"
-        f"  {joined}\n"
+        f"You are reviewing the {stack_name} stack. Your assigned files are an "
+        f"inclusion obligation: read and review EACH one in full -- a file you "
+        f"did not read is not covered by this review.\n"
+        f"  Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
-        f"parallel and will be merged afterwards."
+        f"parallel and will be merged afterwards.\n"
+        f"After the review, output ONE verdict line per assigned file, as: "
+        f"`<path>` | `<lines read>` | `clean | has_findings | not_reviewed`. "
+        f"A file you did not read in this same review must be marked "
+        f"`not_reviewed`, never `clean`."
     )
 
 

@@ -2575,9 +2575,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     )
     assert python_prompt is not None
     assert react_prompt is not None
-    # The scope instruction's file-list line (right after the "Focus ONLY on these files:" header)
+    # The scope instruction's file-list line (right after the "Assigned files:" marker)
     # must not embed React files in the Python stack prompt.
-    python_scope_files_line = python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
+    python_scope_files_line = python_prompt.split("Assigned files:")[1].split("\n", 1)[0]
     assert "App.tsx" not in python_scope_files_line
 
     # Every execute call must have agents=None per D-38.

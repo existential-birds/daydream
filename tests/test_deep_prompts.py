@@ -1418,3 +1418,19 @@ def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
     for prompt in (per_stack, fallback):
         assert "you MAY Read the source files directly" not in prompt
         assert "Read the source file FIRST" in prompt
+
+
+def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> None:
+    """Must-Have 5: assigned files are an inclusion obligation, not an exclusion bound."""
+    from daydream.deep.prompts import build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py", "lib/util.py"], **p,
+    )
+    assert "Focus ONLY on these files" not in out
+    assert "Do NOT review files from other stacks" in out  # cross-stack exclusion preserved
+    assert "api.py" in out and "lib/util.py" in out
+    # The instruction demands one verdict line per assigned file (clean / has_findings / not_reviewed).
+    assert "not_reviewed" in out and "has_findings" in out and "clean" in out
+    assert "verdict" in out
