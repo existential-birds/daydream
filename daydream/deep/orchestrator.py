@@ -99,7 +99,7 @@ from daydream.deep.scope_issues import (
     _revert_out_of_scope_edits,
 )
 from daydream.deep.sharding import shard_stacks
-from daydream.eval.analyzer import _agent_label, _records_issues, load_trajectories
+from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -146,6 +146,7 @@ from daydream.supervision import (
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
+    _safe_descriptor,
     get_current_recorder,
     maybe_fork,
     phase_scope,
@@ -772,8 +773,9 @@ def _rewrite_stack_records(
 
     The cross-stack merge reads per-stack records by path, so arbitration must
     be reflected on disk, not just in memory. Every language stack file is
-    rewritten with its surviving records (an emptied stack becomes ``[]`` rather
-    than retaining stale pre-arbitration content).
+    rewritten with its surviving records (an emptied stack becomes
+    ``{"issues": [], "verdicts": [...]}`` rather than retaining stale
+    pre-arbitration content).
     """
     by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
@@ -787,7 +789,25 @@ def _rewrite_stack_records(
         if dest in by_stack:
             by_stack[dest].append(record)
     for dest_path, stack_records in by_stack.items():
-        dest_path.write_text(json.dumps(stack_records, indent=2))
+        # Issue #742: per-stack records files carry the dict shape
+        # ``{"issues": [...], "verdicts": [...]}``. Preserve the verdicts from
+        # the on-disk file (if a dict-shaped file is present) so arbitration
+        # does not silently drop them; the dict shape is written back
+        # regardless so every worker -- merge resume, the coverage evidence
+        # path -- reads the same shape whether or not arbitration fired.
+        verdicts: list[Any] = []
+        if dest_path.is_file():
+            try:
+                existing = json.loads(dest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                existing = None
+            if isinstance(existing, dict):
+                existing_verdicts = existing.get("verdicts", [])
+                if isinstance(existing_verdicts, list):
+                    verdicts = existing_verdicts
+        dest_path.write_text(
+            json.dumps({"issues": stack_records, "verdicts": verdicts}, indent=2)
+        )
 
 
 def _protect_tree_after_fix_failures(
@@ -1375,9 +1395,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             # verdicts surfaced through the parse). Merge consumes a bare
             # issues list, so normalize the dict shape here; legacy bare-list
             # records pass through unchanged.
-            records = _records_issues(loaded)
-            if records is None:
-                records = [] if isinstance(loaded, dict) else loaded
+            records = _records_issues_or_empty(loaded)
             per_stack_records_paths.append(records_path)
             source_name = records_path.name
             all_records.extend(records)
@@ -2611,8 +2629,12 @@ def _stack_review_reads(
     """
     if recorder is None:
         return set()
+    # A sharded stack is named ``deep-<stack>#<n>`` but its fork is
+    # filesystem-slugified (``_safe_descriptor``) to ``deep-<stack>-<n>`` on
+    # disk, so match the slug -- not the raw descriptor (#742 finding 1).
+    lookup = _safe_descriptor(f"deep-{stack_name}")
     for fork in _loaded_review_forks(daydream_dir, recorder.session_id):
-        if _agent_label(fork["_source_file"]) == f"deep-{stack_name}":
+        if _agent_label(fork["_source_file"]) == lookup:
             return _completed_read_paths(fork)
     return set()
 

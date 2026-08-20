@@ -54,6 +54,20 @@ def _path_component_matches(absolute: str, relative: str) -> bool:
     return absolute == relative or absolute.endswith("/" + relative)
 
 
+def _same_repo_relative(a: str, b: str) -> bool:
+    """Exact dir-aware match between two repo-relative paths.
+
+    ``_path_component_matches`` pairs an absolute read path (from a tool call)
+    with a repo-relative diff file, where a basename-boundary fallback is
+    needed. When BOTH operands are repo-relative (a parsed finding ``file`` vs
+    an assigned or receipt file), that one-directional basename fallback
+    misattributes: ``lib/util.py`` ``endswith("/util.py")`` matches the
+    assigned top-level ``util.py``. Repo-relative operands share the same
+    normalization, so exact equality is the only correct comparison.
+    """
+    return a == b
+
+
 def coverage_receipt_path(deep_dir: Path) -> Path:
     """Path to the run's structured coverage receipts (issue #731).
 
@@ -158,7 +172,7 @@ def _receipt_covered_files(
 
     A diff file is ``inline_hunk_reviewed``-covered when it is in a shard's
     ``inline_files`` AND that shard's parsed records exist AND at least one
-    parsed finding ``_path_component_matches`` it. ``dependency_frontier_read``
+    parsed finding ``_same_repo_relative`` it. ``dependency_frontier_read``
     is the same check over the shard's ``frontier_files``. Assignment/grounding
     alone never counts; a shard without a records file contributes zero.
 
@@ -185,12 +199,28 @@ def _receipt_covered_files(
         ):
             for f in receipt.get(files_key, []) or []:
                 if f in diff_set and any(
-                    _path_component_matches(ff, f) for ff in finding_files
+                    _same_repo_relative(ff, f) for ff in finding_files
                 ):
                     covered.add(f)
                     covered_by_type[evidence_key].add(f)
     counts = {key: len(files) for key, files in covered_by_type.items()}
     return covered, counts
+
+
+def _verdict(path: str, lines_read: int, verdict: str, n_findings: int) -> dict[str, Any]:
+    """Build one conformant per-file verdict dict (issue #742).
+
+    Collapses the three near-identical ``out.append({...})`` blocks in
+    :func:`resolve_per_stack_verdicts`, which differ only in ``verdict`` and
+    ``n_findings``. Every returned dict conforms to ``PER_STACK_RECORD_SCHEMA``'s
+    required ``path`` / ``lines_read`` / ``verdict`` / ``n_findings`` keys.
+    """
+    return {
+        "path": path,
+        "lines_read": lines_read,
+        "verdict": verdict,
+        "n_findings": n_findings,
+    }
 
 
 def resolve_per_stack_verdicts(
@@ -210,7 +240,7 @@ def resolve_per_stack_verdicts(
     self-report.
 
     The final verdict per assigned file is resolved by evidence, in order:
-    a parsed finding that path-component-matches the file wins (``has_findings``
+    a parsed finding that exactly matches the file (``_same_repo_relative``) wins (``has_findings``
     beats a read, beats ``clean``); otherwise a completed read that
     path-component-matches the file yields ``clean``; otherwise the file is
     ``not_reviewed``. This mirrors the read-detection the sweep already uses
@@ -252,31 +282,17 @@ def resolve_per_stack_verdicts(
         declared = declared_by_path.get(path, {})
         lines_read = declared.get("lines_read", 0)
         matching_findings = [
-            ff for ff in finding_files if _path_component_matches(ff, path)
+            ff for ff in finding_files if _same_repo_relative(ff, path)
         ]
         if matching_findings:
             # A finding beats a read and beats a declared clean.
-            out.append(
-                {
-                    "path": path,
-                    "lines_read": lines_read,
-                    "verdict": "has_findings",
-                    "n_findings": len(matching_findings),
-                }
-            )
+            out.append(_verdict(path, lines_read, "has_findings", len(matching_findings)))
         elif any(_path_component_matches(r, path) for r in completed_read_paths):
-            out.append(
-                {"path": path, "lines_read": lines_read, "verdict": "clean", "n_findings": 0}
-            )
+            # A completed read that matches the file yields clean.
+            out.append(_verdict(path, lines_read, "clean", 0))
         else:
-            out.append(
-                {
-                    "path": path,
-                    "lines_read": lines_read,
-                    "verdict": "not_reviewed",
-                    "n_findings": 0,
-                }
-            )
+            # No finding and no completed read: never recorded as a pass.
+            out.append(_verdict(path, lines_read, "not_reviewed", 0))
     return out
 
 

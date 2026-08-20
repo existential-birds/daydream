@@ -1561,6 +1561,34 @@ async def phase_parse_feedback(
         else ""
     )
 
+    # Per-file verdict surface (issue #742). Deep-mode's per-stack parse emits
+    # the schema-required ``verdicts`` array, so the prompt must teach the
+    # verdict-line shape and its sub-fields; otherwise the strict-mode model
+    # emits ``[]``/``lines_read: 0`` in production. Shallow / PR-feedback /
+    # sweep callers pass ``include_verdicts=False`` and get no verdict
+    # instruction, keeping their prompt byte-identical to prior behavior.
+    verdict_line = (
+        '{"path": "path/to/file.py", "lines_read": 42, '
+        '"verdict": "clean|has_findings|not_reviewed", "n_findings": 0}'
+    )
+    verdicts_hint = (
+        "\nEmit a `verdicts` array, one entry per file the review examined, so a "
+        "file marked `clean` stays distinguishable from one never reviewed. Each "
+        f"entry is: {verdict_line}. "
+        "Use `clean` for a file read with no findings, `has_findings` for a file "
+        "the review flagged, and `not_reviewed` for a file never read. Set "
+        "`lines_read` to the real number of lines read and `n_findings` to that "
+        "file's issue count (0 if none).\n"
+        if include_verdicts
+        else ""
+    )
+    verdicts_example = (
+        f', "verdicts": [{verdict_line}]'
+        if include_verdicts
+        else ""
+    )
+    verdicts_empty = ', "verdicts": []' if include_verdicts else ""
+
     # Use absolute path to prevent model hallucination of paths from training data
     review_output_path = input_path if input_path is not None else work.repo / REVIEW_OUTPUT_FILE
     prompt = f"""Read the review output file at {review_output_path}.
@@ -1569,13 +1597,13 @@ Extract ONLY actionable issues that need fixing. Skip these sections entirely:
 - "Good Patterns" or "Strengths"
 - "Summary" sections
 - Any positive observations
-{severity_hint}
+{severity_hint}{verdicts_hint}
 For each issue found, return a JSON object with this structure:
 {{"issues": [
   {{"id": 1, "description": "Brief description of the issue", "file": "path/to/file.py", "line": 42{severity_field}}}
-]}}
+]{verdicts_example}}}
 
-If there are no actionable issues, return: {{"issues": []}}
+If there are no actionable issues, return: {{"issues": []{verdicts_empty}}}
 """
 
     result, _, budget_reason = await run_agent(

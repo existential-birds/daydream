@@ -626,6 +626,22 @@ def _records_issues(records: Any) -> list[Any] | None:
     return records if isinstance(records, list) else None
 
 
+def _records_issues_or_empty(records: Any) -> list[Any]:
+    """Normalize a loaded per-stack records file to a bare issues list.
+
+    Collapses the ``None`` -> ``[]`` fallback idiom that every per-stack
+    records reader previously re-implemented verbatim (orchestrator merge
+    resume, analyzer findings, and the test harness). A non-list load yields
+    the same degenerate value as the callers' explicit fallback
+    (``[]`` for a dict, otherwise the raw load), preserving prior
+    warn-and-continue semantics exactly.
+    """
+    issues = _records_issues(records)
+    if issues is None:
+        return [] if isinstance(records, dict) else records  # type: ignore[return-value]
+    return issues
+
+
 def analyze_findings(daydream_dir: Path) -> dict:
     """Parse per-stack records, dedup stats, and merged review."""
     deep_dir = daydream_dir / "deep"
@@ -648,9 +664,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
         # Issue #742: fresh-run per-stack records files carry the dict shape
         # {"issues": [...], "verdicts": [...]}; findings are the issues list
         # either way (legacy bare lists pass through).
-        records = _records_issues(loaded)
-        if records is None:
-            records = [] if isinstance(loaded, dict) else loaded
+        records = _records_issues_or_empty(loaded)
         stacks.append({"name": stack_name, "finding_count": len(records)})
         for r in records:
             r["_stack"] = stack_name
