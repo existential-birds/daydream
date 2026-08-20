@@ -399,6 +399,24 @@ def test_files_read_grep_content_pattern_credits_path():
     assert paths == {"daydream/config.py"}
 
 
+def test_files_read_grep_pattern_flag_keeps_file_operand():
+    # -e/-f/--regexp/--file are pattern-supplying options: the following token
+    # is the pattern, so the trailing file operand must still be credited as a
+    # read path (issue #739). Before the fix these dropped the operand entirely.
+    assert _shell_reads("grep -e 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --regexp 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --regexp='def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep -f /tmp/patterns.txt daydream/config.py") == {"daydream/config.py"}
+
+
+def test_files_read_grep_context_options_do_not_eat_operand():
+    # --before-context/--after-context/--max-count take a value; their numeric
+    # value must not be misread as the pattern (issue #739).
+    assert _shell_reads("grep --before-context 3 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --after-context 5 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
+
+
 # --- unbalanced-quote tokenization (issue #327) ---
 
 
