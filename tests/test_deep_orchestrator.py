@@ -28,6 +28,7 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
+from daydream.eval.analyzer import _records_issues
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -214,15 +215,11 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
 def _record_issues(loaded: Any) -> list[dict[str, Any]]:
     """Normalize a per-stack records file to its bare issues list.
 
-    Issue #742: fresh-run per-stack records files carry the dict shape
-    ``{"issues": [...], "verdicts": [...]}``; legacy and primed fixtures use
-    the bare list. Consumers reading the file return the issues list either
-    way.
+    Delegates to ``analyzer._records_issues`` (the canonical records-shape
+    normalization); non-list shapes (malformed fixtures) degrade to ``[]``.
     """
-    if isinstance(loaded, dict):
-        issues = loaded.get("issues")
-        return issues if isinstance(issues, list) else []
-    return loaded if isinstance(loaded, list) else []
+    issues = _records_issues(loaded)
+    return issues if issues is not None else []
 
 
 def _prime_merge_resume(

@@ -33,6 +33,7 @@ from daydream.backends import (
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
 from daydream.clipboard import clipboard_available, copy_to_clipboard
+from daydream.eval.analyzer import _records_issues
 from daydream.extensions import get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.generated_files import (
@@ -822,9 +823,11 @@ PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
 # Per-file verdicts (issue #742). ``verdicts`` sits in ``required`` (like
 # every property of every Codex-routed output schema -- the strict-mode
 # validator rejects optional properties, see test_output_schema_strict.py), so
-# the parse model must emit a (possibly empty) verdicts array; the sweep parse
-# still ignores it (``include_verdicts=False``) and records written before this
-# field existed remain parseable on resume (loading is schema-free).
+# the deep per-stack parse model must emit a (possibly empty) verdicts array.
+# The uncovered sweep parses with UNCOVERED_SWEEP_SCHEMA instead (it never
+# teaches the verdicts shape, so it must not ask for that field), and records
+# written before this field existed remain parseable on resume (loading is
+# schema-free).
 PER_STACK_RECORD_SCHEMA["required"] = ["issues", "verdicts"]
 PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
     "type": "array",
@@ -840,6 +843,19 @@ PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
         "additionalProperties": False,
     },
 }
+
+# Uncovered-sweep parse schema (issue #742 finding 2). The sweep re-runs a
+# bare per-file review that never declares a per-file verdict surface, so its
+# parse must NOT force a required ``verdicts`` array: the sweep parse runs with
+# ``include_verdicts=False`` and the phase_parse_feedback prompt never teaches
+# the verdicts shape, so requiring it would ask the model to emit an untaught
+# field. It keeps ``severity`` (the sweep's records enter the same arbiter/merge
+# pool as per-stack records, where severity selects the scoped Opus pass).
+# Derived from PER_STACK_RECORD_SCHEMA and stripped of only the verdicts
+# property and requirement, so it stays strict-mode conformant either way.
+UNCOVERED_SWEEP_SCHEMA: dict[str, Any] = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
+UNCOVERED_SWEEP_SCHEMA["required"] = ["issues"]
+UNCOVERED_SWEEP_SCHEMA["properties"].pop("verdicts", None)
 
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -4026,9 +4042,8 @@ def _append_structural_and_write_merged(
         # Issue #742: fresh-run per-stack records files carry the dict shape
         # ``{"issues": [...], "verdicts": [...]}``; the structural records are
         # the issues list either way. Legacy bare-list files pass through.
-        if isinstance(structural_records, dict):
-            structural_records = structural_records.get("issues")
-        if not isinstance(structural_records, list):
+        structural_records = _records_issues(structural_records)
+        if structural_records is None:
             print_warning(console, "Skipping non-list structural records; expected a list")
             structural_records = []
         for rec in structural_records:

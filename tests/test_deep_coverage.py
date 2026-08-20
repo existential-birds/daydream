@@ -709,8 +709,9 @@ def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     declared = [
         {"path": "api.py", "lines_read": 10, "verdict": "clean"},
         {"path": "notes.txt", "lines_read": 5, "verdict": "has_findings"},
+        {"path": "lib/util.py", "lines_read": 12, "verdict": "clean"},
     ]
-    reads = {"/repo/api.py"}  # api.py read, notes.txt not
+    reads = {"/repo/api.py"}  # api.py read, notes.txt and lib/util.py not
     findings = {"notes.txt"}  # notes.txt has a finding
     out = resolve_per_stack_verdicts(
         assigned_files=["api.py", "notes.txt", "lib/util.py"],
@@ -721,7 +722,7 @@ def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     by_path = {v["path"]: v["verdict"] for v in out}
     assert by_path["api.py"] == "clean"  # read + no finding -> clean stays
     assert by_path["notes.txt"] == "has_findings"  # finding beats read
-    # an assigned file with no declaration, no read -> not_reviewed
+    # declared clean + no read -> downgraded to not_reviewed
     assert by_path["lib/util.py"] == "not_reviewed"
 
 

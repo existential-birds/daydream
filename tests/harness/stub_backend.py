@@ -37,6 +37,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.eval.analyzer import _records_issues
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -610,11 +611,9 @@ class StubBackend:
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
                     loaded = json.loads(Path(path_str).read_text())
-                    if isinstance(loaded, dict):
-                        loaded_issues = loaded.get("issues")
-                        recs = loaded_issues if isinstance(loaded_issues, list) else []
-                    else:
-                        recs = loaded
+                    recs = _records_issues(loaded)
+                    if recs is None:
+                        recs = [] if isinstance(loaded, dict) else loaded
                     for rec in recs:
                         echoed.append(
                             {

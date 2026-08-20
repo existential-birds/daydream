@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 from dataclasses import asdict
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Iterable
 
@@ -75,6 +76,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.coverage import (
     _completed_read_paths,
+    _finding_files_from_records,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
@@ -97,7 +99,7 @@ from daydream.deep.scope_issues import (
     _revert_out_of_scope_edits,
 )
 from daydream.deep.sharding import shard_stacks
-from daydream.eval.analyzer import _agent_label, load_trajectories
+from daydream.eval.analyzer import _agent_label, _records_issues, load_trajectories
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -110,6 +112,7 @@ from daydream.generated_files import (
 )
 from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
+    UNCOVERED_SWEEP_SCHEMA,
     CrossStackMergeError,
     FixResult,
     UnconfinedFindingError,
@@ -1372,11 +1375,9 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             # verdicts surfaced through the parse). Merge consumes a bare
             # issues list, so normalize the dict shape here; legacy bare-list
             # records pass through unchanged.
-            if isinstance(loaded, dict):
-                records = loaded.get("issues")
-                records = records if isinstance(records, list) else []
-            else:
-                records = loaded
+            records = _records_issues(loaded)
+            if records is None:
+                records = [] if isinstance(loaded, dict) else loaded
             per_stack_records_paths.append(records_path)
             source_name = records_path.name
             all_records.extend(records)
@@ -1434,32 +1435,20 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                                 except Exception as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
                                     parse_failures[stack_name] = exc
                                     return
-                                # Issue #742: reconcile the reviewer's declared
-                                # per-file verdicts against completed-read
-                                # evidence from its own deep-<stack> fork. The
-                                # gate is fail-open (never fails the run, never
-                                # records an unread file clean): a missing fork
-                                # degrades to ``verdicts: []``.
-                                try:
-                                    stack_reads = _stack_review_reads(
-                                        dd.parent, recorder, stack_name
-                                    )
-                                    finding_files = {
-                                        f["file"][2:]
-                                        if f["file"].startswith("./")
-                                        else f["file"]
-                                        for f in records
-                                        if isinstance(f, dict)
-                                        and isinstance(f.get("file"), str)
-                                    }
-                                    verdicts = resolve_per_stack_verdicts(
-                                        assigned_files=assigned_files,
-                                        declared_verdicts=declared_verdicts,
-                                        completed_read_paths=stack_reads,
-                                        finding_files=finding_files,
-                                    )
-                                except Exception:  # noqa: BLE001 -- fail-open: never fail the run on a missing fork
-                                    verdicts = []
+                                # Issue #742: reconcile the declared per-file
+                                # verdicts against completed-read evidence from
+                                # the stack's own deep-<stack> fork. Fail-open
+                                # (a missing fork degrades to ``verdicts: []``)
+                                # so the stack's records still land on disk and its
+                                # unread files are swept.
+                                verdicts = _reconcile_stack_verdicts(
+                                    dd.parent,
+                                    recorder,
+                                    stack_name,
+                                    assigned_files=assigned_files,
+                                    declared_verdicts=declared_verdicts,
+                                    parsed_records=records,
+                                )
                                 # Written per task, not after the join, so a
                                 # sibling's failure cannot discard records that
                                 # already succeeded (they survive for --start-at).
@@ -1732,10 +1721,15 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
 
-    # Parse each sweep review into PER_STACK_RECORD_SCHEMA records (fail-open:
-    # unparseable or failed parses are dropped, never fatal). Parse failures are
-    # tracked BY FILENAME into `sweep_failures`, not just the `parse_dropped`
-    # count, so coverage-stats.json names exactly which file's parse failed.
+    # Parse each sweep review with the uncovered-sweep schema (issue #742
+    # finding 2): it carries severity but NOT the per-file verdicts array. The
+    # sweep parse runs with ``include_verdicts=False`` and the prompt never
+    # teaches the verdicts shape, so PER_STACK_RECORD_SCHEMA's required
+    # ``verdicts`` field would be an untaught ask; UNCOVERED_SWEEP_SCHEMA drops
+    # only that requirement/property (severity is preserved so sweep records
+    # enter the arbiter/merge pool undifferentiated). Fail-open: unparseable or
+    # failed parses are dropped, never fatal; failures are tracked BY FILENAME
+    # into `sweep_failures`, not just the `parse_dropped` count.
     parse_results: dict[str, list[dict[str, Any]]] = {}
     parse_dropped = 0
     parse_failures: dict[str, str] = {}
@@ -1757,7 +1751,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                                     parse_backend,
                                     ctx.work,
                                     input_path=input_path,
-                                    output_schema=PER_STACK_RECORD_SCHEMA,
+                                    output_schema=UNCOVERED_SWEEP_SCHEMA,
                                 )
                                 parse_results[file] = records
                             except Exception as exc:  # noqa: BLE001 -- fail-open drop
@@ -2585,6 +2579,21 @@ def _current_session_id() -> str | None:
     return recorder.session_id if recorder is not None else None
 
 
+@lru_cache(maxsize=None)
+def _loaded_review_forks(daydream_dir: Path, session_id: str) -> tuple[dict[str, Any], ...]:
+    """Trajectory forks for a session, parsed once (issue #742 finding 4).
+
+    ``load_trajectories`` re-parses every JSON file under
+    ``runs/<session>/trajectories/`` on every call; the per-stack parse task
+    group fans ``_stack_review_reads`` out once per stack concurrently, so cache
+    the parsed fork set per ``(daydream_dir, session_id)`` and reap a single
+    parse. The gate only consumes the ``forked`` list; the parsed dicts are
+    read-only for the run, so caching is safe. ``Path`` and ``str`` are
+    hashable, satisfying ``functools.lru_cache``'s key contract.
+    """
+    return tuple(load_trajectories(daydream_dir, session_id).get("forked", []))
+
+
 def _stack_review_reads(
     daydream_dir: Path, recorder: TrajectoryRecorder | None, stack_name: str
 ) -> set[str]:
@@ -2593,17 +2602,51 @@ def _stack_review_reads(
     The clean-verdict gate consumes evidence, never reviewer self-report: the
     reads that count are the ones the per-stack review agent actually completed
     in its own fork trajectory (``deep-<stack_name>.json``, written when the
-    review fork exits — always before parse starts). A ``None`` recorder (no
-    trajectory recording this run) or an absent fork yields the empty set
-    (fail-open: every assigned file without a finding resolves to
-    ``not_reviewed`` and is swept, never recorded clean).
+    review fork exits — always before parse starts). The fork set is loaded once
+    and cached (``_loaded_review_forks``) so N concurrent per-stack parse tasks
+    do not re-parse the session's trajectories on every call (finding 4). A
+    ``None`` recorder (no trajectory recording this run) or an absent fork
+    yields the empty set (fail-open: every assigned file without a finding
+    resolves to ``not_reviewed`` and is swept, never recorded clean).
     """
     if recorder is None:
         return set()
-    for fork in load_trajectories(daydream_dir, recorder.session_id)["forked"]:
+    for fork in _loaded_review_forks(daydream_dir, recorder.session_id):
         if _agent_label(fork["_source_file"]) == f"deep-{stack_name}":
             return _completed_read_paths(fork)
     return set()
+
+
+def _reconcile_stack_verdicts(
+    daydream_dir: Path,
+    recorder: TrajectoryRecorder | None,
+    stack_name: str,
+    *,
+    assigned_files: list[str],
+    declared_verdicts: list[dict[str, Any]],
+    parsed_records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fail-open per-file verdict reconciliation for one stack (issue #742).
+
+    Collects the evidence-gathering glue the per-stack parse needs: the stack's
+    own ``deep-<stack>`` review-fork completed reads plus the parse's
+    normalized finding files, then resolves the evidence-gated verdict for each
+    assigned file. Fail-open (never fails the run, never records an unread file
+    clean): any failure (e.g. a missing fork) yields ``[]`` so the stack's
+    records stay writable and its unread files resolve to ``not_reviewed``
+    instead of a pass.
+    """
+    try:
+        stack_reads = _stack_review_reads(daydream_dir, recorder, stack_name)
+        finding_files = _finding_files_from_records(parsed_records)
+        return resolve_per_stack_verdicts(
+            assigned_files=assigned_files,
+            declared_verdicts=declared_verdicts,
+            completed_read_paths=stack_reads,
+            finding_files=finding_files,
+        )
+    except Exception:  # noqa: BLE001 -- fail-open: never fail the run on a missing fork
+        return []
 
 
 def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:

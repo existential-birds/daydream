@@ -31,6 +31,7 @@ from daydream.eval.analyzer import (
     _agent_label,
     _files_from_diff,
     _read_paths_for_call,
+    _records_issues,
     load_trajectories,
 )
 from daydream.phases import (
@@ -112,6 +113,27 @@ def _completed_read_paths(
     return paths
 
 
+def _finding_files_from_records(findings: list[Any]) -> set[str]:
+    """Normalized ``file`` fields across parsed finding records (issue #742).
+
+    Shared between :func:`_parsed_finding_files` (disk-backed) and the per-stack
+    verdict reconciliation in the orchestrator (in-memory parsed records) so the
+    ``./`` strip lives in one place: a leading ``./`` is a legal path spelling
+    since the grammar relaxed (#572/#573), and the reviewed-diff file set and
+    the receipt lists are always bare, so normalizing once keeps a ``./x``
+    finding matching its assigned file rather than failing every path-component
+    match and getting swept.
+    """
+    files: set[str] = set()
+    for finding in findings:
+        if isinstance(finding, dict) and isinstance(finding.get("file"), str):
+            file = finding["file"]
+            if file.startswith("./"):
+                file = file[2:]
+            files.add(file)
+    return files
+
+
 def _parsed_finding_files(records_path: Path) -> set[str] | None:
     """Set of ``file`` fields across a completed shard's parsed records.
 
@@ -123,31 +145,10 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
         records = json.loads(records_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if isinstance(records, dict):
-        # Issue #742: fresh-run per-stack records carry the dict shape
-        # {"issues": [...], "verdicts": [...]}; the issues list is the
-        # findings evidence either way (legacy bare lists pass through).
-        findings = records.get("issues")
-    elif isinstance(records, list):
-        findings = records
-    else:
-        findings = None
-    if not isinstance(findings, list):
+    findings = _records_issues(records)
+    if findings is None:
         return None
-    files: set[str] = set()
-    for finding in findings:
-        if isinstance(finding, dict) and isinstance(finding.get("file"), str):
-            file = finding["file"]
-            # A leading ``./`` is a legal path spelling since the grammar
-            # relaxed (#572/#573); the reviewed-diff file set and the receipt
-            # lists are always bare. Normalize once here (mirroring the fix
-            # gate at orchestrator.py) so a ``./x`` finding contributes
-            # inline/frontier evidence instead of failing every path-component
-            # match and getting swept.
-            if file.startswith("./"):
-                file = file[2:]
-            files.add(file)
-    return files
+    return _finding_files_from_records(findings)
 
 
 def _receipt_covered_files(
@@ -227,12 +228,15 @@ def resolve_per_stack_verdicts(
 
     Returns:
         Exactly one verdict dict per ``assigned_files`` path, in the given
-        order: ``{"path", "lines_read", "verdict"}``, plus ``n_findings``
-        when the verdict is ``has_findings``. The declared ``lines_read`` is
-        preserved even when the verdict is downgraded to ``not_reviewed`` (the
-        reviewer said it read N lines; the gate records it was not read). Pure
-        and total: a declared verdict whose path is not in ``assigned_files``
-        is ignored (never fabricated), and missing keys default safely.
+        order: ``{"path", "lines_read", "verdict", "n_findings"}``. ``n_findings``
+        is the count of parsed findings matching the path (0 for ``clean`` /
+        ``not_reviewed``), so every recorded verdict conforms to
+        ``PER_STACK_RECORD_SCHEMA``'s required ``n_findings`` key. The declared
+        ``lines_read`` is preserved even when the verdict is downgraded to
+        ``not_reviewed`` (the reviewer said it did read N lines; the gate
+        records it was not read). Pure and total: a declared verdict whose path
+        is not in ``assigned_files`` is ignored (never fabricated), and missing
+        keys default safely.
     """
     declared_by_path: dict[str, dict[str, Any]] = {}
     for entry in declared_verdicts:
@@ -261,10 +265,17 @@ def resolve_per_stack_verdicts(
                 }
             )
         elif any(_path_component_matches(r, path) for r in completed_read_paths):
-            out.append({"path": path, "lines_read": lines_read, "verdict": "clean"})
+            out.append(
+                {"path": path, "lines_read": lines_read, "verdict": "clean", "n_findings": 0}
+            )
         else:
             out.append(
-                {"path": path, "lines_read": lines_read, "verdict": "not_reviewed"}
+                {
+                    "path": path,
+                    "lines_read": lines_read,
+                    "verdict": "not_reviewed",
+                    "n_findings": 0,
+                }
             )
     return out
 
