@@ -333,19 +333,21 @@ def _paths_from_command(command: str) -> set[str]:
 def _read_paths_for_call(tc: dict) -> list[str]:
     """All file paths a single tool call reads, across backends.
 
+    ``function_name`` is case-folded so ``Bash`` (Claude) / ``bash`` (pi) /
+    ``shell`` (codex) all route to the shell-command parser, and Claude's
+    ``Read`` / pi's ``read`` collapse into one branch that accepts either the
+    ``file_path`` or ``path`` argument key.
+
     - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
     - pi:     lowercase ``read`` → ``arguments.path``
     - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
     """
-    fn = tc["function_name"]
+    fn = tc["function_name"].lower()
     args = tc["arguments"]
-    if fn == "Read":
-        p = args.get("file_path", "")
-        return [p] if p else []
-    if fn == "Grep":
-        p = args.get("path", "")
-        return [p] if p else []
     if fn == "read":
+        p = args.get("file_path") or args.get("path", "")
+        return [p] if p else []
+    if fn == "grep":
         p = args.get("path", "")
         return [p] if p else []
     if fn in ("shell", "bash"):

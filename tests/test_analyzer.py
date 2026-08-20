@@ -278,6 +278,15 @@ def test_files_read_extracts_pi_read_and_bash_paths():
     assert "core/osprey-cli" in paths
 
 
+def test_files_read_counts_claude_bash_shell_reads():
+    calls = [{"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == {"daydream/config.py"}
+    assert "1,60p" not in paths
+
+
 def _shell_reads(command: str) -> set[str]:
     """Extract read paths from a single codex ``shell`` call."""
     return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
