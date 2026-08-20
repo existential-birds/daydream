@@ -700,3 +700,39 @@ def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path)
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
     swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
     assert "api.py" in swept  # the file is swept, never silently skipped
+
+
+def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
+    """AC2: a clean verdict for a file with no completed read becomes not_reviewed."""
+    from daydream.deep.coverage import resolve_per_stack_verdicts
+
+    declared = [
+        {"path": "api.py", "lines_read": 10, "verdict": "clean"},
+        {"path": "notes.txt", "lines_read": 5, "verdict": "has_findings"},
+    ]
+    reads = {"/repo/api.py"}  # api.py read, notes.txt not
+    findings = {"notes.txt"}  # notes.txt has a finding
+    out = resolve_per_stack_verdicts(
+        assigned_files=["api.py", "notes.txt", "lib/util.py"],
+        declared_verdicts=declared,
+        completed_read_paths=reads,
+        finding_files=findings,
+    )
+    by_path = {v["path"]: v["verdict"] for v in out}
+    assert by_path["api.py"] == "clean"  # read + no finding -> clean stays
+    assert by_path["notes.txt"] == "has_findings"  # finding beats read
+    # an assigned file with no declaration, no read -> not_reviewed
+    assert by_path["lib/util.py"] == "not_reviewed"
+
+
+def test_resolve_per_stack_verdicts_clean_shard_read_is_clean() -> None:
+    """Spike: a clean shard that read its file stays clean (read-detection is findings-independent)."""
+    from daydream.deep.coverage import resolve_per_stack_verdicts
+
+    out = resolve_per_stack_verdicts(
+        assigned_files=["api.py"],
+        declared_verdicts=[{"path": "api.py", "lines_read": 10, "verdict": "clean"}],
+        completed_read_paths={"/repo/api.py"},
+        finding_files=set(),
+    )
+    assert out[0]["verdict"] == "clean"

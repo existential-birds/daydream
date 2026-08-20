@@ -211,6 +211,20 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
 
+def _record_issues(loaded: Any) -> list[dict[str, Any]]:
+    """Normalize a per-stack records file to its bare issues list.
+
+    Issue #742: fresh-run per-stack records files carry the dict shape
+    ``{"issues": [...], "verdicts": [...]}``; legacy and primed fixtures use
+    the bare list. Consumers reading the file return the issues list either
+    way.
+    """
+    if isinstance(loaded, dict):
+        issues = loaded.get("issues")
+        return issues if isinstance(issues, list) else []
+    return loaded if isinstance(loaded, list) else []
+
+
 def _prime_merge_resume(
     target: Path,
     *,
@@ -4798,7 +4812,7 @@ async def test_arbiter_missing_verdict_retains_high_severity_finding(
     records = [
         rec
         for path in deep_dir.glob("stack-*-records.json")
-        for rec in json.loads(path.read_text())
+        for rec in _record_issues(json.loads(path.read_text()))
     ]
     assert any(r.get("severity") == "high" for r in records), (
         f"high-severity record must survive a missing arbiter verdict:\n{records}"

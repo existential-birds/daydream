@@ -74,11 +74,13 @@ from daydream.deep.artifacts import (
     intent_path as _intent_path,
 )
 from daydream.deep.coverage import (
+    _completed_read_paths,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
     diff_block_for_file,
     filter_sweepable_files,
+    resolve_per_stack_verdicts,
 )
 from daydream.deep.dedup import (
     CandidatePair,
@@ -95,6 +97,7 @@ from daydream.deep.scope_issues import (
     _revert_out_of_scope_edits,
 )
 from daydream.deep.sharding import shard_stacks
+from daydream.eval.analyzer import _agent_label, load_trajectories
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
@@ -162,6 +165,7 @@ from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
+    from daydream.trajectory import TrajectoryRecorder
 
 # Exploration infrastructure import guard. When Phases 1-4 are not yet
 # installed, deep mode still runs -- just without grounding context.
@@ -1362,7 +1366,17 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         if sweep_path.is_file():
             expected_paths.append(sweep_path)
         for records_path in sorted(expected_paths):
-            records = json.loads(records_path.read_text())
+            loaded = json.loads(records_path.read_text())
+            # Issue #742: fresh-run per-stack records files now carry the dict
+            # shape ``{"issues": [...], "verdicts": [...]}`` (the per-file
+            # verdicts surfaced through the parse). Merge consumes a bare
+            # issues list, so normalize the dict shape here; legacy bare-list
+            # records pass through unchanged.
+            if isinstance(loaded, dict):
+                records = loaded.get("issues")
+                records = records if isinstance(records, list) else []
+            else:
+                records = loaded
             per_stack_records_paths.append(records_path)
             source_name = records_path.name
             all_records.extend(records)
@@ -1375,6 +1389,12 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         parse_backend = ctx.backend_for("parse")
         limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
         recorder = get_current_recorder()
+        # Issue #742: the verdict gate reconciles each stack's declared per-file
+        # verdicts against its own assigned files. Default-arg captured per
+        # closure so the gate cannot read the wrong stack's file list.
+        stack_files: dict[str, list[str]] = {
+            s.stack_name: list(s.files) for s in stacks
+        }
         parse_results: dict[str, list[dict[str, Any]]] = {}
         parse_failures: dict[str, BaseException] = {}
 
@@ -1398,24 +1418,61 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                         stack_name: str = stack_name,
                         input_path: Path = output_path,
                         schema: dict[str, Any] = record_schema,
+                        assigned_files: list[str] = stack_files[stack_name],
                     ) -> None:
                         async with limiter:
                             async with maybe_fork(recorder, f"parse-{stack_name}"):
                                 try:
-                                    records = await phase_parse_feedback(
+                                    parsed = await phase_parse_feedback(
                                         parse_backend,
                                         ctx.work,
                                         input_path=input_path,
                                         output_schema=schema,
+                                        include_verdicts=True,
                                     )
+                                    records, declared_verdicts = parsed
                                 except Exception as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
                                     parse_failures[stack_name] = exc
                                     return
+                                # Issue #742: reconcile the reviewer's declared
+                                # per-file verdicts against completed-read
+                                # evidence from its own deep-<stack> fork. The
+                                # gate is fail-open (never fails the run, never
+                                # records an unread file clean): a missing fork
+                                # degrades to ``verdicts: []``.
+                                try:
+                                    stack_reads = _stack_review_reads(
+                                        dd.parent, recorder, stack_name
+                                    )
+                                    finding_files = {
+                                        f["file"][2:]
+                                        if f["file"].startswith("./")
+                                        else f["file"]
+                                        for f in records
+                                        if isinstance(f, dict)
+                                        and isinstance(f.get("file"), str)
+                                    }
+                                    verdicts = resolve_per_stack_verdicts(
+                                        assigned_files=assigned_files,
+                                        declared_verdicts=declared_verdicts,
+                                        completed_read_paths=stack_reads,
+                                        finding_files=finding_files,
+                                    )
+                                except Exception:  # noqa: BLE001 -- fail-open: never fail the run on a missing fork
+                                    verdicts = []
                                 # Written per task, not after the join, so a
                                 # sibling's failure cannot discard records that
                                 # already succeeded (they survive for --start-at).
+                                # Issue #742: the record also carries the
+                                # reconciled per-file verdicts (PER_STACK_RECORD_SCHEMA
+                                # shape); merge consumers normalize dict ->
+                                # issues and the coverage evidence path already
+                                # tolerates both shapes.
                                 per_stack_records_path(dd, stack_name).write_text(
-                                    json.dumps(records, indent=2)
+                                    json.dumps(
+                                        {"issues": records, "verdicts": verdicts},
+                                        indent=2,
+                                    )
                                 )
                                 parse_results[stack_name] = records
 
@@ -2526,6 +2583,27 @@ def _current_session_id() -> str | None:
     """Session id binding the quality-gate artifact to the current run."""
     recorder = get_current_recorder()
     return recorder.session_id if recorder is not None else None
+
+
+def _stack_review_reads(
+    daydream_dir: Path, recorder: TrajectoryRecorder | None, stack_name: str
+) -> set[str]:
+    """Completed reads from the ``deep-<stack>`` review fork (issue #742).
+
+    The clean-verdict gate consumes evidence, never reviewer self-report: the
+    reads that count are the ones the per-stack review agent actually completed
+    in its own fork trajectory (``deep-<stack_name>.json``, written when the
+    review fork exits — always before parse starts). A ``None`` recorder (no
+    trajectory recording this run) or an absent fork yields the empty set
+    (fail-open: every assigned file without a finding resolves to
+    ``not_reviewed`` and is swept, never recorded clean).
+    """
+    if recorder is None:
+        return set()
+    for fork in load_trajectories(daydream_dir, recorder.session_id)["forked"]:
+        if _agent_label(fork["_source_file"]) == f"deep-{stack_name}":
+            return _completed_read_paths(fork)
+    return set()
 
 
 def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:

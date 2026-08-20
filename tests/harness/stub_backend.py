@@ -587,10 +587,19 @@ class StubBackend:
             if self.merge_echo_records:
                 # Echo the on-disk per-stack records as merged items so the
                 # rendered artifact reflects any arbiter revisions (#168).
+                # Issue #742: fresh-run records files carry the dict shape
+                # {"issues": [...], "verdicts": [...]}; normalize to the
+                # bare issues list (legacy files stay bare lists).
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
-                    for rec in json.loads(Path(path_str).read_text()):
+                    loaded = json.loads(Path(path_str).read_text())
+                    if isinstance(loaded, dict):
+                        issues = loaded.get("issues")
+                        records = issues if isinstance(issues, list) else []
+                    else:
+                        records = loaded
+                    for rec in records:
                         echoed.append(
                             {
                                 "id": next_id,

@@ -124,10 +124,11 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
     except (OSError, ValueError):
         return None
     if isinstance(records, dict):
+        # Issue #742: fresh-run per-stack records carry the dict shape
+        # {"issues": [...], "verdicts": [...]}; the issues list is the
+        # findings evidence either way (legacy bare lists pass through).
         findings = records.get("issues")
     elif isinstance(records, list):
-        # Production per-stack records are a bare JSON list (the raw parse
-        # output); the dict-with-"issues" shape is the legacy/unit-test form.
         findings = records
     else:
         findings = None
@@ -189,6 +190,83 @@ def _receipt_covered_files(
                     covered_by_type[evidence_key].add(f)
     counts = {key: len(files) for key, files in covered_by_type.items()}
     return covered, counts
+
+
+def resolve_per_stack_verdicts(
+    *,
+    assigned_files: list[str],
+    declared_verdicts: list[dict[str, Any]],
+    completed_read_paths: set[str],
+    finding_files: set[str],
+) -> list[dict[str, Any]]:
+    """Reconcile declared per-file verdicts against completed-read evidence (issue #742).
+
+    A per-stack reviewer's declared verdict is NOT the recorded truth: a
+    ``clean`` verdict for an assigned file with no completed read of that file
+    in the same review is downgraded to ``not_reviewed`` (routing the file to
+    the uncovered sweep), never recorded as a pass. The gate reads evidence
+    (``_completed_read_paths`` output + parsed finding files), never reviewer
+    self-report.
+
+    The final verdict per assigned file is resolved by evidence, in order:
+    a parsed finding that path-component-matches the file wins (``has_findings``
+    beats a read, beats ``clean``); otherwise a completed read that
+    path-component-matches the file yields ``clean``; otherwise the file is
+    ``not_reviewed``. This mirrors the read-detection the sweep already uses
+    (``_path_component_matches``), so a clean shard that read its file is
+    covered regardless of findings and an unread file is never recorded clean.
+
+    Args:
+        assigned_files: The stack's assigned files, in order.
+        declared_verdicts: The reviewer-declared per-file verdict entries
+            (``path`` / ``lines_read`` / ``verdict``), surfaced through the
+            per-stack parse; evidence, not authority.
+        completed_read_paths: Completed-read paths from the stack's own fork
+            trajectory (``_completed_read_paths``).
+        finding_files: ``file`` fields from the stack's parsed issues.
+
+    Returns:
+        Exactly one verdict dict per ``assigned_files`` path, in the given
+        order: ``{"path", "lines_read", "verdict"}``, plus ``n_findings``
+        when the verdict is ``has_findings``. The declared ``lines_read`` is
+        preserved even when the verdict is downgraded to ``not_reviewed`` (the
+        reviewer said it read N lines; the gate records it was not read). Pure
+        and total: a declared verdict whose path is not in ``assigned_files``
+        is ignored (never fabricated), and missing keys default safely.
+    """
+    declared_by_path: dict[str, dict[str, Any]] = {}
+    for entry in declared_verdicts:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or path not in assigned_files:
+            continue  # non-assigned declared paths are ignored, never fabricated
+        declared_by_path[path] = entry
+
+    out: list[dict[str, Any]] = []
+    for path in assigned_files:
+        declared = declared_by_path.get(path, {})
+        lines_read = declared.get("lines_read", 0)
+        matching_findings = [
+            ff for ff in finding_files if _path_component_matches(ff, path)
+        ]
+        if matching_findings:
+            # A finding beats a read and beats a declared clean.
+            out.append(
+                {
+                    "path": path,
+                    "lines_read": lines_read,
+                    "verdict": "has_findings",
+                    "n_findings": len(matching_findings),
+                }
+            )
+        elif any(_path_component_matches(r, path) for r in completed_read_paths):
+            out.append({"path": path, "lines_read": lines_read, "verdict": "clean"})
+        else:
+            out.append(
+                {"path": path, "lines_read": lines_read, "verdict": "not_reviewed"}
+            )
+    return out
 
 
 def compute_uncovered_files(

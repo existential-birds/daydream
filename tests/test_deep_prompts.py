@@ -1383,11 +1383,12 @@ def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
 
 def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:
     """Key Decision 1: a clean verdict also requires a same-turn read, in all four builders."""
+    from daydream.deep.coverage import build_uncovered_sweep_prompt
     from daydream.deep.prompts import (
-        build_generic_fallback_prompt, build_per_stack_prompt,
+        build_generic_fallback_prompt,
+        build_per_stack_prompt,
         build_structural_prompt,
     )
-    from daydream.deep.coverage import build_uncovered_sweep_prompt
     p = _paths(tmp_path)
     prompts = [
         build_per_stack_prompt(skill_invocation="/beagle-python:review-python",

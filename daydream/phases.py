@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import anyio
 from rich.text import Text
@@ -1452,6 +1452,28 @@ Expected: {review_output_path}
 Run a full review first:
   daydream {target_dir}"""
         raise FileNotFoundError(msg)
+
+
+@overload
+async def phase_parse_feedback(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    input_path: Path | None = None,
+    output_schema: dict[str, Any] | None = None,
+    include_verdicts: Literal[False] = False,
+) -> list[dict[str, Any]]: ...
+
+
+@overload
+async def phase_parse_feedback(
+    backend: Backend,
+    work: WorkContext,
+    *,
+    input_path: Path | None = None,
+    output_schema: dict[str, Any] | None = None,
+    include_verdicts: Literal[True],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]: ...
 
 
 async def phase_parse_feedback(
@@ -3997,6 +4019,11 @@ def _append_structural_and_write_merged(
             # malformed output; degrade to none rather than crash the merge.
             print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
             structural_records = []
+        # Issue #742: fresh-run per-stack records files carry the dict shape
+        # ``{"issues": [...], "verdicts": [...]}``; the structural records are
+        # the issues list either way. Legacy bare-list files pass through.
+        if isinstance(structural_records, dict):
+            structural_records = structural_records.get("issues")
         if not isinstance(structural_records, list):
             print_warning(console, "Skipping non-list structural records; expected a list")
             structural_records = []
