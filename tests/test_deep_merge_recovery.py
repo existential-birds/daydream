@@ -352,6 +352,36 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert len(list(dd.glob("stack-*-records.json"))) > 0  # R5: completed records survive
 
 
+async def test_archived_str_merge_salvaged_end_to_end(multi_stack_target, monkeypatch) -> None:
+    """Reopen #361: the ARCHIVED Pi str shape, driven through the full deep
+    pipeline, salvages into a partial merged-items.json + a per-stack-failures.json
+    __merge__ record carrying response_shape/stack_context/byte-identical message,
+    and returns a resumable Stop(1) instead of aborting."""
+    from daydream.deep.artifacts import (
+        deep_dir,
+        merged_items_path,
+        merged_report_path,
+        per_stack_failures_path,
+    )
+
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = ARCHIVED_MERGE_STR
+    assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
+    dd = deep_dir(multi_stack_target)
+    items = json.loads(merged_items_path(dd).read_text())
+    assert "partial" not in items  # dead metadata flag stays unset (recoverability via __merge__)
+    assert len(items["items"]) > 0  # partial items consolidated from surviving records
+    assert merged_report_path(dd).is_file()  # partial review-output.md rendered
+    failures = json.loads(per_stack_failures_path(dd).read_text())
+    assert failures["__merge__"]["response_shape"] == "str"
+    # Byte-identical to the archived c48ca322 per-stack-failures.json message.
+    assert failures["__merge__"]["message"] == "Cross-stack merge returned no item list (got str)"
+    assert len(failures["__merge__"]["stack_context"]) > 0
+    assert len(list(dd.glob("stack-*-records.json"))) > 0  # completed records survive
+
+
 async def test_merge_failure_relaunch_picks_up_salvage(
     multi_stack_target, monkeypatch, mute_side_effects
 ) -> None:
