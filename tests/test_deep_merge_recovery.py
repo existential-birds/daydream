@@ -39,6 +39,18 @@ from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
 
+# Faithful reconstruction of the Pi str-when-no-JSON shape from run
+# c48ca322-eb7d-4634-9fc3-fddbf349bacd (backend Pi): pure prose/refusal with
+# NO parseable JSON, so extract_json -> None and run_agent returns a str where
+# the merge expects an item list. The exact archived prose is not preserved in
+# the run archive; the byte-identical CONTRACT is the recorded message below,
+# pinned from c48ca322's deep/per-stack-failures.json.
+ARCHIVED_MERGE_STR = (
+    "I could not produce a JSON item list for the merged cross-stack findings. "
+    "The per-stack reviews completed, but no consolidated item list was emitted."
+)
+
+
 def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     """Write the merged-findings inputs under *tmp_path*'s deep artifact dir.
 
@@ -264,6 +276,25 @@ async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work) -
         )
     assert excinfo.value.response_shape == "str"
     assert excinfo.value.stack_context == ["python"]
+
+
+async def test_archived_str_response_message_byte_identical(tmp_path, make_work) -> None:
+    """Reopen #361: the archived Pi str shape raises CrossStackMergeError whose
+    message is byte-identical to the record archived from run c48ca322
+    (deep/per-stack-failures.json: 'Cross-stack merge returned no item list
+    (got str)'), not merely a shape-typed error."""
+    from daydream.phases import CrossStackMergeError
+
+    args = _merge_args(tmp_path)
+    with pytest.raises(CrossStackMergeError) as excinfo:
+        await phase_cross_stack_merge(
+            _MergeTextBackend(ARCHIVED_MERGE_STR, None),
+            make_work(tmp_path),
+            **args,
+        )
+    assert excinfo.value.response_shape == "str"
+    assert excinfo.value.stack_context == ["python"]
+    assert str(excinfo.value) == "Cross-stack merge returned no item list (got str)"
 
 
 async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatch) -> None:
