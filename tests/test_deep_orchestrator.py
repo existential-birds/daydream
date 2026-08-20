@@ -8073,6 +8073,16 @@ def test_deep_shard_max_files_resolves_and_coerces(tmp_path: Path) -> None:
     assert _deep_shard_max_files(cfg) == 7
 
 
+def test_deep_shard_default_bounds_align_with_inline_budget() -> None:
+    """Issue #740: the default shard bounds retune to 5 files / 12288 bytes, and
+    the byte bound equals INLINE_DIFF_BUDGET_BYTES so shards inline by construction."""
+    from daydream.config import DEFAULT_DEEP_SHARD_MAX_BYTES, DEFAULT_DEEP_SHARD_MAX_FILES
+    from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
+
+    assert DEFAULT_DEEP_SHARD_MAX_FILES == 5
+    assert DEFAULT_DEEP_SHARD_MAX_BYTES == INLINE_DIFF_BUDGET_BYTES  # == 12_288
+
+
 async def test_deep_sharding_produces_multiple_review_tasks_for_one_large_stack(
     shard_many_python_target: Path, monkeypatch, install_backend,
 ) -> None:

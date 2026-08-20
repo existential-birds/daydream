@@ -400,3 +400,35 @@ def test_build_import_graph_resolves_multilanguage_edges(tmp_path) -> None:
     assert "b.ts" in graph["a.ts"]          # './b' resolves to sibling b.ts
     assert "b.go" in graph["a.go"]          # go import path -> b.go
     assert "b.rs" in graph["a.rs"]          # rust 'use b::c' -> module file b.rs
+
+
+def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
+    """Issue #740 AC4/AC5: a realistic 16-file ~50 KB stack splits under the DEFAULT
+    bounds, and every shard's diff fits the inline budget by construction."""
+    from daydream.config import DEFAULT_DEEP_SHARD_MAX_BYTES, DEFAULT_DEEP_SHARD_MAX_FILES
+    from daydream.deep.detection import StackAssignment
+    from daydream.deep.prompts import inline_grounded_files
+    from daydream.deep.sharding import shard_stacks
+
+    files = [f"src/m{i:02d}.py" for i in range(16)]
+    # ~2.9 KB per hunk -> ~47 KB total changed bytes, > the 12288-byte bound.
+    diff = "".join(
+        f"diff --git a/{f} b/{f}\n--- a/{f}\n+++ b/{f}\n@@ -1 +1 @@\n+x{'a' * 2900}\n"
+        for f in files
+    )
+    stack = StackAssignment(stack_name="python", skill_invocation="s", files=files)
+    out = shard_stacks(
+        [stack], diff,
+        max_files=DEFAULT_DEEP_SHARD_MAX_FILES,
+        max_bytes=DEFAULT_DEEP_SHARD_MAX_BYTES,
+        fanout_cap=16, frontier_max=8,
+    )
+    shards = [s for s in out if s.stack_name.startswith("python#")]
+    assert len(shards) > 1                       # the stack splits
+    union = [f for s in shards for f in s.files]
+    assert sorted(union) == sorted(files)        # no drop, no dup
+    # Every shard inlines: its hunks fit the inline budget, so reviewers never
+    # fall back to fetching/triaging the full patch.
+    for shard in shards:
+        assert inline_grounded_files(diff, shard.files) == set(shard.files)
+
