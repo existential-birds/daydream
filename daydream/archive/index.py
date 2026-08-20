@@ -200,6 +200,26 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "session_id": manifest.session_id,
                 "archived_at": manifest.archived_at,
                 "status": manifest.status,
+                "archive_status": manifest.archive_status,
+                "pipeline_status": manifest.pipeline_status,
+                "phase_states": json.dumps(manifest.phase_states)
+                if manifest.phase_states is not None
+                else None,
+                "daydream_version": manifest.daydream.version
+                if manifest.daydream is not None
+                else None,
+                "daydream_install_source": manifest.daydream.install_source
+                if manifest.daydream is not None
+                else None,
+                "daydream_commit": manifest.daydream.commit
+                if manifest.daydream is not None
+                else None,
+                "daydream_dirty": int(manifest.daydream.dirty)
+                if manifest.daydream is not None and isinstance(manifest.daydream.dirty, bool)
+                else None,
+                "daydream_container_digest": manifest.daydream.container_digest
+                if manifest.daydream is not None
+                else None,
                 "run_flow": manifest.run_flow,
                 "skill": manifest.skill,
                 "model": manifest.model,

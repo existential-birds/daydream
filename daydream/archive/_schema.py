@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import warnings
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
 """SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
@@ -35,6 +35,14 @@ CREATE TABLE IF NOT EXISTS runs (
     session_id TEXT PRIMARY KEY,
     archived_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'complete',
+    archive_status TEXT NOT NULL DEFAULT 'complete',
+    pipeline_status TEXT NOT NULL DEFAULT 'unknown',
+    phase_states TEXT,
+    daydream_version TEXT,
+    daydream_install_source TEXT,
+    daydream_commit TEXT,
+    daydream_dirty INTEGER,
+    daydream_container_digest TEXT,
     run_flow TEXT NOT NULL,
     skill TEXT,
     model TEXT,
@@ -125,7 +133,9 @@ _CREATE_INDEXES = [
 
 _UPSERT_SQL = """
 INSERT OR REPLACE INTO runs (
-    session_id, archived_at, status, run_flow, skill, model, backend,
+    session_id, archived_at, status, archive_status, pipeline_status, phase_states,
+    daydream_version, daydream_install_source, daydream_commit, daydream_dirty,
+    daydream_container_digest, run_flow, skill, model, backend,
     review_backend, fix_backend, test_backend, per_stack_review_backend, per_stack_review_model,
     review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
@@ -134,7 +144,9 @@ INSERT OR REPLACE INTO runs (
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
     outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
-    :session_id, :archived_at, :status, :run_flow, :skill, :model, :backend,
+    :session_id, :archived_at, :status, :archive_status, :pipeline_status, :phase_states,
+    :daydream_version, :daydream_install_source, :daydream_commit, :daydream_dirty,
+    :daydream_container_digest, :run_flow, :skill, :model, :backend,
     :review_backend, :fix_backend, :test_backend, :per_stack_review_backend, :per_stack_review_model,
     :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
@@ -188,6 +200,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("erosion", "REAL"),
             ("verbosity", "REAL"),
             ("fix_quality_gate", "TEXT"),
+            ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),
+            ("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("phase_states", "TEXT"),
+            ("daydream_version", "TEXT"),
+            ("daydream_install_source", "TEXT"),
+            ("daydream_commit", "TEXT"),
+            ("daydream_dirty", "INTEGER"),
+            ("daydream_container_digest", "TEXT"),
         ],
     )
 

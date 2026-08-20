@@ -1529,7 +1529,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 5
+    assert user_version == SCHEMA_VERSION == 6
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None
@@ -2078,3 +2078,33 @@ def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: Make
     assert m["phase_states"]["merge"]["status"] == "failed"
     assert m["daydream"]["version"]  # executable provenance recorded
     assert m["daydream"]["commit"] in {"unknown"} or m["daydream"]["commit"]
+
+
+def test_schema_additive_columns_and_migration(tmp_path):
+    from daydream.archive import _schema
+    db = tmp_path / "index.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'complete')")
+    conn.commit()
+    conn.close()
+    # _migrate_schema adds the new columns idempotently to an existing table
+    _schema._migrate_schema(sqlite3.connect(db))
+    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(runs)").fetchall()}
+    assert "archive_status" in cols and "pipeline_status" in cols and "phase_states" in cols
+    assert "daydream_version" in cols and "daydream_commit" in cols and "daydream_dirty" in cols
+
+
+def test_upsert_run_persists_pipeline_fields(tmp_path):
+    from daydream.archive import index
+    from daydream.archive.manifest import Manifest
+    from daydream.archive.provenance import ExecutableProvenance
+    m = Manifest(session_id="s-2", status="complete", archive_status="complete",
+                 pipeline_status="failed", phase_states={"merge": {"ran": True, "status": "failed"}},
+                 daydream=ExecutableProvenance(version="0.27.0", install_source="git",
+                                               commit="abc", dirty=False, container_digest="unknown"))
+    index.upsert_run(tmp_path, m)
+    row = index.query_runs(tmp_path, "session_id = ?", ("s-2",))[0]
+    assert row["archive_status"] == "complete"
+    assert row["pipeline_status"] == "failed"
+    assert row["daydream_version"] == "0.27.0"
+    assert row["daydream_dirty"] == 0
