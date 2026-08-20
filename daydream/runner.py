@@ -224,10 +224,10 @@ class RunConfig:
             sharding/coversweep benchmark gate passes.
         deep_shard_max_files: Issue #731. Per-shard cap on the number of files a
             stack may hold before it is split into shards. ``None`` falls through
-            to file config then ``DEFAULT_DEEP_SHARD_MAX_FILES`` (20).
+            to file config then ``DEFAULT_DEEP_SHARD_MAX_FILES`` (5).
         deep_shard_max_bytes: Issue #731. Per-shard cap on the on-disk diff bytes
             a stack may hold before it is split into shards. ``None`` falls
-            through to file config then ``DEFAULT_DEEP_SHARD_MAX_BYTES`` (65536).
+            through to file config then ``DEFAULT_DEEP_SHARD_MAX_BYTES`` (12288).
         deep_shard_fanout_cap: Issue #731. Upper bound on the total number of
             sharded review tasks; stacks beyond the cap are kept unsplit (the
             largest sharded stacks are unsplit first). ``None`` falls through to
