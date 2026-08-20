@@ -15,16 +15,9 @@ from typing import Any
 
 import pytest
 
-from daydream.backends import (
-    CostEvent,
-    MetricsEvent,
-    ResultEvent,
-    TextEvent,
-    TurnEndEvent,
-)
 from daydream.pr_comment_renderer import _PHASE_LABELS, _format_duration, render_run_info_block
 from daydream.trajectory import DaydreamPhase
-from tests.harness.trajectory import make_recorder
+from tests.harness.trajectory import make_recorder, observe_claude_shape
 
 # Committed fixtures cover Claude (cost_usd present) and Codex (cost_usd null,
 # synthesized via pricing). Tests needing a specific shape build inline via _write_trajectory.
@@ -710,20 +703,15 @@ def _write_reconciled_trajectory(tmp_path: Path) -> Path:
     """
 
     async def _build() -> Path:
-        recorder = make_recorder(tmp_path)
+        # Price the fixture model (claude-sonnet-5 is a MODEL_PRICES key) so the
+        # cost-reconciliation half of the invariant is exercised: with the default
+        # unpriced 'opus' model, cost synthesis can never run, phase.cost_unknown
+        # flips True and the cost cell degrades to '—' (issue #747).
+        recorder = make_recorder(tmp_path, agent_model_name="claude-sonnet-5")
         async with recorder:
             async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
                 inv.observe_user_step(prompt="go")
-                for i, c in enumerate((12, 9, 11, 8, 10)):
-                    inv.observe(TextEvent(text=f"turn {i}"))
-                    inv.observe(MetricsEvent(
-                        message_id=f"m{i}", prompt_tokens=100,
-                        completion_tokens=c, cached_tokens=None, cost_usd=None,
-                    ))
-                    inv.observe(TurnEndEvent(message_id=f"m{i}"))
-                inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
-                                      output_tokens=66_737, cached_tokens=None))
-                inv.observe(ResultEvent(structured_output=None, continuation=None))
+                observe_claude_shape(inv)
         return recorder.path
 
     return asyncio.run(_build())
@@ -739,3 +727,8 @@ def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -
     # collapsed per-message sum (~50).
     assert "66,737 out" in rendered
     assert "50 out" not in rendered   # no collapsed value leaks
+    # The priced fixture model lets cost synthesis run: the authoritative
+    # session cost_usd=0.5 renders (not '—'), so the cost-reconciliation half of
+    # the "consistent with session total" invariant is actually exercised.
+    assert "$0.50" in rendered
+    assert "Cost unavailable" not in rendered

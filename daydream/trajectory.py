@@ -996,6 +996,85 @@ class Invocation:
             reasoning=event.reasoning_tokens,
         )
 
+    def _fold_cost_event(self, event: CostEvent) -> None:
+        """Fold a ``CostEvent``'s residual onto a step and aggregate totals.
+
+        End-of-call signal — fold per-step metrics onto the open Step so the
+        renderer's per-step rollup sees real cost / tokens (Bug C: previously
+        CostEvent only updated _final_totals).
+
+        Per-dimension take-max delta (issue #747): the amount by which this
+        CostEvent's total EXCEEDS the invocation's per-message sum. Claude's
+        authoritative session total exceeds the collapsed per-message single
+        digits -> positive delta repairs the under-count; codex/pi re-state
+        totals equal to the per-message sum -> delta 0, so the restatement never
+        double-counts. Never negative, never subtraction.
+        """
+        delta = self._reconcile_cost_delta(event)
+        existing = (
+            self._open_step_dict["_metrics"] if self._open_step_dict is not None else None
+        )
+        if existing is not None:
+            # A MetricsEvent already populated this step. Fold the residual
+            # delta onto it (previously only the recorder-level tally absorbed
+            # it, so the Step's rollup dropped the magnitude and ``Sigma steps <
+            # final``). Then backfill cost_usd / reasoning the per-message path
+            # didn't surface. ``Sigma steps == final`` holds here too (issue
+            # #747).
+            if delta.nonzero:
+                existing = _merge_metrics(
+                    existing,
+                    delta.residual_metrics(
+                        cost_usd=event.cost_usd, include_reasoning=False
+                    ),
+                )
+            updates: dict[str, Any] = {}
+            if existing.cost_usd is None and event.cost_usd is not None:
+                updates["cost_usd"] = event.cost_usd
+            # #192: backfill reasoning_tokens via Metrics.extra when the
+            # MetricsEvent path didn't carry it (mirrors cost_usd backfill).
+            if (
+                event.reasoning_tokens is not None
+                and (existing.extra is None or "reasoning_tokens" not in existing.extra)
+            ):
+                merged_extra = dict(existing.extra or {})
+                merged_extra["reasoning_tokens"] = event.reasoning_tokens
+                updates["extra"] = merged_extra
+            if updates:
+                existing = existing.model_copy(update=updates)
+            assert self._open_step_dict is not None
+            self._open_step_dict["_metrics"] = existing
+        elif delta.nonzero:
+            # No metrics-bearing step is open and the residual is non-zero: mint
+            # a fresh residual Step holding exactly the delta this CostEvent
+            # adds beyond the invocation's per-message sum, so ``Sigma steps ==
+            # recorder total`` holds (issue #747). reasoning_tokens (#192) is a
+            # subset of completion_tokens and rides in Metrics.extra (D-03).
+            self._ensure_open_step()
+            assert self._open_step_dict is not None
+            self._open_step_dict["_metrics"] = delta.residual_metrics(
+                cost_usd=event.cost_usd, include_reasoning=True
+            )
+        # else: a delta-0 restatement (codex/pi) with no metrics-bearing step
+        # open has nothing to fold — do NOT mint a phantom all-zero Metrics Step
+        # that would inflate total_steps and per-step lists in archived
+        # trajectories and rendered reports (issue #747).
+        if event.model_name:
+            if self._open_step_dict is not None:
+                self._open_step_dict["_model_name"] = event.model_name
+            self.recorder._upgrade_model_name(event.model_name)
+        # Aggregate the delta into recorder-level totals: per-dimension take-max
+        # at the per-invocation level, summed across invocations (a multi-phase
+        # run shares one recorder, so each phase's session total should sum). A
+        # CostEvent-only backend (no MetricsEvents at all) still totals by the
+        # full delta.
+        self.recorder._accumulate_metrics(
+            prompt_tokens=delta.prompt,
+            completion_tokens=delta.completion,
+            cached_tokens=delta.cached,
+            cost_usd=None if event.cost_usd is None else delta.cost,
+        )
+
     def _dispatch(self, event: Any) -> None:
         # Function-local imports avoid load-order cycles with daydream.backends.
         from daydream.backends import (
@@ -1133,80 +1212,13 @@ class Invocation:
                 cost_usd=event.cost_usd,
             )
         elif isinstance(event, CostEvent):
-            # End-of-call signal — also fold per-step metrics onto the open
-            # Step so the renderer's per-step rollup sees real cost / tokens
-            # (Bug C: previously CostEvent only updated _final_totals).
-            #
-            # Per-dimension take-max delta (issue #747): the amount by which
-            # this CostEvent's total EXCEEDS the invocation's per-message sum.
-            # Claude's authoritative session total exceeds the collapsed
-            # per-message single digits -> positive delta repairs the
-            # under-count; codex/pi re-state totals equal to the per-message
-            # sum -> delta 0, so the restatement never double-counts. Never
-            # negative, never subtraction.
-            delta = self._reconcile_cost_delta(event)
-            existing = self._open_step_dict["_metrics"] if self._open_step_dict is not None else None
-            if existing is not None:
-                # A MetricsEvent already populated this step. Fold the residual
-                # delta onto it (previously only the recorder-level tally
-                # absorbed it, so the Step's rollup dropped the magnitude and
-                # ``Σ steps < final``). Then backfill cost_usd / reasoning the
-                # per-message path didn't surface. ``Σ steps == final`` holds
-                # here too (issue #747).
-                if delta.nonzero:
-                    existing = _merge_metrics(
-                        existing,
-                        delta.residual_metrics(
-                            cost_usd=event.cost_usd, include_reasoning=False
-                        ),
-                    )
-                updates: dict[str, Any] = {}
-                if existing.cost_usd is None and event.cost_usd is not None:
-                    updates["cost_usd"] = event.cost_usd
-                # #192: backfill reasoning_tokens via Metrics.extra when the
-                # MetricsEvent path didn't carry it (mirrors cost_usd backfill).
-                if (
-                    event.reasoning_tokens is not None
-                    and (existing.extra is None or "reasoning_tokens" not in existing.extra)
-                ):
-                    merged_extra = dict(existing.extra or {})
-                    merged_extra["reasoning_tokens"] = event.reasoning_tokens
-                    updates["extra"] = merged_extra
-                if updates:
-                    existing = existing.model_copy(update=updates)
-                assert self._open_step_dict is not None
-                self._open_step_dict["_metrics"] = existing
-            elif delta.nonzero:
-                # No metrics-bearing step is open and the residual is non-zero:
-                # mint a fresh residual Step holding exactly the delta this
-                # CostEvent adds beyond the invocation's per-message sum, so
-                # ``Σ steps == recorder total`` holds (issue #747).
-                # reasoning_tokens (#192) is a subset of completion_tokens and
-                # rides in Metrics.extra (D-03).
-                self._ensure_open_step()
-                assert self._open_step_dict is not None
-                self._open_step_dict["_metrics"] = delta.residual_metrics(
-                    cost_usd=event.cost_usd, include_reasoning=True
-                )
-            # else: a delta-0 restatement (codex/pi) with no metrics-bearing
-            # step open has nothing to fold — do NOT mint a phantom all-zero
-            # Metrics Step that would inflate total_steps and per-step lists
-            # in archived trajectories and rendered reports (issue #747).
-            if event.model_name:
-                if self._open_step_dict is not None:
-                    self._open_step_dict["_model_name"] = event.model_name
-                self.recorder._upgrade_model_name(event.model_name)
-            # Aggregate the delta into recorder-level totals: per-dimension
-            # take-max at the per-invocation level, summed across invocations
-            # (a multi-phase run shares one recorder, so each phase's session
-            # total should sum). A CostEvent-only backend (no MetricsEvents at
-            # all) still totals by the full delta.
-            self.recorder._accumulate_metrics(
-                prompt_tokens=delta.prompt,
-                completion_tokens=delta.completion,
-                cached_tokens=delta.cached,
-                cost_usd=None if event.cost_usd is None else delta.cost,
-            )
+            # End-of-call signal — fold the CostEvent's per-dimension
+            # take-max residual delta onto the open/metrics step (or mint a
+            # residual step) and aggregate it into recorder totals. Isolated
+            # in _fold_cost_event so the CostEvent merge/backfill wiring is
+            # not inlined inside _dispatch (cuts the dispatch complexity
+            # concentration; issue #747).
+            self._fold_cost_event(event)
         elif isinstance(event, ResultEvent):
             self._close_open_step()
         elif isinstance(event, TurnEndEvent):
@@ -1348,6 +1360,16 @@ class Invocation:
                 step.model_copy(update=updates)
             )
             return
+        # No closed agent Step exists to fold onto (self.steps is non-empty but
+        # every step is non-agent, e.g. only user/context steps recorded). Mint a
+        # metrics-bearing agent Step so the recorder-level tally still sums to
+        # final (Sigma steps == final) instead of silently dropping the metrics
+        # while final_metrics keeps them (issue #747).
+        self._ensure_open_step()
+        assert self._open_step_dict is not None
+        self._open_step_dict["_metrics"] = incoming
+        if event.model_name:
+            self._open_step_dict["_model_name"] = event.model_name
 
     def snapshot_steps(self, *, snapshot_step_id: int | None = None) -> list[Step]:
         """Return steps including a materialized copy of any open step (signal-safe, non-mutating).

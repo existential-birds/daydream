@@ -13,7 +13,6 @@ emitted MetricsEvent lands on its own Step.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +21,6 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
-    ContinuationToken,
     CostEvent,
     MetricsEvent,
     ResultEvent,
@@ -31,43 +29,14 @@ from daydream.backends import (
     ToolStartEvent,
     TurnEndEvent,
 )
-from daydream.trajectory import DaydreamPhase, Invocation
-from tests.harness.trajectory import make_recorder, read_trajectory, step_token_sum
-
-
-@dataclass
-class _MockBackend:
-    """Minimal Backend replaying a canned event list (mirrors the MockBackend
-    in tests/test_multi_turn_tokens.py)."""
-
-    model = "mock-model"
-    fanout_concurrency = 4
-    events: list[AgentEvent]
-
-    def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: ContinuationToken | None = None,
-        agents: dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> Any:
-        events = self.events
-
-        async def _gen() -> Any:
-            for event in events:
-                yield event
-
-        return _gen()
-
-    async def cancel(self) -> None:
-        return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}"
+from daydream.trajectory import DaydreamPhase
+from tests.harness.backend import ScriptedBackend
+from tests.harness.trajectory import (
+    make_recorder,
+    observe_claude_shape,
+    read_trajectory,
+    step_token_sum,
+)
 
 
 async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
@@ -88,7 +57,7 @@ async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
     recorder = make_recorder(tmp_path)
     async with recorder:
         await run_agent(
-            _MockBackend(events=events), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
+            ScriptedBackend(events=events, model="mock-model"), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
         )
     return read_trajectory(recorder.path)
 
@@ -118,26 +87,10 @@ async def _run_tool_agent(
     recorder = make_recorder(tmp_path)
     async with recorder:
         await run_agent(
-            _MockBackend(events=events), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
+            ScriptedBackend(events=events, model="mock-model"), tmp_path, "prompt", phase=DaydreamPhase.REVIEW
         )
     return read_trajectory(recorder.path)
 
-
-
-def _observe_claude_shape(inv: Invocation) -> None:
-    """Shared Claude-shaped observe() body: 5 per-message single-digit
-    MetricsEvents (one per turn) + the authoritative session-total CostEvent
-    + ResultEvent. Both claude-shape tests replay this so a future token
-    dimension is added in exactly one place."""
-    for i, c in enumerate((12, 9, 11, 8, 10)):
-        inv.observe(TextEvent(text=f"turn {i}"))
-        inv.observe(MetricsEvent(message_id=f"m{i}", prompt_tokens=100,
-                                 completion_tokens=c, cached_tokens=None,
-                                 cost_usd=None))
-        inv.observe(TurnEndEvent(message_id=f"m{i}"))
-    inv.observe(CostEvent(cost_usd=0.5, input_tokens=600,
-                          output_tokens=66_737, cached_tokens=None))
-    inv.observe(ResultEvent(structured_output=None, continuation=None))
 
 
 @pytest.mark.asyncio
@@ -148,7 +101,7 @@ async def test_claude_shape_final_reflects_session_total(tmp_path):
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            _observe_claude_shape(inv)
+            observe_claude_shape(inv)
     traj = read_trajectory(recorder.path)
     assert traj["final_metrics"]["total_completion_tokens"] == 66_737
 
@@ -160,7 +113,7 @@ async def test_claude_shape_step_sum_equals_final(tmp_path):
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            _observe_claude_shape(inv)
+            observe_claude_shape(inv)
     traj = read_trajectory(recorder.path)
     final = traj["final_metrics"]
     step_sum = step_token_sum(traj, "completion_tokens")
@@ -255,3 +208,24 @@ def _pre_fix_bundle() -> dict[str, Any]:
             }],
         }],
     }
+
+@pytest.mark.asyncio
+async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path):
+    """Round-2 #747: a MetricsEvent arriving with no open Step and no existing
+    agent Step (self.steps contains only a user/context step) must fold onto a
+    minted agent Step so the recorder-level tally still sums to final
+    (Sigma steps == final), instead of silently dropping the metrics."""
+    recorder = make_recorder(tmp_path)
+    async with recorder:
+        async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
+            inv.observe_user_step(prompt="go")  # non-agent user step only
+            # No TextEvent/TurnEnd: self.steps non-empty but no agent step.
+            inv.observe(MetricsEvent(message_id="m0", prompt_tokens=100,
+                                     completion_tokens=25, cached_tokens=None,
+                                     cost_usd=0.01))
+            inv.observe(ResultEvent(structured_output=None, continuation=None))
+    traj = read_trajectory(recorder.path)
+    final = traj["final_metrics"]
+    step_sum = step_token_sum(traj, "completion_tokens")
+    assert final.get("total_completion_tokens") == 25
+    assert step_sum == 25
