@@ -507,8 +507,9 @@ def _diff_instruction(
             "Relevant diff hunks for your stack (inlined; do NOT re-Read "
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
-            "Focus on hunks that touch your stack's files. For whole-file "
-            "context beyond these hunks you MAY Read the source files directly."
+            "Focus on hunks that touch your stack's files. Read the source file "
+            "FIRST; you may only comment on hunks you have read. The inlined "
+            "hunks are not a substitute for reading the file."
         )
     joined = ", ".join(files)
     # Point agents at diff_path directly. A bare `git diff -- <files>` command

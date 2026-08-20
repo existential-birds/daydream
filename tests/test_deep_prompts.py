@@ -1402,3 +1402,19 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
     ]
     for prompt in prompts:
         assert "not reviewed" in prompt and "clean" in prompt
+
+
+def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
+    """Key Decision 5: MAY Read is replaced by the sweep's read-first obligation."""
+    from daydream.deep.prompts import build_generic_fallback_prompt, build_per_stack_prompt
+    p = _paths(tmp_path)
+    per_stack = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
+    )
+    fallback = build_generic_fallback_prompt(
+        files=["config.yaml"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
+    )
+    for prompt in (per_stack, fallback):
+        assert "you MAY Read the source files directly" not in prompt
+        assert "Read the source file FIRST" in prompt
