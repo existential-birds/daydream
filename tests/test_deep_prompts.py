@@ -1434,3 +1434,22 @@ def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> N
     # The instruction demands one verdict line per assigned file (clean / has_findings / not_reviewed).
     assert "not_reviewed" in out and "has_findings" in out and "clean" in out
     assert "verdict" in out
+
+
+def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp_path: Path) -> None:
+    """Should-Have: 'do NOT read up front' applies to exploration artifacts, not assigned source files."""
+    from daydream.deep.prompts import build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], exploration_dir=tmp_path / ".daydream" / "exploration", **p,
+    )
+    assert "do NOT read them all up front" in out
+    assert "assigned source files" in out and "MUST read in full" in out
+    # The no-up-front-read rule is scoped to exploration artifacts ONLY: the
+    # sentence that forbids up-front reads must not also carry the assigned-
+    # source-files mandate (today's dash-joined wording fails this).
+    upfront = "do NOT read them all up front"
+    sentence = out[out.index(upfront):]
+    sentence = sentence[: sentence.index("\n")]
+    assert "assigned source files" not in sentence

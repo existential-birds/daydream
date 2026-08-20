@@ -1162,8 +1162,9 @@ def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -
         f"Read {exploration_dir}/affected_files.md for the deterministic index of files relevant to this review "
         f"(paths, roles, import relationships).\n"
         f"{exploration_dir}/summary.md is a counts-only index; reference individual exploration files as needed.\n"
-        f"Reference files as needed; do NOT read them all up front under {exploration_dir}/ — "
-        f"but you MUST read in full all assigned source files.\n"
+        f"Reference exploration files as needed; do NOT read them all up front under {exploration_dir}/ — "
+        f"that no-up-front-read rule applies ONLY to exploration artifacts."
+        f"\nAssigned source files are different: you MUST read in full all assigned source files.\n"
     )
 
 
