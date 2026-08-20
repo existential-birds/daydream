@@ -325,6 +325,24 @@ reference anchors, not thresholds.
 | CodeFuse-CR-Bench | End-to-end repo-level Python review with multi-dimensional scoring | 601 instances, 70 projects | [11] |
 | SeRe | Security-specific code review evaluation | 6,732 instances, 5 languages | [8] |
 
+## Archived Manifest Schema: Provenance Namespaces & Status Split
+
+The archived ``manifest.json`` keeps two provenance namespaces, which must
+never be conflated:
+
+- ``git.*`` and ``code_context.*`` record provenance of the **target repository**
+  under review (``base_sha``/``head_sha``, changed files).
+- ``daydream.*`` records the **immutable Daydream executable provenance** — the
+  executable that produced the run (``version``, resolved ``install_source``,
+  ``commit`` + ``dirty``, opt-in ``container_digest``).
+
+Likewise the status fields split archive finalization from pipeline outcome:
+``status`` is an alias of ``archive_status`` (was the run cleanly **archived**?)
+``pipeline_status`` is the pipeline-outcome signal (``succeeded``/``failed``/
+``partial``/``cancelled``) — a run that merged-failed and never tested is cleanly
+archived but its **pipeline failed**.
+See ``daydream/archive/manifest.py`` for the authoritative field documentation.
+
 ---
 
 ## References

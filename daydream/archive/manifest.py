@@ -9,6 +9,12 @@ of the repository under review (target ``base_sha``/``head_sha``); the
 ``daydream.*`` block records the immutable Daydream executable that
 produced the run. The two must never be conflated.
 
+Status split: ``status`` is a backward-compat alias of ``archive_status``
+(archive finalization — was the run cleanly archived?); ``pipeline_status``
+is the pipeline-outcome signal (succeeded/failed/partial/cancelled) — a run
+that merged-failed and never tested is cleanly archived but its pipeline
+failed.
+
 Exports:
     MANIFEST_SCHEMA_VERSION: Current schema version string.
     Manifest: Dataclass representing the manifest.
