@@ -120,6 +120,8 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "not recalled. The source is the only truth; never infer a finding from the "
     "branch name, cwd, or memory. A finding without a same-turn echo of its "
     "target is INVALID.\n"
+    "  A `clean` verdict for a file also requires a same-turn read of that file: "
+    "absent the read, mark the file `not reviewed`, never `clean`.\n"
     "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
     "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "

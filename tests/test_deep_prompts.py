@@ -1379,3 +1379,26 @@ def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
         files=["api.py"], **p,
     )
     assert VERIFICATION_PROTOCOL_INSTRUCTION in out
+
+
+def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:
+    """Key Decision 1: a clean verdict also requires a same-turn read, in all four builders."""
+    from daydream.deep.prompts import (
+        build_generic_fallback_prompt, build_per_stack_prompt,
+        build_structural_prompt,
+    )
+    from daydream.deep.coverage import build_uncovered_sweep_prompt
+    p = _paths(tmp_path)
+    prompts = [
+        build_per_stack_prompt(skill_invocation="/beagle-python:review-python",
+                               stack_name="python", files=["api.py"], **p),
+        build_structural_prompt(skill_invocation="/beagle-core:review-structure",
+                                files=["api.py"], **p),
+        build_generic_fallback_prompt(files=["config.yaml"], **p),
+        build_uncovered_sweep_prompt(
+            file="api.py", hunks="", intent_path=p["intent_path"],
+            cwd=p["cwd"], output_path=p["output_path"],
+        ),
+    ]
+    for prompt in prompts:
+        assert "not reviewed" in prompt and "clean" in prompt
