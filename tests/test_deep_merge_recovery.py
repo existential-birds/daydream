@@ -415,6 +415,38 @@ async def test_merge_failure_relaunch_picks_up_salvage(
     assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
 
 
+async def test_archived_str_merge_resume_skips_rereview_and_merge(
+    multi_stack_target, monkeypatch, mute_side_effects, capsys
+) -> None:
+    """Reopen #361: after the archived-str merge salvages, a --start-at fix
+    relaunch picks up the salvaged partial items without re-reviewing completed
+    stacks or re-running the merge agent, and warns the merged results are partial."""
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = ARCHIVED_MERGE_STR
+    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
+    stub.calls.clear()
+    stub.merge_emit_str = None
+    # Force the fix gate to accept so the resume reaches the fix phase and
+    # consumes the salvaged partial items (mirrors the existing relaunch test).
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.resolve_or_prompt", lambda *_a, **_k: True
+    )
+    assert await _run_deep(multi_stack_target, start_at="fix") == 0
+    assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
+    assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
+    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
+    # R6 positive outcome: the fix phase consumed the salvaged partial items.
+    fix_calls = [
+        c["prompt"]
+        for c in stub.calls
+        if "fix these" in c["prompt"].lower() or "fix this issue" in c["prompt"].lower()
+    ]
+    assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
+
+
 async def test_merge_failure_merge_resume_skips_merge_entry(
     multi_stack_target, monkeypatch, mute_side_effects
 ) -> None:
