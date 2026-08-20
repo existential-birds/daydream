@@ -255,53 +255,50 @@ def _tokenize_command(command: str) -> list[str]:
         return command.split()
 
 
-def _rg_option_info(tok: str) -> tuple[int, bool]:
-    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern.
+def _option_info(
+    tok: str,
+    long_value_opts: frozenset[str],
+    short_value_opts: frozenset[str],
+) -> tuple[int, bool]:
+    """How many tokens a ``rg``/``grep``-family option occupies, and whether it supplies the pattern.
 
     ``-C 3`` → (2, False); ``--glob=*.py`` → (1, False) (value attached);
     ``-n`` → (1, False); ``-e PAT``/``--regexp=PAT`` → (…, True) because an
     explicit pattern leaves the next positional operand as a path, not a
     pattern. Combined short flags (``-ni``) skip only their own token; a
     value-taking short flag with an attached value (``-C3``) also consumes one.
+
+    The value sets are the verb's own — ``_RG_{LONG,SHORT}_VALUE_OPTS`` for
+    ``rg`` and ``_GREP_{LONG,SHORT}_VALUE_OPTS`` for ``grep`` — so each verb
+    consumes exactly the options that take a value in its own table. Which
+    options supply the search pattern is shared across both: ``--regexp`` and
+    ``--file`` long, ``-e`` and ``-f`` short.
     """
     if tok.startswith("--"):
         if "=" in tok:
             name = tok[2:].split("=", 1)[0]
             return 1, name in ("regexp", "file")
         name = tok[2:]
-        if name in _RG_LONG_VALUE_OPTS:
-            return 2, name in ("regexp", "file")
-        return 1, False
+        return (2 if name in long_value_opts else 1), name in ("regexp", "file")
     body = tok[1:]
-    if body and body[0] in _RG_SHORT_VALUE_OPTS:
-        value_attached = len(body) > 1
-        return (1 if value_attached else 2), body[0] in ("e", "f")
+    if body and body[0] in short_value_opts:
+        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
     return 1, False
+
+
+def _rg_option_info(tok: str) -> tuple[int, bool]:
+    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern."""
+    return _option_info(tok, _RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
 
 
 def _grep_option_info(tok: str) -> tuple[int, bool]:
     """How many tokens a ``grep`` option occupies, and whether it supplies the pattern.
 
-    Value-taking options (``-e``/``-f``/``-A``/``-B``/``-C`` and the long
-    ``--context``/``--before-context``/``--after-context``/``--max-count``/
-    ``--regexp``/``--file``/``--include``/``--exclude``) consume an attached
-    value (``-C3``, ``--context=3``) or the next token. An explicit pattern
-    flag (``-e``/``-f``/``--regexp``/``--file``) leaves the following
-    positional operand as a path, not a pattern (mirroring ``_rg_option_info``).
-    Plain flags (``-E``/``-n``/``-i``/``-r``/``-l``/``-w``/``-H`` and any
-    other short flag) consume only their own token. This is deliberately
-    grep's own table, keyed off grep's short/long value sets.
+    Uses grep's own value sets (``--context``/``--before-context``/``--max-count``/…
+    long; ``-e``/``-f``/``-A``/``-B``/``-C`` short) so only grep's value-taking
+    options consume a following token.
     """
-    if tok.startswith("--"):
-        if "=" in tok:
-            name = tok[2:].split("=", 1)[0]
-            return 1, name in ("regexp", "file")
-        name = tok[2:]
-        return 2 if name in _GREP_LONG_VALUE_OPTS else 1, name in ("regexp", "file")
-    body = tok[1:]
-    if body and body[0] in _GREP_SHORT_VALUE_OPTS:
-        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
-    return 1, False
+    return _option_info(tok, _GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
 
 
 def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
@@ -310,9 +307,10 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
     Redirection operators are consumed together with their targets (separated
     ``> target`` or attached ``2>/dev/null``) so a redirect target is never
     recorded as a read. Sed address ranges and flags are filtered, ``rg``
-    skips option values plus the search pattern, and the new inspection verbs
+    skips option values plus the search pattern, and the inspection verbs
     behave likewise: ``grep`` skips option values and its first positional
-    (the pattern), ``awk`` skips options and its first positional (the
+    (the pattern) and credits no operand when that pattern is import-only
+    (issue #739), ``awk`` skips options and its first positional (the
     program), ``head``/``tail`` skip options and their ``-n``/``-c`` values,
     and ``wc`` skips options. ``cat`` operands pass through verbatim.
     """
@@ -328,34 +326,31 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
         if m:
             i += 1 if m.group(3) else 2
             continue
-        if verb == "rg":
+        # ``rg`` and ``grep`` share the same shape: ``--`` flips to literal
+        # operand parsing, a leading ``-`` (unless ``-`` itself) is an option
+        # whose consumed tokens + pattern-supplying status come from the verb's
+        # own option table, and the first remaining positional is the pattern.
+        if verb in ("rg", "grep"):
+            option_info = _rg_option_info if verb == "rg" else _grep_option_info
             if tok == "--":
                 after_ddash = True
                 i += 1
                 continue
             if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = _rg_option_info(tok)
+                skip, supplies_pattern = option_info(tok)
                 i += skip
                 if supplies_pattern:
                     seen_pattern = True
                 continue
             if not seen_pattern:
                 seen_pattern = True
-                i += 1
-                continue
-        elif verb == "grep":
-            if tok == "--":
-                after_ddash = True
-                i += 1
-                continue
-            if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = _grep_option_info(tok)
-                i += skip
-                if supplies_pattern:
-                    seen_pattern = True
-                continue
-            if not seen_pattern:
-                seen_pattern = True
+                if verb == "grep" and _is_import_only_pattern(tok):
+                    # A grep whose pattern is only an import anchor is a
+                    # module-import scan, not a content read (issue #739):
+                    # crediting its operands as read paths would mis-credit
+                    # AC2/AC3 import coverage, exactly like the Grep-tool
+                    # branch's carve-out on the same shared seam.
+                    return paths
                 i += 1
                 continue
         elif verb in ("head", "tail"):
