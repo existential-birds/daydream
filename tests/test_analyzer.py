@@ -1554,3 +1554,29 @@ def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):
     out = analyze_findings(dd)
     assert out["per_lens"]["wonder"] == 6
     assert out["per_lens"]["per-stack"] == 0
+
+
+def seed_run_trajectory(dd: Path, session_id: str, *, total_cost_usd: float) -> None:
+    """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with final metrics."""
+    run_dir = dd / "runs" / session_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "trajectory.json").write_text(json.dumps({
+        "session_id": session_id,
+        "final_metrics": {"total_cost_usd": total_cost_usd},
+        "agent": {"name": "test"},
+        "extra": {},
+    }))
+
+
+def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path):
+    sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
+    dd = tmp_path / ".daydream"
+    seed_run_trajectory(dd, sid, total_cost_usd=18.2056)
+    deep = dd / "deep"; deep.mkdir(parents=True)
+    seed_shipped_items(deep, high=4, med=4)     # 8 shipped items, the a80b9373 shape
+    (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
+    res = analyze_session(dd, session_id=sid)
+    assert res["findings"]["total"] == 8
+    assert res["findings"]["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+    assert res["findings"]["per_lens"]["wonder"] == 6
+    assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
