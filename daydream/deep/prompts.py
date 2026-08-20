@@ -876,7 +876,7 @@ def build_merge_prompt(
 
     The merge agent returns a schema-validated JSON item list
     (``MERGED_ITEMS_SCHEMA``) -- NOT markdown. Each item is one actionable
-    finding tagged with ``lens`` (``per-stack`` | ``cross-stack``) and
+    finding tagged with ``lens`` (``per-stack`` | ``cross-stack`` | ``wonder``) and
     ``severity``. The host (``phase_cross_stack_merge``) appends structural
     findings tagged ``lens="structural"`` in Python, normalizes ids, writes the
     canonical ``merged-items.json``, and renders ``review-output.md`` from it.
@@ -884,8 +884,9 @@ def build_merge_prompt(
     section, or a write-to-file step.
 
     Each emitted item MUST:
-      - carry a ``lens`` of ``per-stack`` or ``cross-stack`` (D-26 — cross-stack
-        for concerns spanning multiple stacks)
+      - carry a ``lens`` of ``per-stack``, ``cross-stack`` (D-26 — cross-stack
+        for concerns spanning multiple stacks), or ``wonder`` (alternatives.json-
+        sourced findings)
       - carry a ``severity`` of ``high`` | ``medium`` | ``low`` (D-25 ordering)
       - collapse duplicates per dedup candidate adjudication (D-27)
 
@@ -963,8 +964,9 @@ def build_merge_prompt(
         "Item fields (MANDATORY):\n"
         "  - id: integer; any value -- the host renumbers contiguously.\n"
         "  - lens: \"per-stack\" for a single-stack finding, \"cross-stack\" for a "
-        "concern spanning multiple stacks. (Structural findings are appended by the "
-        "host -- do NOT emit them yourself.)\n"
+        "concern spanning multiple stacks, and \"wonder\" for an "
+        "alternatives.json-sourced finding. (Structural findings are appended by "
+        "the host -- do NOT emit them yourself.)\n"
         "  - severity: \"high\" | \"medium\" | \"low\".\n"
         "  - confidence: \"HIGH\" | \"MEDIUM\" | \"LOW\".\n"
         "  - file: the FULL repo-relative path exactly as it appears in the per-stack "

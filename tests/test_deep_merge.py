@@ -144,3 +144,15 @@ def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
     )
     for r in records:
         assert str(r) in prompt
+
+
+def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
+    prompt = build_merge_prompt(
+        per_stack_records_paths=[tmp_path / "r.json"],
+        intent_path=tmp_path / "i.md",
+        alternatives_path=tmp_path / "a.json",
+        dedup_candidates_path=tmp_path / "d.json",
+        output_path=tmp_path / ".review-output.md",
+    )
+    assert '"wonder"' in prompt      # the lens value the agent must emit for alt items
+    assert "alternatives" in prompt
