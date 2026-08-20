@@ -21,6 +21,7 @@ from daydream.eval.analyzer import (
     _tokenize_command,
     analyze_costs,
     analyze_coverage,
+    analyze_findings,
     analyze_grounding,
     analyze_quality,
     analyze_session,
@@ -1463,3 +1464,75 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path):
     assert result["scoped_files"] == 1
     assert list(result["per_file"]) == ["app.py"]
     assert result["erosion"] == 0.0
+
+
+# ----------------------------------------------------------------------------
+# Shipped-set findings metrics (issue #741): analyze_findings counts the
+# authoritative merged-items.json set, falling back to the merged review
+# regex count, then the pre-merge per-stack total.
+# ----------------------------------------------------------------------------
+
+def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
+    """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
+    items = []
+    for i in range(high):
+        items.append({
+            "id": i,
+            "description": f"high-{i}",
+            "file": "a.py",
+            "line": i + 1,
+            "confidence": "HIGH",
+            "rationale": "r",
+            "evidence": "a.py:1",
+            "lens": "per-stack",
+            "severity": "high",
+        })
+    for i in range(med):
+        items.append({
+            "id": high + i,
+            "description": f"med-{i}",
+            "file": "b.py",
+            "line": i + 1,
+            "confidence": "MEDIUM",
+            "rationale": "r",
+            "evidence": "b.py:1",
+            "lens": "per-stack",
+            "severity": "medium",
+        })
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+
+
+def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
+    """Write deep/f\"stack-{stack_name}-records.json\" = [{\"id\": i, \"confidence\": \"HIGH\"}]*n."""
+    records = [{"id": i, "confidence": "HIGH"} for i in range(n)]
+    (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
+
+
+def seed_review_output(deep: Path, *, count: int) -> None:
+    """Write deep/\"review-output.md\" with `count` lines matching ^\\d+\\.\\s+\\[."""
+    lines = [f"{i}. [HIGH] finding {i}" for i in range(1, count + 1)]
+    (deep / "review-output.md").write_text("\n".join(lines) + "\n")
+
+
+def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
+    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    seed_shipped_items(deep, high=4, med=4)     # merged-items.json: 8 items (4 HIGH, 4 MEDIUM)
+    seed_stack_records(deep, "python", n=4)     # stack-python-records.json: 4 HIGH
+    out = analyze_findings(dd)
+    assert out["total"] == 8
+    assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+
+
+def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
+    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    seed_review_output(deep, count=8)           # review-output.md: 8 numbered [ items
+    seed_stack_records(deep, "python", n=4)
+    out = analyze_findings(dd)
+    assert out["total"] == 8                    # from merged_finding_count regex, not per-stack
+
+
+def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
+    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    out = analyze_findings(dd)
+    assert out["total"] == 4                    # pre-merge fallback, never 0

@@ -643,7 +643,14 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
 
 
 def analyze_findings(daydream_dir: Path) -> dict:
-    """Parse per-stack records, dedup stats, and merged review."""
+    """Parse per-stack records, dedup stats, and merged review.
+
+    ``total``/``by_confidence`` report the shipped review set: ``merged-items.json``
+    is authoritative when present (it is the canonical set the posted review is
+    rendered from). When that file is absent, the count falls back to the
+    ``merged_finding_count`` regex on ``review-output.md``, then to the pre-merge
+    per-stack total so archived runs never regress to zero.
+    """
     deep_dir = daydream_dir / "deep"
     if not deep_dir.is_dir():
         return {
@@ -693,9 +700,29 @@ def analyze_findings(daydream_dir: Path) -> dict:
             re.findall(r"^\d+\.\s+\[", text, re.MULTILINE)
         )
 
+    # Issue #741: count the shipped set. merged-items.json is authoritative
+    # (present-but-empty means "shipped nothing"); the regex count is a
+    # resilience fallback when the file is absent, and the pre-merge per-stack
+    # total protects archived runs from regressing to zero. A present-but-corrupt
+    # file is a data-integrity error: let its JSONDecodeError propagate rather
+    # than silently hiding it behind the fallback.
+    merged_items_file = deep_dir / "merged-items.json"
+    if merged_items_file.exists():
+        merged_items = json.loads(merged_items_file.read_text()).get("items", [])
+        total = len(merged_items)
+        by_confidence = dict(
+            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
+        )
+    elif merged_review.get("merged_finding_count"):
+        total = merged_review["merged_finding_count"]
+        by_confidence = dict(confidence_counts)
+    else:
+        total = len(all_findings)
+        by_confidence = dict(confidence_counts)
+
     return {
-        "total": len(all_findings),
-        "by_confidence": dict(confidence_counts),
+        "total": total,
+        "by_confidence": by_confidence,
         "findings": all_findings,
         "stacks": stacks,
         "dedup": dedup_stats,
