@@ -195,7 +195,7 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     return {"_source_file": source_file, "steps": steps}
 
 
-def test_exploration_utilization_counts_only_deterministic_artifact():
+def test_exploration_utilization_counts_reads_beneath_exploration_dir():
     from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
@@ -207,15 +207,42 @@ def test_exploration_utilization_counts_only_deterministic_artifact():
             _read_traj(
                 "deep-c.json", "/repo/.daydream/exploration/affected_files.md", pi_style=True
             ),
+            _read_traj("deep-go.json", "/repo/src/main.go"),
         ],
     }
     result = analyze_exploration_utilization(trajectories)
     by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
-    assert by_agent["deep-python"]["utilized"] is False
+    assert by_agent["deep-python"]["utilized"] is True
     assert by_agent["deep-ts"]["utilized"] is True
-    assert by_agent["deep-rust"]["utilized"] is False
+    assert by_agent["deep-rust"]["utilized"] is True
     assert by_agent["deep-c"]["utilized"] is True
-    assert result["reviewers_utilizing_exploration"] == 2
+    assert by_agent["deep-go"]["utilized"] is False  # outside exploration/ -> not counted
+    assert result["reviewers_utilizing_exploration"] == 4
+
+
+def test_exploration_utilization_counts_bash_mediated_reads():
+    from daydream.eval.analyzer import analyze_exploration_utilization
+
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-python.json",
+                "steps": [
+                    {"step_id": "s0", "tool_calls": [
+                        {"function_name": "Bash", "arguments": {"command": "cat .daydream/exploration/summary.md"}},
+                    ]},
+                ],
+            }
+        ],
+    }
+
+    result = analyze_exploration_utilization(trajectories)
+
+    entry = result["by_agent"][0]
+    assert entry["exploration_reads"] == 1
+    assert entry["utilized"] is True
+    assert result["reviewers_utilizing_exploration"] == 1
 
 
 def test_grounding_rate_is_undefined_with_zero_findings():

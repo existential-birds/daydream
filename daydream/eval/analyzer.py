@@ -707,7 +707,14 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
 
 
 def analyze_exploration_utilization(trajectories: dict) -> dict:
-    """Check whether review agents read the deterministic ``affected_files.md`` artifact."""
+    """Check whether review agents read the exploration-path artifacts.
+
+    Any tool call contributing a read path beneath an ``exploration/`` directory
+    (e.g. the deterministic ``affected_files.md`` index, ``summary.md``, or
+    ``conventions.md``) counts as exploration utilization, whichever backend
+    performed the read — ``Read``/``Grep`` tool calls and ``shell``/``bash``
+    commands alike route through ``_read_paths_for_call``.
+    """
     results: list[dict] = []
 
     for traj in trajectories["forked"]:
@@ -725,7 +732,7 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
                 continue
             total_reads += 1
             for path in read_paths:
-                if "affected_files.md" in path:
+                if "/exploration/" in path:
                     exploration_refs.append(path)
 
         results.append({
