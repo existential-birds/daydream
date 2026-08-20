@@ -49,6 +49,14 @@ ARCHIVED_MERGE_STR = (
     "The per-stack reviews completed, but no consolidated item list was emitted."
 )
 
+# The pinned error contract, named as a single source of truth: both the raised
+# ``CrossStackMergeError`` str() and the persisted ``__merge__`` message must
+# match the byte-identical record pinned from the archived run's
+# per-stack-failures.json. Reused at every assertion site so a message drift
+# breaks at one name instead of two inline literals.
+CROSS_STACK_MERGE_ERR_MSG = "Cross-stack merge returned no item list (got str)"
+
+
 
 def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     """Write the merged-findings inputs under *tmp_path*'s deep artifact dir.
@@ -266,9 +274,7 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None
     "merge_text",
     [
         "The review is done; no JSON items list here.",
-        # Reopen #361: the archived Pi str shape (run c48ca322) must raise a
-        # CrossStackMergeError whose message is byte-identical to the recorded
-        # per-stack-failures.json ('Cross-stack merge returned no item list (got str)').
+        # Reopen #361: the archived Pi str shape must raise a byte-identical CrossStackMergeError.
         ARCHIVED_MERGE_STR,
     ],
     ids=["generic", "archived"],
@@ -286,7 +292,7 @@ async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work, m
         )
     assert excinfo.value.response_shape == "str"
     assert excinfo.value.stack_context == ["python"]
-    assert str(excinfo.value) == "Cross-stack merge returned no item list (got str)"
+    assert str(excinfo.value) == CROSS_STACK_MERGE_ERR_MSG
 
 
 async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatch) -> None:
@@ -314,8 +320,7 @@ async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatc
     "merge_str",
     [
         "All stacks reviewed. No JSON item list to emit.",
-        # Reopen #361: the archived Pi str shape (run c48ca322) must salvage into
-        # a partial merged-items.json with a byte-identical __merge__ message.
+        # Reopen #361: the archived Pi str shape salvages a byte-identical __merge__ message.
         ARCHIVED_MERGE_STR,
     ],
     ids=["generic", "archived"],
@@ -348,7 +353,7 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert failures["__merge__"]["response_shape"] == "str"  # R4/AC2
     # Reopen #361: the byte-identical message persisted via "message": str(exc)
     # must match the record archived from run c48ca322.
-    assert failures["__merge__"]["message"] == "Cross-stack merge returned no item list (got str)"
+    assert failures["__merge__"]["message"] == CROSS_STACK_MERGE_ERR_MSG
     # R4/AC2: pin the deterministic stack names instead of only asserting
     # non-empty. multi_stack_target routes api.py/App.tsx/README.md to the
     # python + react + generic stacks; the structural meta-stack is partitioned
@@ -361,8 +366,7 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     "merge_str",
     [
         "prose with no item list",
-        # Reopen #361: after the ARCHIVED Pi str shape salvages, the resume must
-        # pick up the partial items without re-review/re-merge and warn PARTIAL.
+        # Reopen #361: after the archived Pi str shape salvages, the resume picks up partial items.
         ARCHIVED_MERGE_STR,
     ],
     ids=["generic", "archived"],
