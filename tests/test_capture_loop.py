@@ -124,7 +124,12 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     backend = PhaseDispatchBackend(
         events=[
             TextEvent(text="Review complete."),
-            ResultEvent(structured_output={"issues": [issue]}, continuation=None),
+            # Issue #742: the deep per-stack parse schema requires a
+            # ``verdicts`` property (Codex strict-mode output).
+            ResultEvent(
+                structured_output={"issues": [issue], "verdicts": []},
+                continuation=None,
+            ),
         ]
     )
     with _review_run_env(feature_branch_repo, monkeypatch, out, backend, fake_gh) as config:

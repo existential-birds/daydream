@@ -70,4 +70,4 @@ async def test_input_path_is_keyword_only(tmp_path: Path, make_work) -> None:
     """input_path cannot be passed positionally (signature guard)."""
     backend = _SpyBackend()
     with pytest.raises(TypeError):
-        await phase_parse_feedback(backend, make_work(tmp_path), tmp_path / "other.md")  # type: ignore[misc]
+        await phase_parse_feedback(backend, make_work(tmp_path), tmp_path / "other.md")  # type: ignore[call-overload]

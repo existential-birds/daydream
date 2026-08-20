@@ -101,6 +101,7 @@ class _DeepMockBackend:
             yield TextEvent(text="")
             # Parsing the structural review yields a finding (tagged lens="structural"
             # in merge, rendering the ## Structural Review section); other stacks yield none.
+            # Issue #742: the per-stack parse schema requires a ``verdicts`` property.
             if "stack-structure-review.md" in prompt:
                 yield ResultEvent(
                     structured_output={
@@ -112,12 +113,16 @@ class _DeepMockBackend:
                                 "line": 1,
                                 "evidence": "api.py:1",
                             }
-                        ]
+                        ],
+                        "verdicts": [],
                     },
                     continuation=None,
                 )
             else:
-                yield ResultEvent(structured_output={"issues": []}, continuation=None)
+                yield ResultEvent(
+                    structured_output={"issues": [], "verdicts": []},
+                    continuation=None,
+                )
             return
 
         # Merge: return an empty item list (no language-stack issues in this fixture),

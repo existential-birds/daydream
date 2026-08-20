@@ -518,10 +518,15 @@ class StubBackend:
                             }
                         )
             yield TextEvent(text="")
-            payload: dict[str, Any] = {"issues": issues}
-            if self.parse_declared_verdicts is not None:
-                payload["verdicts"] = self.parse_declared_verdicts
-            yield ResultEvent(structured_output=payload, continuation=None)
+            # Issue #742: PER_STACK_RECORD_SCHEMA requires a ``verdicts``
+            # property (Codex strict-mode output schemas list every key in
+            # ``required``), so the parse payload always carries the key --
+            # declared per-file verdicts when the knob is set, else empty.
+            parse_payload: dict[str, Any] = {
+                "issues": issues,
+                "verdicts": self.parse_declared_verdicts or [],
+            }
+            yield ResultEvent(structured_output=parse_payload, continuation=None)
             return
 
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
@@ -606,11 +611,11 @@ class StubBackend:
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
                     loaded = json.loads(Path(path_str).read_text())
                     if isinstance(loaded, dict):
-                        issues = loaded.get("issues")
-                        records = issues if isinstance(issues, list) else []
+                        loaded_issues = loaded.get("issues")
+                        recs = loaded_issues if isinstance(loaded_issues, list) else []
                     else:
-                        records = loaded
-                    for rec in records:
+                        recs = loaded
+                    for rec in recs:
                         echoed.append(
                             {
                                 "id": next_id,

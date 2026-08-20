@@ -819,9 +819,13 @@ PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
-# Per-file verdicts (issue #742). Fail-open: NOT in ``required``, so records
-# written before this field existed (or a sweep record that never emits
-# verdicts) still parse.
+# Per-file verdicts (issue #742). ``verdicts`` sits in ``required`` (like
+# every property of every Codex-routed output schema -- the strict-mode
+# validator rejects optional properties, see test_output_schema_strict.py), so
+# the parse model must emit a (possibly empty) verdicts array; the sweep parse
+# still ignores it (``include_verdicts=False``) and records written before this
+# field existed remain parseable on resume (loading is schema-free).
+PER_STACK_RECORD_SCHEMA["required"] = ["issues", "verdicts"]
 PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
     "type": "array",
     "items": {
@@ -832,7 +836,7 @@ PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
             "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
             "n_findings": {"type": "integer"},
         },
-        "required": ["path", "lines_read", "verdict"],
+        "required": ["path", "lines_read", "verdict", "n_findings"],
         "additionalProperties": False,
     },
 }

@@ -626,7 +626,15 @@ def analyze_findings(daydream_dir: Path) -> dict:
 
     for f in sorted(deep_dir.glob("stack-*-records.json")):
         stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        records = json.loads(f.read_text())
+        loaded = json.loads(f.read_text())
+        # Issue #742: fresh-run per-stack records files carry the dict shape
+        # {"issues": [...], "verdicts": [...]}; findings are the issues list
+        # either way (legacy bare lists pass through).
+        if isinstance(loaded, dict):
+            issues = loaded.get("issues")
+            records = issues if isinstance(issues, list) else []
+        else:
+            records = loaded
         stacks.append({"name": stack_name, "finding_count": len(records)})
         for r in records:
             r["_stack"] = stack_name

@@ -148,7 +148,12 @@ async def test_review_mode_writes_findings_artifact(feature_branch_repo, monkeyp
     # phase renders an empty change list from it).
     backend = PhaseDispatchBackend(events=[
         TextEvent(text="Review complete."),
-        ResultEvent(structured_output={"issues": [issue]}, continuation=None),
+        # Issue #742: the deep per-stack parse schema requires a ``verdicts``
+        # property (Codex strict-mode output).
+        ResultEvent(
+            structured_output={"issues": [issue], "verdicts": []},
+            continuation=None,
+        ),
     ])
     head = git_ops.head_sha(feature_branch_repo)
     base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
