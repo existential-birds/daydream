@@ -71,8 +71,9 @@ def _same_repo_relative(a: str, b: str) -> bool:
 def coverage_receipt_path(deep_dir: Path) -> Path:
     """Path to the run's structured coverage receipts (issue #731).
 
-    Written at prompt-build time by ``phase_per_stack_reviews`` when sharding
-    is enabled and consumed by ``compute_uncovered_files`` (Task 9/10).
+    Written at prompt-build time by ``phase_per_stack_reviews`` on every deep
+    run (decoupled from sharding, #740) and consumed by
+    ``compute_uncovered_files`` (Task 9/10).
     """
     return deep_dir / "coverage-receipts.json"
 
@@ -130,9 +131,10 @@ def _completed_read_paths(
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
-    Shared between :func:`_parsed_finding_files` (disk-backed) and the per-stack
-    verdict reconciliation in the orchestrator (in-memory parsed records) so the
-    ``./`` strip lives in one place: a leading ``./`` is a legal path spelling
+    Shared between the findings-only fallback (:func:`_parsed_finding_files`)
+    and the per-stack verdict reconciliation in the orchestrator (in-memory
+    parsed records) so the ``./`` strip lives in one place: a leading ``./``
+    is a legal path spelling
     since the grammar relaxed (#572/#573), and the reviewed-diff file set and
     the receipt lists are always bare, so normalizing once keeps a ``./x``
     finding matching its assigned file rather than failing every path-component
@@ -148,19 +150,33 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
     return files
 
 
-def _parsed_finding_files(records_path: Path) -> set[str] | None:
-    """Set of ``file`` fields across a completed shard's parsed records.
+def _load_records_or_none(records_path: Path) -> Any | None:
+    """Load and parse a per-stack records file, or ``None`` when absent/unreadable.
 
-    Returns ``None`` when the records file is absent or unreadable -- an
-    incomplete shard holds ZERO inline/frontier coverage (fail-open: the
-    review failed/omitted, so its files stay uncovered and get swept). This
-    helper is also the findings-only fallback used by :func:`_parsed_covered_files`
-    when a shard's records predate the evidence-gated ``verdicts`` array.
+    The single ``json.loads`` / ``(OSError, ValueError)`` opener shared by
+    :func:`_parsed_finding_files` and :func:`_parsed_covered_files` so the
+    fail-open loader lives in one place instead of being copy-pasted. A missing
+    or malformed records file degrades to ``None``; callers treat that as an
+    incomplete shard contributing ZERO coverage (fail-open: swept, never
+    skipped).
     """
     try:
-        records = json.loads(records_path.read_text(encoding="utf-8"))
+        return json.loads(records_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def _parsed_finding_files(records: Any) -> set[str] | None:
+    """Set of ``file`` fields across a completed shard's parsed records.
+
+    Operates on an already-loaded records object (:func:`_load_records_or_none`)
+    so the findings-only extraction is shared rather than copy-pasted, and used
+    as the fallback by :func:`_parsed_covered_files` when a shard's records
+    predate the evidence-gated ``verdicts`` array. Returns ``None`` when the
+    records shape carries no parseable findings (a non-list load, or a dict
+    without an ``issues`` list); the caller keeps its own fail-open for that
+    case.
+    """
     findings = _records_issues(records)
     if findings is None:
         return None
@@ -181,9 +197,8 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
     incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
     reviewer failed/omitted, so its files stay uncovered and get swept).
     """
-    try:
-        records = json.loads(records_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    records = _load_records_or_none(records_path)
+    if records is None:
         return None
     if isinstance(records, dict):
         verdicts = records.get("verdicts")
@@ -199,10 +214,7 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
                     path = path[2:]
                 covered.add(path)
             return covered
-    findings = _records_issues(records)
-    if findings is None:
-        return None
-    return _finding_files_from_records(findings)
+    return _parsed_finding_files(records)
 
 
 def _receipt_covered_files(
@@ -216,8 +228,11 @@ def _receipt_covered_files(
     parsed finding) marks it covered. A ``clean`` verdict -- a reviewed file
     with no findings -- credits the file, so a clean review is never swept;
     a ``not_reviewed`` verdict never credits. ``dependency_frontier_read``
-    is the same check over the shard's ``frontier_files``. Assignment/grounding
-    alone never counts; a shard without a records file contributes zero.
+    credits a shard's ``frontier_files`` when ANY completed shard's evidence
+    covers the file: a frontier file lives in a SIBLING shard, so its read
+    evidence is recorded in the sibling's records, never the shard that merely
+    lists it as a frontier. Assignment/grounding alone never counts; a shard
+    without a records file contributes zero inline evidence.
 
     Returns the covered set plus per-evidence-type counts (a file covered by
     multiple types counts once per type it satisfies).
@@ -231,18 +246,33 @@ def _receipt_covered_files(
         "dependency_frontier_read": set(),
     }
     diff_set = set(diff_files)
+
+    # A shard's ``frontier_files`` are files in OTHER shards of the same
+    # language (_assign_frontiers, sharding.py), so the read evidence backing a
+    # frontier entry lives in the SIBLING shard's records, never the shard that
+    # lists it as a frontier. Merge every shard's completed covered set once so
+    # the frontier branch credits a file when its owning (or any) shard actually
+    # read it -- else a frontier file never appears in a shard's own records and
+    # ``dependency_frontier_read`` can never fire (issue #740 regression).
+    shard_covered: dict[str, set[str]] = {}
+    frontier_evidence: set[str] = set()
+    for stack_name, _ in receipts.items():
+        loaded = _parsed_covered_files(per_stack_records_path(deep_dir_path, stack_name))
+        if loaded is not None:
+            shard_covered[stack_name] = loaded
+            frontier_evidence |= loaded
+
     for stack_name, receipt in receipts.items():
-        records_path = per_stack_records_path(deep_dir_path, stack_name)
-        finding_files = _parsed_covered_files(records_path)
-        if finding_files is None:
-            continue  # incomplete shard contributes zero inline/frontier evidence
-        for evidence_key, files_key in (
-            ("inline_hunk_reviewed", "inline_files"),
-            ("dependency_frontier_read", "frontier_files"),
+        inline_covered = shard_covered.get(stack_name)
+        if inline_covered is None:
+            continue  # incomplete shard contributes zero inline evidence
+        for evidence_key, files_key, credit_from in (
+            ("inline_hunk_reviewed", "inline_files", inline_covered),
+            ("dependency_frontier_read", "frontier_files", frontier_evidence),
         ):
             for f in receipt.get(files_key, []) or []:
                 if f in diff_set and any(
-                    _same_repo_relative(ff, f) for ff in finding_files
+                    _same_repo_relative(ff, f) for ff in credit_from
                 ):
                     covered.add(f)
                     covered_by_type[evidence_key].add(f)
@@ -355,7 +385,8 @@ def compute_uncovered_files(
     rules fail open — a genuinely unread file is swept, never skipped.
 
     Issue #731: when ``receipts`` (the structured coverage receipts written at
-    prompt-build time when sharding is enabled) is provided, a diff file is
+    prompt-build time on every deep run, decoupled from sharding) is provided,
+    a diff file is
     additionally covered by ``inline_hunk_reviewed`` / ``dependency_frontier_read``
     evidence per ``_receipt_covered_files``. When ``receipts`` is ``None`` (or
     the file is absent) behavior is byte-identical to today (Reads only).
@@ -403,9 +434,10 @@ def compute_uncovered_files(
         "uncovered_files": uncovered,
     }
     if receipts:
-        # Issue #731: per-evidence-type counts surface ONLY when sharding was
-        # enabled this run (receipts provided); absent otherwise (finding 3), so
-        # the Reads-only path stays byte-identical to today's stats artifact.
+        # Issue #731: per-evidence-type counts surface whenever receipts are
+        # provided (written and loaded on every deep run, decoupled from
+        # sharding -- #740); absent otherwise, so the Reads-only path stays
+        # byte-identical to its receipts-free stats artifact.
         stats["coverage_by_evidence"] = {
             "source_read": source_covered,
             **receipt_counts,

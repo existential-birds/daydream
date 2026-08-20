@@ -1647,8 +1647,9 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "coverage_ratio": coverage_stats["coverage_ratio"],
             "uncovered_files": uncovered_files,
             # Issue #731: per-evidence-type coverage counts (source_read /
-            # inline_hunk_reviewed / dependency_frontier_read), surfaced only
-            # when sharding was enabled this run (absent otherwise).
+            # inline_hunk_reviewed / dependency_frontier_read); receipts are
+            # written and loaded on every deep run (decoupled from sharding,
+            # #740), so the counts surface whenever the run produced them.
             "coverage_by_evidence": coverage_stats.get("coverage_by_evidence", {}),
         },
         "attempted_files": swept_files,
