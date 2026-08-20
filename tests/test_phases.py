@@ -1306,6 +1306,106 @@ async def test_phase_fix_parallel_rejects_missing_file_reference(tmp_path, make_
     assert backend.prompts == []
 
 
+@pytest.mark.asyncio
+async def test_phase_fix_batched_adds_test_map_source_hint(tmp_path, make_work, silence_console):
+    import json as _json
+
+    from daydream.phases import _parse_test_map, phase_fix_batched
+
+    silence_console("daydream.phases")
+    test_map_path = tmp_path / "test-map.json"
+    test_map_path.write_text(
+        _json.dumps({"test_mapping": [{"test_file": "tests/test_app.py", "source_file": "daydream/app.py"}]})
+    )
+    # The map is parsed once at the fan-out root; fix prompts consume the
+    # normalized table rather than re-reading test-map.json per group.
+    test_map = _parse_test_map(test_map_path, tmp_path)
+    backend = ScriptedBackend()
+    items = [{"file": "tests/test_app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1], 1, test_map=test_map)
+    assert any("daydream/app.py" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_parallel_forwards_exploration_pointer(tmp_path, make_work, silence_console):
+    from daydream.phases import phase_fix_parallel
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "affected_files.md").write_text("# Affected Files\n")
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_parallel(backend, make_work(tmp_path), items, exploration_dir=exploration_dir)
+    assert any("affected_files.md" in prompt for prompt in backend.prompts)
+
+
+@pytest.mark.asyncio
+async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_reviewer(
+    tmp_path, make_work, silence_console
+):
+    """Real path: a populated exploration dir is threaded phase_per_stack_reviews
+    -> structural reviewer prompt (not just the builder's synthetic unit test).
+
+    Enters from the production phase that ramps the structural stack, with a real
+    populated ``exploration/affected_files.md`` and the real registry ``structural``
+    builder resolved -- only the external network backend is mocked. Asserts the
+    deterministic affected-files index actually reaches the reviewer prompt.
+    """
+    from daydream.backends import ResultEvent, TextEvent
+    from daydream.config import STRUCTURE_SKILL, STRUCTURE_STACK_NAME
+    from daydream.deep.detection import StackAssignment
+    from daydream.phases import phase_per_stack_reviews
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend(
+        events=(TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None))
+    )
+    exploration_dir = tmp_path / "exploration"
+    exploration_dir.mkdir()
+    (exploration_dir / "affected_files.md").write_text("# Affected Files\napi/main.py role=root\n")
+    diff = tmp_path / "diff.patch"
+    diff.write_text("")
+    intent = tmp_path / "intent.md"
+    intent.write_text("x")
+    alts = tmp_path / "alts.json"
+    alts.write_text("[]")
+    stacks = [
+        StackAssignment(
+            stack_name=STRUCTURE_STACK_NAME,
+            skill_invocation=STRUCTURE_SKILL,
+            files=["api/main.py"],
+            is_docs_only=False,
+        )
+    ]
+
+    results, failures = await phase_per_stack_reviews(
+        backend,
+        make_work(tmp_path),
+        stacks,
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+        exploration_dir=exploration_dir,
+    )
+
+    assert failures == {}
+    assert STRUCTURE_STACK_NAME in results
+    structural_prompt = next(p for p in backend.prompts if f"/{STRUCTURE_SKILL}" in p)
+    assert str(exploration_dir / "affected_files.md") in structural_prompt
+
+
+@pytest.mark.asyncio
+async def test_phase_fix_batched_prompt_includes_evidence(tmp_path, make_work, silence_console):
+    from daydream.phases import phase_fix_batched
+
+    silence_console("daydream.phases")
+    backend = ScriptedBackend()
+    items = [{"file": "src/app.py", "evidence": "tests/test_app.py:10"}]
+    await phase_fix_batched(backend, make_work(tmp_path), items, [1], 1)
+    assert any("tests/test_app.py:10" in prompt for prompt in backend.prompts)
+
+
 class TestBuildFixPrompt:
     """Tests for _build_fix_prompt helper."""
 
@@ -1350,6 +1450,13 @@ class TestBuildFixPrompt:
         assert "if a correct fix needs another file, edit it and say which and why" in result
         # foo.py deduped to a single entry.
         assert result.count("- src/foo.py") == 1
+
+    def test_build_fix_prompt_threads_evidence_exemplar(self):
+        from daydream.phases import _build_fix_prompt
+
+        items = [{"file": "src/app.py", "evidence": "tests/test_deep_orchestrator.py:526"}]
+        prompt = _build_fix_prompt("tests failed", items, repo=None)
+        assert "tests/test_deep_orchestrator.py:526" in prompt
 
     def test_none_feedback_items_omits_file_section(self):
         from daydream.phases import _build_fix_prompt
@@ -2252,6 +2359,17 @@ def test_all_phase_builders_include_exploration_pointer(tmp_path):
         assert str(exploration_dir) in prompt
         assert "summary.md" in prompt
         assert UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY in prompt
+
+
+def test_exploration_pointer_names_affected_files_and_scopes_read_clause(tmp_path):
+    from daydream.phases import _exploration_pointer
+
+    exploration_dir = tmp_path / "exploration"
+    pointer = _exploration_pointer(exploration_dir)
+    assert "affected_files.md" in pointer
+    assert "do NOT read them all up front" in pointer
+    assert "assigned source files" in pointer
+    assert _exploration_pointer(None) == ""
 
 
 def test_exploration_pointer_marks_results_untrusted(tmp_path):

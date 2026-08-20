@@ -136,7 +136,8 @@ def _build_fix_prompt(
 
     Args:
         test_output: Raw test output text.
-        feedback_items: Optional list of feedback items with 'file' keys.
+        feedback_items: Optional list of feedback items with 'file' and
+            optional 'evidence' exemplar keys.
         repo: Optional repo root; listed files are mapped to absolute paths when
             they exist under it, so the fix agent's first Read hits.
         concise_mode: When True, tighten action directives to suppress verbose
@@ -161,6 +162,10 @@ def _build_fix_prompt(
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+        evidence = [value for item in feedback_items if (value := _item_evidence(item))]
+        if evidence:
+            evidence_list = "\n".join(f"- {value}" for value in evidence)
+            parts.append(f"\nEvidence exemplars:\n{evidence_list}")
 
     if concise_mode:
         parts.append("\nFix the failures.")
@@ -1132,16 +1137,33 @@ def _dependency_impact_instructions() -> str:
     )
 
 
-def _exploration_pointer(exploration_dir: Path | None) -> str:
-    """Return a short prompt pointer to exploration files, or empty string."""
+def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -> str:
+    """Return a short prompt pointer to exploration files, or empty string.
+
+    The single shared pointer builder for reviewer and fix prompts: both point
+    the subagent at the ``affected_files.md`` deterministic index under the
+    untrusted-content boundary, so the wording cannot drift between audiences.
+    ``fixer=True`` selects the compact fix-time variant used by the
+    single-finding (``phase_fix``) and batched (``phase_fix_batched``) fix
+    prompts; ``None`` yields an empty string so an unexplored run leaves the
+    prompt unchanged.
+    """
     if exploration_dir is None:
         return ""
+    if fixer:
+        return (
+            f"\n{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            f"Pre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
+            "for the structural/import file map before fixing."
+        )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Pre-scan exploration results are available in {exploration_dir}/.\n"
-        f"Read {exploration_dir}/summary.md for an index of what was found.\n"
-        f"Reference individual files as needed during your review — "
-        f"do NOT read them all up front.\n"
+        f"Read {exploration_dir}/affected_files.md for the deterministic index of files relevant to this review "
+        f"(paths, roles, import relationships).\n"
+        f"{exploration_dir}/summary.md is a counts-only index; reference individual exploration files as needed.\n"
+        f"Reference files as needed; do NOT read them all up front under {exploration_dir}/ — "
+        f"but you MUST read in full all assigned source files.\n"
     )
 
 
@@ -1715,6 +1737,86 @@ def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
     return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
 
 
+def _item_evidence(item: dict[str, Any]) -> str:
+    """Return a finding's evidence text, or ``''`` when absent/blank.
+
+    The single per-item guard shared by the fix-prompt summarizer, the
+    single-finding fix, and the batched fix, so the "has evidence" shape is
+    not re-declared in three ad-hoc forms.
+    """
+    return str(item.get("evidence", "") or "")
+
+
+def _repo_relative_path(repo: Path, value: str) -> str:
+    """Normalize a file reference to a repo-root-relative posix form.
+
+    A shared common form for both bare git-relative refs (``tests/test_app.py``)
+    and cwd-absolute refs (``<repo>/tests/test_app.py``), so test-map keys and
+    finding ``file`` refs compare equal even when one side was emitted rooted at
+    the cwd. A value that cannot be anchored under ``repo`` (e.g. a path
+    elsewhere) is returned normpath-normalized as-is.
+    """
+    if not value:
+        return value
+    p = Path(value)
+    try:
+        anchored = p if p.is_absolute() else repo / p
+        return anchored.resolve().relative_to(repo.resolve()).as_posix()
+    except (ValueError, OSError):
+        return p.as_posix()
+
+
+def _parse_test_map(test_map_path: Path | None, repo: Path) -> dict[str, str]:
+    """Parse ``test-map.json`` once into a normalized ``{test_file: source_file}`` map.
+
+    Keys and values are reduced to the repo-root-relative form finding ``file``
+    refs use, so hint lookups downstream never silently no-op on a
+    cwd-absolute vs bare-relative mismatch. A missing/unreadable/over-malformed
+    map degrades to an empty map -- a hint-map failure can never block a fix,
+    matching the prior defensive inline behavior.
+    """
+    if test_map_path is None:
+        return {}
+    try:
+        data = json.loads(test_map_path.read_text())
+        mappings = data["test_mapping"]
+        if not isinstance(mappings, list):
+            raise TypeError("test_mapping must be a list")
+        return {
+            _repo_relative_path(repo, str(row["test_file"])): _repo_relative_path(repo, str(row["source_file"]))
+            for row in mappings
+            if isinstance(row, dict) and row.get("test_file") and row.get("source_file")
+        }
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def _build_test_map_hints(
+    items: list[dict[str, Any]], test_map: dict[str, str] | None, repo: Path
+) -> str:
+    """Return source-file hints for mapped test findings.
+
+    ``test_map`` is the pre-parsed ``{test_file: source_file}`` table built once
+    by :func:`_parse_test_map` at the fan-out root (so the parallel loop never
+    re-reads or re-parses ``test-map.json`` per fix group). Each item ``file``
+    ref is normalized to the same repo-relative form as the keys, so the
+    linkage holds when the findings carry bare-relative paths.
+    """
+    if not test_map:
+        return ""
+    hints = []
+    for item in items:
+        if not isinstance(item.get("file"), str):
+            continue
+        source_file = test_map.get(_repo_relative_path(repo, item["file"]))
+        if source_file is None:
+            continue
+        hints.append(
+            f"This test covers {source_file} — read it to understand the expected behavior."
+        )
+    return "\n" + "\n".join(hints) if hints else ""
+
+
 def _build_intent_suffix(intent_path: Path | None) -> str:
     """Build the confirmed-author-intent block for a fix prompt.
 
@@ -1866,6 +1968,8 @@ async def phase_fix(
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
+    test_map: dict[str, str] | None = None,
 ) -> None:
     """Phase 3: Apply a single fix for one feedback item.
 
@@ -1888,10 +1992,17 @@ async def phase_fix(
             the prompt so the prose scope boundary is also concrete. ``None``
             (legacy/resume callers) leaves the prompt without the clause; the
             prose boundary still applies.
+        exploration_dir: Optional pre-scan directory whose deterministic
+            ``affected_files.md`` index is pointed out to the fixer.
+        test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
+            (built once by ``_parse_test_map`` at the fan-out root); ``None``
+            yields no hint. Invalid maps are ignored.
     """
     description = item.get("description", "No description")
     file_ref = _resolve_finding_file_ref(work.repo, item.get("file"))
     line = item.get("line", "Unknown")
+    evidence = _item_evidence(item)
+    evidence_line = f"\nEvidence: {evidence}" if evidence else ""
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
@@ -1901,12 +2012,14 @@ async def phase_fix(
 {description}
 
 File: {file_ref}
-Line: {line}
+Line: {line}{evidence_line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
+    prompt += _exploration_pointer(exploration_dir, fixer=True)
+    prompt += _build_test_map_hints([item], test_map, work.repo)
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
     # deliberate decision. A read failure skips the block; it is never coerced
@@ -1949,6 +2062,8 @@ async def phase_fix_batched(
     console_lock: anyio.Lock | None = None,
     intent_path: Path | None = None,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
+    test_map: dict[str, str] | None = None,
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
@@ -1973,12 +2088,18 @@ async def phase_fix_batched(
             forwarded to the single-item delegation and appended to the batched
             prompt as an explicit "Allowed files" clause. ``None`` for
             legacy/resume callers leaves the prompt without the clause.
+        exploration_dir: Optional pre-scan directory whose deterministic
+            ``affected_files.md`` index is pointed out to the fixer.
+        test_map: Optional pre-parsed ``{test_file: source_file}`` mapping
+            (built once by ``_parse_test_map`` at the fan-out root); ``None``
+            yields no hint. Invalid maps are ignored.
     """
     if len(items) == 1:
         await phase_fix(
             backend, work, items[0], item_nums[0], total,
             console_lock=console_lock, intent_path=intent_path,
-            changed_files=changed_files,
+            changed_files=changed_files, exploration_dir=exploration_dir,
+            test_map=test_map,
         )
         return
 
@@ -1999,7 +2120,10 @@ async def phase_fix_batched(
     for idx, item in enumerate(items, start=1):
         desc = item.get("description", "No description")
         line = item.get("line", "Unknown")
+        evidence = _item_evidence(item)
         findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
+        if evidence:
+            findings_block += f"   Evidence: {evidence}\n"
 
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
@@ -2007,6 +2131,8 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
+    prompt += _exploration_pointer(exploration_dir, fixer=True)
+    prompt += _build_test_map_hints(items, test_map, work.repo)
 
     prompt += _build_intent_suffix(intent_path)
     for idx, item in enumerate(items, start=1):
@@ -2059,6 +2185,8 @@ async def phase_fix_parallel(
     group_max_wall_s: float = DEFAULT_GROUP_MAX_WALL_S,
     group_max_serial_items: int = DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     changed_files: set[str] | None = None,
+    exploration_dir: Path | None = None,
+    test_map_path: Path | None = None,
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
@@ -2100,6 +2228,10 @@ async def phase_fix_parallel(
             forwarded to every ``phase_fix_batched`` / ``phase_fix`` call so each
             prompt carries an explicit "Allowed files" clause. ``None`` for
             legacy/resume callers (no diff context) leaves prompts unchanged.
+        exploration_dir: Optional pre-scan directory forwarded to every fix
+            call so prompts point at its deterministic ``affected_files.md``.
+        test_map_path: Optional ``test-map.json`` forwarded to every fix call
+            for source-file context hints. Invalid maps are ignored.
 
     Returns:
         ``failures``: file -> reason string.  Exception-failed groups carry
@@ -2141,6 +2273,10 @@ async def phase_fix_parallel(
     )
     _console_lock = anyio.Lock()
     total = len(items)
+    # Parse the optional test map exactly once for the whole fan-out; every fix
+    # group reuses the normalized ``{test_file: source_file}`` table instead of
+    # re-reading and re-parsing test-map.json per group.
+    test_map = _parse_test_map(test_map_path, work.repo)
 
     async def _record_budget_stop(
         fkey: str,
@@ -2186,6 +2322,8 @@ async def phase_fix_parallel(
                 console_lock=_console_lock,
                 intent_path=intent_path,
                 changed_files=changed_files,
+                exploration_dir=exploration_dir,
+                test_map=test_map,
             )
             budget.record_item()
 
@@ -2228,6 +2366,8 @@ async def phase_fix_parallel(
                                         console_lock=_console_lock,
                                         intent_path=intent_path,
                                         changed_files=changed_files,
+                                        exploration_dir=exploration_dir,
+                                        test_map=test_map,
                                     )
                                     budget.record_item()
                                 except Exception:  # noqa: BLE001 -- batched failure falls back to per-finding fixes

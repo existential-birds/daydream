@@ -176,26 +176,46 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
 # --- analyze_grounding ---
 
 
-def _read_traj(source_file: str, *read_paths: str) -> dict:
+def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict:
     """Forked-trajectory fixture whose agent Read each of ``read_paths``.
 
     Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
     ``tool_calls`` need ``function_name``/``arguments``. ``_files_read`` keeps
     only the ``file_path`` of ``Read`` calls, and ``_agent_label`` derives the
-    ``deep-<stack>`` key from ``_source_file``.
+    ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
+    calls use the pi style ``read``/``arguments.path`` shape.
     """
-    return {
-        "_source_file": source_file,
-        "steps": [
-            {
-                "step_id": f"s{i}",
-                "tool_calls": [
-                    {"function_name": "Read", "arguments": {"file_path": path}}
-                ],
-            }
-            for i, path in enumerate(read_paths)
+    steps = []
+    for i, path in enumerate(read_paths):
+        if pi_style:
+            tc = {"function_name": "read", "arguments": {"path": path}}
+        else:
+            tc = {"function_name": "Read", "arguments": {"file_path": path}}
+        steps.append({"step_id": f"s{i}", "tool_calls": [tc]})
+    return {"_source_file": source_file, "steps": steps}
+
+
+def test_exploration_utilization_counts_only_deterministic_artifact():
+    from daydream.eval.analyzer import analyze_exploration_utilization
+
+    trajectories = {
+        "main": None,
+        "forked": [
+            _read_traj("deep-python.json", "/repo/.daydream/exploration/summary.md"),
+            _read_traj("deep-ts.json", "/repo/.daydream/exploration/affected_files.md"),
+            _read_traj("deep-rust.json", "/repo/.daydream/exploration/conventions.md"),
+            _read_traj(
+                "deep-c.json", "/repo/.daydream/exploration/affected_files.md", pi_style=True
+            ),
         ],
     }
+    result = analyze_exploration_utilization(trajectories)
+    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
+    assert by_agent["deep-python"]["utilized"] is False
+    assert by_agent["deep-ts"]["utilized"] is True
+    assert by_agent["deep-rust"]["utilized"] is False
+    assert by_agent["deep-c"]["utilized"] is True
+    assert result["reviewers_utilizing_exploration"] == 2
 
 
 def test_grounding_rate_is_undefined_with_zero_findings():

@@ -110,8 +110,9 @@ TEST_MAPPER_SCHEMA: dict[str, Any] = {
                     "path": {"type": "string"},
                     "role": {"type": "string", "enum": ["test"]},
                     "summary": {"type": "string"},
+                    "source_file": {"type": "string"},
                 },
-                "required": ["path", "role", "summary"],
+                "required": ["path", "role", "summary", "source_file"],
                 "additionalProperties": False,
             },
         },
@@ -267,7 +268,7 @@ def build_test_mapper_prompt(affected_files: list[FileInfo], diff_ref: str, *, c
     return f"""You are the **test-mapper** specialist. Locate test files for each modified
 source file using conventional path mapping (tests/test_X.py, *.test.ts,
 *_test.go, tests/<crate>_test.rs). Emit a FileInfo with role="test" for
-each test file you find.
+each test file you find, and set source_file to the source file it covers.
 
 {UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}
 

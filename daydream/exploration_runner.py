@@ -93,6 +93,8 @@ def _coerce_file_infos(entries: Any) -> list[FileInfo]:
                     path=str(entry["path"]),
                     role=str(entry["role"]),
                     summary=str(entry.get("summary", "")),
+                    provenance="llm",
+                    source_file=str(entry.get("source_file", "")),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -265,7 +267,14 @@ async def pre_scan(
     # linked worktree the agent must not re-root a bare relative path via git
     # topology, which points at the sibling main worktree.
     static_files_abs = [
-        FileInfo(path=str(repo_root / f.path), role=f.role, summary=f.summary) for f in static_files
+        FileInfo(
+            path=str(repo_root / f.path),
+            role=f.role,
+            summary=f.summary,
+            provenance=f.provenance,
+            source_file=f.source_file,
+        )
+        for f in static_files
     ]
 
     with anyio.move_on_after(_SPECIALIST_TIMEOUT_SECONDS) as timeout_scope:

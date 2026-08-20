@@ -344,10 +344,11 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     assert str(tmp_path / "out.md") in prompt
 
 
-def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> None:
-    """Per spec: structural reviewer discovers via tool calls, not pre-injected context."""
+def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> None:
+    """AC5: structural reviewer is pointed at affected_files.md instead of discarding the dir."""
     from daydream.deep.prompts import build_structural_prompt
 
+    exploration_dir = tmp_path / "exploration"
     prompt = build_structural_prompt(
         skill_invocation="/beagle-core:review-structure",
         files=["main.py"],
@@ -355,10 +356,22 @@ def test_build_structural_prompt_omits_exploration_pointer(tmp_path: Path) -> No
         intent_path=tmp_path / "intent.md",
         alternatives_path=tmp_path / "alternatives.json",
         output_path=tmp_path / "out.md",
-        exploration_dir=tmp_path / "exploration",
+        exploration_dir=exploration_dir,
         cwd=tmp_path,
     )
-    assert "exploration" not in prompt.lower()
+    assert str(exploration_dir / "affected_files.md") in prompt
+
+    prompt_none = build_structural_prompt(
+        skill_invocation="/beagle-core:review-structure",
+        files=["main.py"],
+        diff_path=tmp_path / "diff.patch",
+        intent_path=tmp_path / "intent.md",
+        alternatives_path=tmp_path / "alternatives.json",
+        output_path=tmp_path / "out.md",
+        exploration_dir=None,
+        cwd=tmp_path,
+    )
+    assert "affected_files.md" not in prompt_none
 
 
 def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> None:

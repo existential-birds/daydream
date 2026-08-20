@@ -42,6 +42,15 @@ def _materialize(tmp_path: Path, files: dict[str, str]) -> Path:
     return tmp_path
 
 
+def test_detect_affected_files_rows_are_static_provenance(tmp_path: Path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "widget.py").write_text("x = 1\n")
+    (tmp_path / "app.py").write_text("import pkg.widget\n")
+    results = detect_affected_files(_modified_diff("app.py"), tmp_path, depth=1)
+    assert results, "static resolution must produce rows"
+    assert all(f.provenance == "static" for f in results)
+
+
 def test_python_impact_surface(tmp_path: Path):
     diff_text = (FIXTURES / "python_multifile.diff").read_text()
     repo = _materialize(

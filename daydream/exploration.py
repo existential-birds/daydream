@@ -8,7 +8,8 @@ exploration failures.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,11 +41,15 @@ class FileInfo:
         path: Relative file path.
         role: Relationship to the diff -- "modified", "imported_by", "imports", "test".
         summary: Brief description of the file's purpose.
+        provenance: Origin of the row (``static`` or ``llm``).
+        source_file: Source file covered by a test row, when known.
     """
 
     path: str
     role: str
     summary: str = ""
+    provenance: str = "static"
+    source_file: str = ""
 
 
 @dataclass
@@ -151,15 +156,40 @@ class ExplorationContext:
         )
 
     def write_to_dir(self, exploration_dir: Path) -> Path:
-        """Write exploration results as markdown files for on-demand agent access."""
+        """Write exploration results as markdown files and structured JSON."""
         exploration_dir.mkdir(parents=True, exist_ok=True)
+
+        affected_rows = [
+            {"path": f.path, "role": f.role, "summary": f.summary, "provenance": f.provenance}
+            for f in self.affected_files
+        ]
+        exploration_data = {
+            "affected_files": affected_rows,
+            "conventions": [
+                {"name": c.name, "description": c.description, "source": c.source}
+                for c in self.conventions
+            ],
+            "dependencies": [
+                {"source": d.source, "target": d.target, "relationship": d.relationship}
+                for d in self.dependencies
+            ],
+        }
+        (exploration_dir / "exploration.json").write_text(json.dumps(exploration_data, indent=2) + "\n")
+        test_mapping = [
+            {"test_file": f.path, "source_file": f.source_file}
+            for f in self.affected_files
+            if f.role == "test" and f.source_file
+        ]
+        (exploration_dir / "test-map.json").write_text(
+            json.dumps({"test_mapping": test_mapping}, indent=2) + "\n"
+        )
 
         if self.affected_files:
             lines = ["# Affected Files", _BOUNDARY_BLOCKQUOTE, "",
                      "Files relevant to the current review, discovered by exploration.",
-                     "| File | Role | Summary |", "|------|------|---------|"]
+                     "| File | Role | Provenance | Summary |", "|------|------|------------|---------|"]
             for f in self.affected_files:
-                lines.append(f"| `{f.path}` | {f.role} | {f.summary} |")
+                lines.append(f"| `{f.path}` | {f.role} | {f.provenance} | {f.summary} |")
             (exploration_dir / "affected_files.md").write_text("\n".join(lines) + "\n")
         else:
             (exploration_dir / "affected_files.md").write_text(_no_data_artifact("Affected Files"))
@@ -259,7 +289,8 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
     """Fold multiple partial ExplorationContext instances into one.
 
     De-duplication rules:
-    - FileInfo: keyed on (path, role); the entry with the longer summary wins.
+    - FileInfo: keyed on (path, role); the entry with the longer summary wins,
+      while static provenance wins when either duplicate is static.
     - Convention: keyed on name; first occurrence wins.
     - Dependency: keyed on (source, target, relationship).
     - guidelines: keyed on string identity.
@@ -270,12 +301,25 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
         list fields, even when called with a single argument).
     """
     files_by_key: dict[tuple[str, str], FileInfo] = {}
+    static_keys: set[tuple[str, str]] = set()
+    source_by_key: dict[tuple[str, str], str] = {}
     for ctx in contexts:
         for f in ctx.affected_files:
             key = (f.path, f.role)
+            if f.provenance == "static":
+                static_keys.add(key)
+            if f.source_file:
+                source_by_key.setdefault(key, f.source_file)
             existing = files_by_key.get(key)
             if existing is None or len(f.summary) > len(existing.summary):
                 files_by_key[key] = f
+    for key in static_keys:
+        winner = files_by_key[key]
+        source = winner.source_file
+        if winner.provenance != "static" or (not source and key in source_by_key):
+            files_by_key[key] = replace(
+                winner, provenance="static", source_file=source or source_by_key.get(key, source),
+            )
 
     seen_conv: set[str] = set()
     conventions: list[Convention] = []
@@ -320,7 +364,7 @@ CACHE_KEY_FILENAME = "cache-key"
 
 # Bump when the artifact generator changes (e.g. a new boundary rendering) so
 # upgrades force regeneration instead of serving pre-upgrade artifacts on a key match.
-_CACHE_VERSION = 2
+_CACHE_VERSION = 3
 
 
 def exploration_cache_key(head_sha: str, diff: str, tier: str, depth: int | str) -> str:

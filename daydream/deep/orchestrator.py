@@ -3062,6 +3062,9 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         )
     else:
         quality_before, quality_before_unavailable = None, None
+    exploration_dir = ctx.data.get("exploration_dir")
+    exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
+    test_map_path = exploration_dir / "test-map.json" if exploration_dir is not None else None
     async with phase_scope(DaydreamPhase.FIX):
         try:
             fix_failures: dict[str, str] = await phase_fix_parallel(
@@ -3072,6 +3075,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 group_max_wall_s=group_wall_s,
                 group_max_serial_items=group_serial,
                 changed_files=changed_files,
+                exploration_dir=exploration_dir,
+                test_map_path=test_map_path,
             )
         except UnconfinedFindingError as exc:
             # Issue #574: the phase's preflight confinement gate raises on an

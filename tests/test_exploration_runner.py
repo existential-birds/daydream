@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent, ResultEvent
-from daydream.exploration import FileInfo
+from daydream.exploration import ExplorationContext, FileInfo
 from daydream.exploration_runner import (
     count_changed_files,
     pre_scan,
@@ -74,6 +75,30 @@ def test_test_mapper_prompt_instructs_mapping():
     assert "If a Bash tool is available, you may also run `git diff" in prompt
 
 
+def test_test_mapper_schema_has_source_file_property():
+    props = TEST_MAPPER_SCHEMA["properties"]["affected_files"]["items"]["properties"]
+    assert "source_file" in props
+    assert props["source_file"] == {"type": "string"}
+
+
+def test_test_mapper_rows_carry_source_file_into_test_map_json(tmp_path):
+    ctx = ExplorationContext(
+        affected_files=[
+            FileInfo(
+                "tests/test_a.py",
+                "test",
+                "covers a.py",
+                provenance="llm",
+                source_file="daydream/a.py",
+            )
+        ]
+    )
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+    data = json.loads((exploration_dir / "test-map.json").read_text())
+    assert {"test_file": "tests/test_a.py", "source_file": "daydream/a.py"} in data["test_mapping"]
+
+
 def test_schemas_are_valid_objects():
     for schema in (PATTERN_SCANNER_SCHEMA, DEPENDENCY_TRACER_SCHEMA, TEST_MAPPER_SCHEMA):
         assert schema["type"] == "object"
@@ -99,7 +124,7 @@ _VALID_ENVELOPE: dict[str, Any] = {
     },
     "test_mapper": {
         "affected_files": [
-            {"path": "tests/test_a.py", "role": "test", "summary": "covers a.py"},
+            {"path": "tests/test_a.py", "role": "test", "summary": "covers a.py", "source_file": "daydream/a.py"},
         ],
     },
 }
@@ -191,6 +216,30 @@ def test_single_tier_dependency_tracer_only(tmp_path):
     assert all(call["read_only"] is True for call in backend.execute_calls)
     paths = {f.path for f in ctx.affected_files}
     assert "daydream/extra.py" in paths
+
+
+def test_specialist_rows_carry_llm_provenance(tmp_path):
+    diff_text = (FIXTURES / "python_multifile.diff").read_text()
+    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
+    by_path = {f.path: f for f in ctx.affected_files}
+    assert by_path["daydream/extra.py"].provenance == "llm"
+
+
+def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path):
+    """A source_file-carrying specialist envelope reaches test-map.json end-to-end."""
+    py = (FIXTURES / "python_multifile.diff").read_text()
+    ts = (FIXTURES / "typescript_multifile.diff").read_text()
+    diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
+
+    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+    data = json.loads((exploration_dir / "test-map.json").read_text())
+    assert {"test_file": "tests/test_a.py", "source_file": "daydream/a.py"} in data["test_mapping"]
+
 
 
 def test_parallel_tier_launches_three_agents(tmp_path):
