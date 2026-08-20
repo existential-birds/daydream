@@ -302,18 +302,24 @@ def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
     """
     files_by_key: dict[tuple[str, str], FileInfo] = {}
     static_keys: set[tuple[str, str]] = set()
+    source_by_key: dict[tuple[str, str], str] = {}
     for ctx in contexts:
         for f in ctx.affected_files:
             key = (f.path, f.role)
             if f.provenance == "static":
                 static_keys.add(key)
+            if f.source_file:
+                source_by_key.setdefault(key, f.source_file)
             existing = files_by_key.get(key)
             if existing is None or len(f.summary) > len(existing.summary):
                 files_by_key[key] = f
     for key in static_keys:
         winner = files_by_key[key]
-        if winner.provenance != "static":
-            files_by_key[key] = replace(winner, provenance="static")
+        source = winner.source_file
+        if winner.provenance != "static" or (not source and key in source_by_key):
+            files_by_key[key] = replace(
+                winner, provenance="static", source_file=source or source_by_key.get(key, source),
+            )
 
     seen_conv: set[str] = set()
     conventions: list[Convention] = []

@@ -162,7 +162,7 @@ def _build_fix_prompt(
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
             parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
-        evidence = [str(item.get("evidence", "")) for item in feedback_items if item.get("evidence")]
+        evidence = [value for item in feedback_items if (value := _item_evidence(item))]
         if evidence:
             evidence_list = "\n".join(f"- {value}" for value in evidence)
             parts.append(f"\nEvidence exemplars:\n{evidence_list}")
@@ -1137,10 +1137,25 @@ def _dependency_impact_instructions() -> str:
     )
 
 
-def _exploration_pointer(exploration_dir: Path | None) -> str:
-    """Return a short prompt pointer to exploration files, or empty string."""
+def _exploration_pointer(exploration_dir: Path | None, *, fixer: bool = False) -> str:
+    """Return a short prompt pointer to exploration files, or empty string.
+
+    The single shared pointer builder for reviewer and fix prompts: both point
+    the subagent at the ``affected_files.md`` deterministic index under the
+    untrusted-content boundary, so the wording cannot drift between audiences.
+    ``fixer=True`` selects the compact fix-time variant used by the
+    single-finding (``phase_fix``) and batched (``phase_fix_batched``) fix
+    prompts; ``None`` yields an empty string so an unexplored run leaves the
+    prompt unchanged.
+    """
     if exploration_dir is None:
         return ""
+    if fixer:
+        return (
+            f"\n{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+            f"Pre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
+            "for the structural/import file map before fixing."
+        )
     return (
         f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
         f"Pre-scan exploration results are available in {exploration_dir}/.\n"
@@ -1722,22 +1737,6 @@ def _build_allowed_files_clause(changed_files: set[str] | None) -> str:
     return "\nAllowed files (reviewed diff + this finding): " + ", ".join(sorted(changed_files)) + "\n"
 
 
-def _build_exploration_pointer(exploration_dir: Path | None) -> str:
-    """Build the deterministic exploration-index pointer for a fix prompt.
-
-    Shared by the single-finding (``phase_fix``) and batched
-    (``phase_fix_batched``) fix prompts so both mention the ``affected_files.md``
-    index with identical wording. ``None`` yields an empty string so an
-    unexplored run leaves the prompt unchanged.
-    """
-    if exploration_dir is None:
-        return ""
-    return (
-        f"\nPre-scan exploration indexed this repo — Read {exploration_dir / 'affected_files.md'} "
-        "for the structural/import file map before fixing."
-    )
-
-
 def _item_evidence(item: dict[str, Any]) -> str:
     """Return a finding's evidence text, or ``''`` when absent/blank.
 
@@ -2019,7 +2018,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
-    prompt += _build_exploration_pointer(exploration_dir)
+    prompt += _exploration_pointer(exploration_dir, fixer=True)
     prompt += _build_test_map_hints([item], test_map, work.repo)
 
     # Best-effort: inject the confirmed author intent so the fixer won't undo a
@@ -2132,7 +2131,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
     # the prose boundary in place without an enumerated set.
     prompt += _build_allowed_files_clause(changed_files)
-    prompt += _build_exploration_pointer(exploration_dir)
+    prompt += _exploration_pointer(exploration_dir, fixer=True)
     prompt += _build_test_map_hints(items, test_map, work.repo)
 
     prompt += _build_intent_suffix(intent_path)

@@ -182,7 +182,7 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
     ``tool_calls`` need ``function_name``/``arguments``. ``_files_read`` keeps
     only the ``file_path`` of ``Read`` calls, and ``_agent_label`` derives the
-    ``deep-<stack>`` key from ``_source_file``. With ``fn_style=True`` the
+    ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
     calls use the pi style ``read``/``arguments.path`` shape.
     """
     steps = []

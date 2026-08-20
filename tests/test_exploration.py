@@ -204,6 +204,32 @@ def test_merge_contexts_prefers_static_provenance_on_tie():
     assert merged.affected_files[0].provenance == "static"
 
 
+def test_merge_contexts_restores_source_file_on_static_tie():
+    """A winning static row must not net out an empty source_file when a
+    duplicate (the deterministic row carries none, but the LLM test-mapper
+    duplicate does) has one recorded, or the test-map filter drops the mapping."""
+    static = ExplorationContext(
+        affected_files=[FileInfo("tests/test_a.py", "test", "static note", provenance="static")]
+    )
+    llm = ExplorationContext(
+        affected_files=[
+            FileInfo(
+                "tests/test_a.py",
+                "test",
+                "a much longer LLM test summary",
+                provenance="llm",
+                source_file="daydream/a.py",
+            )
+        ]
+    )
+    merged = merge_contexts(static, llm)
+    assert len(merged.affected_files) == 1
+    row = merged.affected_files[0]
+    assert row.provenance == "static"
+    assert row.summary == "a much longer LLM test summary"
+    assert row.source_file == "daydream/a.py"
+
+
 def test_merge_contexts_dedups_dependencies():
     dep = Dependency("a.py", "b.py", "imports")
     a = ExplorationContext(dependencies=[dep])

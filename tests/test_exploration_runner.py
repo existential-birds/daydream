@@ -124,7 +124,7 @@ _VALID_ENVELOPE: dict[str, Any] = {
     },
     "test_mapper": {
         "affected_files": [
-            {"path": "tests/test_a.py", "role": "test", "summary": "covers a.py"},
+            {"path": "tests/test_a.py", "role": "test", "summary": "covers a.py", "source_file": "daydream/a.py"},
         ],
     },
 }
@@ -224,6 +224,22 @@ def test_specialist_rows_carry_llm_provenance(tmp_path):
     ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
     by_path = {f.path: f for f in ctx.affected_files}
     assert by_path["daydream/extra.py"].provenance == "llm"
+
+
+def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path):
+    """A source_file-carrying specialist envelope reaches test-map.json end-to-end."""
+    py = (FIXTURES / "python_multifile.diff").read_text()
+    ts = (FIXTURES / "typescript_multifile.diff").read_text()
+    diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
+
+    backend = _SpecialistMockBackend(results=_VALID_ENVELOPE)
+    ctx = anyio.run(pre_scan, backend, tmp_path, diff_text)
+
+    exploration_dir = tmp_path / "exploration"
+    ctx.write_to_dir(exploration_dir)
+    data = json.loads((exploration_dir / "test-map.json").read_text())
+    assert {"test_file": "tests/test_a.py", "source_file": "daydream/a.py"} in data["test_mapping"]
+
 
 
 def test_parallel_tier_launches_three_agents(tmp_path):

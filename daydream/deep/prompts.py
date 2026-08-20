@@ -29,7 +29,7 @@ from daydream.phases import (
 )
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget  # noqa: F401
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -647,11 +647,7 @@ def build_structural_prompt(
         parts.append(settled)
     parts.append(CWD_GROUNDING_INSTRUCTION.format(cwd=cwd))
     if exploration_dir is not None:
-        parts.append(
-            f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
-            f"Read {exploration_dir / 'affected_files.md'} for the deterministic structural/import index "
-            f"(paths, roles, and import relationships) relevant to this review."
-        )
+        parts.append(_exploration_pointer(exploration_dir))
     parts.append(
         _context_pointers(
             intent_path=intent_path,
