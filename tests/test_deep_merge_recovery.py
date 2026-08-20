@@ -38,7 +38,6 @@ from daydream.phases import phase_cross_stack_merge
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
-
 # Faithful reconstruction of the Pi str-when-no-JSON shape from run
 # c48ca322-eb7d-4634-9fc3-fddbf349bacd (backend Pi): pure prose/refusal with
 # NO parseable JSON, so extract_json -> None and run_agent returns a str where
@@ -263,32 +262,25 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work) -> None
     assert items.get("partial") is not True
 
 
-async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work) -> None:
+@pytest.mark.parametrize(
+    "merge_text",
+    [
+        "The review is done; no JSON items list here.",
+        # Reopen #361: the archived Pi str shape (run c48ca322) must raise a
+        # CrossStackMergeError whose message is byte-identical to the recorded
+        # per-stack-failures.json ('Cross-stack merge returned no item list (got str)').
+        ARCHIVED_MERGE_STR,
+    ],
+    ids=["generic", "archived"],
+)
+async def test_merge_raises_structured_error_on_str(tmp_path: Path, make_work, merge_text) -> None:
     """R2/AC2: a genuinely-unparseable str raises CrossStackMergeError with shape + stacks."""
     from daydream.phases import CrossStackMergeError
 
     args = _merge_args(tmp_path)
     with pytest.raises(CrossStackMergeError) as excinfo:
         await phase_cross_stack_merge(
-            _MergeTextBackend("The review is done; no JSON items list here.", None),
-            make_work(tmp_path),
-            **args,
-        )
-    assert excinfo.value.response_shape == "str"
-    assert excinfo.value.stack_context == ["python"]
-
-
-async def test_archived_str_response_message_byte_identical(tmp_path, make_work) -> None:
-    """Reopen #361: the archived Pi str shape raises CrossStackMergeError whose
-    message is byte-identical to the record archived from run c48ca322
-    (deep/per-stack-failures.json: 'Cross-stack merge returned no item list
-    (got str)'), not merely a shape-typed error."""
-    from daydream.phases import CrossStackMergeError
-
-    args = _merge_args(tmp_path)
-    with pytest.raises(CrossStackMergeError) as excinfo:
-        await phase_cross_stack_merge(
-            _MergeTextBackend(ARCHIVED_MERGE_STR, None),
+            _MergeTextBackend(merge_text, None),
             make_work(tmp_path),
             **args,
         )
@@ -318,8 +310,18 @@ async def test_merge_accepts_bare_list_end_to_end(multi_stack_target, monkeypatc
     assert items.get("partial") is not True
 
 
+@pytest.mark.parametrize(
+    "merge_str",
+    [
+        "All stacks reviewed. No JSON item list to emit.",
+        # Reopen #361: the archived Pi str shape (run c48ca322) must salvage into
+        # a partial merged-items.json with a byte-identical __merge__ message.
+        ARCHIVED_MERGE_STR,
+    ],
+    ids=["generic", "archived"],
+)
 async def test_merge_str_response_is_salvaged_not_fatal(
-    multi_stack_target, monkeypatch
+    multi_stack_target, monkeypatch, merge_str
 ) -> None:
     """R2/R3/R4/R5/S1/S2: a str merge writes partial items + failure record, stops resumably."""
     from daydream.deep.artifacts import (
@@ -332,7 +334,7 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_severity = "high"
-    stub.merge_emit_str = "All stacks reviewed. No JSON item list to emit."
+    stub.merge_emit_str = merge_str
     assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
     dd = deep_dir(multi_stack_target)
     items = json.loads(merged_items_path(dd).read_text())
@@ -344,6 +346,9 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert merged_report_path(dd).is_file()  # S1: partial review-output.md rendered
     failures = json.loads(per_stack_failures_path(dd).read_text())
     assert failures["__merge__"]["response_shape"] == "str"  # R4/AC2
+    # Reopen #361: the byte-identical message persisted via "message": str(exc)
+    # must match the record archived from run c48ca322.
+    assert failures["__merge__"]["message"] == "Cross-stack merge returned no item list (got str)"
     # R4/AC2: pin the deterministic stack names instead of only asserting
     # non-empty. multi_stack_target routes api.py/App.tsx/README.md to the
     # python + react + generic stacks; the structural meta-stack is partitioned
@@ -352,45 +357,25 @@ async def test_merge_str_response_is_salvaged_not_fatal(
     assert len(list(dd.glob("stack-*-records.json"))) > 0  # R5: completed records survive
 
 
-async def test_archived_str_merge_salvaged_end_to_end(multi_stack_target, monkeypatch) -> None:
-    """Reopen #361: the ARCHIVED Pi str shape, driven through the full deep
-    pipeline, salvages into a partial merged-items.json + a per-stack-failures.json
-    __merge__ record carrying response_shape/stack_context/byte-identical message,
-    and returns a resumable Stop(1) instead of aborting."""
-    from daydream.deep.artifacts import (
-        deep_dir,
-        merged_items_path,
-        merged_report_path,
-        per_stack_failures_path,
-    )
-
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_str = ARCHIVED_MERGE_STR
-    assert await _run_deep(multi_stack_target) != 0  # controlled Stop(1), not a crash
-    dd = deep_dir(multi_stack_target)
-    items = json.loads(merged_items_path(dd).read_text())
-    assert "partial" not in items  # dead metadata flag stays unset (recoverability via __merge__)
-    assert len(items["items"]) > 0  # partial items consolidated from surviving records
-    assert merged_report_path(dd).is_file()  # partial review-output.md rendered
-    failures = json.loads(per_stack_failures_path(dd).read_text())
-    assert failures["__merge__"]["response_shape"] == "str"
-    # Byte-identical to the archived c48ca322 per-stack-failures.json message.
-    assert failures["__merge__"]["message"] == "Cross-stack merge returned no item list (got str)"
-    assert len(failures["__merge__"]["stack_context"]) > 0
-    assert len(list(dd.glob("stack-*-records.json"))) > 0  # completed records survive
-
-
+@pytest.mark.parametrize(
+    "merge_str",
+    [
+        "prose with no item list",
+        # Reopen #361: after the ARCHIVED Pi str shape salvages, the resume must
+        # pick up the partial items without re-review/re-merge and warn PARTIAL.
+        ARCHIVED_MERGE_STR,
+    ],
+    ids=["generic", "archived"],
+)
 async def test_merge_failure_relaunch_picks_up_salvage(
-    multi_stack_target, monkeypatch, mute_side_effects
+    multi_stack_target, monkeypatch, mute_side_effects, capsys, merge_str
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
     silence(monkeypatch)
     mute_side_effects()
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_severity = "high"
-    stub.merge_emit_str = "prose with no item list"
+    stub.merge_emit_str = merge_str
     assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
     stub.calls.clear()
     stub.merge_emit_str = None
@@ -401,44 +386,14 @@ async def test_merge_failure_relaunch_picks_up_salvage(
         "daydream.deep.orchestrator.resolve_or_prompt", lambda *_a, **_k: True
     )
     assert await _run_deep(multi_stack_target, start_at="fix") == 0
+    # Reopen #361: the resume loader surfaces the prior merge failure.
+    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
     assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
     assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
     # R6 positive outcome: the fix phase consumed the salvaged partial items --
     # the fix prompt (built from merged-items.json) references the surviving
     # per-stack finding's description + file. A regression where --start-at fix
     # fails to load the partial merged-items.json would fail this assertion.
-    fix_calls = [
-        c["prompt"]
-        for c in stub.calls
-        if "fix these" in c["prompt"].lower() or "fix this issue" in c["prompt"].lower()
-    ]
-    assert any("Sample issue" in p and "api.py" in p for p in fix_calls)
-
-
-async def test_archived_str_merge_resume_skips_rereview_and_merge(
-    multi_stack_target, monkeypatch, mute_side_effects, capsys
-) -> None:
-    """Reopen #361: after the archived-str merge salvages, a --start-at fix
-    relaunch picks up the salvaged partial items without re-reviewing completed
-    stacks or re-running the merge agent, and warns the merged results are partial."""
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_str = ARCHIVED_MERGE_STR
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    stub.calls.clear()
-    stub.merge_emit_str = None
-    # Force the fix gate to accept so the resume reaches the fix phase and
-    # consumes the salvaged partial items (mirrors the existing relaunch test).
-    monkeypatch.setattr(
-        "daydream.deep.orchestrator.resolve_or_prompt", lambda *_a, **_k: True
-    )
-    assert await _run_deep(multi_stack_target, start_at="fix") == 0
-    assert not any("cross-stack merge agent" in c["prompt"].lower() for c in stub.calls)
-    assert not any("per-stack review" in c["prompt"].lower() for c in stub.calls)
-    assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in capsys.readouterr().out
-    # R6 positive outcome: the fix phase consumed the salvaged partial items.
     fix_calls = [
         c["prompt"]
         for c in stub.calls
