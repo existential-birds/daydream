@@ -401,6 +401,9 @@ def build_manifest(
     fix_failures: dict[str, str] | None = None,
     fix_leftover_untracked: list[str] | None = None,
     fix_quality_gate: dict[str, Any] | None = None,
+    pipeline_status: str = "unknown",
+    phase_states: dict[str, Any] | None = None,
+    provenance: Any | None = None,
 ) -> Manifest:
     """Construct a Manifest from run context.
 
@@ -421,6 +424,13 @@ def build_manifest(
         fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
             (issue #315), or ``None`` when the artifact is absent. Recorded
             verbatim on the manifest.
+        pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
+            cancelled/unknown) derived from per-phase terminal states; distinct
+            from ``status``/``archive_status`` (archive finalization).
+        phase_states: Per-phase terminal states (``merge``/``fix``/``test``),
+            each ``{"ran": bool, "status": str}``, or ``None`` for legacy runs.
+        provenance: The ``ExecutableProvenance`` of the Daydream executable that
+            produced this run, or ``None`` (never merged into ``git.*``).
 
     Returns:
         A fully populated Manifest.
@@ -506,6 +516,10 @@ def build_manifest(
         test_backend=_resolved_backend_name(config, "test") if runs_test else None,
         per_stack_review_backend=per_stack_review_backend,
         per_stack_review_model=per_stack_review_model,
+        archive_status=status,
+        pipeline_status=pipeline_status,
+        phase_states=phase_states,
+        daydream=provenance,
         review_only=config.output_mode == "review",
         deep=not config.shallow,
         fix_failures=fix_failures or None,

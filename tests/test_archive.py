@@ -2053,3 +2053,28 @@ def test_pipeline_status_precedence():
         {"merge": {"ran": True, "status": "succeeded"},
          "fix": {"ran": True, "status": "succeeded"},
          "test": {"ran": True, "status": "succeeded"}}) == "succeeded"
+
+
+def _deep(tmp_path: Path, name: str, data):
+    d = tmp_path / ".daydream" / "deep"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig):
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+    _deep(tmp_path, "merged-items.json", {"items": []})
+    _deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    recorder = make_recorder(tmp_path)  # run_flow NORMAL; fake config with archive=False
+    config = make_config(tmp_path, archive=False)
+    _archive_run_inner(recorder=recorder, target_dir=tmp_path, config=config,
+                       status="complete", run_eval=False, work=None, upload=False)
+    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    m = json.loads(manifest_path.read_text())
+    assert m["archive_status"] == "complete"   # cleanly archived...
+    assert m["pipeline_status"] == "failed"    # ...but the pipeline failed
+    assert m["phase_states"]["merge"]["status"] == "failed"
+    assert m["daydream"]["version"]  # executable provenance recorded
+    assert m["daydream"]["commit"] in {"unknown"} or m["daydream"]["commit"]

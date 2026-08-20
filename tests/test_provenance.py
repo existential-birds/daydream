@@ -1,4 +1,3 @@
-import pytest
 
 from daydream.archive import provenance
 

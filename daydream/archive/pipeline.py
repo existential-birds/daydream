@@ -133,7 +133,9 @@ def derive_pipeline_status(
     """
     if archive_status == "partial" and not fix_failures:
         return "cancelled"
-    if (phase_states.get("merge") or {}).get("status") == _FAILED or (phase_states.get("test") or {}).get("status") == _FAILED:
+    merge_status = (phase_states.get("merge") or {}).get("status")
+    test_status = (phase_states.get("test") or {}).get("status")
+    if merge_status == _FAILED or test_status == _FAILED:
         return _FAILED
     if fix_failures:
         return _PARTIAL

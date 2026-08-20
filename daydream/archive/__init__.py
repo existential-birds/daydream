@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
-from daydream.archive.manifest import build_manifest
+from daydream.archive.manifest import _flow_fix_test_steps, build_manifest
 from daydream.config import REVIEW_OUTPUT_FILE
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,21 @@ def _archive_run_inner(
     if fix_failures:
         status = "partial"
 
+    # 3c. Executable provenance + pipeline outcome. Best-effort by contract:
+    #     capture_executable_provenance never raises (per-field "unknown"), and
+    #     derive_phase_states/derive_pipeline_status never raise on bad artifacts
+    #     (absent/malformed -> absent/neutral). A failure here must never abort
+    #     the archive (the surrounding archive_run try/except is a second net).
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+    from daydream.archive.provenance import capture_executable_provenance
+
+    provenance = capture_executable_provenance()
+    runs_fix, runs_test = _flow_fix_test_steps(recorder.run_flow, config.flow_name)
+    phase_states = derive_phase_states(target_dir, phase_events=getattr(recorder, "_phase_events", []))
+    pipeline_status = derive_pipeline_status(
+        status, fix_failures, phase_states, runs_fix=runs_fix, runs_test=runs_test,
+    )
+
     # 4. Build and write manifest
     source_path = str(work.source) if work is not None else str(target_dir)
     manifest = build_manifest(
@@ -169,6 +184,9 @@ def _archive_run_inner(
         fix_failures=fix_failures,
         fix_leftover_untracked=fix_leftover_untracked,
         fix_quality_gate=fix_quality_gate,
+        pipeline_status=pipeline_status,
+        phase_states=phase_states,
+        provenance=provenance,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")

@@ -16,6 +16,7 @@ Exports:
         package dir + opt-in env.
 """
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,14 +70,16 @@ def _resolve_install_source() -> str:
         dist = distribution("daydream")
         if dist is None:
             return "unknown"
-        direct_url_file = (dist.locate_file("direct_url.json")
-                           if hasattr(dist, "locate_file") else dist._path)  # noqa: SLF001
-        if not direct_url_file or not getattr(direct_url_file, "exists", lambda: False)():
-            # No direct_url.json -> conventional package install (site-packages, no
-            # install-time VCS/editable marker).
-            return "package"
+        dist = distribution("daydream")
+        if dist is None:
+            return "unknown"
         try:
-            info = json.loads(Path(direct_url_file).read_text(encoding="utf-8"))
+            direct_url_json = dist.read_text("direct_url.json")
+            if direct_url_json is None:
+                # No direct_url.json -> conventional package install
+                # (site-packages, no install-time VCS/editable marker).
+                return "package"
+            info = json.loads(direct_url_json)
         except Exception:  # noqa: BLE001 - unreadable/malformed direct_url, never raise
             return "unknown"
         dir_info = info.get("dir_info")
@@ -106,6 +109,7 @@ def capture_executable_provenance() -> ExecutableProvenance:
     except GitError:
         commit = "unknown"
 
+    dirty: bool | str
     try:
         dirty = bool(git_ops.status_porcelain(pkg_dir))
     except GitError:
