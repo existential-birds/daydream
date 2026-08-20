@@ -168,7 +168,7 @@ def _files_from_diff(diff_path: Path) -> list[str]:
     return sorted(files)
 
 
-_READ_VERBS = ("sed", "nl", "cat", "rg")
+_READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
 _SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
 _REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
 _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
@@ -197,6 +197,8 @@ _RG_LONG_VALUE_OPTS = frozenset(
     }
 )
 _RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
+_GREP_LONG_VALUE_OPTS = frozenset({"context", "regexp", "file", "include", "exclude"})
+_GREP_SHORT_VALUE_OPTS = frozenset("efABC")
 
 
 def _tokenize_command(command: str) -> list[str]:
@@ -245,19 +247,45 @@ def _rg_option_info(tok: str) -> tuple[int, bool]:
     return 1, False
 
 
+def _grep_option_info(tok: str) -> int:
+    """How many tokens a ``grep`` option occupies.
+
+    Value-taking options (``-e``/``-f``/``-A``/``-B``/``-C`` and the long
+    ``--context``/``--regexp``/``--file``/``--include``/``--exclude``) consume
+    an attached value (``-C3``, ``--context=3``) or the next token. Plain
+    flags (``-E``/``-n``/``-i``/``-r``/``-l``/``-w``/``-H`` and any other
+    short flag) consume only their own token. This is deliberately grep's own
+    table — ``_rg_option_info`` treats short ``E`` as value-taking, which
+    would swallow grep's ``-E`` flag.
+    """
+    if tok.startswith("--"):
+        if "=" in tok:
+            return 1
+        name = tok[2:]
+        return 2 if name in _GREP_LONG_VALUE_OPTS else 1
+    body = tok[1:]
+    if body and body[0] in _GREP_SHORT_VALUE_OPTS:
+        return 1 if len(body) > 1 else 2
+    return 1
+
+
 def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
     """File-path operands of one command segment for a given read verb.
 
     Redirection operators are consumed together with their targets (separated
     ``> target`` or attached ``2>/dev/null``) so a redirect target is never
-    recorded as a read. Sed address ranges and flags are filtered, and ``rg``
-    skips option values plus the search pattern. ``cat`` operands pass through
-    verbatim.
+    recorded as a read. Sed address ranges and flags are filtered, ``rg``
+    skips option values plus the search pattern, and the new inspection verbs
+    behave likewise: ``grep`` skips option values and its first positional
+    (the pattern), ``awk`` skips options and its first positional (the
+    program), ``head``/``tail`` skip options and their ``-n``/``-c`` values,
+    and ``wc`` skips options. ``cat`` operands pass through verbatim.
     """
     paths: set[str] = set()
     i = 0
     n = len(operands)
     seen_pattern = False
+    seen_program = False
     after_ddash = False
     while i < n:
         tok = operands[i]
@@ -280,6 +308,34 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
                 seen_pattern = True
                 i += 1
                 continue
+        elif verb == "grep":
+            if tok == "--":
+                after_ddash = True
+                i += 1
+                continue
+            if not after_ddash and tok.startswith("-") and tok != "-":
+                i += _grep_option_info(tok)
+                continue
+            if not seen_pattern:
+                seen_pattern = True
+                i += 1
+                continue
+        elif verb in ("head", "tail"):
+            if tok.startswith("-"):
+                body = tok[1:]
+                if body and body[0] in ("n", "c"):
+                    i += 1 if len(body) > 1 else 2
+                else:
+                    i += 1
+                continue
+        elif verb in ("awk", "wc"):
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if verb == "awk" and not seen_program:
+                seen_program = True
+                i += 1
+                continue
         elif verb in ("sed", "nl", "cat"):
             if tok.startswith("-"):
                 i += 1
@@ -296,13 +352,15 @@ def _paths_from_command(command: str) -> set[str]:
     """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
 
     Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
-    ``cat``, and ``rg``. Commands may chain segments with ``&&``/``;`` and
-    redirect with ``2>/dev/null``. Tokenization is shell-aware: quoted paths
-    survive, redirection targets are consumed with their operator, and ``rg``
-    option values and the search pattern are filtered. Extraction is
-    deliberately permissive — ``_path_matches`` matches by ``endswith``, so a
-    stray operand simply never matches a diff file — but flags, redirect
-    targets, sed address ranges, and the ``rg`` search pattern are filtered.
+    ``cat``, ``rg``, ``grep``, ``head``, ``tail``, ``awk``, and ``wc``.
+    Commands may chain segments with ``&&``/``;`` and redirect with
+    ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
+    redirection targets are consumed with their operator, and option values
+    plus the ``rg``/``grep`` search pattern and the ``awk`` program are
+    filtered. Extraction is deliberately permissive — ``_path_matches``
+    matches by ``endswith``, so a stray operand simply never matches a diff
+    file — but options, redirect targets, sed address ranges, and the
+    ``rg``/``grep`` search patterns are filtered.
     """
     paths: set[str] = set()
     tokens = _tokenize_command(command)

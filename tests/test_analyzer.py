@@ -322,6 +322,29 @@ def test_files_read_skips_rg_option_values():
     assert "needle" not in paths
 
 
+def test_files_read_extracts_claude_inspection_verbs():
+    calls = [{"function_name": "Bash", "arguments": {"command": (
+        "grep -n '^from|^import' daydream/config.py && "
+        "head -n 20 tests/test_config.py; "
+        "tail -n 5 README.md; "
+        "wc -l daydream/timeutil.py; "
+        "awk '{print $1}' docs/guide.md"
+    )}}]
+
+    paths = _files_read(calls)
+
+    assert "daydream/config.py" in paths
+    assert "tests/test_config.py" in paths
+    assert "README.md" in paths
+    assert "daydream/timeutil.py" in paths
+    assert "docs/guide.md" in paths
+    assert "^from|^import" not in paths   # grep pattern is not a path
+    assert "20" not in paths              # head -n value is not a path
+    assert "5" not in paths               # tail -n value is not a path
+    assert "{print $1}" not in paths      # awk program is not a path
+    assert "1" not in paths               # wc -l flag not a path
+
+
 def test_files_read_claude_read_and_grep_unchanged():
     calls = [
         {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
