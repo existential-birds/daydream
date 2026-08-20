@@ -1980,3 +1980,76 @@ def test_legacy_manifest_reads_new_fields_as_unknown():
     assert legacy.get("pipeline_status", "unknown") == "unknown"
     assert legacy.get("archive_status", "unknown") == "unknown"
     assert legacy.get("daydream", "unknown") == "unknown"
+
+
+def _write_deep(target: Path, name: str, data):
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / name).write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["merge"]["ran"] is True
+    assert states["merge"]["status"] == "failed"   # merged-items present is NOT sufficient
+
+
+def test_merge_succeeded_when_items_and_no_merge_key(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["merge"]["status"] == "succeeded"
+
+
+def test_test_failed_from_verdict(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 1, "ignored": False})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["test"]["ran"] is True
+    assert states["test"]["status"] == "failed"
+
+
+def test_test_absent_when_no_verdict(tmp_path):
+    from daydream.archive import pipeline
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["test"]["ran"] is False
+    assert states["test"]["status"] == "absent"
+
+
+def test_fix_partial_from_failures(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["fix"]["status"] == "partial"
+
+
+def test_pipeline_status_precedence():
+    from daydream.archive import pipeline
+    # cancelled beats everything when archive partial with no fix failures
+    assert pipeline.derive_pipeline_status("partial", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "succeeded"}}) == "cancelled"
+    # merge failed -> failed even though archive_status complete
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "failed"},
+         "fix": {"ran": False, "status": "absent"},
+         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "failed"
+    # test failed -> failed
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "failed"}}) == "failed"
+    # flow runs test but it never ran -> partial
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "partial"
+    # clean deep run -> succeeded
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "succeeded"}}) == "succeeded"
