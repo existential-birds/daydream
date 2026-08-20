@@ -649,7 +649,9 @@ def analyze_findings(daydream_dir: Path) -> dict:
     is authoritative when present (it is the canonical set the posted review is
     rendered from). When that file is absent, the count falls back to the
     ``merged_finding_count`` regex on ``review-output.md``, then to the pre-merge
-    per-stack total so archived runs never regress to zero.
+    per-stack total so archived runs never regress to zero. ``per_lens`` attributes
+    findings across the wonder (``alternatives.json``), per-stack, uncovered, and
+    structure lenses.
     """
     deep_dir = daydream_dir / "deep"
     if not deep_dir.is_dir():
@@ -660,10 +662,21 @@ def analyze_findings(daydream_dir: Path) -> dict:
             "stacks": [],
             "dedup": {},
             "merged_review": {},
+            "per_lens": {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0},
         }
 
     all_findings: list[dict] = []
     stacks: list[dict] = []
+
+    # Issue #741: per-lens finding attribution. wonder reads the bare-list
+    # alternatives.json (the canonical wonder artifact); the existing
+    # stack-*-records.json glob buckets into structure / uncovered / per-stack.
+    per_lens: dict[str, int] = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
+    alts_path = deep_dir / "alternatives.json"
+    if alts_path.exists():
+        alternatives = json.loads(alts_path.read_text())
+        if isinstance(alternatives, list):
+            per_lens["wonder"] = len(alternatives)
 
     for f in sorted(deep_dir.glob("stack-*-records.json")):
         stack_name = f.stem.replace("stack-", "").replace("-records", "")
@@ -673,6 +686,12 @@ def analyze_findings(daydream_dir: Path) -> dict:
         # either way (legacy bare lists pass through).
         records = _records_issues_or_empty(loaded)
         stacks.append({"name": stack_name, "finding_count": len(records)})
+        if stack_name == "uncovered":
+            per_lens["uncovered"] += len(records)
+        elif stack_name == "structure":
+            per_lens["structure"] += len(records)
+        else:
+            per_lens["per-stack"] += len(records)
         for r in records:
             r["_stack"] = stack_name
             all_findings.append(r)
@@ -727,6 +746,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
         "stacks": stacks,
         "dedup": dedup_stats,
         "merged_review": merged_review,
+        "per_lens": per_lens,
     }
 
 
@@ -1837,6 +1857,7 @@ def analyze_session(daydream_dir: str | Path, session_id: str | None = None) -> 
             "stacks": findings_data["stacks"],
             "dedup": findings_data["dedup"],
             "merged_review": findings_data.get("merged_review", {}),
+            "per_lens": findings_data.get("per_lens", {}),
         },
         "grounding": grounding,
         "exploration_utilization": exploration,

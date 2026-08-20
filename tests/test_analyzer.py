@@ -1536,3 +1536,21 @@ def test_shipped_count_never_zero_without_artifacts(tmp_path: Path):
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
     assert out["total"] == 4                    # pre-merge fallback, never 0
+
+
+def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path):
+    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text(json.dumps([{"id": 1}, {"id": 2}]))
+    seed_stack_records(deep, "python", n=3)
+    seed_stack_records(deep, "uncovered", n=1)
+    seed_stack_records(deep, "structure", n=2)
+    out = analyze_findings(dd)
+    assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "uncovered": 1, "structure": 2}
+
+
+def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):
+    dd = tmp_path / ".daydream"; deep = dd / "deep"; deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text(json.dumps([{"id": i} for i in range(6)]))
+    out = analyze_findings(dd)
+    assert out["per_lens"]["wonder"] == 6
+    assert out["per_lens"]["per-stack"] == 0
