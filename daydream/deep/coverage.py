@@ -128,25 +128,39 @@ def _completed_read_paths(
     return paths
 
 
+def _strip_dot_slash(path: str) -> str:
+    """Normalize a leading ``./`` off a repo-relative path (issue #740).
+
+    A leading ``./`` is a legal path spelling since the grammar relaxed
+    (#572/#573); the reviewed-diff file set and the receipt lists are always
+    bare, so stripping once in a single canonical location keeps a ``./x``
+    finding matching its assigned file rather than failing every
+    path-component match and getting swept. The findings fallback, the verdict
+    path, and the orchestrator reconciliation all route through here so a
+    future normalization change is applied in one place.
+    """
+    if path.startswith("./"):
+        return path[2:]
+    return path
+
+
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
     Shared between the findings-only fallback (:func:`_parsed_finding_files`)
     and the per-stack verdict reconciliation in the orchestrator (in-memory
-    parsed records) so the ``./`` strip lives in one place: a leading ``./``
-    is a legal path spelling
+    parsed records) so the ``./`` strip lives in one place
+    (:func:`_strip_dot_slash`): a leading ``./`` is a legal path spelling
     since the grammar relaxed (#572/#573), and the reviewed-diff file set and
     the receipt lists are always bare, so normalizing once keeps a ``./x``
-    finding matching its assigned file rather than failing every path-component
-    match and getting swept.
+    finding matching its assigned file rather than failing every
+    path-component match and getting swept.
     """
     files: set[str] = set()
     for finding in findings:
         if isinstance(finding, dict) and isinstance(finding.get("file"), str):
             file = finding["file"]
-            if file.startswith("./"):
-                file = file[2:]
-            files.add(file)
+            files.add(_strip_dot_slash(file))
     return files
 
 
@@ -209,9 +223,7 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
                     continue
                 if entry.get("verdict") not in {"clean", "has_findings"}:
                     continue  # not_reviewed (or any other) never credits
-                path = entry["path"]
-                if path.startswith("./"):
-                    path = path[2:]
+                path = _strip_dot_slash(entry["path"])
                 covered.add(path)
             return covered
     return _parsed_finding_files(records)
@@ -264,18 +276,28 @@ def _receipt_covered_files(
 
     for stack_name, receipt in receipts.items():
         inline_covered = shard_covered.get(stack_name)
-        if inline_covered is None:
-            continue  # incomplete shard contributes zero inline evidence
-        for evidence_key, files_key, credit_from in (
-            ("inline_hunk_reviewed", "inline_files", inline_covered),
-            ("dependency_frontier_read", "frontier_files", frontier_evidence),
-        ):
-            for f in receipt.get(files_key, []) or []:
+        # Inline evidence is gated on THIS shard's own records: a shard without
+        # a records file contributes zero inline evidence (fail-open).
+        if inline_covered is not None:
+            for f in receipt.get("inline_files", []) or []:
                 if f in diff_set and any(
-                    _same_repo_relative(ff, f) for ff in credit_from
+                    _same_repo_relative(ff, f) for ff in inline_covered
                 ):
                     covered.add(f)
-                    covered_by_type[evidence_key].add(f)
+                    covered_by_type["inline_hunk_reviewed"].add(f)
+        # Frontier evidence is gated on the SIBLING union, NOT this shard's own
+        # records: a frontier file lives in a sibling shard (its read evidence
+        # is recorded in the sibling's records, never the shard that merely
+        # lists it as a frontier). So frontier credit fires whenever ANY
+        # completed shard read the file, independent of whether the listing
+        # shard itself completed (issue #740). Otherwise a shard with missing
+        # records suppresses frontier credit for the files it merely lists.
+        for f in receipt.get("frontier_files", []) or []:
+            if f in diff_set and any(
+                _same_repo_relative(ff, f) for ff in frontier_evidence
+            ):
+                covered.add(f)
+                covered_by_type["dependency_frontier_read"].add(f)
     counts = {key: len(files) for key, files in covered_by_type.items()}
     return covered, counts
 
