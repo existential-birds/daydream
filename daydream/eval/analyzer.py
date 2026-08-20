@@ -218,7 +218,18 @@ _RG_LONG_VALUE_OPTS = frozenset(
     }
 )
 _RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
-_GREP_LONG_VALUE_OPTS = frozenset({"context", "regexp", "file", "include", "exclude"})
+_GREP_LONG_VALUE_OPTS = frozenset(
+    {
+        "context",
+        "before-context",
+        "after-context",
+        "max-count",
+        "regexp",
+        "file",
+        "include",
+        "exclude",
+    }
+)
 _GREP_SHORT_VALUE_OPTS = frozenset("efABC")
 
 
@@ -268,26 +279,29 @@ def _rg_option_info(tok: str) -> tuple[int, bool]:
     return 1, False
 
 
-def _grep_option_info(tok: str) -> int:
-    """How many tokens a ``grep`` option occupies.
+def _grep_option_info(tok: str) -> tuple[int, bool]:
+    """How many tokens a ``grep`` option occupies, and whether it supplies the pattern.
 
     Value-taking options (``-e``/``-f``/``-A``/``-B``/``-C`` and the long
-    ``--context``/``--regexp``/``--file``/``--include``/``--exclude``) consume
-    an attached value (``-C3``, ``--context=3``) or the next token. Plain
-    flags (``-E``/``-n``/``-i``/``-r``/``-l``/``-w``/``-H`` and any other
-    short flag) consume only their own token. This is deliberately grep's own
-    table — ``_rg_option_info`` treats short ``E`` as value-taking, which
-    would swallow grep's ``-E`` flag.
+    ``--context``/``--before-context``/``--after-context``/``--max-count``/
+    ``--regexp``/``--file``/``--include``/``--exclude``) consume an attached
+    value (``-C3``, ``--context=3``) or the next token. An explicit pattern
+    flag (``-e``/``-f``/``--regexp``/``--file``) leaves the following
+    positional operand as a path, not a pattern (mirroring ``_rg_option_info``).
+    Plain flags (``-E``/``-n``/``-i``/``-r``/``-l``/``-w``/``-H`` and any
+    other short flag) consume only their own token. This is deliberately
+    grep's own table, keyed off grep's short/long value sets.
     """
     if tok.startswith("--"):
         if "=" in tok:
-            return 1
+            name = tok[2:].split("=", 1)[0]
+            return 1, name in ("regexp", "file")
         name = tok[2:]
-        return 2 if name in _GREP_LONG_VALUE_OPTS else 1
+        return 2 if name in _GREP_LONG_VALUE_OPTS else 1, name in ("regexp", "file")
     body = tok[1:]
     if body and body[0] in _GREP_SHORT_VALUE_OPTS:
-        return 1 if len(body) > 1 else 2
-    return 1
+        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
+    return 1, False
 
 
 def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
@@ -335,7 +349,10 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
                 i += 1
                 continue
             if not after_ddash and tok.startswith("-") and tok != "-":
-                i += _grep_option_info(tok)
+                skip, supplies_pattern = _grep_option_info(tok)
+                i += skip
+                if supplies_pattern:
+                    seen_pattern = True
                 continue
             if not seen_pattern:
                 seen_pattern = True
