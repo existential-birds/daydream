@@ -1552,6 +1552,41 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path):
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 
+def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path):
+    # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
+    # data-integrity error. A well-formed file with the wrong shape must surface
+    # that error too, not silently yield a bogus count behind the fallback.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    # ``items`` present but a non-list, and a top-level list, are both wrong
+    # shapes, as is a missing ``items`` key -- the writer always emits it.
+    (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
+    with pytest.raises(ValueError):
+        analyze_findings(dd)
+
+
+def test_shipped_count_missing_items_key_propagates(tmp_path: Path):
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "merged-items.json").write_text(json.dumps({}))
+    with pytest.raises(ValueError):
+        analyze_findings(dd)
+
+
+def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path):
+    # A *syntax*-invalid merged-items.json surfaces, not the fallback.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    seed_stack_records(deep, "python", n=4)
+    (deep / "merged-items.json").write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        analyze_findings(dd)
+
+
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
@@ -1581,6 +1616,17 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
     seed_stack_records(deep, "structure", n=2)
     out = analyze_findings(dd)
     assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "uncovered": 1, "structure": 2}
+
+
+def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path):
+    # A present-but-malformed alternatives.json must not take down
+    # analyze_findings / analyze_session (it served wonder attribution either).
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    (deep / "alternatives.json").write_text("{not json")
+    out = analyze_findings(dd)
+    assert out["per_lens"]["wonder"] == 0
 
 
 def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path):

@@ -650,12 +650,23 @@ def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
 
     ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
     artifact); the existing ``stack-*-records.json`` glob buckets into
-    per-stack / uncovered / structure by stack name.
+    per-stack / uncovered / structure by stack name. These lens counts are raw,
+    pre-merge attribution -- they are *not* derived from the shipped
+    ``merged-items.json`` set, so they need not sum to, or relate to, the
+    shipped ``total`` reported by ``_shipped_counts``. The distinction is
+    deliberate and documented: reconciling a lens to the shipped set would hide
+    how many items survived merge/dedup, so report readers should treat the
+    lens as raw attribution rather than a partition of the shipped set.
     """
     per_lens = dict(_EMPTY_PER_LENS)
     alts_path = deep_dir / "alternatives.json"
     if alts_path.exists():
-        alternatives = json.loads(alts_path.read_text())
+        try:
+            alternatives = json.loads(alts_path.read_text())
+        except json.JSONDecodeError:
+            # A present-but-malformed alternatives.json must not take down
+            # analyze_findings / analyze_session; leave wonder attribution at 0.
+            alternatives = None
         if isinstance(alternatives, list):
             per_lens["wonder"] = len(alternatives)
     for f in sorted(deep_dir.glob("stack-*-records.json")):
@@ -681,14 +692,30 @@ def _shipped_counts(
     file is absent the count falls back to the ``merged_finding_count`` regex on
     ``review-output.md``; when neither exists it falls back to the pre-merge
     per-stack total so archived runs never regress to zero. ``by_confidence``
-    is in every branch derived from the artifact that supplies ``total``. A
-    present-but-corrupt ``merged-items.json`` is a data-integrity error: let its
-    ``JSONDecodeError`` propagate rather than silently hiding it behind the
-    fallback.
+    is in every branch derived from the artifact that supplies ``total``.
+
+    A present-but-corrupt ``merged-items.json`` is a data-integrity error that
+    propagates rather than being silently hidden behind the fallback: a
+    *syntax*-invalid file surfaces ``JSONDecodeError`` from ``json.loads``, and a
+    well-formed file with the wrong shape (top-level non-object, or an ``items``
+    field that is not a list) raises ``ValueError`` from the explicit shape
+    check. Both are the same documented error class -- a bogus shipped set is
+    never silently counted.
     """
     merged_items_file = deep_dir / "merged-items.json"
     if merged_items_file.exists():
-        merged_items = json.loads(merged_items_file.read_text()).get("items", [])
+        merged = json.loads(merged_items_file.read_text())
+        # Shape-check before use so a well-formed-but-wrong-shape file (top-level
+        # non-object, or ``items`` not a list) is treated as the documented
+        # data-integrity error instead of silently yielding a bogus count. The
+        # writer always emits the ``items`` key, so a missing ``items`` is a
+        # wrong shape too -- only ``items": []`` is "shipped nothing".
+        if not isinstance(merged, dict) or not isinstance(merged.get("items"), list):
+            raise ValueError(
+                "merged-items.json must be an object whose ``items`` is a list; "
+                f"got top-level type {type(merged).__name__}"
+            )
+        merged_items = merged["items"]
         # Every merged item is shipped: the renderer now emits wonder-lens
         # findings too (issue #741), so the shipped set equals the posted
         # review. A present-but-empty list means "shipped nothing".
@@ -778,6 +805,13 @@ def analyze_findings(daydream_dir: Path) -> dict:
 
 def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
     """Tier 1 grounding: verify cited files were actually read by the agent.
+
+    The denominator is the pre-merge per-stack finding list held in
+    ``findings_data["findings"]`` -- those are the records tagged with
+    ``_stack`` to match against a deep-stack reader -- not the shipped ``total``
+    from ``merged-items.json``. Shipped wonder/structural items are absent from
+    this set because they have no per-stack reader stream to ground to, so they
+    neither inflate the denominator nor get grounding credit here.
 
     ``grounding_rate`` is ``None`` over an empty finding set: the ratio is
     undefined, not perfect. It feeds the RL/SFT reward as a credit axis

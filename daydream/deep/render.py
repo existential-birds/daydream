@@ -44,28 +44,22 @@ def render_report(items: list[dict[str, Any]]) -> str:
     Returns:
         The rendered markdown report as a string.
     """
-    structural = [i for i in items if i.get("lens") == "structural"]
-    per_stack = [i for i in items if i.get("lens") == "per-stack"]
-    cross_stack = [i for i in items if i.get("lens") == "cross-stack"]
-    wonder = [i for i in items if i.get("lens") == "wonder"]
-
     sections: list[str] = ["# Review"]
 
-    if structural:
-        body = "\n".join(_finding_line(i) for i in structural)
-        sections.append(f"## Structural Review\n{body}")
+    # lens -> (section title, line prefix). One arm per lens; a section is
+    # emitted only when it has items.
+    lens_sections = [
+        ("structural", "## Structural Review", ""),
+        ("per-stack", "## Issues", ""),
+        ("cross-stack", "## Cross-Stack Issues", "[cross-stack] "),
+        ("wonder", "## Wonder Findings", ""),
+    ]
 
-    if per_stack:
-        body = "\n".join(_finding_line(i) for i in per_stack)
-        sections.append(f"## Issues\n{body}")
-
-    if cross_stack:
-        body = "\n".join(_finding_line(i, prefix="[cross-stack] ") for i in cross_stack)
-        sections.append(f"## Cross-Stack Issues\n{body}")
-
-    if wonder:
-        body = "\n".join(_finding_line(i) for i in wonder)
-        sections.append(f"## Wonder Findings\n{body}")
+    for lens, title, prefix in lens_sections:
+        rows = [i for i in items if i.get("lens") == lens]
+        if rows:
+            body = "\n".join(_finding_line(i, prefix=prefix) for i in rows)
+            sections.append(f"{title}\n{body}")
 
     return "\n\n".join(sections) + "\n"
 
