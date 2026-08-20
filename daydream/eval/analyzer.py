@@ -642,6 +642,68 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
     return issues
 
 
+_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
+
+
+def _bucketed_lens_counts(deep_dir: Path) -> dict[str, int]:
+    """Attribute findings across the wonder / per-stack / uncovered / structure lenses.
+
+    ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
+    artifact); the existing ``stack-*-records.json`` glob buckets into
+    per-stack / uncovered / structure by stack name.
+    """
+    per_lens = dict(_EMPTY_PER_LENS)
+    alts_path = deep_dir / "alternatives.json"
+    if alts_path.exists():
+        alternatives = json.loads(alts_path.read_text())
+        if isinstance(alternatives, list):
+            per_lens["wonder"] = len(alternatives)
+    for f in sorted(deep_dir.glob("stack-*-records.json")):
+        stack_name = f.stem.replace("stack-", "").replace("-records", "")
+        records = _records_issues_or_empty(json.loads(f.read_text()))
+        if stack_name == "uncovered":
+            per_lens["uncovered"] += len(records)
+        elif stack_name == "structure":
+            per_lens["structure"] += len(records)
+        else:
+            per_lens["per-stack"] += len(records)
+    return per_lens
+
+
+def _shipped_counts(
+    deep_dir: Path, all_findings: list[dict], merged_review: dict
+) -> tuple[int, dict[str, int]]:
+    """Select the shipped review set and report (total, by_confidence) together.
+
+    ``merged-items.json`` is authoritative when present (present-but-empty means
+    "shipped nothing"), and only the items the renderer emits count: the
+    renderer drops wonder-lens items, so they are excluded here too. When that
+    file is absent the count falls back to the ``merged_finding_count`` regex on
+    ``review-output.md``; when neither exists it falls back to the pre-merge
+    per-stack total so archived runs never regress to zero. ``by_confidence``
+    is in every branch derived from the artifact that supplies ``total``. A
+    present-but-corrupt ``merged-items.json`` is a data-integrity error: let its
+    ``JSONDecodeError`` propagate rather than silently hiding it behind the
+    fallback.
+    """
+    merged_items_file = deep_dir / "merged-items.json"
+    if merged_items_file.exists():
+        merged_items = json.loads(merged_items_file.read_text()).get("items", [])
+        shipped = [i for i in merged_items if i.get("lens") != "wonder"]
+        by_confidence = dict(
+            Counter(i.get("confidence", "UNKNOWN") for i in shipped)
+        )
+        return len(shipped), by_confidence
+    if merged_review.get("merged_finding_count"):
+        # The review is the shipped rendering but carries no confidence values,
+        # so no confidence attribution is possible without another source. Return
+        # an empty rather than cross-mix the pre-merge per-stack confidences.
+        return merged_review["merged_finding_count"], {}
+    return len(all_findings), dict(
+        Counter(f.get("confidence", "UNKNOWN") for f in all_findings)
+    )
+
+
 def analyze_findings(daydream_dir: Path) -> dict:
     """Parse per-stack records, dedup stats, and merged review.
 
@@ -662,41 +724,21 @@ def analyze_findings(daydream_dir: Path) -> dict:
             "stacks": [],
             "dedup": {},
             "merged_review": {},
-            "per_lens": {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0},
+            "per_lens": dict(_EMPTY_PER_LENS),
         }
 
     all_findings: list[dict] = []
     stacks: list[dict] = []
 
-    # Issue #741: per-lens finding attribution. wonder reads the bare-list
-    # alternatives.json (the canonical wonder artifact); the existing
-    # stack-*-records.json glob buckets into structure / uncovered / per-stack.
-    per_lens: dict[str, int] = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
-    alts_path = deep_dir / "alternatives.json"
-    if alts_path.exists():
-        alternatives = json.loads(alts_path.read_text())
-        if isinstance(alternatives, list):
-            per_lens["wonder"] = len(alternatives)
+    per_lens = _bucketed_lens_counts(deep_dir)
 
     for f in sorted(deep_dir.glob("stack-*-records.json")):
         stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        loaded = json.loads(f.read_text())
-        # Issue #742: fresh-run per-stack records files carry the dict shape
-        # {"issues": [...], "verdicts": [...]}; findings are the issues list
-        # either way (legacy bare lists pass through).
-        records = _records_issues_or_empty(loaded)
+        records = _records_issues_or_empty(json.loads(f.read_text()))
         stacks.append({"name": stack_name, "finding_count": len(records)})
-        if stack_name == "uncovered":
-            per_lens["uncovered"] += len(records)
-        elif stack_name == "structure":
-            per_lens["structure"] += len(records)
-        else:
-            per_lens["per-stack"] += len(records)
         for r in records:
             r["_stack"] = stack_name
             all_findings.append(r)
-
-    confidence_counts = Counter(f.get("confidence", "UNKNOWN") for f in all_findings)
 
     dedup_stats: dict = {}
     dedup_path = deep_dir / "dedup-candidates.json"
@@ -719,25 +761,7 @@ def analyze_findings(daydream_dir: Path) -> dict:
             re.findall(r"^\d+\.\s+\[", text, re.MULTILINE)
         )
 
-    # Issue #741: count the shipped set. merged-items.json is authoritative
-    # (present-but-empty means "shipped nothing"); the regex count is a
-    # resilience fallback when the file is absent, and the pre-merge per-stack
-    # total protects archived runs from regressing to zero. A present-but-corrupt
-    # file is a data-integrity error: let its JSONDecodeError propagate rather
-    # than silently hiding it behind the fallback.
-    merged_items_file = deep_dir / "merged-items.json"
-    if merged_items_file.exists():
-        merged_items = json.loads(merged_items_file.read_text()).get("items", [])
-        total = len(merged_items)
-        by_confidence = dict(
-            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
-        )
-    elif merged_review.get("merged_finding_count"):
-        total = merged_review["merged_finding_count"]
-        by_confidence = dict(confidence_counts)
-    else:
-        total = len(all_findings)
-        by_confidence = dict(confidence_counts)
+    total, by_confidence = _shipped_counts(deep_dir, all_findings, merged_review)
 
     return {
         "total": total,
