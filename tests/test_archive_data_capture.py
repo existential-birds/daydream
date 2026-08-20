@@ -406,7 +406,11 @@ class _FixEditingBackend:
                             "rationale": "guard missing",
                             "evidence": "main.py:1",
                         }
-                    ]
+                    ],
+                    # Issue #742: the deep per-stack parse schema requires a
+                    # ``verdicts`` property (Codex strict-mode output), so the
+                    # parse payload must carry it (empty when not exercised).
+                    "verdicts": [],
                 },
                 continuation=None,
             )

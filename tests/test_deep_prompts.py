@@ -1368,3 +1368,89 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     )
     assert "shared/iface.py" in prompt
     assert "cross-shard" in prompt or "interface file" in prompt
+
+
+def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
+    """AC1: the per-stack builder emits the shared anti-confabulation gate."""
+    from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION, build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], **p,
+    )
+    assert VERIFICATION_PROTOCOL_INSTRUCTION in out
+
+
+def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:
+    """Key Decision 1: a clean verdict also requires a same-turn read, in all four builders."""
+    from daydream.deep.coverage import build_uncovered_sweep_prompt
+    from daydream.deep.prompts import (
+        build_generic_fallback_prompt,
+        build_per_stack_prompt,
+        build_structural_prompt,
+    )
+    p = _paths(tmp_path)
+    prompts = [
+        build_per_stack_prompt(skill_invocation="/beagle-python:review-python",
+                               stack_name="python", files=["api.py"], **p),
+        build_structural_prompt(skill_invocation="/beagle-core:review-structure",
+                                files=["api.py"], **p),
+        build_generic_fallback_prompt(files=["config.yaml"], **p),
+        build_uncovered_sweep_prompt(
+            file="api.py", hunks="", intent_path=p["intent_path"],
+            cwd=p["cwd"], output_path=p["output_path"],
+        ),
+    ]
+    for prompt in prompts:
+        assert "not reviewed" in prompt and "clean" in prompt
+
+
+def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
+    """Key Decision 5: MAY Read is replaced by the sweep's read-first obligation."""
+    from daydream.deep.prompts import build_generic_fallback_prompt, build_per_stack_prompt
+    p = _paths(tmp_path)
+    per_stack = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
+    )
+    fallback = build_generic_fallback_prompt(
+        files=["config.yaml"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
+    )
+    for prompt in (per_stack, fallback):
+        assert "you MAY Read the source files directly" not in prompt
+        assert "Read the source file FIRST" in prompt
+
+
+def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> None:
+    """Must-Have 5: assigned files are an inclusion obligation, not an exclusion bound."""
+    from daydream.deep.prompts import build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py", "lib/util.py"], **p,
+    )
+    assert "Focus ONLY on these files" not in out
+    assert "Do NOT review files from other stacks" in out  # cross-stack exclusion preserved
+    assert "api.py" in out and "lib/util.py" in out
+    # The instruction demands one verdict line per assigned file (clean / has_findings / not_reviewed).
+    assert "not_reviewed" in out and "has_findings" in out and "clean" in out
+    assert "verdict" in out
+
+
+def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp_path: Path) -> None:
+    """Should-Have: 'do NOT read up front' applies to exploration artifacts, not assigned source files."""
+    from daydream.deep.prompts import build_per_stack_prompt
+    p = _paths(tmp_path)
+    out = build_per_stack_prompt(
+        skill_invocation="/beagle-python:review-python", stack_name="python",
+        files=["api.py"], exploration_dir=tmp_path / ".daydream" / "exploration", **p,
+    )
+    assert "do NOT read them all up front" in out
+    assert "assigned source files" in out and "MUST read in full" in out
+    # The no-up-front-read rule is scoped to exploration artifacts ONLY: the
+    # sentence that forbids up-front reads must not also carry the assigned-
+    # source-files mandate (today's dash-joined wording fails this).
+    upfront = "do NOT read them all up front"
+    sentence = out[out.index(upfront):]
+    sentence = sentence[: sentence.index("\n")]
+    assert "assigned source files" not in sentence

@@ -134,7 +134,12 @@ class PhaseDispatchBackend:
                 for it in issues
             ]
             yield TextEvent(text="Parsed.")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
+            # Issue #742: the deep per-stack parse schema requires a
+            # ``verdicts`` property (Codex strict-mode output), so the parse
+            # payload always carries it (empty when not exercised).
+            yield ResultEvent(
+                structured_output={"issues": issues, "verdicts": []}, continuation=None
+            )
         elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):
             yield TextEvent(text="Fixed.")
             yield ResultEvent(structured_output=None, continuation=None)

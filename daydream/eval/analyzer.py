@@ -608,6 +608,40 @@ def analyze_coverage(trajectories: dict, daydream_dir: Path) -> dict:
     }
 
 
+def _records_issues(records: Any) -> list[Any] | None:
+    """Normalize a loaded per-stack records file to its bare issues list.
+
+    Issue #742: fresh-run per-stack records files carry the dict shape
+    ``{"issues": [...], "verdicts": [...]}``; legacy and primed fixtures use
+    the bare list. Returns the issues list when ``records`` is a bare list or
+    a dict whose ``issues`` is a list; ``None`` when it is neither (callers
+    keep their own fail-open / warn-and-continue handling for non-list
+    shapes). This is the canonical records-shape normalization shared by
+    every per-stack records reader (coverage sweep, merge resume, analyzer,
+    phases, and the test harness); a future shape change lands here only.
+    """
+    if isinstance(records, dict):
+        issues = records.get("issues")
+        return issues if isinstance(issues, list) else None
+    return records if isinstance(records, list) else None
+
+
+def _records_issues_or_empty(records: Any) -> list[Any]:
+    """Normalize a loaded per-stack records file to a bare issues list.
+
+    Collapses the ``None`` -> ``[]`` fallback idiom that every per-stack
+    records reader previously re-implemented verbatim (orchestrator merge
+    resume, analyzer findings, and the test harness). A non-list load yields
+    the same degenerate value as the callers' explicit fallback
+    (``[]`` for a dict, otherwise the raw load), preserving prior
+    warn-and-continue semantics exactly.
+    """
+    issues = _records_issues(records)
+    if issues is None:
+        return [] if isinstance(records, dict) else records  # type: ignore[return-value]
+    return issues
+
+
 def analyze_findings(daydream_dir: Path) -> dict:
     """Parse per-stack records, dedup stats, and merged review."""
     deep_dir = daydream_dir / "deep"
@@ -626,7 +660,11 @@ def analyze_findings(daydream_dir: Path) -> dict:
 
     for f in sorted(deep_dir.glob("stack-*-records.json")):
         stack_name = f.stem.replace("stack-", "").replace("-records", "")
-        records = json.loads(f.read_text())
+        loaded = json.loads(f.read_text())
+        # Issue #742: fresh-run per-stack records files carry the dict shape
+        # {"issues": [...], "verdicts": [...]}; findings are the issues list
+        # either way (legacy bare lists pass through).
+        records = _records_issues_or_empty(loaded)
         stacks.append({"name": stack_name, "finding_count": len(records)})
         for r in records:
             r["_stack"] = stack_name

@@ -28,6 +28,7 @@ import pytest
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
+from daydream.eval.analyzer import _records_issues
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -209,6 +210,16 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     base = _resolve_base(target, None, None)
     diff = git_ops.diff(target, base)
     diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+
+
+def _record_issues(loaded: Any) -> list[dict[str, Any]]:
+    """Normalize a per-stack records file to its bare issues list.
+
+    Delegates to ``analyzer._records_issues`` (the canonical records-shape
+    normalization); non-list shapes (malformed fixtures) degrade to ``[]``.
+    """
+    issues = _records_issues(loaded)
+    return issues if issues is not None else []
 
 
 def _prime_merge_resume(
@@ -2575,9 +2586,9 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     )
     assert python_prompt is not None
     assert react_prompt is not None
-    # The scope instruction's file-list line (right after the "Focus ONLY on these files:" header)
+    # The scope instruction's file-list line (right after the "Assigned files:" marker)
     # must not embed React files in the Python stack prompt.
-    python_scope_files_line = python_prompt.split("Focus ONLY on these files:")[1].split("\n", 2)[1]
+    python_scope_files_line = python_prompt.split("Assigned files:")[1].split("\n", 1)[0]
     assert "App.tsx" not in python_scope_files_line
 
     # Every execute call must have agents=None per D-38.
@@ -4798,7 +4809,7 @@ async def test_arbiter_missing_verdict_retains_high_severity_finding(
     records = [
         rec
         for path in deep_dir.glob("stack-*-records.json")
-        for rec in json.loads(path.read_text())
+        for rec in _record_issues(json.loads(path.read_text()))
     ]
     assert any(r.get("severity") == "high" for r in records), (
         f"high-severity record must survive a missing arbiter verdict:\n{records}"
@@ -8161,3 +8172,64 @@ async def test_deep_forensic_mode_keeps_single_agent_per_stack(
     assert rc == 0
     deep = shard_many_python_target / ".daydream" / "deep"
     assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today
+
+
+async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """AC4: per-stack reviewer declares clean for an assigned file it never
+    Read -> that file is recorded not_reviewed, never a pass; the assigned
+    and Read file stays clean.
+
+    Real path: drives runner.run; mocks only the backend. The stub emits a
+    Read for one assigned file and declares a clean verdict for BOTH assigned
+    files, so the unread file's clean verdict must be downgraded to
+    not_reviewed (read-gated, never a pass) while the read file's clean
+    verdict survives (payload preservation).
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    # Emit reads for one file, and a parse that declares clean verdicts for
+    # two files (one of which is never Read).
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})       # notes.txt is never Read
+    stub.parse_declared_verdicts = [
+        {"path": "api.py", "lines_read": 10, "verdict": "clean"},
+        {"path": "notes.txt", "lines_read": 8, "verdict": "clean"},
+    ]
+    # The stub's default parse emits an api.py finding for every stack; the
+    # gate's ordering is finding-beats-read, so a python-stack api.py finding
+    # would make the api.py verdict has_findings and mask the read-clean
+    # assertion under test. Route the python parse's finding off api.py so the
+    # read+clean verdict for api.py is observable.
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "description": "python-stack finding routed off api.py",
+        },
+    }
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    # The reconciled per-stack record must not record notes.txt as clean.
+    rec = json.loads((deep / "stack-python-records.json").read_text())
+    verdicts = {v["path"]: v for v in rec.get("verdicts", [])}
+    assert verdicts["api.py"]["verdict"] == "clean"  # the read file stays clean
+    assert verdicts["api.py"]["lines_read"] == 10  # declared payload survived reconciliation
+    # notes.txt lives in the generic stack's scope; it was declared clean but
+    # never Read, so the gate must downgrade it to not_reviewed -- and the
+    # declared lines_read payload is preserved on the downgraded entry (the
+    # reviewer said it read 8 lines; the gate records it was not read).
+    rec_generic = json.loads((deep / "stack-generic-records.json").read_text())
+    verdicts_generic = {v["path"]: v for v in rec_generic.get("verdicts", [])}
+    assert verdicts_generic["notes.txt"]["verdict"] == "not_reviewed"  # read-gated, never clean
+    assert verdicts_generic["notes.txt"]["lines_read"] == 8
+    assert verdicts_generic["README.md"]["verdict"] == "clean"  # read, though not declared

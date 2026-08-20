@@ -31,6 +31,7 @@ from daydream.eval.analyzer import (
     _agent_label,
     _files_from_diff,
     _read_paths_for_call,
+    _records_issues,
     load_trajectories,
 )
 from daydream.phases import (
@@ -51,6 +52,20 @@ def _path_component_matches(absolute: str, relative: str) -> bool:
     so it never inherits that false positive (issue #316 owns the analyzer).
     """
     return absolute == relative or absolute.endswith("/" + relative)
+
+
+def _same_repo_relative(a: str, b: str) -> bool:
+    """Exact dir-aware match between two repo-relative paths.
+
+    ``_path_component_matches`` pairs an absolute read path (from a tool call)
+    with a repo-relative diff file, where a basename-boundary fallback is
+    needed. When BOTH operands are repo-relative (a parsed finding ``file`` vs
+    an assigned or receipt file), that one-directional basename fallback
+    misattributes: ``lib/util.py`` ``endswith("/util.py")`` matches the
+    assigned top-level ``util.py``. Repo-relative operands share the same
+    normalization, so exact equality is the only correct comparison.
+    """
+    return a == b
 
 
 def coverage_receipt_path(deep_dir: Path) -> Path:
@@ -112,6 +127,27 @@ def _completed_read_paths(
     return paths
 
 
+def _finding_files_from_records(findings: list[Any]) -> set[str]:
+    """Normalized ``file`` fields across parsed finding records (issue #742).
+
+    Shared between :func:`_parsed_finding_files` (disk-backed) and the per-stack
+    verdict reconciliation in the orchestrator (in-memory parsed records) so the
+    ``./`` strip lives in one place: a leading ``./`` is a legal path spelling
+    since the grammar relaxed (#572/#573), and the reviewed-diff file set and
+    the receipt lists are always bare, so normalizing once keeps a ``./x``
+    finding matching its assigned file rather than failing every path-component
+    match and getting swept.
+    """
+    files: set[str] = set()
+    for finding in findings:
+        if isinstance(finding, dict) and isinstance(finding.get("file"), str):
+            file = finding["file"]
+            if file.startswith("./"):
+                file = file[2:]
+            files.add(file)
+    return files
+
+
 def _parsed_finding_files(records_path: Path) -> set[str] | None:
     """Set of ``file`` fields across a completed shard's parsed records.
 
@@ -123,30 +159,10 @@ def _parsed_finding_files(records_path: Path) -> set[str] | None:
         records = json.loads(records_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if isinstance(records, dict):
-        findings = records.get("issues")
-    elif isinstance(records, list):
-        # Production per-stack records are a bare JSON list (the raw parse
-        # output); the dict-with-"issues" shape is the legacy/unit-test form.
-        findings = records
-    else:
-        findings = None
-    if not isinstance(findings, list):
+    findings = _records_issues(records)
+    if findings is None:
         return None
-    files: set[str] = set()
-    for finding in findings:
-        if isinstance(finding, dict) and isinstance(finding.get("file"), str):
-            file = finding["file"]
-            # A leading ``./`` is a legal path spelling since the grammar
-            # relaxed (#572/#573); the reviewed-diff file set and the receipt
-            # lists are always bare. Normalize once here (mirroring the fix
-            # gate at orchestrator.py) so a ``./x`` finding contributes
-            # inline/frontier evidence instead of failing every path-component
-            # match and getting swept.
-            if file.startswith("./"):
-                file = file[2:]
-            files.add(file)
-    return files
+    return _finding_files_from_records(findings)
 
 
 def _receipt_covered_files(
@@ -156,7 +172,7 @@ def _receipt_covered_files(
 
     A diff file is ``inline_hunk_reviewed``-covered when it is in a shard's
     ``inline_files`` AND that shard's parsed records exist AND at least one
-    parsed finding ``_path_component_matches`` it. ``dependency_frontier_read``
+    parsed finding ``_same_repo_relative`` it. ``dependency_frontier_read``
     is the same check over the shard's ``frontier_files``. Assignment/grounding
     alone never counts; a shard without a records file contributes zero.
 
@@ -183,12 +199,101 @@ def _receipt_covered_files(
         ):
             for f in receipt.get(files_key, []) or []:
                 if f in diff_set and any(
-                    _path_component_matches(ff, f) for ff in finding_files
+                    _same_repo_relative(ff, f) for ff in finding_files
                 ):
                     covered.add(f)
                     covered_by_type[evidence_key].add(f)
     counts = {key: len(files) for key, files in covered_by_type.items()}
     return covered, counts
+
+
+def _verdict(path: str, lines_read: int, verdict: str, n_findings: int) -> dict[str, Any]:
+    """Build one conformant per-file verdict dict (issue #742).
+
+    Collapses the three near-identical ``out.append({...})`` blocks in
+    :func:`resolve_per_stack_verdicts`, which differ only in ``verdict`` and
+    ``n_findings``. Every returned dict conforms to ``PER_STACK_RECORD_SCHEMA``'s
+    required ``path`` / ``lines_read`` / ``verdict`` / ``n_findings`` keys.
+    """
+    return {
+        "path": path,
+        "lines_read": lines_read,
+        "verdict": verdict,
+        "n_findings": n_findings,
+    }
+
+
+def resolve_per_stack_verdicts(
+    *,
+    assigned_files: list[str],
+    declared_verdicts: list[dict[str, Any]],
+    completed_read_paths: set[str],
+    finding_files: set[str],
+) -> list[dict[str, Any]]:
+    """Reconcile declared per-file verdicts against completed-read evidence (issue #742).
+
+    A per-stack reviewer's declared verdict is NOT the recorded truth: a
+    ``clean`` verdict for an assigned file with no completed read of that file
+    in the same review is downgraded to ``not_reviewed`` (routing the file to
+    the uncovered sweep), never recorded as a pass. The gate reads evidence
+    (``_completed_read_paths`` output + parsed finding files), never reviewer
+    self-report.
+
+    The final verdict per assigned file is resolved by evidence, in order:
+    a parsed finding that exactly matches the file (``_same_repo_relative``) wins (``has_findings``
+    beats a read, beats ``clean``); otherwise a completed read that
+    path-component-matches the file yields ``clean``; otherwise the file is
+    ``not_reviewed``. This mirrors the read-detection the sweep already uses
+    (``_path_component_matches``), so a clean shard that read its file is
+    covered regardless of findings and an unread file is never recorded clean.
+
+    Args:
+        assigned_files: The stack's assigned files, in order.
+        declared_verdicts: The reviewer-declared per-file verdict entries
+            (``path`` / ``lines_read`` / ``verdict``), surfaced through the
+            per-stack parse; evidence, not authority.
+        completed_read_paths: Completed-read paths from the stack's own fork
+            trajectory (``_completed_read_paths``).
+        finding_files: ``file`` fields from the stack's parsed issues.
+
+    Returns:
+        Exactly one verdict dict per ``assigned_files`` path, in the given
+        order: ``{"path", "lines_read", "verdict", "n_findings"}``. ``n_findings``
+        is the count of parsed findings matching the path (0 for ``clean`` /
+        ``not_reviewed``), so every recorded verdict conforms to
+        ``PER_STACK_RECORD_SCHEMA``'s required ``n_findings`` key. The declared
+        ``lines_read`` is preserved even when the verdict is downgraded to
+        ``not_reviewed`` (the reviewer said it did read N lines; the gate
+        records it was not read). Pure and total: a declared verdict whose path
+        is not in ``assigned_files`` is ignored (never fabricated), and missing
+        keys default safely.
+    """
+    declared_by_path: dict[str, dict[str, Any]] = {}
+    for entry in declared_verdicts:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or path not in assigned_files:
+            continue  # non-assigned declared paths are ignored, never fabricated
+        declared_by_path[path] = entry
+
+    out: list[dict[str, Any]] = []
+    for path in assigned_files:
+        declared = declared_by_path.get(path, {})
+        lines_read = declared.get("lines_read", 0)
+        matching_findings = [
+            ff for ff in finding_files if _same_repo_relative(ff, path)
+        ]
+        if matching_findings:
+            # A finding beats a read and beats a declared clean.
+            out.append(_verdict(path, lines_read, "has_findings", len(matching_findings)))
+        elif any(_path_component_matches(r, path) for r in completed_read_paths):
+            # A completed read that matches the file yields clean.
+            out.append(_verdict(path, lines_read, "clean", 0))
+        else:
+            # No finding and no completed read: never recorded as a pass.
+            out.append(_verdict(path, lines_read, "not_reviewed", 0))
+    return out
 
 
 def compute_uncovered_files(

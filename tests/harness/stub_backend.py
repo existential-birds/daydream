@@ -37,6 +37,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.eval.analyzer import _records_issues_or_empty
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -203,6 +204,14 @@ class StubBackend:
         # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
         # leave one diff file unread by every reviewer).
         self.per_stack_unread: frozenset[str] = frozenset()
+        # Issue #742: when set, the per-stack parse branch emits these as the
+        # declared per-file verdicts in its structured_output
+        # (``{"issues": issues, "verdicts": self.parse_declared_verdicts}``),
+        # so the orchestrator's ``include_verdicts=True`` parse surfaces them
+        # and the clean-verdict gate reconciles them against completed reads.
+        # Default ``None`` keeps the existing parse output (no ``verdicts``
+        # key), so all current tests are unchanged.
+        self.parse_declared_verdicts: list[dict[str, Any]] | None = None
         # When set, the sweep parse branch emits its finding for this file
         # (instead of the default api.py), so stack-uncovered-records.json names
         # the swept file.
@@ -225,10 +234,11 @@ class StubBackend:
     def _stack_scope_files(prompt: str) -> list[str]:
         """Extract the file list from a per-stack/generic scope instruction.
 
-        ``_stack_scope_instruction`` renders the files comma-joined on a single
-        line (``  api.py, README.md``), so the single line is split on commas.
+        ``_stack_scope_instruction`` renders the files comma-joined on the
+        ``Assigned files:`` marker line (``  Assigned files: api.py, README.md``),
+        so the single line is split on commas.
         """
-        m = re.search(r"Focus ONLY on these files:\n\s*([^\n]+)", prompt)
+        m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]
@@ -509,7 +519,15 @@ class StubBackend:
                             }
                         )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
+            # Issue #742: PER_STACK_RECORD_SCHEMA requires a ``verdicts``
+            # property (Codex strict-mode output schemas list every key in
+            # ``required``), so the parse payload always carries the key --
+            # declared per-file verdicts when the knob is set, else empty.
+            parse_payload: dict[str, Any] = {
+                "issues": issues,
+                "verdicts": self.parse_declared_verdicts or [],
+            }
+            yield ResultEvent(structured_output=parse_payload, continuation=None)
             return
 
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
@@ -586,10 +604,15 @@ class StubBackend:
             if self.merge_echo_records:
                 # Echo the on-disk per-stack records as merged items so the
                 # rendered artifact reflects any arbiter revisions (#168).
+                # Issue #742: fresh-run records files carry the dict shape
+                # {"issues": [...], "verdicts": [...]}; normalize to the
+                # bare issues list (legacy files stay bare lists).
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
-                    for rec in json.loads(Path(path_str).read_text()):
+                    loaded = json.loads(Path(path_str).read_text())
+                    recs = _records_issues_or_empty(loaded)
+                    for rec in recs:
                         echoed.append(
                             {
                                 "id": next_id,

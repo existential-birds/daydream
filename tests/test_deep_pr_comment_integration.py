@@ -300,7 +300,12 @@ class _FakeSDKClient:
                     model=FIXTURE_MODEL_ID,
                 ),
                 FakeResultMessage(
-                    structured_output={"issues": issues},
+                    structured_output={
+                        "issues": issues,
+                        # Issue #742: the deep per-stack parse schema requires a
+                        # ``verdicts`` property (Codex strict-mode output).
+                        "verdicts": [],
+                    },
                     total_cost_usd=0.05,
                     usage={
                         "input_tokens": 1500,

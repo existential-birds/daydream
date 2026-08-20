@@ -4040,3 +4040,15 @@ def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
     assert len(multibyte) < INLINE_DIFF_BUDGET_BYTES
     assert len(multibyte.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES
     assert _inlineable_diff(multibyte) is None
+
+
+async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched() -> None:
+    """Key Decision 2: PER_STACK_RECORD_SCHEMA gains per-file verdicts; FEEDBACK_SCHEMA is not mutated."""
+    from daydream.phases import FEEDBACK_SCHEMA, PER_STACK_RECORD_SCHEMA
+    props = PER_STACK_RECORD_SCHEMA["properties"]
+    assert "verdicts" in props
+    v_items = props["verdicts"]["items"]["properties"]
+    assert {"path", "lines_read", "verdict"}.issubset(v_items)
+    assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed"]
+    assert "verdicts" not in FEEDBACK_SCHEMA["properties"]  # base schema untouched
+    assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved

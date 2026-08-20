@@ -120,6 +120,8 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "not recalled. The source is the only truth; never infer a finding from the "
     "branch name, cwd, or memory. A finding without a same-turn echo of its "
     "target is INVALID.\n"
+    "  A `clean` verdict for a file also requires a same-turn read of that file: "
+    "absent the read, mark the file `not reviewed`, never `clean`.\n"
     "  Gate 1 (anchor): read the full enclosing symbol/module, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
     "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
@@ -231,10 +233,16 @@ def _context_pointers(
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     joined = ", ".join(files)
     return (
-        f"You are reviewing the {stack_name} stack. Focus ONLY on these files:\n"
-        f"  {joined}\n"
+        f"You are reviewing the {stack_name} stack. Your assigned files are an "
+        f"inclusion obligation: read and review EACH one in full -- a file you "
+        f"did not read is not covered by this review.\n"
+        f"  Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
-        f"parallel and will be merged afterwards."
+        f"parallel and will be merged afterwards.\n"
+        f"After the review, output ONE verdict line per assigned file, as: "
+        f"`<path>` | `<lines read>` | `clean | has_findings | not_reviewed`. "
+        f"A file you did not read in this same review must be marked "
+        f"`not_reviewed`, never `clean`."
     )
 
 
@@ -505,8 +513,9 @@ def _diff_instruction(
             "Relevant diff hunks for your stack (inlined; do NOT re-Read "
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
-            "Focus on hunks that touch your stack's files. For whole-file "
-            "context beyond these hunks you MAY Read the source files directly."
+            "Focus on hunks that touch your stack's files. Read the source file "
+            "FIRST; you may only comment on hunks you have read. The inlined "
+            "hunks are not a substitute for reading the file."
         )
     joined = ", ".join(files)
     # Point agents at diff_path directly. A bare `git diff -- <files>` command
@@ -594,6 +603,7 @@ def build_per_stack_prompt(
     parts.append(skill_invocation)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
+    parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)
     if stack_name == "rust":
