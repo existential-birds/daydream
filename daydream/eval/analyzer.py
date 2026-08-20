@@ -168,7 +168,28 @@ def _files_from_diff(diff_path: Path) -> list[str]:
     return sorted(files)
 
 
-_READ_VERBS = ("sed", "nl", "cat", "rg")
+_READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
+_IMPORT_ONLY_ALTERNATIVE_RE = re.compile(r"^\^?(?:from\b|import\b)")
+
+
+def _is_import_only_pattern(pattern: str) -> bool:
+    """Whether a ``Grep`` pattern references only module imports, no content.
+
+    Returns ``False`` for an empty/absent pattern (an import-only rule must
+    never gate a pathless Grep call). Otherwise ``True`` iff every ``|``-
+    separated alternative, stripped, matches the anchor-or-bare ``from`` /
+    ``import`` predicate — so ``^from|^import`` and ``from |import `` qualify,
+    while any alternative naming content (a ``class ``/``def `` body or a
+    symbol) makes it ``False``.
+    """
+    if not pattern:
+        return False
+    return all(
+        _IMPORT_ONLY_ALTERNATIVE_RE.match(alt.strip())
+        for alt in pattern.split("|")
+    )
+
+
 _SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
 _REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
 _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
@@ -197,6 +218,19 @@ _RG_LONG_VALUE_OPTS = frozenset(
     }
 )
 _RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
+_GREP_LONG_VALUE_OPTS = frozenset(
+    {
+        "context",
+        "before-context",
+        "after-context",
+        "max-count",
+        "regexp",
+        "file",
+        "include",
+        "exclude",
+    }
+)
+_GREP_SHORT_VALUE_OPTS = frozenset("efABC")
 
 
 def _tokenize_command(command: str) -> list[str]:
@@ -221,28 +255,50 @@ def _tokenize_command(command: str) -> list[str]:
         return command.split()
 
 
-def _rg_option_info(tok: str) -> tuple[int, bool]:
-    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern.
+def _option_info(
+    tok: str,
+    long_value_opts: frozenset[str],
+    short_value_opts: frozenset[str],
+) -> tuple[int, bool]:
+    """How many tokens a ``rg``/``grep``-family option occupies, and whether it supplies the pattern.
 
     ``-C 3`` → (2, False); ``--glob=*.py`` → (1, False) (value attached);
     ``-n`` → (1, False); ``-e PAT``/``--regexp=PAT`` → (…, True) because an
     explicit pattern leaves the next positional operand as a path, not a
     pattern. Combined short flags (``-ni``) skip only their own token; a
     value-taking short flag with an attached value (``-C3``) also consumes one.
+
+    The value sets are the verb's own — ``_RG_{LONG,SHORT}_VALUE_OPTS`` for
+    ``rg`` and ``_GREP_{LONG,SHORT}_VALUE_OPTS`` for ``grep`` — so each verb
+    consumes exactly the options that take a value in its own table. Which
+    options supply the search pattern is shared across both: ``--regexp`` and
+    ``--file`` long, ``-e`` and ``-f`` short.
     """
     if tok.startswith("--"):
         if "=" in tok:
             name = tok[2:].split("=", 1)[0]
             return 1, name in ("regexp", "file")
         name = tok[2:]
-        if name in _RG_LONG_VALUE_OPTS:
-            return 2, name in ("regexp", "file")
-        return 1, False
+        return (2 if name in long_value_opts else 1), name in ("regexp", "file")
     body = tok[1:]
-    if body and body[0] in _RG_SHORT_VALUE_OPTS:
-        value_attached = len(body) > 1
-        return (1 if value_attached else 2), body[0] in ("e", "f")
+    if body and body[0] in short_value_opts:
+        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
     return 1, False
+
+
+def _rg_option_info(tok: str) -> tuple[int, bool]:
+    """How many tokens an ``rg`` option occupies, and whether it supplies the pattern."""
+    return _option_info(tok, _RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
+
+
+def _grep_option_info(tok: str) -> tuple[int, bool]:
+    """How many tokens a ``grep`` option occupies, and whether it supplies the pattern.
+
+    Uses grep's own value sets (``--context``/``--before-context``/``--max-count``/…
+    long; ``-e``/``-f``/``-A``/``-B``/``-C`` short) so only grep's value-taking
+    options consume a following token.
+    """
+    return _option_info(tok, _GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
 
 
 def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
@@ -250,14 +306,19 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
 
     Redirection operators are consumed together with their targets (separated
     ``> target`` or attached ``2>/dev/null``) so a redirect target is never
-    recorded as a read. Sed address ranges and flags are filtered, and ``rg``
-    skips option values plus the search pattern. ``cat`` operands pass through
-    verbatim.
+    recorded as a read. Sed address ranges and flags are filtered, ``rg``
+    skips option values plus the search pattern, and the inspection verbs
+    behave likewise: ``grep`` skips option values and its first positional
+    (the pattern) and credits no operand when that pattern is import-only
+    (issue #739), ``awk`` skips options and its first positional (the
+    program), ``head``/``tail`` skip options and their ``-n``/``-c`` values,
+    and ``wc`` skips options. ``cat`` operands pass through verbatim.
     """
     paths: set[str] = set()
     i = 0
     n = len(operands)
     seen_pattern = False
+    seen_program = False
     after_ddash = False
     while i < n:
         tok = operands[i]
@@ -265,19 +326,47 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
         if m:
             i += 1 if m.group(3) else 2
             continue
-        if verb == "rg":
+        # ``rg`` and ``grep`` share the same shape: ``--`` flips to literal
+        # operand parsing, a leading ``-`` (unless ``-`` itself) is an option
+        # whose consumed tokens + pattern-supplying status come from the verb's
+        # own option table, and the first remaining positional is the pattern.
+        if verb in ("rg", "grep"):
+            option_info = _rg_option_info if verb == "rg" else _grep_option_info
             if tok == "--":
                 after_ddash = True
                 i += 1
                 continue
             if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = _rg_option_info(tok)
+                skip, supplies_pattern = option_info(tok)
                 i += skip
                 if supplies_pattern:
                     seen_pattern = True
                 continue
             if not seen_pattern:
                 seen_pattern = True
+                if verb == "grep" and _is_import_only_pattern(tok):
+                    # A grep whose pattern is only an import anchor is a
+                    # module-import scan, not a content read (issue #739):
+                    # crediting its operands as read paths would mis-credit
+                    # AC2/AC3 import coverage, exactly like the Grep-tool
+                    # branch's carve-out on the same shared seam.
+                    return paths
+                i += 1
+                continue
+        elif verb in ("head", "tail"):
+            if tok.startswith("-"):
+                body = tok[1:]
+                if body and body[0] in ("n", "c"):
+                    i += 1 if len(body) > 1 else 2
+                else:
+                    i += 1
+                continue
+        elif verb in ("awk", "wc"):
+            if tok.startswith("-"):
+                i += 1
+                continue
+            if verb == "awk" and not seen_program:
+                seen_program = True
                 i += 1
                 continue
         elif verb in ("sed", "nl", "cat"):
@@ -296,13 +385,15 @@ def _paths_from_command(command: str) -> set[str]:
     """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
 
     Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
-    ``cat``, and ``rg``. Commands may chain segments with ``&&``/``;`` and
-    redirect with ``2>/dev/null``. Tokenization is shell-aware: quoted paths
-    survive, redirection targets are consumed with their operator, and ``rg``
-    option values and the search pattern are filtered. Extraction is
-    deliberately permissive — ``_path_matches`` matches by ``endswith``, so a
-    stray operand simply never matches a diff file — but flags, redirect
-    targets, sed address ranges, and the ``rg`` search pattern are filtered.
+    ``cat``, ``rg``, ``grep``, ``head``, ``tail``, ``awk``, and ``wc``.
+    Commands may chain segments with ``&&``/``;`` and redirect with
+    ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
+    redirection targets are consumed with their operator, and option values
+    plus the ``rg``/``grep`` search pattern and the ``awk`` program are
+    filtered. Extraction is deliberately permissive — ``_path_matches``
+    matches by ``endswith``, so a stray operand simply never matches a diff
+    file — but options, redirect targets, sed address ranges, and the
+    ``rg``/``grep`` search patterns are filtered.
     """
     paths: set[str] = set()
     tokens = _tokenize_command(command)
@@ -333,21 +424,29 @@ def _paths_from_command(command: str) -> set[str]:
 def _read_paths_for_call(tc: dict) -> list[str]:
     """All file paths a single tool call reads, across backends.
 
+    ``function_name`` is case-folded so ``Bash`` (Claude) / ``bash`` (pi) /
+    ``shell`` (codex) all route to the shell-command parser, and Claude's
+    ``Read`` / pi's ``read`` collapse into one branch that accepts either the
+    ``file_path`` or ``path`` argument key.
+
     - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
+      (credited only when the pattern is not import-only)
     - pi:     lowercase ``read`` → ``arguments.path``
     - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
     """
-    fn = tc["function_name"]
+    fn = tc["function_name"].lower()
     args = tc["arguments"]
-    if fn == "Read":
-        p = args.get("file_path", "")
-        return [p] if p else []
-    if fn == "Grep":
-        p = args.get("path", "")
-        return [p] if p else []
     if fn == "read":
-        p = args.get("path", "")
+        p = args.get("file_path") or args.get("path", "")
         return [p] if p else []
+    if fn == "grep":
+        p = args.get("path", "")
+        if not p:
+            return []
+        pattern = args.get("pattern", "")
+        if pattern and _is_import_only_pattern(pattern):
+            return []
+        return [p]
     if fn in ("shell", "bash"):
         return sorted(_paths_from_command(args.get("command", "")))
     return []
@@ -620,7 +719,14 @@ def analyze_grounding(trajectories: dict, findings: list[dict]) -> dict:
 
 
 def analyze_exploration_utilization(trajectories: dict) -> dict:
-    """Check whether review agents read the deterministic ``affected_files.md`` artifact."""
+    """Check whether review agents read the exploration-path artifacts.
+
+    Any tool call contributing a read path beneath an ``exploration/`` directory
+    (e.g. the deterministic ``affected_files.md`` index, ``summary.md``, or
+    ``conventions.md``) counts as exploration utilization, whichever backend
+    performed the read — ``Read``/``Grep`` tool calls and ``shell``/``bash``
+    commands alike route through ``_read_paths_for_call``.
+    """
     results: list[dict] = []
 
     for traj in trajectories["forked"]:
@@ -638,7 +744,7 @@ def analyze_exploration_utilization(trajectories: dict) -> dict:
                 continue
             total_reads += 1
             for path in read_paths:
-                if "affected_files.md" in path:
+                if "/exploration/" in path:
                     exploration_refs.append(path)
 
         results.append({

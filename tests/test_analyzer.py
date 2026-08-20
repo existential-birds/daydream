@@ -195,7 +195,7 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     return {"_source_file": source_file, "steps": steps}
 
 
-def test_exploration_utilization_counts_only_deterministic_artifact():
+def test_exploration_utilization_counts_reads_beneath_exploration_dir():
     from daydream.eval.analyzer import analyze_exploration_utilization
 
     trajectories = {
@@ -207,15 +207,42 @@ def test_exploration_utilization_counts_only_deterministic_artifact():
             _read_traj(
                 "deep-c.json", "/repo/.daydream/exploration/affected_files.md", pi_style=True
             ),
+            _read_traj("deep-go.json", "/repo/src/main.go"),
         ],
     }
     result = analyze_exploration_utilization(trajectories)
     by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
-    assert by_agent["deep-python"]["utilized"] is False
+    assert by_agent["deep-python"]["utilized"] is True
     assert by_agent["deep-ts"]["utilized"] is True
-    assert by_agent["deep-rust"]["utilized"] is False
+    assert by_agent["deep-rust"]["utilized"] is True
     assert by_agent["deep-c"]["utilized"] is True
-    assert result["reviewers_utilizing_exploration"] == 2
+    assert by_agent["deep-go"]["utilized"] is False  # outside exploration/ -> not counted
+    assert result["reviewers_utilizing_exploration"] == 4
+
+
+def test_exploration_utilization_counts_bash_mediated_reads():
+    from daydream.eval.analyzer import analyze_exploration_utilization
+
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-python.json",
+                "steps": [
+                    {"step_id": "s0", "tool_calls": [
+                        {"function_name": "Bash", "arguments": {"command": "cat .daydream/exploration/summary.md"}},
+                    ]},
+                ],
+            }
+        ],
+    }
+
+    result = analyze_exploration_utilization(trajectories)
+
+    entry = result["by_agent"][0]
+    assert entry["exploration_reads"] == 1
+    assert entry["utilized"] is True
+    assert result["reviewers_utilizing_exploration"] == 1
 
 
 def test_grounding_rate_is_undefined_with_zero_findings():
@@ -278,6 +305,15 @@ def test_files_read_extracts_pi_read_and_bash_paths():
     assert "core/osprey-cli" in paths
 
 
+def test_files_read_counts_claude_bash_shell_reads():
+    calls = [{"function_name": "Bash", "arguments": {"command": "sed -n '1,60p' daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == {"daydream/config.py"}
+    assert "1,60p" not in paths
+
+
 def _shell_reads(command: str) -> set[str]:
     """Extract read paths from a single codex ``shell`` call."""
     return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
@@ -313,6 +349,39 @@ def test_files_read_skips_rg_option_values():
     assert "needle" not in paths
 
 
+def test_files_read_extracts_claude_inspection_verbs():
+    calls = [{"function_name": "Bash", "arguments": {"command": (
+        "grep -n 'def validate' daydream/config.py && "
+        "head -n 20 tests/test_config.py; "
+        "tail -n 5 README.md; "
+        "wc -l daydream/timeutil.py; "
+        "awk '{print $1}' docs/guide.md"
+    )}}]
+
+    paths = _files_read(calls)
+
+    assert "daydream/config.py" in paths
+    assert "tests/test_config.py" in paths
+    assert "README.md" in paths
+    assert "daydream/timeutil.py" in paths
+    assert "docs/guide.md" in paths
+    assert "def validate" not in paths    # grep pattern is not a path
+    assert "20" not in paths              # head -n value is not a path
+    assert "5" not in paths               # tail -n value is not a path
+    assert "{print $1}" not in paths      # awk program is not a path
+    assert "1" not in paths               # wc -l flag not a path
+
+
+def test_files_read_bash_import_only_grep_does_not_credit():
+    # The import-only carve-out spans the shared seam: a Bash/shell ``grep``
+    # whose pattern references only module imports credits no read path,
+    # matching the Grep-tool branch (issue #739).
+    assert _shell_reads("grep -n '^from|^import' daydream/config.py") == set()
+    assert _shell_reads("grep 'import ' a.py b.py") == set()
+    # A content grep still credits its file operands.
+    assert _shell_reads("grep -n 'def validate' daydream/config.py") == {"daydream/config.py"}
+
+
 def test_files_read_claude_read_and_grep_unchanged():
     calls = [
         {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
@@ -322,6 +391,40 @@ def test_files_read_claude_read_and_grep_unchanged():
     paths = _files_read(calls)
 
     assert paths == {"/repo/api.py", "src/"}
+
+
+def test_files_read_grep_import_only_pattern_does_not_credit():
+    calls = [{"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == set()
+
+
+def test_files_read_grep_content_pattern_credits_path():
+    calls = [{"function_name": "Grep", "arguments": {"pattern": "def validate", "path": "daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == {"daydream/config.py"}
+
+
+def test_files_read_grep_pattern_flag_keeps_file_operand():
+    # -e/-f/--regexp/--file are pattern-supplying options: the following token
+    # is the pattern, so the trailing file operand must still be credited as a
+    # read path (issue #739). Before the fix these dropped the operand entirely.
+    assert _shell_reads("grep -e 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --regexp 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --regexp='def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep -f /tmp/patterns.txt daydream/config.py") == {"daydream/config.py"}
+
+
+def test_files_read_grep_context_options_do_not_eat_operand():
+    # --before-context/--after-context/--max-count take a value; their numeric
+    # value must not be misread as the pattern (issue #739).
+    assert _shell_reads("grep --before-context 3 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --after-context 5 'def validate' daydream/config.py") == {"daydream/config.py"}
+    assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
 
 
 # --- unbalanced-quote tokenization (issue #327) ---
