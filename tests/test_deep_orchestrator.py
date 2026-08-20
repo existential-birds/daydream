@@ -8175,3 +8175,64 @@ async def test_deep_forensic_mode_keeps_single_agent_per_stack(
     assert rc == 0
     deep = shard_many_python_target / ".daydream" / "deep"
     assert not list(deep.glob("stack-python#*-review.md"))  # exactly one agent per stack, as today
+
+
+async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """AC4: per-stack reviewer declares clean for an assigned file it never
+    Read -> that file is recorded not_reviewed, never a pass; the assigned
+    and Read file stays clean.
+
+    Real path: drives runner.run; mocks only the backend. The stub emits a
+    Read for one assigned file and declares a clean verdict for BOTH assigned
+    files, so the unread file's clean verdict must be downgraded to
+    not_reviewed (read-gated, never a pass) while the read file's clean
+    verdict survives (payload preservation).
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    # Emit reads for one file, and a parse that declares clean verdicts for
+    # two files (one of which is never Read).
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})       # notes.txt is never Read
+    stub.parse_declared_verdicts = [
+        {"path": "api.py", "lines_read": 10, "verdict": "clean"},
+        {"path": "notes.txt", "lines_read": 8, "verdict": "clean"},
+    ]
+    # The stub's default parse emits an api.py finding for every stack; the
+    # gate's ordering is finding-beats-read, so a python-stack api.py finding
+    # would make the api.py verdict has_findings and mask the read-clean
+    # assertion under test. Route the python parse's finding off api.py so the
+    # read+clean verdict for api.py is observable.
+    stub.parse_by_stack = {
+        "python": {
+            "severity": "medium",
+            "confidence": "MEDIUM",
+            "file": "App.tsx",
+            "description": "python-stack finding routed off api.py",
+        },
+    }
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    # The reconciled per-stack record must not record notes.txt as clean.
+    rec = json.loads((deep / "stack-python-records.json").read_text())
+    verdicts = {v["path"]: v for v in rec.get("verdicts", [])}
+    assert verdicts["api.py"]["verdict"] == "clean"  # the read file stays clean
+    assert verdicts["api.py"]["lines_read"] == 10  # declared payload survived reconciliation
+    # notes.txt lives in the generic stack's scope; it was declared clean but
+    # never Read, so the gate must downgrade it to not_reviewed -- and the
+    # declared lines_read payload is preserved on the downgraded entry (the
+    # reviewer said it read 8 lines; the gate records it was not read).
+    rec_generic = json.loads((deep / "stack-generic-records.json").read_text())
+    verdicts_generic = {v["path"]: v for v in rec_generic.get("verdicts", [])}
+    assert verdicts_generic["notes.txt"]["verdict"] == "not_reviewed"  # read-gated, never clean
+    assert verdicts_generic["notes.txt"]["lines_read"] == 8
+    assert verdicts_generic["README.md"]["verdict"] == "clean"  # read, though not declared
