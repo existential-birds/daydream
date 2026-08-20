@@ -747,7 +747,9 @@ def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
     file only under the old findings-only gate.
     """
     from daydream.deep.coverage import (
-        compute_uncovered_files, coverage_receipt_path, write_coverage_receipts,
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
     )
 
     daydream_dir = tmp_path / ".daydream"
@@ -778,7 +780,9 @@ def test_not_reviewed_verdict_never_credits(tmp_path: Path) -> None:
     resolving the file to not_reviewed must leave it swept, never credited.
     """
     from daydream.deep.coverage import (
-        compute_uncovered_files, coverage_receipt_path, write_coverage_receipts,
+        compute_uncovered_files,
+        coverage_receipt_path,
+        write_coverage_receipts,
     )
 
     daydream_dir = tmp_path / ".daydream"
