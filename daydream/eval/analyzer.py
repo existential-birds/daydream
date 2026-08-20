@@ -676,8 +676,8 @@ def _shipped_counts(
     """Select the shipped review set and report (total, by_confidence) together.
 
     ``merged-items.json`` is authoritative when present (present-but-empty means
-    "shipped nothing"), and only the items the renderer emits count: the
-    renderer drops wonder-lens items, so they are excluded here too. When that
+    "shipped nothing"); every item it carries is shipped, including wonder-lens
+    findings (the renderer emits them, so they count -- issue #741). When that
     file is absent the count falls back to the ``merged_finding_count`` regex on
     ``review-output.md``; when neither exists it falls back to the pre-merge
     per-stack total so archived runs never regress to zero. ``by_confidence``
@@ -689,11 +689,13 @@ def _shipped_counts(
     merged_items_file = deep_dir / "merged-items.json"
     if merged_items_file.exists():
         merged_items = json.loads(merged_items_file.read_text()).get("items", [])
-        shipped = [i for i in merged_items if i.get("lens") != "wonder"]
+        # Every merged item is shipped: the renderer now emits wonder-lens
+        # findings too (issue #741), so the shipped set equals the posted
+        # review. A present-but-empty list means "shipped nothing".
         by_confidence = dict(
-            Counter(i.get("confidence", "UNKNOWN") for i in shipped)
+            Counter(i.get("confidence", "UNKNOWN") for i in merged_items)
         )
-        return len(shipped), by_confidence
+        return len(merged_items), by_confidence
     if merged_review.get("merged_finding_count"):
         # The review is the shipped rendering but carries no confidence values,
         # so no confidence attribution is possible without another source. Return

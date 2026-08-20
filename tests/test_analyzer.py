@@ -1525,6 +1525,33 @@ def test_shipped_count_wins_over_per_stack_records(tmp_path: Path):
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 
+def test_shipped_count_includes_wonder_lens_items(tmp_path: Path):
+    # Issue #741: wonder-lens merged items are shipped findings and MUST count
+    # toward total_findings (they were dropped by the pre-fix renderer, inflating
+    # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
+    dd = tmp_path / ".daydream"
+    deep = dd / "deep"
+    deep.mkdir(parents=True)
+    # 4 per-stack + 4 wonder = 8 shipped items.
+    items = []
+    for i in range(4):
+        items.append({
+            "id": i, "description": f"high-{i}", "file": "a.py", "line": i + 1,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
+            "lens": "per-stack", "severity": "high",
+        })
+    for i in range(4):
+        items.append({
+            "id": 4 + i, "description": f"wonder-{i}", "file": "w.py", "line": i + 1,
+            "confidence": "MEDIUM", "rationale": "r", "evidence": "w.py:1",
+            "lens": "wonder", "severity": "medium",
+        })
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    out = analyze_findings(dd)
+    assert out["total"] == 8                     # wonder items are counted (issue #741)
+    assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
+
+
 def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path):
     dd = tmp_path / ".daydream"
     deep = dd / "deep"
