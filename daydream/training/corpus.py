@@ -429,6 +429,10 @@ class CorpusFilters:
         min_grounding: Optional minimum ``grounding_rate`` (inclusive).
         status: Exact-match filter on the ``status`` column. Defaults to
             ``"complete"`` so partial / failed runs never enter training.
+        pipeline_status: Optional exact-match filter on the ``pipeline_status``
+            column — the authoritative pipeline-outcome gate
+            (succeeded/failed/partial/cancelled). ``None`` (default) applies no
+            pipeline filter, preserving pre-#762 behavior exactly.
         include_all_labels: When ``True``, suppresses the label admission
             filter so every run (labeled or not) passes.
         allow_copyleft: ``owner/repo`` slugs the caller has explicitly
@@ -448,6 +452,7 @@ class CorpusFilters:
     labels: tuple[str, ...] = ("accepted",)
     min_grounding: float | None = None
     status: str = "complete"
+    pipeline_status: str | None = None
     include_all_labels: bool = False
     allow_copyleft: frozenset[str] = frozenset()
     min_reward: float | None = None
@@ -502,12 +507,13 @@ def _build_query(
     Clauses, in fixed order:
 
     1. ``status = ?`` — always.
-    2. C5 exclusion: ``repo_slug IS NULL OR repo_slug NOT IN (...)`` — always
+    2. ``pipeline_status = ?`` — when ``filters.pipeline_status`` is set.
+    3. C5 exclusion: ``repo_slug IS NULL OR repo_slug NOT IN (...)`` — always
        (when the exclusion list is non-empty; otherwise omitted to keep the
        SQL clean). Placeholder count is derived from the loaded set size.
-    3. ``skill = ?`` — when ``filters.skill`` is set.
-    4. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
-    5. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
+    4. ``skill = ?`` — when ``filters.skill`` is set.
+    5. ``repo_slug IN (...)`` — when ``filters.repos`` is non-empty.
+    6. ``grounding_rate >= ?`` — when ``filters.min_grounding`` is set.
 
     Returns:
         ``(where_clause, params)`` where ``where_clause`` has no leading
@@ -520,6 +526,11 @@ def _build_query(
     # 1. status — always
     clauses.append("status = ?")
     params.append(filters.status)
+
+    # 1b. pipeline_status — optional (authoritative pipeline-outcome gate)
+    if filters.pipeline_status is not None:
+        clauses.append("pipeline_status = ?")
+        params.append(filters.pipeline_status)
 
     # 2. C5 exclusion — always (when list is non-empty)
     if exclusion is None:
@@ -678,6 +689,10 @@ class BuildCorpusConfig:
         out_path: Destination JSONL file. Written atomically via tempfile +
             ``Path.replace``; ``schema.json`` is emitted next to it.
         filters: Resolved post-exclusion filter knobs.
+        pipeline_status: Optional pipeline-outcome gate (succeeded/failed/
+            partial/cancelled) overlaid onto ``filters`` when set — the
+            authoritative ``pipeline_status`` column filter distinguishing
+            pipeline success from mere archive finalization.
         archive_dir: Daydream archive root. ``None`` defers to
             :func:`daydream.archive.get_archive_dir`.
         stratify_by: ``"stack"`` to apply :func:`_stratify`; ``None`` to skip.
@@ -704,6 +719,7 @@ class BuildCorpusConfig:
 
     out_path: Path
     filters: CorpusFilters
+    pipeline_status: str | None = None
     archive_dir: Path | None = None
     stratify_by: str | None = None
     max_stack_share: float = 0.6
@@ -887,8 +903,16 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
     # 3. Unfiltered count for the summary.
     total_in_index = count_runs(archive_dir)
 
-    # 4. Apply label-independent SQL filters.
-    rows = _query_index(archive_dir, config.filters)
+    # 4. Apply label-independent SQL filters. The config-level ``pipeline_status``
+    #    knob (when set) is overlaid onto the resolved filters so the authoritative
+    #    pipeline-outcome gate joins the status gate.
+    if config.pipeline_status is not None:
+        from dataclasses import replace
+
+        filters = replace(config.filters, pipeline_status=config.pipeline_status)
+    else:
+        filters = config.filters
+    rows = _query_index(archive_dir, filters)
 
     # 5. Resolve the pinned annotation per row, apply the admission gate, build
     #    records. Label/reward come from the silver annotation, never the

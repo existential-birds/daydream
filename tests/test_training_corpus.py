@@ -23,6 +23,7 @@ from daydream.training.corpus import (
     BuildCorpusConfig,
     CorpusFilters,
     _annotation_reward,
+    _build_query,
     _build_record,
     _is_admitted,
     run_build_corpus,
@@ -45,6 +46,7 @@ def _seed_run_with_annotation(
     has_posterior: bool | None = None,
     observed_at: str,
     valid_at: str,
+    pipeline_status: str = "unknown",
 ) -> Path:
     """Index a run and append one bitemporal annotation carrying label + reward.
 
@@ -101,6 +103,7 @@ def _seed_run_with_annotation(
             grounding_rate=1.0,
             changed_files=["app.py"],
             archive_path=str(run_dir),
+            pipeline_status=pipeline_status,
         ),
     )
     append_label_observation(
@@ -518,3 +521,59 @@ def test_build_record_emits_posterior_discriminator_only_for_labeled(tmp_path: P
     # The discriminator does not leak into the intrinsic composite scalar.
     assert rec_labeled["composite_reward"] == 0.6
     assert rec_intrinsic["composite_reward"] == 0.6
+
+
+def test_corpus_can_filter_on_pipeline_status(tmp_path, archive_dir):
+    """The status gate (default 'complete') must be able to exclude failed pipelines.
+
+    ``BuildCorpusConfig`` gains a ``pipeline_status`` knob that flows into the
+    WHERE clause as ``pipeline_status = ?``, mirroring the existing
+    ``status = ?`` construction — the ''authoritative'' pipeline-outcome gate
+    the spec's consumer migration calls for.
+    """
+    cfg = BuildCorpusConfig(out_path=tmp_path / "out.jsonl",
+                            filters=CorpusFilters(status="complete"),
+                            pipeline_status="succeeded", archive_dir=archive_dir)
+    assert cfg.pipeline_status == "succeeded"
+    where, params = _build_query(filters=cfg.filters)
+    # The status gate itself is unchanged...
+    assert "status = ?" in where and "complete" in params
+    # ...and with the config-level knob applied the query gains the pipeline gate.
+    from dataclasses import replace
+    effective = replace(cfg.filters, pipeline_status=cfg.pipeline_status)
+    where2, params2 = _build_query(filters=effective)
+    assert "pipeline_status = ?" in where2 and "succeeded" in params2
+
+
+def test_build_corpus_pipeline_status_gate_excludes_failed_pipelines(tmp_path, archive_dir):
+    """Real-path: a corpus built with pipeline_status='succeeded' drops failed runs.
+
+    Seeds one succeeded and one failed pipeline run in the index; the emitted
+    JSONL must contain only the succeeded run.
+    """
+    _seed_run_with_annotation(archive_dir, "ok-run", label="accepted",
+                              observed_at="2026-03-01T00:00:00+00:00",
+                              valid_at="2026-03-01T00:00:00+00:00",
+                              pipeline_status="succeeded")
+    _seed_run_with_annotation(archive_dir, "bad-run", label="accepted",
+                              observed_at="2026-03-01T00:00:00+00:00",
+                              valid_at="2026-03-01T00:00:00+00:00",
+                              pipeline_status="failed")
+    out = tmp_path / "corpus.jsonl"
+    run_build_corpus(BuildCorpusConfig(
+        out_path=out, archive_dir=archive_dir,
+        filters=CorpusFilters(status="complete"), pipeline_status="succeeded",
+        as_of="2026-04-01T00:00:00+00:00",
+    ))
+    lines = [line for line in out.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["session_id"] == "ok-run"
+    # Without the knob, both runs are admitted (backward compat preserved).
+    out2 = tmp_path / "corpus-all.jsonl"
+    run_build_corpus(BuildCorpusConfig(
+        out_path=out2, archive_dir=archive_dir,
+        filters=CorpusFilters(status="complete"),
+        as_of="2026-04-01T00:00:00+00:00",
+    ))
+    lines2 = [line for line in out2.read_text().splitlines() if line.strip()]
+    assert len(lines2) == 2
