@@ -8132,6 +8132,37 @@ async def test_deep_sweep_skips_inline_grounded_file_when_enabled(
     assert pre_sweep["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
 
 
+async def test_deep_default_run_coverage_by_evidence_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    """Issue #740 AC2/AC3: coverage_by_evidence is non-empty on a DEFAULT (non-sharded) run.
+
+    Before this fix receipts were only written when sharding was enabled
+    (default-off), so coverage_by_evidence was {} and clean reviews earned no
+    credit. After the fix the receipt mechanism runs on every deep run.
+    """
+    from daydream.runner import run
+
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.sweep_file = "notes.txt"
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    deep = target / ".daydream" / "deep"
+    # The receipt file exists on a default (non-sharded) run.
+    assert (deep / "coverage-receipts.json").is_file()
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    cbe = stats["pre_sweep"]["coverage_by_evidence"]
+    assert cbe                      # present and non-empty on a default run
+    assert cbe["inline_hunk_reviewed"] >= 1   # api.py read -> clean/has_findings -> credited
+
+
 async def test_deep_large_diff_shards_respect_limiter_union_and_forensic(
     shard_many_python_target: Path, monkeypatch, install_backend,
 ) -> None:
