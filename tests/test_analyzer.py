@@ -356,6 +356,22 @@ def test_files_read_claude_read_and_grep_unchanged():
     assert paths == {"/repo/api.py", "src/"}
 
 
+def test_files_read_grep_import_only_pattern_does_not_credit():
+    calls = [{"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == set()
+
+
+def test_files_read_grep_content_pattern_credits_path():
+    calls = [{"function_name": "Grep", "arguments": {"pattern": "def validate", "path": "daydream/config.py"}}]
+
+    paths = _files_read(calls)
+
+    assert paths == {"daydream/config.py"}
+
+
 # --- unbalanced-quote tokenization (issue #327) ---
 
 

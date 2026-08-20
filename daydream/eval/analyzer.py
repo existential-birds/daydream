@@ -169,6 +169,27 @@ def _files_from_diff(diff_path: Path) -> list[str]:
 
 
 _READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
+_IMPORT_ONLY_ALTERNATIVE_RE = re.compile(r"^\^?(?:from\b|import\b)")
+
+
+def _is_import_only_pattern(pattern: str) -> bool:
+    """Whether a ``Grep`` pattern references only module imports, no content.
+
+    Returns ``False`` for an empty/absent pattern (an import-only rule must
+    never gate a pathless Grep call). Otherwise ``True`` iff every ``|``-
+    separated alternative, stripped, matches the anchor-or-bare ``from`` /
+    ``import`` predicate — so ``^from|^import`` and ``from |import `` qualify,
+    while any alternative naming content (a ``class ``/``def `` body or a
+    symbol) makes it ``False``.
+    """
+    if not pattern:
+        return False
+    return all(
+        _IMPORT_ONLY_ALTERNATIVE_RE.match(alt.strip())
+        for alt in pattern.split("|")
+    )
+
+
 _SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
 _REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
 _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
@@ -397,6 +418,7 @@ def _read_paths_for_call(tc: dict) -> list[str]:
     ``file_path`` or ``path`` argument key.
 
     - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
+      (credited only when the pattern is not import-only)
     - pi:     lowercase ``read`` → ``arguments.path``
     - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
     """
@@ -407,7 +429,12 @@ def _read_paths_for_call(tc: dict) -> list[str]:
         return [p] if p else []
     if fn == "grep":
         p = args.get("path", "")
-        return [p] if p else []
+        if not p:
+            return []
+        pattern = args.get("pattern", "")
+        if pattern and _is_import_only_pattern(pattern):
+            return []
+        return [p]
     if fn in ("shell", "bash"):
         return sorted(_paths_from_command(args.get("command", "")))
     return []
