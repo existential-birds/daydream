@@ -810,6 +810,60 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
     assert len(fix_calls) == 2  # one per file group, no re-dispatch
 
 
+async def test_fix_verify_loop_redispatch_resolves_second_round(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
+    second round, verifies resolved -> the loop ran twice and the outcome is
+    resolved."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_verify_resolve_after_round = 2  # round 1 -> unresolved, round 2 -> resolved
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"
+    outcomes = json.loads(outcomes_p.read_text())
+    assert outcomes["1"]["verdict"] == "resolved"
+    fix_calls = [c for c in stub.calls
+                 if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
+    assert len(fix_calls) == 2  # loop ran twice: round 1 + re-dispatch round 2
+
+
+async def test_fix_verify_wrong_target_retargets_within_scope(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: a wrong_target retarget re-dispatches to the corrected file, but
+    only inside the allowed edit set (#336 net never widens)."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # round 1 verifier says: defect really lives in App.tsx
+    stub.fix_verify_verdicts = {1: {"issue_id": 1, "verdict": "wrong_target",
+                                    "path": "App.tsx", "reason": "moved"}}
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
+    assert outcomes["1"]["verdict"] == "resolved"
+    assert outcomes["1"].get("path") == "App.tsx"
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

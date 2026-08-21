@@ -1889,6 +1889,7 @@ async def phase_fix_verify(
     changed_hunks: str,
     *,
     console_lock: anyio.Lock | None = None,
+    round_number: int = 1,
 ) -> list[dict[str, Any]]:
     """Post-round fix verifier: one read-only verdict per dispatched finding.
 
@@ -1940,6 +1941,7 @@ async def phase_fix_verify(
         items=items,
         changed_hunks=changed_hunks,
         cwd=work.repo,
+        round_number=round_number,
     )
 
     result, _, _ = await run_agent(
@@ -2187,16 +2189,30 @@ def _build_verifier_suffix(item: dict[str, Any]) -> str:
     """Build the recommendation-verifier block for one finding.
 
     Mirrors the single-finding verdict/evidence/assumptions text so batched and
-    single-finding prompts carry identical per-finding verifier guidance.
+    single-finding prompts carry identical per-finding verifier guidance. Also
+    carries the post-fix fix-verifier's prior-round verdict + reason forward on
+    a re-dispatched finding (issue #744), so the fix agent knows why the
+    previous round was not accepted.
 
     Args:
         item: Feedback item, optionally carrying ``verifier_verdict``,
-            ``evidence``, and ``unverified_assumptions``.
+            ``evidence``, and ``unverified_assumptions`` (pre-fix
+            recommendation verifier) or ``fix_verify_verdict`` /
+            ``fix_verify_reason`` (post-fix round verifier, re-dispatch only).
 
     Returns:
         The verifier block (with leading newline) when a verdict is present;
         otherwise an empty string.
     """
+    fix_verify_verdict = item.get("fix_verify_verdict")
+    fix_verify_reason = item.get("fix_verify_reason")
+    if fix_verify_verdict:
+        out = f"\nPrevious round fix-verify verdict: {fix_verify_verdict}."
+        if fix_verify_reason:
+            out += f" Verifier reason: {fix_verify_reason}."
+        out += " Re-address this finding accordingly."
+        return out
+
     verifier_verdict = item.get("verifier_verdict")
     if not verifier_verdict:
         return ""

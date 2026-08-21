@@ -86,11 +86,14 @@ class StubBackend:
         self.verifier_verdict: str = "consistent"
         self.verifier_unverified_assumptions: list[str] = []
         # Post-fix fix-verifier knobs (#744). fix_verify_verdicts overrides the
-        # verdict for a finding id (default: resolved); when None every dispatched
-        # finding resolves. fix_verify_requires_read_only pins the phase's
-        # read_only=True contract (default True).
+        # verdict for a finding id (default: resolved) on round 1 only; when
+        # None every dispatched finding resolves. fix_verify_requires_read_only
+        # pins the phase's read_only=True contract (default True).
+        # fix_verify_resolve_after_round returns unresolved for rounds below
+        # the threshold, resolved thereafter (drives the re-dispatch loop).
         self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
         self.fix_verify_requires_read_only: bool = True
+        self.fix_verify_resolve_after_round: int = 1
         # Counts test-suite invocations so a test can fail the FIRST run (driving
         # the heal loop into choice "2") and pass the SECOND.
         self.test_suite_calls: int = 0
@@ -814,11 +817,18 @@ class StubBackend:
         if "post-fix fix-verifier agent" in pl:
             if self.fix_verify_requires_read_only and not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
+            round_match = re.search(r"Round (\d+) of up to 3 check passes", prompt)
+            round_num = int(round_match.group(1)) if round_match else 1
             ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
-            verdicts = [
-                (self.fix_verify_verdicts or {}).get(i, {"issue_id": i, "verdict": "resolved", "reason": "stub"})
-                for i in ids
-            ]
+            verdicts = []
+            for i in ids:
+                override = (self.fix_verify_verdicts or {}).get(i)
+                if override is not None and round_num == 1:
+                    verdicts.append(dict(override))
+                elif round_num < self.fix_verify_resolve_after_round:
+                    verdicts.append({"issue_id": i, "verdict": "unresolved", "reason": "stub: round still fumbling"})
+                else:
+                    verdicts.append({"issue_id": i, "verdict": "resolved", "reason": "stub"})
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={"verdicts": verdicts},

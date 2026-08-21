@@ -1124,6 +1124,7 @@ def build_fix_verify_prompt(
     items: list[dict[str, Any]],
     changed_hunks: str,
     cwd: Path,
+    round_number: int = 1,
 ) -> str:
     """Assemble the read-only post-fix fix-verify prompt (issue #744).
 
@@ -1159,6 +1160,7 @@ def build_fix_verify_prompt(
         "worktree; your job is to audit what the round produced and return "
         "EXACTLY one verdict per finding below. This is a READ-ONLY pass: you "
         "inspect the diff and the code, you do not edit anything.\n\n"
+        f"Round {round_number} of up to 3 check passes.\n\n"
         f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
         "You audit the round's changed hunks ONLY, never the whole tree:\n"
         "\n"

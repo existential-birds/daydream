@@ -3107,8 +3107,51 @@ def _scrub_smart_quotes(
         )
 
 
+def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Derive THIS round's fix dispatch set from prior fix-verify outcomes (#744).
+
+    Round 1 (iteration unset or 1) dispatches the full canonical list. Round
+    N+1 re-dispatches ONLY the actionable subset — findings whose prior-round
+    verdict was ``unresolved`` / ``wrong_target`` / ``regressed`` — each
+    carrying the verifier's reason forward into the fix prompt. A
+    ``wrong_target(path)`` retarget applies only when *path* stays inside the
+    allowed edit set (``changed_files ∪ {finding files}`` — the same set the
+    residual net and allowed-files clause use); otherwise the item keeps its
+    original file and the retarget is treated as not actionable (the #336 scope
+    net is never widened). Never mutates the canonical items (copies only).
+    """
+    iteration = ctx.data.get("iteration")
+    outcomes = ctx.data.get("fix_outcomes") or {}
+    if iteration in (None, 1) or not outcomes:
+        return [dict(i) for i in canonical]
+    allowed = set(_resolve_changed_files(ctx) or [])
+    allowed |= {i.get("file") for i in canonical if i.get("file")}
+    dispatched: list[dict[str, Any]] = []
+    for item in canonical:
+        iid = item.get("id")
+        outcome = outcomes.get(iid) if isinstance(iid, int) else None
+        if not outcome or outcome.get("verdict") not in ("unresolved", "wrong_target", "regressed"):
+            continue
+        copy = dict(item)
+        if outcome.get("verdict") in ("wrong_target", "regressed"):
+            path = outcome.get("path")
+            if isinstance(path, str) and path in allowed:
+                copy["file"] = path
+                copy["fix_verify_path"] = path
+        copy["fix_verify_verdict"] = outcome.get("verdict")
+        copy["fix_verify_reason"] = outcome.get("reason") or ""
+        dispatched.append(copy)
+    return dispatched
+
+
 async def _step_fix(ctx: FlowContext) -> Stop | None:
-    """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection."""
+    """Parallel fix pass: pre-fix snapshot capture, phase_fix_parallel, failure protection.
+
+    Round-aware dispatch (issue #744): the canonical ``ctx.data["items"]`` is
+    the full list for the run; each round dispatches only its own set — round 1
+    the full list, later rounds only the actionable subset from the prior
+    round's fix-verify outcomes, each carrying the verifier's reason forward.
+    """
     from daydream import git_ops
 
     config = ctx.config
@@ -3116,7 +3159,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     target_dir = work.repo
     daydream_dir = target_dir / ".daydream"
     dd = ctx.data["dd"]
-    items: list[dict[str, Any]] = ctx.data["items"]
+    items: list[dict[str, Any]] = _round_dispatch_items(ctx, ctx.data["items"])
     intent_p: Path = ctx.data["intent_path"]
 
     # Only forward confirmed intent when we ran the intent phase in
@@ -3496,6 +3539,7 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
         except git_ops.GitError:
             hunks = ""
     outcomes: dict[int, dict[str, Any]] = ctx.data.setdefault("fix_outcomes", {})
+    iteration = ctx.data.get("iteration")
     async with phase_scope(DaydreamPhase.VERIFY):
         groups = group_items_by_footprint(round_items)
         for _, group_items in groups:
@@ -3504,10 +3548,29 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
                 ctx.work,
                 group_items,
                 hunks,
+                round_number=iteration if isinstance(iteration, int) else 1,
             )
             for verdict in verdicts:
                 issue_id = verdict.get("issue_id")
-                if isinstance(issue_id, int):
+                if not isinstance(issue_id, int):
+                    continue
+                # A wrong_target retarget is re-dispatched to the corrected
+                # path; when that re-dispatch finally resolves, keep the path
+                # on the terminal outcome so the record says where the defect
+                # was actually fixed (#336 net never widened).
+                prior = next(
+                    (i for i in round_items if i.get("id") == issue_id), None
+                )
+                if (
+                    verdict.get("verdict") == "resolved"
+                    and prior is not None
+                    and prior.get("fix_verify_verdict") == "wrong_target"
+                    and isinstance(prior.get("fix_verify_path"), str)
+                ):
+                    stored = dict(verdict)
+                    stored["path"] = prior["fix_verify_path"]
+                    outcomes[issue_id] = stored
+                else:
                     outcomes[issue_id] = verdict
     actionable = _actionable_verdicts(outcomes)
     iteration = ctx.data.get("iteration")
