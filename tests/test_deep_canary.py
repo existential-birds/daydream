@@ -127,3 +127,24 @@ async def test_deep_canary_no_redundant_sweep_when_all_covered(
     assert pre["uncovered_files"] == []          # no file lacks evidence
     assert stats["attempted_files"] == []        # sweep dispatched nothing
     assert pre["coverage_ratio"] == 1.0          # full coverage pre-sweep
+
+
+def test_deep_canary_golden_reproduction(sibling_frontier_target: Path) -> None:
+    """Should-Have: the committed golden receipt/stat JSON is a human-readable
+    archive of the deterministic canary outcome. This test pins the archive's
+    SHAPE (shard set + frontier non-emptiness + evidence counts), not a byte
+    diff that would break on benign shard-name drift."""
+    golden_receipt = json.loads(
+        (Path(__file__).parent / "fixtures" / "deep" / "coverage-receipts.json").read_text()
+    )
+    golden_stats = json.loads(
+        (Path(__file__).parent / "fixtures" / "deep" / "coverage-stats.json").read_text()
+    )
+    py_shards = {k: v for k, v in golden_receipt.items() if k.startswith("python#")}
+    assert len(py_shards) >= 2
+    assert any(r["frontier_files"] for r in py_shards.values())
+    assert all(len(r["assigned_files"]) <= 5 for r in py_shards.values())
+    pre = golden_stats["pre_sweep"]
+    assert pre["coverage_by_evidence"]["dependency_frontier_read"] >= 1
+    assert "mod5.py" in pre["uncovered_files"]
+    assert "mod5.py" in golden_stats["attempted_files"]
