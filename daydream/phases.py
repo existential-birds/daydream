@@ -911,7 +911,15 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "evidence": {"type": "string"},
                     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "related_files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
+                    # Issue #744: a finding may span sibling files. Optional in
+                    # the merge model's semantics (null when single-file) but
+                    # strict-mode required (Codex rejects optional properties,
+                    # see test_output_schema_strict.py), so the model always
+                    # emits the key and uses null to mean "no related files".
+                    "related_files": {
+                        "type": ["array", "null"],
+                        "items": _REPOSITORY_FILE_PATH_SCHEMA,
+                    },
                 },
                 "required": [
                     "id",
@@ -923,6 +931,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "evidence",
                     "lens",
                     "severity",
+                    "related_files",
                 ],
                 "additionalProperties": False,
             },
@@ -1196,10 +1205,15 @@ FIX_VERIFY_VERDICTS_SCHEMA = {
                     "verdict": {"type": "string",
                                 "enum": ["resolved", "unresolved",
                                          "wrong_target", "regressed"]},
-                    "path": {"type": "string"},
+                    # Strict-mode required (Codex rejects optional properties,
+                    # see test_output_schema_strict.py). ``path`` is null for
+                    # resolved/unresolved and a repo-relative file for
+                    # wrong_target/regressed; the phase enforces the conditional
+                    # requirement because JSON Schema cannot express it.
+                    "path": {"type": ["string", "null"]},
                     "reason": {"type": "string"},
                 },
-                "required": ["issue_id", "verdict", "reason"],
+                "required": ["issue_id", "verdict", "path", "reason"],
                 "additionalProperties": False,
             },
         },

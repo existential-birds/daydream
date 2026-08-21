@@ -294,8 +294,9 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 18 | `fix-gate` | `fix-gate` |
 | 19 | `verify` | `verify` |
 | 20 | `fix` | `fix` |
-| 21 | `test` | `test` |
-| 22 | `commit` | `fix` |
+| 21 | `fix-verify` | `verify` |
+| 22 | `test` | `test` |
+| 23 | `commit` | `fix` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble: `feedback` runs only the prefix (steps 1-5, ending at
@@ -311,6 +312,13 @@ report), and `config.findings_out is None` (a `--findings-out` run keeps the
 rendered report the user asked it to produce). It is skipped entirely on any
 non-zero (failure) exit so evidence survives, and removes the report per
 `--cleanup` / `--no-cleanup` / interactive-or-unattended prompt defaults (#335).
+
+`fix` and `fix-verify` (issue #744) are wrapped together in a `LoopGroup`
+(`fix-verify-loop`) capped at 3 rounds: each round dispatches findings, a
+read-only `fix-verify` step audits the round's changed hunks and returns one
+verdict per finding, and actionable verdicts re-dispatch in the next round
+until none remain (or the budget is spent). `fix-verify` uses the `verify`
+phase config key and its own registered `fix-verify` prompt.
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of

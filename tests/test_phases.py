@@ -3929,8 +3929,12 @@ def test_fix_verify_schema_accepts_all_four_verdicts():
 
     for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
         entry = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        # ``path`` is strict-mode required (see test_output_schema_strict.py)
+        # but nullable; wrong_target/regressed carry the corrected file.
         if verdict in ("wrong_target", "regressed"):
             entry["path"] = "corrected.py"
+        else:
+            entry["path"] = None
         jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
 
 
