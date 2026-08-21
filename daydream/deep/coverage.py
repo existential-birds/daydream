@@ -33,7 +33,12 @@ from daydream.eval.analyzer import (
     _records_issues,
     load_trajectories,
 )
-from daydream.hunk_index import files_in_index, load_hunk_index
+from daydream.hunk_index import (
+    change_line_count,
+    files_in_index,
+    hunk_index_path,
+    load_hunk_index,
+)
 from daydream.phases import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
@@ -431,7 +436,12 @@ def compute_uncovered_files(
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
     # The changed-file set comes from the persisted hunk index (written at
     # gather right after diff materialization) rather than re-reading
-    # ``diff.patch``. Fail-open: a missing index degrades to no changed files.
+    # ``diff.patch``. Fail-open: ``load_hunk_index`` never raises and degrades
+    # a missing index to no changed files -- but that is NOT evidence of full
+    # coverage. An absent index leaves the changed-file set unenumerated, so
+    # reporting it as ``diff_files == []`` (ratio 1.0, uncovered []) would let
+    # a genuine coverage gap masquerade as a clean pass. Surfaced below instead.
+    hunk_index_missing = not hunk_index_path(daydream_dir).is_file()
     diff_files = files_in_index(load_hunk_index(daydream_dir))
 
     review_reads: set[str] = set()
@@ -458,6 +468,13 @@ def compute_uncovered_files(
         "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
         "uncovered_files": uncovered,
     }
+    if hunk_index_missing:
+        # Issue #336: a missing index is NOT a clean empty diff. Fail-open is
+        # preserved (``load_hunk_index`` still never raises); only the
+        # reporting changes so the unenumerated changed-file set is surfaced as
+        # a gap rather than silently rendered as full coverage.
+        stats["coverage_ratio"] = None
+        stats["hunk_index_missing"] = True
     if receipts:
         # Issue #731: per-evidence-type counts surface whenever receipts are
         # provided (written and loaded on every deep run, decoupled from
@@ -481,21 +498,6 @@ def diff_block_for_file(diff: str, file: str) -> str | None:
         if _diff_block_path(block) == file:
             return block if block.endswith("\n") else block + "\n"
     return None
-
-
-def hunk_change_line_count(hunks: str) -> int:
-    """Count added/removed lines (``+``/``-``) in a diff block, headers excluded.
-
-    ``+++``/``---`` file headers carry leading plus/minus signs but are not
-    content changes, so they are excluded from the count.
-    """
-    count = 0
-    for line in hunks.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+") or line.startswith("-"):
-            count += 1
-    return count
 
 
 def filter_sweepable_files(
@@ -528,7 +530,7 @@ def filter_sweepable_files(
     skipped_small: list[str] = []
     for file in uncovered_files:
         info = index.get(file)
-        if info is None or (info["added_total"] + info["removed_total"]) < min_hunk_lines:
+        if info is None or change_line_count(index, file) < min_hunk_lines:
             skipped_small.append(file)
             continue
         swept.append(file)

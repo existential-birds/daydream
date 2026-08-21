@@ -15,9 +15,8 @@ from daydream.deep.coverage import (
     compute_uncovered_files,
     diff_block_for_file,
     filter_sweepable_files,
-    hunk_change_line_count,
 )
-from daydream.hunk_index import parse_hunks, write_hunk_index
+from daydream.hunk_index import change_line_count, parse_hunks, write_hunk_index
 
 _DIFF = (
     "diff --git a/api.py b/api.py\n"
@@ -226,6 +225,30 @@ def test_compute_uncovered_files_empty_when_everything_read(tmp_path: Path) -> N
     assert stats["coverage_ratio"] == 1.0
 
 
+def test_compute_uncovered_files_missing_index_surfaces_gap(tmp_path: Path) -> None:
+    """Issue #336: a missing hunk index is surfaced, never a full-coverage pass.
+
+    When ``hunk-index.json`` is absent, ``load_hunk_index`` fails open to
+    ``{}`` and ``files_in_index`` returns ``[]`` -- but that empty diff is NOT
+    evidence full coverage. The stats must surface the unenumerated
+    changed-file set (ratio ``None``, ``hunk_index_missing`` true) so the sweep
+    does not silently render a coverage gap as a clean pass.
+    """
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    run_dir = daydream_dir / "runs" / "sess-missing"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_fork(run_dir, "deep-python.json", ["/repo/api.py"])  # reviewers read, but index absent
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-missing")
+
+    assert uncovered == []                     # cannot enumerate without the index
+    assert stats["files_in_diff"] == 0         # index absent -> no changed files
+    assert stats["coverage_ratio"] is None     # NOT a false 1.0 full-coverage pass
+    assert stats["hunk_index_missing"] is True  # gap is surfaced
+
+
 def test_compute_uncovered_files_boundary_ignores_suffix_collisions(tmp_path: Path) -> None:
     """A read of ``notapi.py`` must NOT cover the changed file ``api.py``.
 
@@ -303,8 +326,9 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
 
 def test_hunk_change_line_count_excludes_headers() -> None:
     """+++/--- file headers are not counted as added/removed lines."""
-    assert hunk_change_line_count(diff_block_for_file(_DIFF, "api.py") or "") == 2
-    assert hunk_change_line_count(diff_block_for_file(_DIFF, "notes.txt") or "") == 6
+    parsed = parse_hunks(_DIFF)
+    assert change_line_count(parsed, "api.py") == 2
+    assert change_line_count(parsed, "notes.txt") == 6
 
 
 def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path) -> None:

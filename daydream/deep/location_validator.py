@@ -106,12 +106,17 @@ def validate_records(
 
     For each record with a ``file`` + integer ``line``:
       - ``distance <= tolerance`` and not in-hunk: snap ``record["line"]`` to
-        the nearest hunk boundary (the record's ``nearest_hunk`` start or end).
-      - ``distance > tolerance``: set ``record["location_note"]`` to a
-        demotion annotation naming the file, cited line, nearest hunk and
-        distance.
+        the nearest hunk boundary (the record's ``nearest_hunk`` start or end)
+        and align the ``file:line`` citation in ``record["evidence"]`` to the
+        snapped line, so the evidence and snapped line never diverge.
+      - ``distance > tolerance``: demote the record in place -- lower
+        ``record["severity"]`` to ``"low"``, ``record["confidence"]`` to
+        ``"LOW"`` and set ``record["location_note"]`` to a demotion annotation
+        naming the file, cited line, nearest hunk and distance -- so the
+        unverified citation no longer reaches the report at full severity.
 
-    The annotation/snap are the only mutations; an in-hunk record is untouched.
+    The mutation surface is the snap (line + evidence) and the demote
+    (severity/confidence/location_note); an in-hunk record is untouched.
     Records without a file/line (or with a non-int line) pass through unchanged.
     Never raises. Returns the (possibly mutated) record list.
     """
@@ -127,12 +132,37 @@ def validate_records(
             continue
         if check.distance <= tolerance:
             start, end = check.nearest_hunk
-            record["line"] = start if line < start else end
+            snapped = start if line < start else end
+            record["line"] = snapped
+            _align_evidence(record, file, line, snapped)
         else:
             start, end = check.nearest_hunk
+            record["severity"] = "low"
+            record["confidence"] = "LOW"
             record["location_note"] = (
                 f"cited line {line} in {file} is {check.distance} lines from the "
                 f"nearest hunk {start}..{end} (tolerance {tolerance}); demoted to "
                 f"informational (unverified citation)."
             )
     return records
+
+
+def _align_evidence(
+    record: dict[str, Any], file: str, old_line: int, new_line: int
+) -> None:
+    """Realign the ``file:old_line`` citation in ``record["evidence"]`` to ``new_line``.
+
+    Snapping ``record["line"]`` to a hunk boundary otherwise leaves a stale original
+    ``file:old_line`` citation in ``record["evidence"]``, so the merged item would
+    carry a snapped boundary line next to a mismatched evidence citation. Only the
+    citation for this record's own ``file`` and the pre-snap ``old_line`` is
+    rewritten; unrelated evidence text is preserved verbatim. Missing or
+    non-string evidence is left untouched.
+    """
+    evidence = record.get("evidence")
+    if not isinstance(evidence, str):
+        return
+    old_citation = f"{file}:{old_line}"
+    new_citation = f"{file}:{new_line}"
+    if old_citation in evidence:
+        record["evidence"] = evidence.replace(old_citation, new_citation)

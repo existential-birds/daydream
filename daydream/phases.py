@@ -4398,12 +4398,14 @@ def _append_structural_and_write_merged(
     # Pre-report finding-location validation (issue #745): the persisted hunk
     # index (``load_hunk_index(items_path.parent.parent)`` -- ``.daydream``) is
     # the run-time authority for changed line ranges. A citation beyond
-    # tolerance is demoted-with-annotation (a ``location_note`` carried through
-    # normalize_items); an in-tolerance citation is snapped to the nearest hunk
-    # boundary. This is THE choke point both merge paths share, so no
-    # unverified citation reaches merged-items / review-output. Fail-open: a
-    # missing index validates nothing (pre-change behavior); the validator
-    # never raises and never rejects.
+    # tolerance is demoted in place -- severity/confidence lowered and a
+    # ``location_note`` carried through normalize_items -- so it no longer
+    # reaches the report at full severity; an in-tolerance citation is snapped
+    # to the nearest hunk boundary with its evidence aligned. This is THE choke
+    # point both merge paths share, so no unverified citation reaches
+    # merged-items / review-output. Fail-open: a missing index validates
+    # nothing (pre-change behavior); the validator never raises and never
+    # rejects.
     from daydream.deep.location_validator import validate_records
     from daydream.hunk_index import load_hunk_index
 

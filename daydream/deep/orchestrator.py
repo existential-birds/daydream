@@ -1381,11 +1381,18 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     # fork cache would otherwise read an incomplete set). Fail-open: a missing
     # fork degrades to ``[]`` (unread files stay swept, never recorded clean).
     stack_files: dict[str, list[str]] = {s.stack_name: list(s.files) for s in stacks}
+    # Require a records file per detected stack (except ones in
+    # `failed_stacks`). A bare glob would silently drop a stack whose records
+    # file is absent, yielding a merged report missing a bucket. The same
+    # per-stack records_path also drives verdict reconciliation below.
+    expected_paths: list[Path] = []
+    missing_stacks: list[str] = []
     for stack in stacks:
         if stack.stack_name in failed_stacks:
             continue
         records_path = per_stack_records_path(dd, stack.stack_name)
         if not records_path.is_file():
+            missing_stacks.append(stack.stack_name)
             continue
         loaded = json.loads(records_path.read_text())
         issues = _records_issues_or_empty(loaded)
@@ -1400,20 +1407,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
             parsed_records=issues,
         )
         records_path.write_text(json.dumps({"issues": issues, "verdicts": verdicts}, indent=2))
-
-    # Require a records file per detected stack (except ones in
-    # `failed_stacks`). A bare glob would silently drop a stack whose records
-    # file is absent, yielding a merged report missing a bucket.
-    expected_paths: list[Path] = []
-    missing_stacks: list[str] = []
-    for stack in stacks:
-        if stack.stack_name in failed_stacks:
-            continue
-        records_path = per_stack_records_path(dd, stack.stack_name)
-        if records_path.is_file():
-            expected_paths.append(records_path)
-        else:
-            missing_stacks.append(stack.stack_name)
+        expected_paths.append(records_path)
     if missing_stacks:
         print_error(
             console,
@@ -1587,6 +1581,10 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
             "files_in_diff": coverage_stats["files_in_diff"],
             "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
             "coverage_ratio": coverage_stats["coverage_ratio"],
+            # Issue #336: propagate the missing-index gap into the persisted
+            # stats so the report renders it instead of a false full-coverage
+            # pass (``load_hunk_index`` still fails open -- reporting only).
+            "hunk_index_missing": coverage_stats.get("hunk_index_missing", False),
             "uncovered_files": uncovered_files,
             # Issue #731: per-evidence-type coverage counts (source_read /
             # inline_hunk_reviewed / dependency_frontier_read); receipts are
@@ -2159,6 +2157,23 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
             return
         pre_sweep = stats.get("pre_sweep")
         if not isinstance(pre_sweep, dict):
+            return
+        # Issue #336: a missing hunk index leaves the changed-file set
+        # unenumerated. Surface that gap instead of rendering an empty diff as
+        # a full-coverage pass (the coverage ratio is ``None`` when the index
+        # was absent, so no ratio line is emitted). ``load_hunk_index`` still
+        # fails open -- this is reporting only.
+        if pre_sweep.get("hunk_index_missing"):
+            lines = [
+                "## Coverage",
+                "- Coverage not available: hunk index is missing.",
+            ]
+            section = "\n".join(lines) + "\n"
+            for target in (report, deep_copy):
+                if target.is_file():
+                    text = target.read_text(encoding="utf-8")
+                    if "## Coverage" not in text:
+                        target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
             return
         files_in_diff = pre_sweep.get("files_in_diff")
         if not isinstance(files_in_diff, int):

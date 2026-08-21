@@ -50,14 +50,27 @@ def test_validate_finding_missing_file_is_all_false():
 
 def test_validate_records_snaps_and_demotes():
     records = [
-        {"id": 1, "file": "orchestrator.py", "line": 2281},   # within tol -> snap to 2284
-        {"id": 2, "file": "orchestrator.py", "line": 2272},   # beyond tol -> location_note
+        {
+            "id": 1,
+            "file": "orchestrator.py",
+            "line": 2281,
+            "evidence": "orchestrator.py:2281",  # within tol -> snap line + evidence
+        },
+        {  # beyond tol -> demote severity/confidence in place + location_note
+            "id": 2,
+            "file": "orchestrator.py",
+            "line": 2272,
+            "severity": "high",
+            "confidence": "HIGH",
+        },
         {"id": 3, "file": "orchestrator.py", "line": 2285},   # in-hunk -> untouched
         {"id": 4},                                            # no file -> untouched
         {"id": 5, "file": "orchestrator.py", "line": "x"},    # non-int line -> untouched
     ]
     out = validate_records(INDEX, records, tolerance=3)
     assert out[0]["line"] == 2284
+    assert out[0]["evidence"] == "orchestrator.py:2284"
+    assert out[1]["severity"] == "low" and out[1]["confidence"] == "LOW"
     assert "location_note" in out[1]
     assert out[2]["line"] == 2285 and "location_note" not in out[2]
     assert out[3] == {"id": 4}

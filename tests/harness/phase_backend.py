@@ -75,6 +75,7 @@ class PhaseDispatchBackend:
         self._tests_pass = tests_pass
         self._emit_cost = emit_cost
         self._parse_call = 0
+        self._review_call = 0
         self.call_log: list[str] = []
         self.commit_calls: list[str] = []
         self.review_prompts: list[str] = []
@@ -114,12 +115,18 @@ class PhaseDispatchBackend:
                 # Issue #745 (AC4): the per-stack reviewer emits
                 # PER_STACK_RECORD_SCHEMA structured output directly (the
                 # deep-shallow spine no longer has a separate parse step).
-                issues = self._parse_results[0] if self._parse_results else []
+                issues = (
+                    self._parse_results[self._review_call]
+                    if self._review_call < len(self._parse_results)
+                    else []
+                )
+                self._review_call += 1
                 issues = [
                     {
                         "confidence": "HIGH",
                         "rationale": "harness fixture",
                         "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
+                        "severity": "medium",
                         **it,
                     }
                     for it in issues

@@ -432,21 +432,6 @@ _GENERIC_STEMS = frozenset(
 # Reverse-edge grep is a best-effort seed, not an exhaustive index. A
 # legitimately widely-imported module can match hundreds of files; cap the
 # seed so no single module can blow the downstream prompt's context window.
-def _is_generic_or_invalid_stem(stem: str) -> bool:
-    """Return True if *stem* should be skipped by the reverse-import lookup.
-
-    Skips empty stems, stems in :data:`_GENERIC_STEMS`, and stems containing
-    characters (NUL, CR, LF) that cannot be expressed in a grep patterns file.
-    A caller may still rescue a generic stem when its file defines a symbol
-    (see :func:`_eligible_for_reverse_grep`).
-    """
-    if not stem or stem in _GENERIC_STEMS:
-        return True
-    if "\x00" in stem or "\r" in stem or "\n" in stem:
-        return True
-    return False
-
-
 def _eligible_for_reverse_grep(path: str, defining_paths: set[str]) -> bool:
     """Whether a modified path should be part of the reverse-import grep.
 
@@ -567,24 +552,6 @@ def build_symbol_index(repo_root: Path, paths: list[str]) -> dict[str, list[dict
     return index
 
 
-def symbol_def(index: dict[str, list[dict[str, object]]], name: str) -> list[dict[str, object]]:
-    """Return the ``[{"path", "line", "end_line", "kind"}]`` entries for ``name``.
-
-    Empty list when the name is not defined in the indexed files (the sole
-    consumer, the dependency tracer / reverse-ref logic, treats it as "no
-    defined symbol").
-    """
-    return index.get(name, [])
-
-
-def symbol_body(
-    index: dict[str, list[dict[str, object]]], name: str
-) -> list[dict[str, object]]:
-    """Alias of :func:`symbol_def` -- this issue scopes ``symbol_body`` to the
-    definition-level (file+line range) entries; no body-text extraction."""
-    return symbol_def(index, name)
-
-
 def detect_affected_files(
     diff_text: str,
     repo_root: Path,
@@ -626,11 +593,11 @@ def detect_affected_files(
         if entry.status != "D" and Path(entry.path).suffix in LANGUAGES
     ]
     # A generic-stem file (e.g. ``config``) is rescued from the reverse-import
-    # skip when it actually defines a symbol (issue #745); compute the defining
-    # set once from the same parse used for the forward edges.
-    symbol_index = build_symbol_index(repo_root, reverse_paths)
-    defining_paths = {d["path"] for entries in symbol_index.values() for d in entries}
-    importers_by_path = _build_importer_lookup(repo_root, reverse_paths, defining_paths)
+    # skip when it actually defines a symbol (issue #745). The defining set is
+    # derived from the definition queries run in this single forward pass, so
+    # the changed files are read and parsed only once -- no separate
+    # ``build_symbol_index`` pass re-reading and re-parsing the same file set.
+    defining_paths: set[str] = set()
     go_package_index: dict[str, tuple[Path, ...]] | None = None
 
     for entry in entries:
@@ -652,8 +619,17 @@ def detect_affected_files(
             continue
 
         parser = get_parser(language_id)
+        if parser is None:
+            continue
+
+        # A generic-stem path that actually defines a symbol is rescued from the
+        # generic-stem reverse-import skip below (issue #745).
+        def_query = _def_query_for_language(language_id)
+        if def_query is not None and extract_definitions(parser, source, def_query):
+            defining_paths.add(entry.path)
+
         query_string = _query_for_language(language_id)
-        if parser is None or query_string is None:
+        if query_string is None:
             continue
 
         imports = extract_imports(parser, source, query_string)
@@ -668,7 +644,11 @@ def detect_affected_files(
                     continue
                 _add(str(rel), "imports")
 
-        for importer in importers_by_path.get(entry.path, ()):
+    # Reverse edges need the complete defining set, so the batched grep runs
+    # after the forward pass (whose reads already covered every file once).
+    importers_by_path = _build_importer_lookup(repo_root, reverse_paths, defining_paths)
+    for path, importers in importers_by_path.items():
+        for importer in importers:
             _add(importer, "imported_by")
 
     return results

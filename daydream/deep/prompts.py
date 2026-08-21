@@ -529,7 +529,14 @@ def _diff_instruction(
     # only surfaces uncommitted workspace changes; on a clean PR branch it
     # would return empty and hide every committed change. diff_path already
     # contains the full base..HEAD diff.
-    return f"{_full_diff_pointer(diff_path)}\nFocus on hunks that touch your stack's files: {joined}."
+    return (
+        f"{_full_diff_pointer(diff_path)}\n"
+        "Changed line ranges are authoritative in `.daydream/hunk-index.json` "
+        "— do not re-derive them with `git diff` (the index is written once "
+        "at gather and is the single persisted source of changed-file/line "
+        "ranges).\n\n"
+        f"Focus on hunks that touch your stack's files: {joined}."
+    )
 
 
 def _frontier_read_instruction(frontier_files: list[str]) -> str:

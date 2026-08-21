@@ -199,8 +199,8 @@ def added_line_numbers(parsed: dict[str, dict[str, Any]]) -> dict[str, set[int]]
 def change_line_count(parsed: dict[str, dict[str, Any]], file: str) -> int:
     """Return the count of changed content lines for one file in a parse result.
 
-    Mirrors the ``coverage.hunk_change_line_count`` contract -- the count of
-    changed content lines, file headers excluded.
+    The single shared hunk-line counter (the count of changed content lines,
+    file headers excluded) consumed by ``coverage.filter_sweepable_files``.
     """
     info = parsed.get(file)
     if info is None:
@@ -208,13 +208,9 @@ def change_line_count(parsed: dict[str, dict[str, Any]], file: str) -> int:
     return info["added_total"] + info["removed_total"]
 
 
-def _daydream_dir(daydream_dir: Path) -> Path:
-    return Path(daydream_dir)
-
-
 def hunk_index_path(daydream_dir: Path) -> Path:
     """Return the persisted hunk-index path under a run's ``.daydream`` dir."""
-    return _daydream_dir(daydream_dir) / HUNK_INDEX_FILENAME
+    return daydream_dir / HUNK_INDEX_FILENAME
 
 
 def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
@@ -227,8 +223,8 @@ def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
     """
     parsed = parse_hunks(diff_text)
     persist: dict[str, Any] = {}
-    for path, info in parsed.items():
-        persist[path] = {
+    for file_path, info in parsed.items():
+        persist[file_path] = {
             "hunks": [
                 {
                     "old_start": h["old_start"],
@@ -243,9 +239,9 @@ def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
             "added_total": info["added_total"],
             "removed_total": info["removed_total"],
         }
-    path = hunk_index_path(daydream_dir)
-    path.write_text(json.dumps(persist, sort_keys=True, indent=2))
-    return path
+    index_path = hunk_index_path(daydream_dir)
+    index_path.write_text(json.dumps(persist, sort_keys=True, indent=2))
+    return index_path
 
 
 def load_hunk_index(daydream_dir: Path) -> dict[str, Any]:

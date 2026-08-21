@@ -371,9 +371,9 @@ class _FakeSDKClient:
         # The structural meta-stack returns empty issues; a per-stack reviewer
         # returns the finding that drives the PR-comment content.
         if "structural reviewer" in pl:
-            issues: list[Any] = []
+            review_issues: list[Any] = []
         else:
-            issues = [
+            review_issues = [
                 {
                     "id": 1,
                     "description": "Use a more descriptive function name",
@@ -391,7 +391,7 @@ class _FakeSDKClient:
                 model=FIXTURE_MODEL_ID,
             ),
             FakeResultMessage(
-                structured_output={"issues": issues, "verdicts": []},
+                structured_output={"issues": review_issues, "verdicts": []},
                 total_cost_usd=0.20,
                 usage={
                     "input_tokens": 4000,
