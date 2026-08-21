@@ -12,7 +12,12 @@ from daydream.phases import phase_per_stack_reviews
 from tests.harness.backend import ScriptedBackend, Turn
 
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
-_REVIEW_TURN: Turn = [TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None)]
+# Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
+# output directly (issues + verdicts) -- there is no separate parse stage.
+_REVIEW_TURN: Turn = [
+    TextEvent(text="done"),
+    ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+]
 
 
 def _review_backend(**attrs: Any) -> ScriptedBackend:

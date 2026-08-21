@@ -744,7 +744,19 @@ async def test_run_populates_exploration_context(
 
     async def fake_per_stack_reviews(backend, work, stacks, **kwargs):
         captured["exploration_dir"] = kwargs.get("exploration_dir")
-        return {}, {}
+        # Issue #745: reviewers write PER_STACK_RECORD_SCHEMA records files that
+        # the loader requires; the fake must do the same or the run stops.
+        import json as _json
+
+        from daydream.deep.artifacts import deep_dir, per_stack_records_path
+
+        dd = deep_dir(work.repo)
+        dd.mkdir(parents=True, exist_ok=True)
+        for s in stacks:
+            per_stack_records_path(dd, s.stack_name).write_text(
+                _json.dumps({"issues": [], "verdicts": []})
+            )
+        return {s.stack_name: None for s in stacks}, {}
 
     monkeypatch.setattr(
         "daydream.deep.orchestrator.phase_per_stack_reviews", fake_per_stack_reviews

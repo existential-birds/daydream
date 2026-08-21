@@ -1402,7 +1402,12 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
 
     silence_console("daydream.phases")
     backend = ScriptedBackend(
-        events=(TextEvent(text="done"), ResultEvent(structured_output=None, continuation=None))
+        events=(
+            TextEvent(text="done"),
+            ResultEvent(
+                structured_output={"issues": [], "verdicts": []}, continuation=None
+            ),
+        )
     )
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()

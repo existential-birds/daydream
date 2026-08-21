@@ -78,7 +78,26 @@ class _DeepMockBackend:
                     "1. [api.py:1] hello() leaks a god-object boundary\n"
                 )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            # Issue #745: the structural reviewer emits PER_STACK_RECORD_SCHEMA
+            # structured output directly (its finding lands lens="structural").
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "hello() leaks a god-object boundary",
+                            "file": "api.py",
+                            "line": 1,
+                            "severity": "medium",
+                            "confidence": "MEDIUM",
+                            "rationale": "stub",
+                            "evidence": "api.py:1",
+                        }
+                    ],
+                    "verdicts": [],
+                },
+                continuation=None,
+            )
             return
 
         # Per-stack review prompt contains "You are reviewing the ... stack".
@@ -92,7 +111,11 @@ class _DeepMockBackend:
                 out.parent.mkdir(parents=True, exist_ok=True)
                 out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            # Issue #745: per-stack reviewer emits structured output directly.
+            yield ResultEvent(
+                structured_output={"issues": [], "verdicts": []},
+                continuation=None,
+            )
             return
 
         # Parse-feedback prompt contains "Read the review output file at".
@@ -248,8 +271,10 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch) -> No
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), (
         "merged report missing after Claude-shape run"
     )
-    # Stages fired: intent, alternatives, at least one per-stack, parse, merge.
-    required = {"intent", "alternatives", "per-stack", "parse", "merge"}
+    # Stages fired: intent, alternatives, at least one per-stack, merge. The
+    # parse-<stack> stage was removed (issue #745) -- reviewers emit records
+    # directly.
+    required = {"intent", "alternatives", "per-stack", "merge"}
     assert required.issubset(set(backend.calls)), (
         f"missing stages; saw only: {sorted(set(backend.calls))}"
     )

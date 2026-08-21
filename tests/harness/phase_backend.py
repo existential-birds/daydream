@@ -110,7 +110,26 @@ class PhaseDispatchBackend:
         if "beagle-" in prompt_lower and "review" in prompt_lower:
             self.review_prompts.append(prompt)
             yield TextEvent(text="Review complete.")
-            yield ResultEvent(structured_output=None, continuation=None)
+            if output_schema is not None:
+                # Issue #745 (AC4): the per-stack reviewer emits
+                # PER_STACK_RECORD_SCHEMA structured output directly (the
+                # deep-shallow spine no longer has a separate parse step).
+                issues = self._parse_results[0] if self._parse_results else []
+                issues = [
+                    {
+                        "confidence": "HIGH",
+                        "rationale": "harness fixture",
+                        "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
+                        **it,
+                    }
+                    for it in issues
+                ]
+                yield ResultEvent(
+                    structured_output={"issues": issues, "verdicts": []},
+                    continuation=None,
+                )
+            else:
+                yield ResultEvent(structured_output=None, continuation=None)
         elif "extract" in prompt_lower and "json" in prompt_lower:
             issues = (
                 self._parse_results[self._parse_call]

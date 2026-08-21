@@ -417,8 +417,31 @@ class StubBackend:
                 yield ToolResultEvent(
                     id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
                 )
+            # Issue #745 (AC4): the sweep reviewer emits UNCOVERED_SWEEP_SCHEMA
+            # structured output directly (no parse-uncovered-<n> fork).
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            if self.sweep_no_output:
+                # Backend succeeds but produces nothing: no structured output
+                # either, so the sweep must not claim coverage (issue #309 f7).
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": f"Sweep finding for {swept_file}",
+                            "file": swept_file,
+                            "line": 1,
+                            "severity": self.parse_severity or "low",
+                            "confidence": "MEDIUM",
+                            "rationale": "stub",
+                            "evidence": f"{swept_file}:1",
+                        }
+                    ]
+                },
+                continuation=None,
+            )
             return
 
         # Per-stack review -> write a markdown file + emit done.
@@ -455,8 +478,55 @@ class StubBackend:
                 out_path.write_text(
                     f"# Review ({stack})\n\n## Issues\n\n1. [api.py:1] Sample issue for {stack}\n"
                 )
+            # Issue #745 (AC4): the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
+            # structured output directly (no separate parse-<stack> fork). Build a
+            # schema-valid payload with every required issue field.
+            issue: dict[str, Any] = {
+                "id": 1,
+                "description": "Sample issue",
+                "file": "api.py",
+                "line": 1,
+                "severity": self.parse_severity or "medium",
+                "confidence": "MEDIUM",
+                "rationale": "stub",
+                "evidence": "api.py:1",
+            }
+            issues: list[dict[str, Any]] = [issue]
+            if self.parse_by_stack is not None:
+                sm = re.search(r"stack-(\S+?)-review\.md", prompt)
+                if sm is not None and sm.group(1) in self.parse_by_stack:
+                    ov = self.parse_by_stack[sm.group(1)]
+                    issue["severity"] = ov["severity"]
+                    issue["confidence"] = ov["confidence"]
+                    issue["file"] = ov.get("file", issue["file"])
+                    issue["line"] = ov.get("line", issue["line"])
+                    issue["description"] = ov.get("description", issue["description"])
+                    issue["evidence"] = f"{issue['file']}:{issue['line']}"
+                    issue["rationale"] = "stub"
+                    extra = ov.get("extra")
+                    if extra is not None:
+                        ex_file = extra.get("file", issue["file"])
+                        ex_line = extra.get("line", issue["line"])
+                        issues.append(
+                            {
+                                "id": 2,
+                                "description": extra.get("description", "extra finding"),
+                                "file": ex_file,
+                                "line": ex_line,
+                                "severity": extra["severity"],
+                                "confidence": extra["confidence"],
+                                "rationale": "stub",
+                                "evidence": f"{ex_file}:{ex_line}",
+                            }
+                        )
             yield TextEvent(text="")
-            yield ResultEvent(structured_output=None, continuation=None)
+            yield ResultEvent(
+                structured_output={
+                    "issues": issues,
+                    "verdicts": self.parse_declared_verdicts or [],
+                },
+                continuation=None,
+            )
             return
 
         if "extract only actionable issues" in pl:  # phase_parse_feedback

@@ -426,7 +426,26 @@ class _FixEditingBackend:
         pl = prompt.lower()
         if "beagle-" in pl and "review" in pl:
             yield TextEvent(text="Review complete.")
-            yield ResultEvent(structured_output=None, continuation=None)
+            # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
+            # structured output directly (no separate parse step).
+            yield ResultEvent(
+                structured_output={
+                    "issues": [
+                        {
+                            "id": 1,
+                            "description": "Add a guard",
+                            "file": "main.py",
+                            "line": 1,
+                            "severity": "medium",
+                            "confidence": "HIGH",
+                            "rationale": "guard missing",
+                            "evidence": "main.py:1",
+                        }
+                    ],
+                    "verdicts": [],
+                },
+                continuation=None,
+            )
         elif "extract" in pl and "json" in pl:
             yield TextEvent(text="Parsed.")
             yield ResultEvent(

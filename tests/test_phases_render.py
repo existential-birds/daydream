@@ -183,7 +183,11 @@ class _PerStackBackend:
         async def _gen() -> AsyncIterator[AgentEvent]:
             if should_fail:
                 raise RuntimeError("agent boom")
-            yield ResultEvent(structured_output=None, continuation=None)
+            # Issue #745: per-stack reviewers must emit PER_STACK_RECORD_SCHEMA
+            # structured output (issues + verdicts) to be recorded as a success.
+            yield ResultEvent(
+                structured_output={"issues": [], "verdicts": []}, continuation=None
+            )
 
         return _gen()
 

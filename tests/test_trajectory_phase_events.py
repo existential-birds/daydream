@@ -400,22 +400,18 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Phase events: the review spine's parse and the fix cycle's test must appear.
+    # Phase events: the deep-shallow spine's review and the fix's test must
+    # appear (the parse-<stack> stage was removed with issue #745).
     events = data["extra"].get("phase_events", [])
     event_phases = [e["phase"] for e in events]
-    assert "parse" in event_phases, f"parse phase event missing; got {event_phases!r}"
     assert "test" in event_phases, f"test phase event missing; got {event_phases!r}"
-    # Each must have a matching start+end pair.
-    parse_events = [e for e in events if e["phase"] == "parse"]
-    assert any(e["event"] == "phase_start" for e in parse_events)
-    assert any(e["event"] == "phase_end" for e in parse_events)
 
-    # Subtrajectories: the parse invocation registered one with timestamps.
+    # Subtrajectories: the review invocation registered one with timestamps.
     subs = data["extra"].get("subtrajectories", [])
     assert subs, "subtrajectories missing from trajectory extra"
-    sub = next(s for s in subs if s["phase"] == "parse")
-    assert sub["started_at"], "subtrajectory started_at is empty"
-    assert sub["ended_at"], "subtrajectory ended_at is empty"
+    assert all(s["started_at"] and s["ended_at"] for s in subs), (
+        "subtrajectory missing complete timestamps"
+    )
 
     # Manifest: phase_timings appears in the metrics block.
     archive_dir = tmp_path / "archive"
@@ -423,9 +419,6 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     assert manifest_files, "manifest.json not written"
     manifest = json.loads(manifest_files[0].read_text())
     assert manifest["metrics"]["phase_timings"] is not None
-    assert "parse" in manifest["metrics"]["phase_timings"], (
-        f"parse missing from manifest phase_timings: {manifest['metrics']['phase_timings']!r}"
-    )
 
 
 async def test_deep_run_emits_phase_events_and_manifest_timings(
@@ -496,8 +489,9 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     assert "deep" in phase_timings, (
         f"deep missing from manifest phase_timings: {phase_timings!r}"
     )
-    # Declined gate still records the phases reached before fix/test/verify.
-    for phase in ("intent", "alternatives", "parse"):
+    # Declined gate still records the phases reached before fix/test/verify. The
+    # parse-<stack> stage was removed (issue #745), so it is not expected here.
+    for phase in ("intent", "alternatives"):
         assert phase in phase_timings, (
             f"{phase} missing from deep phase_timings: {phase_timings!r}"
         )
@@ -547,7 +541,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None
-    for phase in ("intent", "alternatives", "parse", "verify", "fix", "test", "deep"):
+    for phase in ("intent", "alternatives", "verify", "fix", "test", "deep"):
         assert phase in phase_timings, (
             f"{phase} missing from deep phase_timings: {phase_timings!r}"
         )
@@ -653,10 +647,11 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     data = json.loads(traj.read_text(encoding="utf-8"))
     assert atif_validate(data, validate_images=False) is True
 
-    # Review-only mode records intent + alternatives + parse phases.
+    # Review-only mode records intent + alternatives phases (the parse-<stack>
+    # stage was removed with issue #745).
     events = data["extra"].get("phase_events", [])
     event_phases = {e["phase"] for e in events}
-    for phase in ("intent", "alternatives", "parse"):
+    for phase in ("intent", "alternatives"):
         assert phase in event_phases, (
             f"{phase} phase_events missing; got phases: {sorted(event_phases)!r}"
         )
@@ -673,7 +668,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
     manifest = json.loads(manifest_files[0].read_text())
     phase_timings = manifest["metrics"]["phase_timings"]
     assert phase_timings is not None, "review flow phase_timings must not be null"
-    for phase in ("intent", "alternatives", "parse"):
+    for phase in ("intent", "alternatives"):
         assert phase in phase_timings, (
             f"{phase} missing from review phase_timings: {phase_timings!r}"
         )
