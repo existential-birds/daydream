@@ -60,6 +60,7 @@ from daydream.deep.artifacts import (
     diff_key_path,
     fix_failures_path,
     fix_leftover_untracked_path,
+    fix_outcomes_path,
     fix_quality_gate_path,
     generated_file_violations_path,
     merged_items_path,
@@ -101,7 +102,7 @@ from daydream.deep.scope_issues import (
 from daydream.deep.sharding import shard_stacks
 from daydream.eval.analyzer import _agent_label, _records_issues_or_empty, load_trajectories
 from daydream.extensions import get_registry
-from daydream.extensions.api import FlowStep, Stop
+from daydream.extensions.api import BreakLoop, FlowStep, Stop
 from daydream.flows.engine import FlowContext, run_flow
 from daydream.generated_files import (
     _changed_untracked_generated_files,
@@ -3209,6 +3210,10 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     exploration_dir = ctx.data.get("exploration_dir")
     exploration_dir = exploration_dir if isinstance(exploration_dir, Path) else None
     test_map_path = exploration_dir / "test-map.json" if exploration_dir is not None else None
+    # Issue #744: record THIS round's dispatch set so the post-round fix-verify
+    # step audits exactly the findings that were dispatched (round 1: the full
+    # canonical list; later rounds: the actionable subset derived in _step_fix).
+    ctx.data["fix_round_items"] = list(items)
     async with phase_scope(DaydreamPhase.FIX):
         try:
             fix_failures: dict[str, str] = await phase_fix_parallel(
@@ -3260,6 +3265,14 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         fix_failures_p.write_text(json.dumps(all_non_success, indent=2, sort_keys=True))
     elif fix_failures_p.exists():
         fix_failures_p.unlink()
+
+    # Issue #744: fix-outcomes sidecar adjacent to the fix-failure record.
+    # Every dispatched finding's accumulated terminal verdict lives here so an
+    # attempted-but-unconfirmed finding cannot silently pass as fixed. The
+    # verifier step merges verdicts into ctx.data["fix_outcomes"]; this write
+    # keeps the sidecar current at every round boundary (and deletes it when
+    # empty -- no dispatched findings means no outcomes).
+    _persist_fix_outcomes(dd, ctx.data.get("fix_outcomes") or {})
 
     if exception_failures:
         # Only revert and abort for exception-failed groups; budget-exceeded
@@ -3381,6 +3394,23 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 "HEAD may include edits present before the fix pass."
             ),
         )
+    # Issue #744: capture the round's changed-file set + hunks for the post-fix
+    # fix-verify step (read-only verifier audits the round's hunks only, never
+    # the whole tree). Written after the residual net + scrub so the verifier
+    # sees the exact state the round left behind; best-effort (enumeration or
+    # diff failure degrades to an empty hunks string, never a crash).
+    if changed_after_fix is not None:
+        ctx.data["fix_round_changed"] = sorted(changed_after_fix)
+        try:
+            ctx.data["fix_round_hunks"] = git_ops.diff_worktree_against(
+                work.repo, pre_fix_ref, sorted(changed_after_fix)
+            )
+        except git_ops.GitError as exc:
+            print_warning(console, f"Could not capture round diff for fix-verify: {exc}")
+            ctx.data["fix_round_hunks"] = ""
+    else:
+        ctx.data["fix_round_changed"] = []
+        ctx.data["fix_round_hunks"] = ""
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
@@ -3431,6 +3461,110 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         iteration=ctx.data.get("iteration"),
     )
     return None
+
+
+async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
+    """Post-round fix verifier step (issue #744): one verdict per dispatched finding.
+
+    Runs after every fix group in a round finishes (the round barrier) on the
+    round's changed hunks only. Phase work is delegated to
+    ``phase_fix_verify`` (read-only, advisory); each dispatched finding is
+    recorded in ``ctx.data["fix_outcomes"]`` keyed by its canonical id so the
+    dispatched-count == outcome-count invariant holds. Round 1 dispatches the
+    full canonical item list; later rounds re-dispatch only the actionable
+    subset (see ``_step_fix``).
+
+    Returns:
+        ``BreakLoop`` when no actionable verdicts remain — or when the round
+        budget is spent (iteration 3) — after persisting ``fix-outcomes.json``
+        and rendering the honest per-finding summary. ``None`` keeps the
+        enclosing LoopGroup iterating.
+    """
+    from daydream import git_ops
+    from daydream.phases import group_items_by_footprint, phase_fix_verify
+
+    round_items: list[dict[str, Any]] = ctx.data.get("fix_round_items") or list(ctx.data["items"])
+    if not round_items:
+        _persist_fix_outcomes(ctx.data["dd"], ctx.data.get("fix_outcomes") or {})
+        return BreakLoop()
+    hunks: str = ctx.data.get("fix_round_hunks") or ""
+    if not hunks:
+        # Best-effort worktree diff (changes the round produced vs HEAD); a
+        # failed capture degrades to the whole-tree message below, never raises.
+        try:
+            hunks = git_ops.diff(ctx.work.repo, "HEAD", "HEAD")
+        except git_ops.GitError:
+            hunks = ""
+    outcomes: dict[int, dict[str, Any]] = ctx.data.setdefault("fix_outcomes", {})
+    async with phase_scope(DaydreamPhase.VERIFY):
+        groups = group_items_by_footprint(round_items)
+        for _, group_items in groups:
+            verdicts = await phase_fix_verify(
+                ctx.backend_for("verify"),
+                ctx.work,
+                group_items,
+                hunks,
+            )
+            for verdict in verdicts:
+                issue_id = verdict.get("issue_id")
+                if isinstance(issue_id, int):
+                    outcomes[issue_id] = verdict
+    actionable = _actionable_verdicts(outcomes)
+    iteration = ctx.data.get("iteration")
+    # Budget spent (iteration == 3), a flat/no-loop pass (iteration unset), or
+    # nothing left to re-dispatch all terminate the loop. In every terminal
+    # case the accumulated outcomes are persisted and the honest per-finding
+    # summary rendered (attempted-not-fixed for still-unresolved findings).
+    if actionable and iteration not in (None, 3):
+        return None
+    _persist_fix_outcomes(ctx.data["dd"], outcomes)
+    _render_fix_outcome_summary(ctx.data["dd"], outcomes)
+    return BreakLoop()
+
+
+def _actionable_verdicts(outcomes: dict[int, dict[str, Any]]) -> list[str]:
+    """Verdicts that schedule re-dispatch in a later round (issue #744)."""
+    return [
+        v["verdict"]
+        for v in outcomes.values()
+        if v.get("verdict") in ("unresolved", "wrong_target", "regressed")
+    ]
+
+
+def _persist_fix_outcomes(dd: Path, outcomes: dict[int, dict[str, Any]]) -> None:
+    """Write ``fix-outcomes.json`` beside the fix-failure record (issue #744).
+
+    Keys are finding ids (JSON stringified), values the terminal verdict dicts.
+    Deleted when empty — no dispatched findings means no outcomes.
+    """
+    fix_outcomes_p = fix_outcomes_path(dd)
+    if outcomes:
+        fix_outcomes_p.write_text(
+            json.dumps({str(k): v for k, v in outcomes.items()}, indent=2, sort_keys=True)
+        )
+    elif fix_outcomes_p.exists():
+        fix_outcomes_p.unlink()
+
+
+def _render_fix_outcome_summary(dd: Path, outcomes: dict[int, dict[str, Any]]) -> None:
+    """Render the terminal per-finding fix-outcome summary (issue #744).
+
+    Best-effort reporting read: distinguishes resolved findings from
+    attempted-not-fixed ones. Task 7 builds the honest user-facing lines; the
+    sidecar is the durable record.
+    """
+    resolved = [k for k, v in outcomes.items() if v.get("verdict") == "resolved"]
+    attempted = [
+        k for k, v in outcomes.items()
+        if v.get("verdict") in ("unresolved", "wrong_target", "regressed")
+    ]
+    if not outcomes:
+        return
+    parts = [f"fix outcomes: {len(resolved)} resolved, {len(attempted)} attempted-not-fixed"]
+    if attempted:
+        parts.append(f"not fixed: {sorted(attempted)}")
+    print_info(console, "; ".join(parts))
+
 
 
 async def _step_test(ctx: FlowContext) -> Stop | None:
@@ -3859,6 +3993,7 @@ STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="fix-gate", run=_step_fix_gate, enabled=_fix_cycle_enabled),
     FlowStep(name="verify", run=_step_verify, enabled=_fix_cycle_enabled),
     FlowStep(name="fix", run=_step_fix, enabled=_fix_cycle_enabled),
+    FlowStep(name="fix-verify", run=_step_fix_verify, enabled=_fix_cycle_enabled),
     FlowStep(name="test", run=_step_test, enabled=_fix_cycle_enabled),
     # config_phase "fix" mirrors the old body's use of the fix backend for the commit.
     FlowStep(name="commit", run=_step_commit, config_phase="fix", enabled=_fix_cycle_enabled),

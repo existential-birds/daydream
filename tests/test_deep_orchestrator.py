@@ -779,6 +779,37 @@ async def test_fix_verify_turn_is_read_only(
     assert all(c["read_only"] is True for c in verify_calls)
 
 
+async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: every dispatched finding has a recorded terminal outcome; all
+    resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high"),
+                        _merge_item(2, "App.tsx", "medium")]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"
+    assert outcomes_p.exists()
+    outcomes = json.loads(outcomes_p.read_text())
+    # every dispatched finding (incl. structural) has exactly one recorded outcome
+    assert sorted(int(k) for k in outcomes) == [1, 2, 3]
+    assert all(v["verdict"] == "resolved" for v in outcomes.values())
+    # one round only (all resolved -> BreakLoop on round 1)
+    fix_calls = [c for c in stub.calls
+                 if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
+    assert len(fix_calls) == 2  # one per file group, no re-dispatch
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
