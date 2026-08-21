@@ -13,46 +13,75 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 from pathlib import Path
+from typing import Any
 
-# Block / header regexes mirroring ``daydream.deep.prompts`` so a hunk's owning
-# path resolves identically across every consumer (and the persisted index is
-# derived from the exact unified-diff contract the deep flow writes).
-_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$")
-_DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$")
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
+# Header regexes for the shared unified-diff parser.
 # Unified-diff hunk header: @@ -<old_start>[,<old_count>] +<new_start>[,<new_count>] @@
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 HUNK_INDEX_FILENAME = "hunk-index.json"
 
 
-def _strip_prefix(path: str, prefix: str) -> str:
-    return path[len(prefix) :] if path.startswith(prefix) else path
+def _unquote_git_path(quoted: str) -> str:
+    """Unquote a ``core.quotepath``-quoted path from ``git diff`` output.
 
-
-def _diff_block_path(block: str) -> str | None:
-    """Resolve the single changed path for one ``diff --git`` block.
-
-    Mirrors ``daydream.deep.prompts._diff_block_path``: prefer the post-state
-    path (``+++ b/<path>``), fall back to the pre-state path for deletions, and
-    to the ``diff --git`` header for binary / mode-only diffs. ``/dev/null``
-    sentinels are skipped at every layer.
+    Git quotes non-ASCII path names as C-style string literals, e.g.
+    ``"b/caf\\303\\251.go"`` (octal escapes of the raw UTF-8 bytes). Strips the
+    surrounding quotes, decodes the escapes back to bytes, and decodes those as
+    UTF-8. Non-quoted input passes through unchanged.
     """
-    if not block.startswith("diff --git "):
+    if not (quoted.startswith('"') and quoted.endswith('"')):
+        return quoted
+    inner = quoted[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(inner):
+        ch = inner[i]
+        if ch == "\\" and i + 1 < len(inner):
+            nxt = inner[i + 1]
+            if nxt == "\\":
+                out.append(ord("\\"))
+                i += 2
+            elif nxt == '"':
+                out.append(ord('"'))
+                i += 2
+            elif nxt in "01234567":
+                val = 0
+                j = i + 1
+                while j < len(inner) and j < i + 4 and inner[j] in "01234567":
+                    val = val * 8 + int(inner[j])
+                    j += 1
+                out.append(val)
+                i = j
+            else:
+                out.append(ord("\\"))
+                i += 1
+        else:
+            out.extend(ch.encode("utf-8"))
+            i += 1
+    return out.decode("utf-8")
+
+
+def _header_path(raw: str) -> str | None:
+    """Resolve the repo-relative path from a ``+++ `` file-header line.
+
+    Mirrors ``quote_scrub._header_path`` so the shared parser keys files
+    identically across every consumer: handles the plain ``+++ b/rel/path`` form,
+    git's ``core.quotepath`` quoted form, and ``diff.noprefix`` output (no ``b/``
+    prefix). A trailing tab (git appends one after space-containing paths) is
+    stripped first. Returns ``None`` for the ``+++ /dev/null`` deletion header.
+    """
+    if not raw.startswith("+++ "):
         return None
-    plus = _DIFF_PLUS_HEADER.search(block)
-    if plus and plus.group(1) != "/dev/null":
-        return _strip_prefix(plus.group(1), "b/")
-    minus = _DIFF_MINUS_HEADER.search(block)
-    if minus and minus.group(1) != "/dev/null":
-        return _strip_prefix(minus.group(1), "a/")
-    git = _DIFF_GIT_HEADER.match(block)
-    if git:
-        return git.group(2)
-    return None
+    tail = raw[4:].rstrip("\t")
+    if tail.startswith('"') and tail.endswith('"'):
+        tail = _unquote_git_path(tail)
+    if tail.startswith("b/"):
+        return tail[2:]
+    if tail == "/dev/null":
+        return None
+    return tail
 
 
 def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
@@ -77,68 +106,71 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
         information.
     """
     result: dict[str, dict[str, Any]] = {}
-    for block in _DIFF_BLOCK_SPLIT.split(diff_text):
-        path = _diff_block_path(block)
-        if path is None:
+    current_meta: dict[str, Any] | None = None
+    current_hunk: dict[str, Any] | None = None
+    new_line = 0
+    prev_old_header = False
+    for raw in diff_text.splitlines():
+        if raw.startswith(("--- ", '--- "')):
+            prev_old_header = True
             continue
-        hunks: list[dict[str, Any]] = []
-        added_total = 0
-        removed_total = 0
-        added_lines: set[int] = set()
-        new_line = 0
-        current: dict[str, Any] | None = None
-        prev_old_header = False
-        for raw in block.splitlines():
-            if raw.startswith(("--- ", '--- "')):
-                prev_old_header = True
-                continue
-            if raw.startswith("+++ ") and prev_old_header:
-                prev_old_header = False
-                continue
+        if raw.startswith("+++ ") and prev_old_header:
             prev_old_header = False
-            header = _HUNK_HEADER.match(raw)
-            if raw.startswith("@@") and header:
-                old_start = int(header.group(1))
-                old_count = int(header.group(2)) if header.group(2) else 1
-                new_start = int(header.group(3))
-                new_count = int(header.group(4)) if header.group(4) else 1
-                new_line = new_start
-                if new_count == 0:
-                    # Empty new-side range (pure deletion): pr_review skips it.
-                    current = None
-                    continue
-                current = {
-                    "old_start": old_start,
-                    "old_end": old_start + old_count - 1,
-                    "new_start": new_start,
-                    "new_end": new_start + new_count - 1,
-                    "added": 0,
-                    "removed": 0,
-                    "added_lines": set(),
-                }
-                hunks.append(current)
-            elif raw.startswith("+"):
-                added_total += 1
-                added_lines.add(new_line)
-                if current is not None:
-                    current["added"] += 1
-                    current["added_lines"].add(new_line)
-                new_line += 1
-            elif raw.startswith("-"):
-                removed_total += 1
-                if current is not None:
-                    current["removed"] += 1
-            elif raw.startswith(" "):
-                new_line += 1
-        for hunk in hunks:
+            path = _header_path(raw)
+            if path is None:
+                current_meta = None
+                current_hunk = None
+                new_line = 0
+                continue
+            current_meta = result.setdefault(
+                path,
+                {"hunks": [], "added_total": 0, "removed_total": 0, "added_lines": set()},
+            )
+            current_hunk = None
+            new_line = 0
+            continue
+        prev_old_header = False
+        if current_meta is None:
+            continue
+        header = _HUNK_HEADER.match(raw)
+        if raw.startswith("@@") and header:
+            old_start = int(header.group(1))
+            old_count = int(header.group(2)) if header.group(2) else 1
+            new_start = int(header.group(3))
+            new_count = int(header.group(4)) if header.group(4) else 1
+            new_line = new_start
+            if new_count == 0:
+                # Empty new-side range (pure deletion): pr_review skips it.
+                current_hunk = None
+                continue
+            current_hunk = {
+                "old_start": old_start,
+                "old_end": old_start + old_count - 1,
+                "new_start": new_start,
+                "new_end": new_start + new_count - 1,
+                "added": 0,
+                "removed": 0,
+                "added_lines": set(),
+            }
+            current_meta["hunks"].append(current_hunk)
+        elif raw.startswith("+"):
+            current_meta["added_total"] += 1
+            current_meta["added_lines"].add(new_line)
+            if current_hunk is not None:
+                current_hunk["added"] += 1
+                current_hunk["added_lines"].add(new_line)
+            new_line += 1
+        elif raw.startswith("-"):
+            current_meta["removed_total"] += 1
+            if current_hunk is not None:
+                current_hunk["removed"] += 1
+        elif raw.startswith(" "):
+            new_line += 1
+    for info in result.values():
+        for hunk in info["hunks"]:
             hunk["added_lines"] = sorted(hunk["added_lines"])
-        result[path] = {
-            "hunks": hunks,
-            "added_total": added_total,
-            "removed_total": removed_total,
-            "added_lines": set(added_lines),
-        }
-    return {path: result[path] for path in sorted(result)}
+        info["added_lines"] = set(info["added_lines"])
+    return result
 
 
 def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]:
@@ -165,7 +197,7 @@ def added_line_numbers(parsed: dict[str, dict[str, Any]]) -> dict[str, set[int]]
 
 
 def change_line_count(parsed: dict[str, dict[str, Any]], file: str) -> int:
-    """Return ``added_total + removed_total`` for one file in a parse result.
+    """Return the count of changed content lines for one file in a parse result.
 
     Mirrors the ``coverage.hunk_change_line_count`` contract -- the count of
     changed content lines, file headers excluded.
