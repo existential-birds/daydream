@@ -3769,7 +3769,7 @@ async def phase_per_stack_reviews(
     """
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.artifacts import deep_dir as _deep_dir
-    from daydream.deep.artifacts import per_stack_review_path
+    from daydream.deep.artifacts import per_stack_records_path, per_stack_review_path
     from daydream.deep.prompts import _diff_blocks_for_files
 
     deep_dir_path = _deep_dir(work.repo)
@@ -3885,27 +3885,50 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
+                structured: Any = None
+                budget_reason: str | None = None
                 async with limiter:
-                    async with maybe_fork(recorder, f"deep-{stack_name}"):
-                        try:
-                            _, _, budget_reason = await run_agent(
+                    try:
+                        async with maybe_fork(recorder, f"deep-{stack_name}"):
+                            # Issue #745 (AC4): the reviewer emits
+                            # PER_STACK_RECORD_SCHEMA structured output directly --
+                            # no separate ``parse-<stack>`` fork. The fork is
+                            # finalized on exit so verdict reconciliation below
+                            # can read its completed reads from disk.
+                            structured, _, budget_reason = await run_agent(
                                 backend,
                                 work.repo,
                                 task_prompt,
                                 phase=DaydreamPhase.DEEP,
+                                output_schema=PER_STACK_RECORD_SCHEMA,
                                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
                             )
-                            if budget_reason:
-                                # A truncated stack did not really pass: route it
-                                # into failures so merge lists it under
-                                # "Uncovered stacks" instead of silently shipping
-                                # a partial review as a complete one.
-                                failures[stack_name] = f"budget exhausted: {budget_reason}"
-                            else:
-                                results[stack_name] = task_output
-                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                            failures[stack_name] = f"{type(e).__name__}: {e}"
+                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                        failures[stack_name] = f"{type(e).__name__}: {e}"
+                        return
+                    if budget_reason:
+                        # A truncated stack did not really pass: route it
+                        # into failures so merge lists it under
+                        # "Uncovered stacks" instead of silently shipping
+                        # a partial review as a complete one.
+                        failures[stack_name] = f"budget exhausted: {budget_reason}"
+                        return
+                    if not isinstance(structured, dict):
+                        failures[stack_name] = "no structured output produced"
+                        return
+                    issues = structured.get("issues")
+                    issues = issues if isinstance(issues, list) else []
+                    declared_verdicts = structured.get("verdicts")
+                    declared = declared_verdicts if isinstance(declared_verdicts, list) else []
+                    # Persist the records file with the DECLARED verdicts for
+                    # now; final verdict reconciliation happens in
+                    # ``_step_per_stack_parse`` AFTER the fan-out completes and
+                    # every review fork is finalized on disk (issue #745).
+                    per_stack_records_path(deep_dir_path, stack_name).write_text(
+                        json.dumps({"issues": issues, "verdicts": declared}, indent=2)
+                    )
+                    results[stack_name] = task_output
 
             tg.start_soon(_task)
 

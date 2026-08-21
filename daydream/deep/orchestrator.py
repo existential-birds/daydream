@@ -115,7 +115,6 @@ from daydream.generated_files import (
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
-    PER_STACK_RECORD_SCHEMA,
     UNCOVERED_SWEEP_SCHEMA,
     CrossStackMergeError,
     FixResult,
@@ -1353,157 +1352,93 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
 
 
 async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
-    """Pre-merge parse pass (D-21) + structural partitioning; loads records on a merge resume."""
-    config = ctx.config
+    """Load per-stack records (written by the reviewers) + structural partition.
+
+    Issue #745 (AC4): there is no separate ``parse-<stack>`` stage -- the
+    per-stack reviewers emit PER_STACK_RECORD_SCHEMA records directly. This
+    step loads them off disk (same path fresh runs and ``--start-at merge``
+    resumes take) and partitions the structural meta-stack records out before
+    dedup.
+    """
     dd = ctx.data["dd"]
     stacks = ctx.data["stacks"]
     failed_stacks: dict[str, str] = ctx.data["failed_stacks"]
-    per_stack_outputs: dict[str, Path] = ctx.data["per_stack_outputs"]
 
     print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
-
+    # Issue #745 (AC4): the per-stack reviewers emit PER_STACK_RECORD_SCHEMA
+    # records directly (no separate `parse-<stack>` stage), so BOTH a fresh run
+    # and a `--start-at merge` resume load the on-disk per-stack records. A
+    # fresh run separates records by the structural meta-stack below exactly as
+    # the resume path does.
     per_stack_records_paths: list[Path] = []
     all_records: list[dict[str, Any]] = []
     record_sources: list[str] = []
-    if config.start_at == "merge":
-        # Resume: require a records file per detected stack (except ones in
-        # `failed_stacks`). A bare glob would silently drop a stack whose
-        # records file is absent, yielding a merged report missing a bucket.
-        expected_paths: list[Path] = []
-        missing_stacks: list[str] = []
-        for stack in stacks:
-            if stack.stack_name in failed_stacks:
-                continue
-            records_path = per_stack_records_path(dd, stack.stack_name)
-            if records_path.is_file():
-                expected_paths.append(records_path)
-            else:
-                missing_stacks.append(stack.stack_name)
-        if missing_stacks:
-            print_error(
-                console,
-                "Missing Per-Stack Records",
-                "Missing parsed records for: "
-                + ", ".join(sorted(missing_stacks)),
-            )
-            return Stop(1)
-        # Issue #309: a prior run's uncovered-file sweep records are
-        # per-stack-style findings already finalized on disk (the sweep itself
-        # is a no-op on resume). Load them so a merge resume keeps the sweep's
-        # findings instead of silently dropping them.
-        sweep_path = per_stack_records_path(dd, "uncovered")
-        if sweep_path.is_file():
-            expected_paths.append(sweep_path)
-        for records_path in sorted(expected_paths):
-            loaded = json.loads(records_path.read_text())
-            # Issue #742: fresh-run per-stack records files now carry the dict
-            # shape ``{"issues": [...], "verdicts": [...]}`` (the per-file
-            # verdicts surfaced through the parse). Merge consumes a bare
-            # issues list, so normalize the dict shape here; legacy bare-list
-            # records pass through unchanged.
-            records = _records_issues_or_empty(loaded)
-            per_stack_records_paths.append(records_path)
-            source_name = records_path.name
-            all_records.extend(records)
-            record_sources.extend(source_name for _ in records)
-    else:
-        # Pre-merge parse pass (D-21). The N parse calls run concurrently;
-        # results are consumed in stack_name order below so merge input order
-        # is independent of task completion order, keeping the merge prompt
-        # and global issue numbering reproducible.
-        parse_backend = ctx.backend_for("parse")
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
-        recorder = get_current_recorder()
-        # Issue #742: the verdict gate reconciles each stack's declared per-file
-        # verdicts against its own assigned files. Default-arg captured per
-        # closure so the gate cannot read the wrong stack's file list.
-        stack_files: dict[str, list[str]] = {
-            s.stack_name: list(s.files) for s in stacks
-        }
-        parse_results: dict[str, list[dict[str, Any]]] = {}
-        parse_failures: dict[str, BaseException] = {}
+    recorder = get_current_recorder()
+    # Issue #742/#745: reconcile each stack's per-file verdicts against its own
+    # completed-read evidence NOW that EVERY review fork is finalized on disk
+    # (record-writing moved into the fan-out; reconciliation needs all forks
+    # present, so it happens here after the task group, not inside it -- the
+    # fork cache would otherwise read an incomplete set). Fail-open: a missing
+    # fork degrades to ``[]`` (unread files stay swept, never recorded clean).
+    stack_files: dict[str, list[str]] = {s.stack_name: list(s.files) for s in stacks}
+    for stack in stacks:
+        if stack.stack_name in failed_stacks:
+            continue
+        records_path = per_stack_records_path(dd, stack.stack_name)
+        if not records_path.is_file():
+            continue
+        loaded = json.loads(records_path.read_text())
+        issues = _records_issues_or_empty(loaded)
+        declared = loaded.get("verdicts") if isinstance(loaded, dict) else []
+        declared = declared if isinstance(declared, list) else []
+        verdicts = _reconcile_stack_verdicts(
+            dd.parent,
+            recorder,
+            stack.stack_name,
+            assigned_files=stack_files[stack.stack_name],
+            declared_verdicts=declared,
+            parsed_records=issues,
+        )
+        records_path.write_text(json.dumps({"issues": issues, "verdicts": verdicts}, indent=2))
 
-        async with phase_scope(DaydreamPhase.PARSE):
-            async with anyio.create_task_group() as tg:
-                for stack_name, output_path in sorted(per_stack_outputs.items()):
-                    # Every stack -- language or the structural meta-stack --
-                    # parses with the severity-bearing PER_STACK_RECORD_SCHEMA.
-                    # Issue #314: the structural reviewer calibrates anti-slop
-                    # findings to medium/low, so its parse must carry severity
-                    # or that calibration is silently upgraded to high at merge
-                    # (the anti-slop rubric's primary home). The structural
-                    # meta-stack is still partitioned out of arbitration/dedup
-                    # below (unchanged); _append_structural_and_write_merged
-                    # preserves the reported severity, falling back to high only
-                    # for unlabeled records.
-                    record_schema = PER_STACK_RECORD_SCHEMA
-
-                    # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
-                    async def _parse_one(
-                        stack_name: str = stack_name,
-                        input_path: Path = output_path,
-                        schema: dict[str, Any] = record_schema,
-                        assigned_files: list[str] = stack_files[stack_name],
-                    ) -> None:
-                        async with limiter:
-                            async with maybe_fork(recorder, f"parse-{stack_name}"):
-                                try:
-                                    parsed = await phase_parse_feedback(
-                                        parse_backend,
-                                        ctx.work,
-                                        input_path=input_path,
-                                        output_schema=schema,
-                                        include_verdicts=True,
-                                    )
-                                    records, declared_verdicts = parsed
-                                except Exception as exc:  # noqa: BLE001 -- captured so one failure cannot cancel siblings mid-write
-                                    parse_failures[stack_name] = exc
-                                    return
-                                # Issue #742: reconcile the declared per-file
-                                # verdicts against completed-read evidence from
-                                # the stack's own deep-<stack> fork. Fail-open
-                                # (a missing fork degrades to ``verdicts: []``)
-                                # so the stack's records still land on disk and its
-                                # unread files are swept.
-                                verdicts = _reconcile_stack_verdicts(
-                                    dd.parent,
-                                    recorder,
-                                    stack_name,
-                                    assigned_files=assigned_files,
-                                    declared_verdicts=declared_verdicts,
-                                    parsed_records=records,
-                                )
-                                # Written per task, not after the join, so a
-                                # sibling's failure cannot discard records that
-                                # already succeeded (they survive for --start-at).
-                                # Issue #742: the record also carries the
-                                # reconciled per-file verdicts (PER_STACK_RECORD_SCHEMA
-                                # shape); merge consumers normalize dict ->
-                                # issues and the coverage evidence path already
-                                # tolerates both shapes.
-                                per_stack_records_path(dd, stack_name).write_text(
-                                    json.dumps(
-                                        {"issues": records, "verdicts": verdicts},
-                                        indent=2,
-                                    )
-                                )
-                                parse_results[stack_name] = records
-
-                    tg.start_soon(_parse_one)
-
-        if recorder is not None:
-            recorder.create_dispatch_step(phase=DaydreamPhase.PARSE)
-        # Fail the run on the first failure by stack name — same semantics and
-        # exception type as the serial loop, just deferred past the join so
-        # sibling records that completed are already on disk.
-        if parse_failures:
-            raise parse_failures[sorted(parse_failures)[0]]
-
-        for stack_name in sorted(parse_results):
-            records = parse_results[stack_name]
-            per_stack_records_paths.append(per_stack_records_path(dd, stack_name))
-            all_records.extend(records)
-            record_sources.extend(stack_name for _ in records)
+    # Require a records file per detected stack (except ones in
+    # `failed_stacks`). A bare glob would silently drop a stack whose records
+    # file is absent, yielding a merged report missing a bucket.
+    expected_paths: list[Path] = []
+    missing_stacks: list[str] = []
+    for stack in stacks:
+        if stack.stack_name in failed_stacks:
+            continue
+        records_path = per_stack_records_path(dd, stack.stack_name)
+        if records_path.is_file():
+            expected_paths.append(records_path)
+        else:
+            missing_stacks.append(stack.stack_name)
+    if missing_stacks:
+        print_error(
+            console,
+            "Missing Per-Stack Records",
+            "Missing parsed records for: " + ", ".join(sorted(missing_stacks)),
+        )
+        return Stop(1)
+    # Issue #309: a prior run's uncovered-file sweep records are
+    # per-stack-style findings already finalized on disk (the sweep itself
+    # is a no-op on merge resume). Load them so a merge resume keeps the
+    # sweep's findings instead of silently dropping them.
+    sweep_path = per_stack_records_path(dd, "uncovered")
+    if sweep_path.is_file():
+        expected_paths.append(sweep_path)
+    for records_path in sorted(expected_paths):
+        loaded = json.loads(records_path.read_text())
+        # Issue #742: per-stack records files carry the dict shape
+        # ``{"issues": [...], "verdicts": [...]}``. Merge consumes a bare
+        # issues list, so normalize the dict shape here; legacy bare-list
+        # records pass through unchanged.
+        records = _records_issues_or_empty(loaded)
+        per_stack_records_paths.append(records_path)
+        source_name = records_path.name
+        all_records.extend(records)
+        record_sources.extend(source_name for _ in records)
 
     # Partition structural meta-stack records out before dedup: its lens
     # (file-size budgets, layering, canonical-helper gaps) differs from the
@@ -1694,11 +1629,14 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     # Cheap-tier dispatch (parse tier), parallel, in diff order. Each sweep
     # fork is `deep-uncovered-<n>` so post-run analyze_coverage counts its
-    # reads (the coverage-ratio-improves acceptance criterion).
+    # reads (the coverage-ratio-improves acceptance criterion). Issue #745
+    # (AC4): the sweep reviewer emits UNCOVERED_SWEEP_SCHEMA structured output
+    # directly -- there is no `parse-uncovered-<n>` fork.
     parse_backend = ctx.backend_for("parse")
     limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, parse_backend))
     review_outputs: dict[str, Path] = {}
     sweep_failures: dict[str, str] = {}
+    sweep_records_by_file: dict[str, list[dict[str, Any]]] = {}
 
     async with anyio.create_task_group() as tg:
         for n, file in enumerate(swept_files):
@@ -1719,76 +1657,39 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
                 n: int = n,
             ) -> None:
                 async with limiter:
-                    async with maybe_fork(recorder, f"deep-uncovered-{n}"):
-                        try:
-                            _, _, budget_reason = await run_agent(
+                    try:
+                        async with maybe_fork(recorder, f"deep-uncovered-{n}"):
+                            structured, _, budget_reason = await run_agent(
                                 parse_backend,
                                 ctx.work.repo,
                                 task_prompt,
                                 phase=DaydreamPhase.DEEP,
+                                output_schema=UNCOVERED_SWEEP_SCHEMA,
                                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
                             )
-                            if budget_reason:
-                                sweep_failures[file] = f"budget exhausted: {budget_reason}"
-                            elif task_output.is_file():
-                                # A backend can return normally without writing
-                                # its output; only an actual review file counts
-                                # as coverage, so the parse loop and
-                                # `completed_files` never see phantom outputs.
+                        if budget_reason:
+                            sweep_failures[file] = f"budget exhausted: {budget_reason}"
+                        elif not isinstance(structured, dict):
+                            sweep_failures[file] = "no structured output produced"
+                        else:
+                            issues = structured.get("issues")
+                            issues = issues if isinstance(issues, list) else []
+                            sweep_records_by_file[file] = issues
+                            # A backend can return normally without writing its
+                            # output; only an actual review file counts as
+                            # coverage, so `completed_files` never sees phantom
+                            # outputs (the review.md is a byproduct of the stub;
+                            # structured records ARE the authoritative output).
+                            if task_output.is_file():
                                 review_outputs[file] = task_output
-                            else:
-                                sweep_failures[file] = "no review output written"
-                        except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
-                            sweep_failures[file] = f"{type(exc).__name__}: {exc}"
+                    except Exception as exc:  # noqa: BLE001 -- parallel isolation; fail-open
+                        sweep_failures[file] = f"{type(exc).__name__}: {exc}"
 
             tg.start_soon(_sweep_one)
 
     if recorder is not None:
         recorder.create_dispatch_step(phase=DaydreamPhase.DEEP)
-
-    # Parse each sweep review with the uncovered-sweep schema (issue #742
-    # finding 2): it carries severity but NOT the per-file verdicts array. The
-    # sweep parse runs with ``include_verdicts=False`` and the prompt never
-    # teaches the verdicts shape, so PER_STACK_RECORD_SCHEMA's required
-    # ``verdicts`` field would be an untaught ask; UNCOVERED_SWEEP_SCHEMA drops
-    # only that requirement/property (severity is preserved so sweep records
-    # enter the arbiter/merge pool undifferentiated). Fail-open: unparseable or
-    # failed parses are dropped, never fatal; failures are tracked BY FILENAME
-    # into `sweep_failures`, not just the `parse_dropped` count.
-    parse_results: dict[str, list[dict[str, Any]]] = {}
-    parse_dropped = 0
-    parse_failures: dict[str, str] = {}
-
-    async def _parse_all() -> None:
-        nonlocal parse_dropped
-        async with anyio.create_task_group() as tg:
-            for i, (file, output_path) in enumerate(sorted(review_outputs.items())):
-                async def _parse_one(
-                    file: str = file,
-                    input_path: Path = output_path,
-                    i: int = i,
-                ) -> None:
-                    nonlocal parse_dropped
-                    async with limiter:
-                        async with maybe_fork(recorder, f"parse-uncovered-{i}"):
-                            try:
-                                records = await phase_parse_feedback(
-                                    parse_backend,
-                                    ctx.work,
-                                    input_path=input_path,
-                                    output_schema=UNCOVERED_SWEEP_SCHEMA,
-                                )
-                                parse_results[file] = records
-                            except Exception as exc:  # noqa: BLE001 -- fail-open drop
-                                parse_dropped += 1
-                                parse_failures[file] = (
-                                    f"parse failed: {type(exc).__name__}: {exc}"
-                                )
-
-                tg.start_soon(_parse_one)
-
-    await _parse_all()
 
     # Recompute coverage AFTER the sweep so the report shows the ratio the
     # sweep actually achieved (the ``deep-uncovered-*`` forks' completed reads
@@ -1818,10 +1719,10 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     # review produced output, a current empty records artifact is still written
     # so a stale file from a prior run cannot linger.
     sweep_records: list[dict[str, Any]] = []
-    for file in sorted(parse_results):
-        sweep_records.extend(parse_results[file])
-    stats["sweep_parse_dropped"] = parse_dropped
-    stats["sweep_failures"] = {**sweep_failures, **parse_failures}
+    for file in sorted(sweep_records_by_file):
+        sweep_records.extend(sweep_records_by_file[file])
+    stats["sweep_parse_dropped"] = 0
+    stats["sweep_failures"] = {**sweep_failures}
     stats["completed_files"] = sorted(review_outputs)
     # Issue #309 finding 6: per-file attempt status. A completed review output
     # is a completed ATTEMPT; only files with a verified post-sweep completed
