@@ -266,6 +266,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
                 if manifest.fix_quality_gate is not None
                 else None,
+                "recommended_patch_capture": manifest.recommended_patch_capture,
                 "total_prompt_tokens": manifest.total_prompt_tokens,
                 "total_completion_tokens": manifest.total_completion_tokens,
                 "total_cached_tokens": manifest.total_cached_tokens,
