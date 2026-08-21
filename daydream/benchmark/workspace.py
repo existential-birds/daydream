@@ -176,7 +176,7 @@ def workspace_status(root: Path) -> WorkspaceStatus:
         raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
 
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
-    state = derive_workspace_state(pull_requests=pr_dicts, cases=[])
+    state = derive_workspace_state(pull_requests=pr_dicts, cases=_case_curation_states(root, manifest))
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return WorkspaceStatus(
         workspace_state=state,
@@ -215,7 +215,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         return (1, f"corrupt: {exc}")
 
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
-    state = derive_workspace_state(pull_requests=pr_dicts, cases=[])
+    state = derive_workspace_state(pull_requests=pr_dicts, cases=_case_curation_states(root, manifest))
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
 
     if not resolved:
@@ -227,6 +227,27 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
 def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
     return {c.case_file for c in manifest.cases}
+
+
+def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[str, str]]:
+    """The ``curation.state`` per indexed case, for workspace-state derivation.
+
+    ``derive_workspace_state`` needs the real curation states (its ``ready`` /
+    ``stale`` / ``curating`` branches are driven by them); passing ``[]`` made
+    those branches unreachable so a fully curated workspace could never report
+    ``ready``. An unreadable or missing case document is treated as ``draft``
+    (conservatively curating) so a workspace cannot claim ``ready`` while any
+    case is not verifiably ready.
+    """
+    states: list[dict[str, str]] = []
+    for case in manifest.cases:
+        try:
+            raw = load_yaml_strict(root / case.case_file)
+            cs = raw.get("curation", {}).get("state")
+        except Exception:
+            cs = None
+        states.append({"curation_state": cs or "draft"})
+    return states
 
 
 def _scan_case_files(root: Path) -> set[Path]:

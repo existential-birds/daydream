@@ -475,9 +475,16 @@ _EVIDENCE_REASON = Literal[
 
 
 class _NoteForOther(BaseModel):
-    """Require a note on an exclusion model when ``reason == "other"``."""
+    """Require a note on an exclusion model when ``reason == "other"``.
+
+    ``reason`` / ``note`` are declared here so the shared validator typechecks;
+    concrete subclasses narrow ``reason`` to their own Literal.
+    """
 
     _exclusion_noun: ClassVar[str] = "exclusion"
+
+    reason: str
+    note: str | None = None
 
     @model_validator(mode="after")
     def _note_for_other(self) -> "_NoteForOther":

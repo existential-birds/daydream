@@ -108,3 +108,75 @@ def test_validate_missing_manifest_returns_1(tmp_path):
     (root / "benchmark.yaml").unlink()
     code, _ = validate_workspace(root)
     assert code == 1
+
+
+def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
+    """Build a workspace whose single indexed case carries ``curation_state``.
+
+    Reuses ``init_workspace`` for the base layout then resolves the source
+    identity and adds one ready/unready case so ``validate_workspace`` /
+    ``workspace_status`` exercise the case-driven readiness path (regression
+    for the finding that ``cases=[]`` made exit 0 unreachable).
+    """
+    import yaml
+
+    from daydream.benchmark.workspace import init_workspace
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    if resolved:
+        raw["source"]["repository_id"] = 12345
+        raw["source"]["visibility"] = "private"
+    case_id = "pr-000101-0123456789ab"
+    case_file = f"cases/{case_id}.yaml"
+    raw["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": case_file}]
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    (root / "cases").mkdir(parents=True, exist_ok=True)
+    (root / case_file).write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "case_id": case_id, "curation": {"state": curation_state}},
+            sort_keys=False,
+        )
+    )
+    return root
+
+
+def test_validate_ready_workspace_returns_0(tmp_path):
+    # A resolved, fully-curated workspace must be able to reach the documented
+    # exit 0 ("ready") — it was previously unreachable because derive_workspace_state
+    # was fed cases=[].
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    code, label = validate_workspace(root)
+    assert code == 0
+    assert label == "ready"
+
+
+def test_validate_curating_workspace_returns_2(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "draft")
+    code, label = validate_workspace(root)
+    assert code == 2
+    assert "incomplete" in label
+
+
+def test_validate_unresolved_but_ready_case_still_returns_2(tmp_path):
+    # Readiness of the cases does not trump an unresolved repository identity.
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready", resolved=False)
+    code, label = validate_workspace(root)
+    assert code == 2
+    assert "incomplete" in label
+
+
+def test_status_derives_ready_from_curated_cases(tmp_path):
+    from daydream.benchmark.workspace import workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    st = workspace_status(root)
+    assert st.workspace_state == "ready"
+    assert st.repository_identity_resolved is True

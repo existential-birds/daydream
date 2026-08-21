@@ -354,7 +354,15 @@ class Transaction:
         _fsync_file(self._journal_path())
 
     def begin_commit(self) -> None:
-        """Rewrite the journal ``committing``, then apply targets in ordered list."""
+        """Rewrite the journal ``committing``, then apply targets in ordered list.
+
+        Each target's ``applied_count`` is recorded in the journal *before* the
+        target is replaced, so a crash between the replace and the next journal
+        write still lets recovery roll that target back from its backup (the
+        journal already accounts for it). Journaling-after-apply would leave the
+        last-replaced file unrecoverable — a checksum-drifted mixed state the
+        journal's never-drift contract forbids.
+        """
         self._state = "committing"
         self._applied_count = 0
         self._write_journal()
@@ -363,13 +371,13 @@ class Transaction:
             st = self._states[rel]
             target = self._root / rel
             ensure_private_dir(target.parent)
-            os.replace(st.stage_path, target)
-            _fsync_file(target)
-            os.chmod(target, 0o600)
             st.applied = True
             self._applied_count += 1
             self._write_journal()
             _fsync_file(self._journal_path())
+            os.replace(st.stage_path, target)
+            _fsync_file(target)
+            os.chmod(target, 0o600)
         _fsync_dir(self._root)
 
     def commit(self) -> None:
