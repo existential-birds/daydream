@@ -339,7 +339,7 @@ never be conflated:
 Likewise the status fields split archive finalization from pipeline outcome:
 ``status`` is an alias of ``archive_status`` (was the run cleanly **archived**?)
 ``pipeline_status`` is the pipeline-outcome signal (``succeeded``/``failed``/
-``partial``/``cancelled``) — a run that merged-failed and never tested is cleanly
+``partial``/``cancelled``/``unknown``) — a run that merged-failed and never tested is cleanly
 archived but its **pipeline failed**.
 See ``daydream/archive/manifest.py`` for the authoritative field documentation.
 

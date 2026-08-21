@@ -80,19 +80,51 @@ def _test_state(target_dir: Path) -> dict[str, Any]:
     return {"ran": True, "status": _SUCCEEDED}
 
 
-def derive_phase_states(target_dir: Path, *, phase_events: list) -> dict[str, dict]:
+def _absent() -> dict[str, Any]:
+    """Return the neutral per-phase state for a phase this run did not execute."""
+    return {"ran": False, "status": _ABSENT}
+
+
+def derive_phase_states(
+    target_dir: Path,
+    *,
+    phase_events: list,
+    runs_merge: bool = True,
+    runs_fix: bool = True,
+    runs_test: bool = True,
+) -> dict[str, dict]:
     """Return per-phase terminal states for ``merge``, ``fix``, and ``test``.
 
     Each entry is ``{"ran": bool, "status": str}`` with status one of
     ``succeeded``/``failed``/``partial``/``absent``/``unknown``. Pure
     derivation over on-disk deep artifacts + recorder phase events; never
     raises on absent/malformed artifacts (they read as ``absent``).
+
+    The deep artifacts (``per-stack-failures.json`` / ``merged-items.json`` /
+    ``test-verdict.json`` / ``fix-failures.json``) are session-agnostic -- they
+    live in ``target_dir/.daydream/deep`` with no run-bound ``session_id``. A
+    non-deep flow run against a previously deep-reviewed repo would otherwise
+    inherit a PRIOR run's artifacts as its own pipeline state. ``runs_merge`` /
+    ``runs_fix`` / ``runs_test`` gate each phase read to only the phases the
+    current flow actually executes; a phase the flow never runs reads
+    ``absent`` (neutral) regardless of what stale artifacts sit on disk.
     """
     return {
-        "merge": _merge_state(target_dir),
-        "fix": _fix_state(target_dir, phase_events),
-        "test": _test_state(target_dir),
+        "merge": _merge_state(target_dir) if runs_merge else _absent(),
+        "fix": _fix_state(target_dir, phase_events) if runs_fix else _absent(),
+        "test": _test_state(target_dir) if runs_test else _absent(),
     }
+
+
+def _phase(phase_states: dict, name: str) -> dict:
+    """Return a phase's state dict, defaulting to ``{}`` when absent/malformed.
+
+    Unifies the two key styles used across ``derive_pipeline_status`` (reading
+    ``"status"`` vs ``"ran"``) into one spelling, so an absent phase entry
+    reads as an empty dict: ``.get("status")`` -> ``None`` and ``.get("ran")``
+    -> ``None`` both degrade to the all-absent case instead of raising.
+    """
+    return phase_states.get(name) or {}
 
 
 def derive_pipeline_status(
@@ -119,18 +151,18 @@ def derive_pipeline_status(
     """
     if archive_status == "partial" and not fix_failures:
         return "cancelled"
-    merge_status = (phase_states.get("merge") or {}).get("status")
-    test_status = (phase_states.get("test") or {}).get("status")
+    merge_status = _phase(phase_states, "merge").get("status")
+    test_status = _phase(phase_states, "test").get("status")
     if merge_status == _FAILED or test_status == _FAILED:
         return _FAILED
     if fix_failures:
         return _PARTIAL
-    if (runs_test and (phase_states.get("test") or {}).get("ran") is False) or (
-        runs_fix and (phase_states.get("fix") or {}).get("ran") is False
+    if (runs_test and _phase(phase_states, "test").get("ran") is False) or (
+        runs_fix and _phase(phase_states, "fix").get("ran") is False
     ):
         return _PARTIAL
     for name in ("merge", "fix", "test"):
-        status = (phase_states.get(name) or {}).get("status")
+        status = _phase(phase_states, name).get("status")
         if status is not None and status not in (_SUCCEEDED, _ABSENT):
             return _UNKNOWN
     # Only claim success when at least one derivable phase actually ran. A flow
@@ -138,7 +170,7 @@ def derive_pipeline_status(
     # phase evidence, so every phase reading ``absent`` means we cannot tell a
     # clean profile from an early aborted/failed run — report ``unknown``.
     if any(
-        (phase_states.get(name) or {}).get("status") == _SUCCEEDED
+        _phase(phase_states, name).get("status") == _SUCCEEDED
         for name in ("merge", "fix", "test")
     ):
         return _SUCCEEDED

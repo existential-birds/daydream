@@ -912,6 +912,32 @@ def run_build_corpus(config: BuildCorpusConfig) -> dict[str, int]:
         filters = replace(config.filters, pipeline_status=config.pipeline_status)
     else:
         filters = config.filters
+
+    # 3b. Surface the pipeline_status gate's exclusions. The CLI default
+    #     (``--pipeline-status succeeded``) is also the column default of
+    #     ``unknown`` for pre-existing legacy runs and non-review flows, so a
+    #     default build would otherwise silently drop them — give the count a
+    #     visible warning instead of an unqualified empty/excluded cohort.
+    effective_pipeline_status = filters.pipeline_status
+    if effective_pipeline_status is not None:
+        excluded_by_pipeline = count_runs(
+            archive_dir,
+            "pipeline_status != ? AND status = ?",
+            (effective_pipeline_status, filters.status),
+        )
+        if excluded_by_pipeline:
+            legacy_unknown = count_runs(
+                archive_dir,
+                "pipeline_status = ? AND status = ?",
+                ("unknown", filters.status),
+            )
+            print_warning(
+                console,
+                f"{excluded_by_pipeline} run(s) excluded by pipeline_status="
+                f"'{effective_pipeline_status}' (including {legacy_unknown} "
+                f"legacy run(s) with pipeline_status='unknown') are dropped from "
+                "the corpus",
+            )
     rows = _query_index(archive_dir, filters)
 
     # 5. Resolve the pinned annotation per row, apply the admission gate, build

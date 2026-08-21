@@ -2056,6 +2056,41 @@ def test_pipeline_status_precedence():
         {"merge": {"ran": True, "status": "succeeded"},
          "fix": {"ran": True, "status": "succeeded"},
          "test": {"ran": True, "status": "succeeded"}}) == "succeeded"
+    # all-absent (a flow that runs neither fix nor test and surfaced no phase
+    # evidence) -> unknown, never succeeded
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": False, "status": "absent"},
+         "fix": {"ran": False, "status": "absent"},
+         "test": {"ran": False, "status": "absent"}},
+        runs_fix=False, runs_test=False) == "unknown"
+    # an unexpected/unknown per-phase status drives the _UNKNOWN branch
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "unknown"},
+         "test": {"ran": True, "status": "succeeded"}}) == "unknown"
+
+
+def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path):
+    # Issue #336: derive_phase_states is flow-aware. A prior deep run left
+    # session-agnostic merge/fix/test artifacts in target_dir/.daydream/deep;
+    # a non-deep flow run afterwards must NOT inherit them as its own pipeline
+    # state -- the phases it does not run read absent regardless of disk.
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False})
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+    # TTT review runs the merge spine but never the fix/test cycle.
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[],
+                                          runs_merge=True, runs_fix=False, runs_test=False)
+    assert states["merge"]["status"] == "failed"   # merge ran (spine wrote fresh artifacts)
+    assert states["fix"] == {"ran": False, "status": "absent"}    # stale fix ignored
+    assert states["test"] == {"ran": False, "status": "absent"}   # stale test ignored
+    # An improve-only flow runs none of the deep phases at all.
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[],
+                                          runs_merge=False, runs_fix=False, runs_test=False)
+    assert all(s == {"ran": False, "status": "absent"} for s in states.values())
+
 
 
 def _deep(tmp_path: Path, name: str, data):

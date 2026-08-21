@@ -186,10 +186,37 @@ def _get_connection(archive_dir: Path) -> sqlite3.Connection:
     return conn
 
 
+def _project_daydream(daydream) -> dict:
+    """Project the ``manifest.daydream`` provenance onto per-column values.
+
+    Collapses the guarded-ternary projection ladder into one place so the five
+    ``daydream_*`` projections stay in sync with the ``_UPSERT_SQL`` column
+    list. ``None`` (no executable provenance captured) projects every field to
+    ``None``; ``daydream_dirty`` is stored as an int only when it is a real
+    bool so a sentinel (non-bool) dirty state persists as ``NULL``.
+    """
+    if daydream is None:
+        return {
+            "daydream_version": None,
+            "daydream_install_source": None,
+            "daydream_commit": None,
+            "daydream_dirty": None,
+            "daydream_container_digest": None,
+        }
+    dirty = daydream.dirty
+    return {
+        "daydream_version": daydream.version,
+        "daydream_install_source": daydream.install_source,
+        "daydream_commit": daydream.commit,
+        "daydream_dirty": int(dirty) if isinstance(dirty, bool) else None,
+        "daydream_container_digest": daydream.container_digest,
+    }
+
+
 def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     """Insert or replace a run entry from a Manifest.
 
-    Bool fields (review_only, deep) are mapped to integers (0/1)
+    Bool fields (review_only, deep) are normalized to integers (0/1)
     for SQLite storage.
     """
     conn = _get_connection(archive_dir)
@@ -206,21 +233,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "phase_states": json.dumps(manifest.phase_states)
                 if manifest.phase_states is not None
                 else None,
-                "daydream_version": daydream.version
-                if daydream is not None
-                else None,
-                "daydream_install_source": daydream.install_source
-                if daydream is not None
-                else None,
-                "daydream_commit": daydream.commit
-                if daydream is not None
-                else None,
-                "daydream_dirty": int(daydream.dirty)
-                if daydream is not None and isinstance(daydream.dirty, bool)
-                else None,
-                "daydream_container_digest": daydream.container_digest
-                if daydream is not None
-                else None,
+                **_project_daydream(daydream),
                 "run_flow": manifest.run_flow,
                 "skill": manifest.skill,
                 "model": manifest.model,
