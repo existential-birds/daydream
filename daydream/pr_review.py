@@ -510,8 +510,6 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
 
     return None
 
-
-_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 # Splits a unified diff on each `diff --git` header so we can pick out the
 # block for a single file from a full-PR diff.
 _DIFF_BLOCK_SPLIT = re.compile(r"(?m)^(?=diff --git )")
@@ -606,14 +604,17 @@ def pr_changed_files(target_dir: Path, pr: PRInfo) -> set[str]:
 
 
 def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
-    hunks: list[tuple[int, int]] = []
-    for m in _HUNK_HEADER.finditer(diff_text):
-        start = int(m.group(1))
-        count = int(m.group(2)) if m.group(2) else 1
-        if count == 0:
-            continue
-        hunks.append((start, start + count - 1))
-    return hunks
+    """Head-side inclusive hunk ranges for a (single-file) diff block.
+
+    Delegates to the shared unified-diff parser in ``daydream.hunk_index``
+    (``head_side_ranges(parse_hunks(...))``) so pr_review, quote_scrub and
+    coverage all count from the same source. The contract is unchanged: a
+    ``list[tuple[int, int]]`` of ``(new_start, new_start + count - 1)`` ranges
+    in diff order.
+    """
+    from daydream.hunk_index import head_side_ranges, parse_hunks
+
+    return head_side_ranges(parse_hunks(diff_text))
 
 
 def snap_to_hunk(

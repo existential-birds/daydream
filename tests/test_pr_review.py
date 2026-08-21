@@ -259,6 +259,25 @@ def test_parse_hunks() -> None:
     assert _parse_hunks(diff) == [(10, 14), (30, 31)]
 
 
+def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    import daydream.hunk_index as hunk_index
+
+    calls = {"n": 0}
+    real = hunk_index.parse_hunks
+
+    def spy(diff_text):
+        calls["n"] += 1
+        return real(diff_text)
+
+    monkeypatch.setattr(hunk_index, "parse_hunks", spy)
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
+    )
+    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
+    assert calls["n"] == 1, "_parse_hunks must delegate to the shared parser"
+
+
 def test_snap_to_hunk_inside_returns_unchanged() -> None:
     hunks = [(10, 20), (30, 40)]
     assert snap_to_hunk(15, hunks) == 15
