@@ -576,3 +576,41 @@ def test_build_corpus_pipeline_status_gate_excludes_failed_pipelines(tmp_path, a
     ))
     lines2 = [line for line in out2.read_text().splitlines() if line.strip()]
     assert len(lines2) == 2
+
+
+def test_cli_build_corpus_default_excludes_failed_pipelines(tmp_path, archive_dir):
+    """Finding #8: the corpus build CLI gates on pipeline_status='succeeded' by
+    default, so a default build drops merge-failed runs (archived status=complete
+    but pipeline_status=failed) rather than admitting them into training data.
+
+    The config-level knob already exists; this pins that the CLI *wires* it with
+    a safe default instead of leaving it opt-in only.
+    """
+    from daydream.cli import _handle_build_corpus_command
+
+    _seed_run_with_annotation(archive_dir, "ok-run", label="accepted",
+                              observed_at="2026-03-01T00:00:00+00:00",
+                              valid_at="2026-03-01T00:00:00+00:00",
+                              pipeline_status="succeeded")
+    _seed_run_with_annotation(archive_dir, "bad-run", label="accepted",
+                              observed_at="2026-03-01T00:00:00+00:00",
+                              valid_at="2026-03-01T00:00:00+00:00",
+                              pipeline_status="failed")
+    out = tmp_path / "corpus.jsonl"
+    # No --pipeline-status passed: the CLI default ('succeeded') must apply and
+    # drop the merge-failed run.
+    rc = _handle_build_corpus_command(["--out", str(out)])
+    assert rc == 0
+    lines = [line for line in out.read_text().splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["session_id"] == "ok-run"
+
+    # An explicit override proves the flag threads through to the SQL gate.
+    out2 = tmp_path / "corpus-failed.jsonl"
+    rc2 = _handle_build_corpus_command(
+        ["--out", str(out2), "--pipeline-status", "failed"]
+    )
+    assert rc2 == 0
+    lines2 = [line for line in out2.read_text().splitlines() if line.strip()]
+    assert len(lines2) == 1
+    assert json.loads(lines2[0])["session_id"] == "bad-run"

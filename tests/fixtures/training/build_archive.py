@@ -128,6 +128,7 @@ def _build_manifest(session: FixtureSession, session_dir: Path) -> Manifest:
         session_id=session.session_id,
         archived_at=ARCHIVED_AT,
         status=session.status,
+        pipeline_status="succeeded",
         skill=session.skill,
         repo_slug=session.repo_slug,
         branch="feat/x",
