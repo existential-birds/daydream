@@ -18,7 +18,7 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import install_stub_backend
 
 
-def _numeric(name: str) -> tuple[int, ...]:
+def _numeric(name: str) -> tuple[float, ...]:
     """Natural sort: mod10.py orders after mod9.py (lexicographic would place
     mod10 before mod2, diverging from the plan's numeric ordering)."""
     return tuple(
