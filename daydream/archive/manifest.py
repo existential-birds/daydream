@@ -547,7 +547,11 @@ def build_manifest(
         recommended_patch_capture=(
             recommended_capture
             if recommended_capture
-            else ("pre_test" if runs_fix else None)
+            else (
+                "pre_test"
+                if runs_fix and recorder.run_flow is not DaydreamRunFlow.PR
+                else None
+            )
         ),
         source_path=source_path,
         remote_url=git_ctx.remote_url,

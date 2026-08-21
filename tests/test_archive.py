@@ -980,6 +980,17 @@ def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path):
     assert m.to_dict()["recommended_patch_capture"] == "post_test"
 
 
+def test_feedback_run_leaves_recommended_patch_capture_none():
+    """PR/feedback runs never produce a pre-test fix-phase capture, so an
+    absent sidecar must leave ``recommended_patch_capture`` ``None`` rather
+    than defaulting to ``"pre_test"`` (feedback's ``_step_fix_items`` never
+    writes ``recommended.patch``)."""
+    recorder = _MockRecorder(run_flow=DaydreamRunFlow.PR)
+    m = _build(tmp_path=Path("/tmp"), recorder=recorder)
+    assert m.recommended_patch_capture is None
+    assert "recommended_patch_capture" not in m.to_dict()
+
+
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))
