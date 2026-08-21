@@ -2799,6 +2799,32 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert "[cross-stack]" in cross_section
 
 
+async def test_deep_run_writes_hunk_index_after_diff(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persisted hunk index is written right after diff materialization.
+
+    Real-path: drive a minimal deep run and assert the index exists alongside
+    ``diff.patch``, is not older than it, and reflects the actual changed files.
+    """
+    from daydream.hunk_index import load_hunk_index
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    idx_path = multi_stack_target / ".daydream" / "hunk-index.json"
+    diff_path = multi_stack_target / ".daydream" / "diff.patch"
+    assert idx_path.is_file() and diff_path.is_file()
+    # Ordering invariant: the index is not older than the patch it derives from.
+    assert idx_path.stat().st_mtime >= diff_path.stat().st_mtime
+    idx = load_hunk_index(multi_stack_target / ".daydream")
+    assert idx, "hunk index must reflect the run's changed files"
+    assert "api.py" in idx or "README.md" in idx
+
+
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
 
 

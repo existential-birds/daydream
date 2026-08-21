@@ -4360,6 +4360,7 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     from daydream import git_ops
     from daydream.backends import Backend
     from daydream.git_ops import GitError, GitTimeoutError
+    from daydream.hunk_index import write_hunk_index
     from daydream.phases import _git_branch, _git_log
     from daydream.runner import (
         _default_backend_name,
@@ -4398,6 +4399,10 @@ async def _run_review_spine(config: RunConfig, work: WorkContext, mode: str) -> 
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
+    # Persist the hunk index immediately after the diff bytes, so the run-time
+    # authority (changed file/line ranges) is available to every later step
+    # (reviews, arbiter, merge, uncovered sweep) and never predates the patch.
+    write_hunk_index(daydream_dir, diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
     # it at both the exploration step's gate and the alternatives step's gate.
     tier = select_tier(count_changed_files(diff))
