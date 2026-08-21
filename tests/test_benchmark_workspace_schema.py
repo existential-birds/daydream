@@ -6,7 +6,12 @@ from pydantic import ValidationError
 
 from daydream.benchmark.schema import (
     BenchmarkManifest,
+    CaseDocument,
     PullRequestEntry,
+    case_id_for,
+    derive_finding_id,
+    derive_gold_mode,
+    derive_gold_status,
     normalize_hostname,
 )
 
@@ -120,3 +125,199 @@ def test_ledger_entry_valid_and_fetch_failed_error_shape():
         error={"code": "E_AUTH", "message": "no access"},
     )
     assert failed.error["code"] == "E_AUTH"
+
+
+def _valid_case_dict():
+    return {
+        "schema_version": 1,
+        "case_id": "pr-000101-0123456789ab",
+        "pull_request": {"number": 101, "url": "https://github.com/O/R/pull/101", "title": "Fix cache"},
+        "snapshot": {
+            "status": "ready",
+            "policy": "final_pr_head",
+            "requested_head": "final",
+            "original_base_sha": "0123456789abcdef0123456789abcdef01234567",
+            "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+            "base_tree_sha": "0000000000000000000000000000000000000001",
+            "head_tree_sha": "0000000000000000000000000000000000000002",
+            "diff_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bundle_file": "snapshots/pr-000101-0123456789ab.bundle",
+            "bundle_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "error": None,
+        },
+        "source": {
+            "import_file": "imports/pr-101.json",
+            "import_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        },
+        "curation": {
+            "state": "ready",
+            "snapshot_attested": True,
+            "clean_attested": False,
+            "gold_status": "findings",
+            "findings": [
+                {
+                    "finding_id": _finding_id_for(
+                        "Cache misses", "The cache layers never populate.", "high", "src/cache.py", 2, 2
+                    ) or "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "title": "Cache misses",
+                    "body": "The cache layers never populate.",
+                    "severity": "high",
+                    "location": {"path": "src/cache.py", "start_line": 2, "end_line": 2},
+                    "provenance": {"kind": "edited", "source_ids": ["github:review_comment:1"]},
+                }
+            ],
+            "exclusions": [],
+            "case_exclusion": None,
+        },
+    }
+
+
+def _finding_id_for(title, body, severity, path, start_line, end_line):
+    return derive_finding_id(
+        {
+            "title": title,
+            "body": body,
+            "severity": severity,
+            "location": {"path": path, "start_line": start_line, "end_line": end_line},
+        }
+    )
+
+
+def _valid_case():
+    return CaseDocument.model_validate(_valid_case_dict())
+
+
+def test_case_id_derivation():
+    assert case_id_for(101, "0123456789abcdef0123456789abcdef01234567") == "pr-000101-0123456789ab"
+
+
+def test_ready_snapshot_valid():
+    doc = _valid_case()
+    assert doc.snapshot.status == "ready"
+    assert doc.curation.state == "ready"
+
+
+def test_ready_snapshot_rejects_missing_bundle_fields():
+    # Re-validate from a raw dict so a missing required field is caught.
+    raw = _valid_case_dict()
+    raw["snapshot"].pop("bundle_file")
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_unreplayable_snapshot_requires_error_and_null_bundle():
+    raw = _valid_case_dict()
+    raw["snapshot"] = {
+        "status": "unreplayable",
+        "policy": "final_pr_head",
+        "requested_head": "final",
+        "original_base_sha": None,
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None,
+        "head_tree_sha": None,
+        "diff_sha256": None,
+        "bundle_file": None,
+        "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
+    }
+    doc = CaseDocument.model_validate(raw)
+    assert doc.snapshot.status == "unreplayable"
+
+
+def test_unreplayable_with_ready_fields_rejected():
+    raw = _valid_case_dict()
+    raw["snapshot"]["status"] = "unreplayable"
+    raw["snapshot"]["error"] = {"reason": "equal_trees", "detail": "no change"}
+    raw["snapshot"]["bundle_file"] = "snapshots/pr-000101-0123456789ab.bundle"  # must be null
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_curation_unreplayable_requires_state_unreplayable():
+    raw = _valid_case_dict()
+    raw["snapshot"] = {
+        "status": "unreplayable",
+        "policy": "final_pr_head",
+        "requested_head": "final",
+        "original_base_sha": None,
+        "original_head_sha": None,
+        "base_tree_sha": None,
+        "head_tree_sha": None,
+        "diff_sha256": None,
+        "bundle_file": None,
+        "bundle_sha256": None,
+        "error": {"reason": "bundle_failure", "detail": "could not bundle"},
+    }
+    raw["curation"]["state"] = "ready"  # violates: must be unreplayable when snapshot unreplayable
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_finding_title_and_body_limits():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["title"] = "x" * 501
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+    raw2 = _valid_case_dict()
+    raw2["curation"]["findings"][0]["body"] = "y" * (8 * 1024 + 1)
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
+def test_finding_rejects_nul_in_title():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["title"] = "bad\x00title"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_finding_severity_enum():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["severity"] = "critical"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_finding_location_must_be_relative_and_ordered():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["location"] = {"path": "/abs/path.py", "start_line": 2, "end_line": 2}
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+    raw2 = _valid_case_dict()
+    raw2["curation"]["findings"][0]["location"] = {"path": "src/cache.py", "start_line": 5, "end_line": 2}
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
+def test_finding_id_sha256_and_duplicate_rejection():
+    f = _valid_case().curation.findings[0]
+    expected = derive_finding_id(f)
+    assert f.finding_id == expected
+    # duplicate canonical finding in one case rejected
+    raw = _valid_case_dict()
+    raw["curation"]["findings"].append(raw["curation"]["findings"][0])
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_historical_daydream_marker_cannot_be_gold():
+    from daydream.pr_review import finding_marker
+
+    raw = _valid_case_dict()
+    body = "looks fine"
+    raw["curation"]["findings"][0] = {
+        "finding_id": "0" * 64,
+        "title": "Daydream self-output",
+        "body": body + finding_marker("a" * 64),
+        "severity": None,
+        "location": None,
+        "provenance": {"kind": "historical", "source_ids": ["github:review_comment:1"]},
+    }
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_gold_status_and_mode_derived():
+    case = _valid_case()  # ready, 1 finding, clean_attested=False
+    assert derive_gold_status(case.curation) == "findings"
+    assert derive_gold_mode(case.curation) == "historical"

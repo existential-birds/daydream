@@ -1,21 +1,30 @@
 """Strict Pydantic schemas for the private benchmark workspace.
 
-This module owns the workspace's ``benchmark.yaml`` manifest shape and its
-invariants: host normalization, the ``source``/``privacy`` blocks, the PR
-ledger (``pull_requests``), and the case index (``cases``). Every model uses
-``extra="forbid"`` so an unknown field is a schema violation, never silently
-ignored. Later tasks add the snapshot union, case/gold/provenance/exclusion
-models, derived state, transitions, and the ``0/2/1`` validation classifier.
+This module owns the ``benchmark.yaml`` manifest and ``cases/*.yaml`` case
+schemas plus their invariants:
+
+* ``normalize_hostname`` and the manifest ``source``/``privacy`` blocks.
+* the ``pull_requests[]`` ledger and ``cases[]`` index.
+* the snapshot ``ready | unreplayable`` union, the case/gold/provenance/
+  exclusion models, ``case_id`` / finding-id derivation, and the Daydream
+  self-marker rule.
+
+Every model uses ``extra="forbid"`` so an unknown field is a schema violation.
+Later tasks add derived workspace state, transitions, and the ``0/2/1``
+classifier.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from daydream.pr_review import FINDING_MARKER_RE
 
 __all__ = [
     "Source",
@@ -24,20 +33,29 @@ __all__ = [
     "CaseIndexEntry",
     "BenchmarkManifest",
     "normalize_hostname",
+    "case_id_for",
+    "CaseDocument",
+    "Snapshot",
+    "SnapshotReady",
+    "SnapshotUnreplayable",
+    "derive_finding_id",
+    "derive_gold_status",
+    "derive_gold_mode",
 ]
 
 _REPOSITORY_SHAPE = re.compile(r"^[^/]+/[^/]+$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
+_EMPTY_OR_NUL = re.compile(r"[\x00]")
+
 
 def normalize_hostname(raw: str) -> str:
-    """Normalize a DNS hostname, stripping scheme/credentials/port/path.
+    """Normalize a DNS hostname, stripping scheme/credentials/port/query path.
 
     Lowers the host, drops ``<scheme>://``, ``user:pass@``, ``:port`` and a
     trailing ``/path``. Rejects empty strings, wildcards, embedded whitespace,
-    and a result with no dot-bearing host segment (so a bare single label like
-    ``localhost`` is rejected, but ``api.anthropic.com`` is kept).
+    and a result with no dot-bearing host segment.
     """
     if not isinstance(raw, str):
         raise ValueError(f"hostname must be a string, got {raw!r}")
@@ -67,6 +85,11 @@ def _normalize_host_list(values: list[str], what: str) -> list[str]:
     return [normalize_hostname(str(h)) for h in values]
 
 
+# ---------------------------------------------------------------------------
+# manifest blocks
+# ---------------------------------------------------------------------------
+
+
 class Source(BaseModel):
     """Immutable repository identity for the workspace's forge (github.com)."""
 
@@ -94,7 +117,7 @@ class Source(BaseModel):
 
 
 class Privacy(BaseModel):
-    """Privacy/egress configuration: classification, reviewer/judge data + hosts."""
+    """Privacy / egress configuration for a private benchmark."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -185,7 +208,389 @@ class BenchmarkManifest(BaseModel):
 
     @model_validator(mode="after")
     def _cases_ordered(self) -> "BenchmarkManifest":
-        ordered = sorted(self.cases, key=lambda c: (c.pr_number, c.case_id))
+        def _cases_key(c: CaseIndexEntry) -> tuple[int, str, str]:
+            return (c.pr_number, head_sha_from_case_id(c.case_id), c.case_id)
+
+        ordered = sorted(self.cases, key=_cases_key)
         if [c.case_id for c in ordered] != [c.case_id for c in self.cases]:
-            raise ValueError("cases[] index must be sorted by (pr_number, case_id)")
+            raise ValueError("cases[] index must be sorted by (pr_number, head-sha, case_id)")
         return self
+
+
+# ---------------------------------------------------------------------------
+# ID derivation
+# ---------------------------------------------------------------------------
+
+
+def case_id_for(pr_number: int, head_sha: str) -> str:
+    """Derive the canonical ``case_id`` ``pr-<6-digit>-<first-12-hex>``."""
+    if not _HEX40.fullmatch(head_sha):
+        raise ValueError(f"head SHA must be lowercase 40-hex, got {head_sha!r}")
+    return f"pr-{pr_number:06d}-{head_sha[:12]}"
+
+
+def head_sha_from_case_id(case_id: str) -> str:
+    """Extract the 12-hex head-sha prefix from a canonical ``case_id``."""
+    return case_id.rsplit("-", 1)[-1]
+
+
+def _loc_parts(loc: "Location | dict | None") -> tuple[str, str, str]:
+    if loc is None:
+        return ("", "", "")
+    if isinstance(loc, dict):
+        return (
+            str(loc.get("path") or ""),
+            str(loc.get("start_line") or ""),
+            str(loc.get("end_line") or ""),
+        )
+    return (str(loc.path), str(loc.start_line), str(loc.end_line))
+
+
+def _field_of(value: "Finding | dict", name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def derive_finding_id(finding: "Finding | dict") -> str:
+    """sha256 over the canonical (title, body, severity, path, start/end) tuple.
+
+    Nulls are normalized to the empty string; ``finding_id`` must equal this
+    digest so a case's findings are content-addressable and dedupe-friendly.
+    """
+    payload = "\x1f".join(
+        [
+            str(_field_of(finding, "title") or ""),
+            str(_field_of(finding, "body") or ""),
+            str(_field_of(finding, "severity") or ""),
+            *_loc_parts(_field_of(finding, "location")),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# snapshot union
+# ---------------------------------------------------------------------------
+
+
+class _SnapshotBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str
+    policy: str
+    requested_head: str
+
+    @field_validator("policy")
+    @classmethod
+    def _policy_nonblank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("policy must not be blank")
+        return v
+
+
+class SnapshotReady(_SnapshotBase):
+    status: Literal["ready"]
+    original_base_sha: str
+    original_head_sha: str
+    base_tree_sha: str
+    head_tree_sha: str
+    diff_sha256: str
+    bundle_file: str
+    bundle_sha256: str
+    error: None = None
+
+    @field_validator(
+        "original_base_sha", "original_head_sha", "base_tree_sha", "head_tree_sha"
+    )
+    @classmethod
+    def _sha40(cls, v: str) -> str:
+        if not _HEX40.fullmatch(v):
+            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
+        return v
+
+    @field_validator("diff_sha256", "bundle_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        if not _HEX64.fullmatch(v):
+            raise ValueError(f"digest must be lowercase 64-hex, got {v!r}")
+        return v
+
+
+_SNAPSHOT_ERROR_REASON = Literal[
+    "head_unreachable",
+    "head_not_on_pr",
+    "base_unreachable",
+    "missing_object",
+    "equal_trees",
+    "empty_diff",
+    "bundle_failure",
+]
+
+
+class _SnapshotError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: _SNAPSHOT_ERROR_REASON
+    detail: str
+
+
+class SnapshotUnreplayable(_SnapshotBase):
+    status: Literal["unreplayable"]
+    original_base_sha: str | None = None
+    original_head_sha: str | None = None
+    base_tree_sha: None = None
+    head_tree_sha: None = None
+    diff_sha256: None = None
+    bundle_file: None = None
+    bundle_sha256: None = None
+    error: _SnapshotError
+
+    @field_validator("original_base_sha", "original_head_sha")
+    @classmethod
+    def _sha40_nullable(cls, v: str | None) -> str | None:
+        if v is not None and not _HEX40.fullmatch(v):
+            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
+        return v
+
+
+Snapshot = Annotated[SnapshotReady | SnapshotUnreplayable, Field(discriminator="status")]
+
+# ---------------------------------------------------------------------------
+# location / finding / provenance / exclusions
+# ---------------------------------------------------------------------------
+
+
+class Location(BaseModel):
+    """A POSIX-relative source location with a positive ordered line span."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    start_line: int
+    end_line: int
+
+    @field_validator("path")
+    @classmethod
+    def _relative_path(cls, v: str) -> str:
+        if not v:
+            raise ValueError("location path must not be blank")
+        if v.startswith("/") or (":" in v and not v.startswith("http")):
+            raise ValueError(f"location path must be relative, got {v!r}")
+        if v == ".." or v.startswith("../") or "/../" in v or v.endswith("/.."):
+            raise ValueError(f"location path must not contain '..' segments: {v!r}")
+        if "\x00" in v:
+            raise ValueError("location path must not contain NUL")
+        return v
+
+    @model_validator(mode="after")
+    def _ordered(self) -> "Location":
+        if self.start_line < 1 or self.end_line < 1:
+            raise ValueError("start_line/end_line must be positive")
+        if self.start_line > self.end_line:
+            raise ValueError("start_line must be <= end_line")
+        return self
+
+
+_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_./:-]+$")
+
+
+class Provenance(BaseModel):
+    """Where a finding came from (historical review output, edited, or authored)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["historical", "edited", "authored"]
+    source_ids: list[str] = []
+
+    @model_validator(mode="after")
+    def _cardinality(self) -> "Provenance":
+        if self.kind == "historical" and len(self.source_ids) != 1:
+            raise ValueError("historical provenance requires exactly one source ID")
+        if self.kind == "edited" and len(self.source_ids) < 1:
+            raise ValueError("edited provenance requires at least one source ID")
+        return self
+
+
+class Finding(BaseModel):
+    """A single gold finding (or an authored/edited candidate)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    title: str
+    body: str
+    severity: Literal["high", "medium", "low"] | None = None
+    location: Location | None = None
+    provenance: Provenance
+
+    @field_validator("finding_id")
+    @classmethod
+    def _id_hex(cls, v: str) -> str:
+        if not _HEX64.fullmatch(v):
+            raise ValueError(f"finding_id must be 64-hex, got {v!r}")
+        return v
+
+    @field_validator("title")
+    @classmethod
+    def _title_limit(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("title must not be blank")
+        if "\x00" in v:
+            raise ValueError("title must not contain NUL")
+        if len(v.encode("utf-8")) > 500:
+            raise ValueError("title exceeds 500 UTF-8 bytes")
+        return v
+
+    @field_validator("body")
+    @classmethod
+    def _body_limit(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("body must not be blank")
+        if "\x00" in v:
+            raise ValueError("body must not contain NUL")
+        if len(v.encode("utf-8")) > 8 * 1024:
+            raise ValueError("body exceeds 8 KiB")
+        return v
+
+    @model_validator(mode="after")
+    def _canonical_id(self) -> "Finding":
+        if self.finding_id != derive_finding_id(self):
+            raise ValueError("finding_id is not the canonical sha256")
+        if self.provenance.kind == "historical":
+            text = f"{self.title}\n{self.body}"
+            if FINDING_MARKER_RE.search(text):
+                raise ValueError("historical findings must not carry the Daydream self-marker")
+        return self
+
+
+_EVIDENCE_REASON = Literal[
+    "fixed_before_snapshot",
+    "not_actionable",
+    "incorrect",
+    "duplicate",
+    "style_only",
+    "out_of_scope",
+    "other",
+]
+
+
+class EvidenceExclusion(BaseModel):
+    """A reason an individual finding/evidence item was excluded from gold."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    reason: _EVIDENCE_REASON
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _note_for_other(self) -> "EvidenceExclusion":
+        if self.reason == "other" and not self.note:
+            raise ValueError("evidence exclusion with reason 'other' requires a note")
+        return self
+
+
+_CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case", "other"]
+
+
+class CaseExclusion(BaseModel):
+    """Why an entire case was excluded from the dataset."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: _CASE_EXCLUSION_REASON
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _note_for_other(self) -> "CaseExclusion":
+        if self.reason == "other" and not self.note:
+            raise ValueError("case exclusion with reason 'other' requires a note")
+        return self
+
+
+class Curation(BaseModel):
+    """Curated gold state for one case."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["draft", "ready", "stale", "excluded", "unreplayable"]
+    snapshot_attested: bool = False
+    clean_attested: bool = False
+    gold_status: Literal["findings", "clean"] | None = None
+    findings: list[Finding] = []
+    exclusions: list[EvidenceExclusion] = []
+    case_exclusion: CaseExclusion | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "Curation":
+        if self.case_exclusion is not None and self.state != "excluded":
+            raise ValueError("case_exclusion is only valid when state == 'excluded'")
+        if self.gold_status == "findings":
+            if not self.findings or self.clean_attested:
+                raise ValueError("gold_status 'findings' requires >=1 finding and clean_attested=False")
+        elif self.gold_status == "clean":
+            if self.findings or not self.clean_attested:
+                raise ValueError("gold_status 'clean' requires zero findings and clean_attested=True")
+        elif self.state == "draft":
+            if self.gold_status is not None or self.clean_attested:
+                raise ValueError("draft curation must have gold_status None and clean_attested=False")
+        return self
+
+
+class CaseDocument(BaseModel):
+    """One ``cases/<case-id>.yaml`` document."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    case_id: str
+    pull_request: dict
+    snapshot: Snapshot
+    source: dict
+    curation: Curation
+
+    @model_validator(mode="after")
+    def _case_id_matches(self) -> "CaseDocument":
+        pr_number = int(self.pull_request["number"])
+        head = snapshot_head_sha(self.snapshot)
+        if head is None:
+            raise ValueError("snapshot carries no head SHA to derive case_id")
+        expected = case_id_for(pr_number, head)
+        if self.case_id != expected:
+            raise ValueError(f"case_id {self.case_id!r} mismatches {expected!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _unique_findings(self) -> "CaseDocument":
+        ids = [f.finding_id for f in self.curation.findings]
+        if len(set(ids)) != len(ids):
+            raise ValueError("case contains duplicate canonical findings")
+        return self
+
+
+def snapshot_head_sha(snapshot: "SnapshotReady | SnapshotUnreplayable") -> str | None:
+    """The 40-hex head SHA of a snapshot, or None when unknown (unreplayable)."""
+    if snapshot.status == "ready":
+        return snapshot.original_head_sha
+    return snapshot.original_head_sha
+
+
+def derive_gold_status(curation: Curation) -> str | None:
+    """Yes: findings (>=1 finding), clean (0 findings + attested), else draft none."""
+    if curation.findings:
+        return "findings"
+    if not curation.findings and curation.clean_attested:
+        return "clean"
+    return None
+
+
+def derive_gold_mode(curation: Curation) -> str:
+    """Derive the gold provenance mode of a curation's findings."""
+    kinds = {f.provenance.kind for f in curation.findings}
+    if not kinds:
+        return "clean"
+    if kinds == {"authored"}:
+        return "authored"
+    if "authored" in kinds:
+        return "mixed"
+    return "historical"
