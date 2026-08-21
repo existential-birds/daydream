@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 import warnings
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _PRECEDENCE_ORDER = "CASE WHEN source = 'human' THEN 1 ELSE 0 END DESC, observed_at DESC"
 """SQL ORDER BY expression that ranks label_observations by human-first precedence then recency.
@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS runs (
     erosion REAL,
     verbosity REAL,
     fix_quality_gate TEXT,
+    recommended_patch_capture TEXT,
     total_prompt_tokens INTEGER,
     total_completion_tokens INTEGER,
     total_cached_tokens INTEGER,
@@ -140,7 +141,7 @@ INSERT OR REPLACE INTO runs (
     review_only, deep, remote_url, repo_slug, source_path, branch, base_branch,
     head_sha, base_sha, changed_files, pr_number, pr_repo, total_cost_usd, total_findings,
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
-    erosion, verbosity, fix_quality_gate,
+    erosion, verbosity, fix_quality_gate, recommended_patch_capture,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
     outcome_labels, labeled_at, composite_reward, archive_path, schema_version
 ) VALUES (
@@ -151,7 +152,7 @@ INSERT OR REPLACE INTO runs (
     :review_only, :deep, :remote_url, :repo_slug, :source_path, :branch, :base_branch,
     :head_sha, :base_sha, :changed_files, :pr_number, :pr_repo, :total_cost_usd, :total_findings,
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
-    :erosion, :verbosity, :fix_quality_gate,
+    :erosion, :verbosity, :fix_quality_gate, :recommended_patch_capture,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
     :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version
 )
@@ -200,6 +201,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("erosion", "REAL"),
             ("verbosity", "REAL"),
             ("fix_quality_gate", "TEXT"),
+            ("recommended_patch_capture", "TEXT"),
             ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),
             ("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'"),
             ("phase_states", "TEXT"),

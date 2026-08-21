@@ -889,6 +889,34 @@ def test_runs_fix_quality_gate_column_migrates_existing_db(tmp_path: Path):
     assert json.loads(row["fix_quality_gate"]) == gate
 
 
+def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path):
+    upsert_run(tmp_path, make_manifest(session_id="s-cap", recommended_patch_capture="post_test"))
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-cap",))[0]
+    assert row["recommended_patch_capture"] == "post_test"
+
+
+def test_runs_recommended_patch_capture_column_migrates_existing_db(tmp_path: Path):
+    from daydream.archive.index import _CREATE_TABLE
+
+    legacy_ddl = _CREATE_TABLE.replace("    recommended_patch_capture TEXT,\n", "")
+    assert "recommended_patch_capture" not in legacy_ddl
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    conn.execute(legacy_ddl)
+    conn.execute(
+        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        ("legacy-cap-run", "2026-01-01T00:00:00Z", "normal", str(tmp_path / "legacy-cap-run")),
+    )
+    conn.commit()
+    conn.close()
+
+    upsert_run(tmp_path, make_manifest(session_id="s-mig-cap", recommended_patch_capture="pre_test"))
+
+    legacy = query_runs(tmp_path, where="session_id = ?", params=("legacy-cap-run",))[0]
+    assert legacy["recommended_patch_capture"] is None  # pre-existing row preserved, column nullable
+    row = query_runs(tmp_path, where="session_id = ?", params=("s-mig-cap",))[0]
+    assert row["recommended_patch_capture"] == "pre_test"
+
+
 def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path):
     """#329: only an artifact bound to the current session is read.
 
@@ -916,6 +944,51 @@ def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path):
     gate_p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
 
     assert _read_fix_quality_gate(tmp_path, "sess-42") is None
+
+
+def test_read_recommended_capture_requires_matching_session(tmp_path: Path):
+    from daydream.archive import _read_recommended_capture
+
+    cap = {"session_id": "sess-42", "capture_point": "post_test"}
+    p = tmp_path / ".daydream" / "deep" / "recommended-capture.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps(cap))
+
+    assert _read_recommended_capture(tmp_path, "sess-42") == cap
+    assert _read_recommended_capture(tmp_path, "sess-other") is None
+    assert _read_recommended_capture(tmp_path, None) is None
+
+
+def test_read_recommended_capture_absent_is_none(tmp_path: Path):
+    from daydream.archive import _read_recommended_capture
+
+    assert _read_recommended_capture(tmp_path, "sess-42") is None
+
+
+def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path):
+    m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
+    assert m.recommended_patch_capture == "pre_test"
+    assert m.to_dict()["recommended_patch_capture"] == "pre_test"
+
+
+def test_manifest_recommended_patch_capture_omitted_when_none():
+    assert "recommended_patch_capture" not in Manifest().to_dict()
+
+
+def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path):
+    m = _build(tmp_path, recommended_capture="post_test")
+    assert m.to_dict()["recommended_patch_capture"] == "post_test"
+
+
+def test_feedback_run_leaves_recommended_patch_capture_none():
+    """PR/feedback runs never produce a pre-test fix-phase capture, so an
+    absent sidecar must leave ``recommended_patch_capture`` ``None`` rather
+    than defaulting to ``"pre_test"`` (feedback's ``_step_fix_items`` never
+    writes ``recommended.patch``)."""
+    recorder = _MockRecorder(run_flow=DaydreamRunFlow.PR)
+    m = _build(tmp_path=Path("/tmp"), recorder=recorder)
+    assert m.recommended_patch_capture is None
+    assert "recommended_patch_capture" not in m.to_dict()
 
 
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
@@ -1483,7 +1556,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (6)."""
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (7)."""
     from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
     db_path = tmp_path / "index.db"
@@ -1529,7 +1602,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 6
+    assert user_version == SCHEMA_VERSION == 7
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None
