@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from daydream.extensions.registry import Registry
+    from daydream.extensions.registry import FlowEntry, Registry
 
 
 def register_builtins(registry: Registry) -> None:
@@ -68,6 +68,7 @@ def _register_builtin_prompts(registry: Registry) -> None:
     registry.override_prompt("suppression", deep_prompts.build_suppression_prompt)
     registry.override_prompt("merge", deep_prompts.build_merge_prompt)
     registry.override_prompt("verify", deep_prompts.build_verification_prompt)
+    registry.override_prompt("fix-verify", deep_prompts.build_fix_verify_prompt)
 
 
 def _register_builtin_renderers(registry: Registry) -> None:
@@ -81,11 +82,30 @@ def _register_builtin_renderers(registry: Registry) -> None:
 def _register_builtin_flows(registry: Registry) -> None:
     """Seed the built-in flow definitions (deep + improve only, #330)."""
     from daydream.deep import orchestrator as deep
+    from daydream.flows.engine import LoopGroup
     from daydream.improve import orchestrator as improve
 
     for step in deep.STEPS:
         registry.register_phase(step)
-    registry.set_flow("deep", [step.name for step in deep.STEPS])
+    # Issue #744: the fix cycle is a fix -> verify -> re-dispatch loop. The
+    # flat ``fix`` step is wrapped together with the post-fix ``fix-verify``
+    # step in a LoopGroup (budget 3 rounds); ``fix-verify`` emits BreakLoop when
+    # no actionable verdicts remain and the group ends. Every other step stays a
+    # plain entry. ``max_iterations`` is a ctx lambda: the round budget is a
+    # fixed 3 per the issue.
+    entries: list[FlowEntry] = []
+    for step in deep.STEPS:
+        if step.name == "fix":
+            entries.append(
+                LoopGroup(
+                    name="fix-verify-loop",
+                    steps=("fix", "fix-verify"),
+                    max_iterations=lambda ctx: 3,
+                )
+            )
+        elif step.name != "fix-verify":
+            entries.append(step.name)
+    registry.set_flow("deep", entries)
 
     for step in improve.STEPS:
         registry.register_phase(step)

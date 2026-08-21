@@ -9,7 +9,8 @@ Public builders:
     - build_structural_prompt: repo-wide structural-maintainability meta-stack.
     - build_arbiter_prompt: scoped Opus arbiter for cross-stack conflict resolution.
     - build_merge_prompt: cross-stack merge into a unified report.
-    - build_verification_prompt: recommendation-verifier agent prompt.
+    - build_verification_prompt: pre-fix recommendation-verifier agent prompt.
+    - build_fix_verify_prompt: post-fix (fix-verify) read-only round verifier.
     - build_generic_fallback_prompt: fallback for files without a dedicated stack.
 """
 
@@ -978,13 +979,21 @@ def build_merge_prompt(
         "  - rationale: why it matters; cite the actual records filename or stack "
         "name -- e.g. `(Sources: python-records item 6, alternatives item 4)`. "
         "NEVER use the `#N` notation (e.g. `#6`); GitHub auto-links `#N` to "
-        "repository issues/PRs, creating misleading links.\n\n"
+        "repository issues/PRs, creating misleading links.\n"
+        "  - related_files: array of repo-relative paths of every OTHER "
+        "file a deduplicated/cross-file finding affects (besides the primary "
+        "`file`). Always emit this key -- use an empty array (or a null value) "
+        "when the finding spans one file. "
+        "Emit real paths exactly as they appear in the records -- downstream "
+        "dispatch uses this footprint to send the finding to the agents that own "
+        "every file the fix will touch.\n\n"
         "Rules:\n"
         "  - Each item's `file` contains EXACTLY ONE path. For a concern that spans "
         "multiple files AND was NOT flagged as a duplicate in "
         "record_duplicate_pairs, emit a separate item per file. For deduplicated "
         "findings (same concern across files), emit ONE item with the primary file "
-        "and list the other affected files in the rationale.\n"
+        "and list every other affected file in the `related_files` array (NOT buried "
+        "in the rationale).\n"
         "  - Do not invent findings not supported by the source records."
     )
     if resumed_from_arbiter:
@@ -1107,6 +1116,86 @@ def build_verification_prompt(
     parts.append(
         "Every verdict entry MUST include all four required fields, even when "
         "`unverified_assumptions` is an empty array."
+    )
+    return "\n\n".join(parts)
+
+
+def build_fix_verify_prompt(
+    *,
+    items: list[dict[str, Any]],
+    changed_hunks: str,
+    cwd: Path,
+    round_number: int = 1,
+) -> str:
+    """Assemble the read-only post-fix fix-verify prompt (issue #744).
+
+    Runs after every fix group in a round finishes (the round barrier) and
+    audits the round's changed hunks only -- never the whole tree. For each
+    dispatched finding listed below the verifier returns EXACTLY one verdict
+    from the four-value enum: ``resolved`` (the named defect is gone),
+    ``unresolved`` (still present, wholly or partly), ``wrong_target`` (the
+    defect lives in a file the finding did not name -- carry ``path``), or
+    ``regressed`` (the round introduced a new instance of the named defect --
+    carry ``path``).
+
+    The verdict schema is NOT dumped into the prompt: it reaches every backend
+    through ``output_schema`` (claude natively, codex via a temp file, pi by
+    appending its own instruction), so an inline copy is a duplicate the model
+    pays for twice.
+
+    Args:
+        items: The round's dispatched canonical items, rendered inline into the
+            prompt; verdicts are keyed by each item's canonical ``id``.
+        changed_hunks: The round's diff text (changed hunks only) the verifier
+            audits. May be empty; the verifier is told these hunks are all it
+            may inspect.
+        cwd: Absolute working directory the verifier runs in (grounds path resolution).
+    """
+    from daydream.deep.render import render_report
+
+    hunks_block = changed_hunks if changed_hunks.strip() else "(no hunks provided)"
+    parts: list[str] = []
+    parts.append(
+        "You are the post-fix fix-verifier agent (the `fix-verify` step). A fix "
+        "round just ran on this "
+        "worktree; your job is to audit what the round produced and return "
+        "EXACTLY one verdict per finding below. This is a READ-ONLY pass: you "
+        "inspect the diff and the code, you do not edit anything.\n\n"
+        f"Round {round_number} of up to 3 check passes.\n\n"
+        f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
+        "You audit the round's changed hunks ONLY, never the whole tree:\n"
+        "\n"
+        "<changed-hunks>\n"
+        f"{hunks_block}\n"
+        "</changed-hunks>\n\n"
+        "The numbered findings the round dispatched (each `issue_id` in your "
+        "output MUST match the leading number `N.` of the finding it "
+        "verifies):\n\n"
+        + render_report(items)
+        + "\nDo NOT re-run reviews; do NOT re-dispatch anything."
+    )
+    parts.append(
+        "Verdict semantics (MANDATORY):\n"
+        "  - `resolved` -- the named defect is gone from the changed hunks.\n"
+        "  - `unresolved` -- the defect is still present, wholly or partly.\n"
+        "  - `wrong_target` -- the defect lives in a file the finding did NOT "
+        "name; emit `path` with the corrected repo-relative file.\n"
+        "  - `regressed` -- the round introduced a NEW instance of the named "
+        "defect; emit `path` with the file where it now appears.\n"
+        "  - `wrong_target` and `regressed` verdicts MUST carry `path`; the "
+        "other two never carry it.\n"
+        "  - Emit one verdict entry for EVERY numbered finding. A finding you "
+        "omit is treated as `unresolved`; there is no skip verdict."
+    )
+    parts.append(
+        "Read-only contract (MANDATORY):\n"
+        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
+        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
+        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
+        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
+        "state-changing command.\n"
+        "  - Depth: inspect the changed hunks' files, but do not roam the whole "
+        "tree; prefer Grep/Glob to narrow."
     )
     return "\n\n".join(parts)
 

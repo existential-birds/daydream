@@ -911,6 +911,15 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "evidence": {"type": "string"},
                     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    # Issue #744: a finding may span sibling files. Optional in
+                    # the merge model's semantics (null when single-file) but
+                    # strict-mode required (Codex rejects optional properties,
+                    # see test_output_schema_strict.py), so the model always
+                    # emits the key and uses null to mean "no related files".
+                    "related_files": {
+                        "type": ["array", "null"],
+                        "items": _REPOSITORY_FILE_PATH_SCHEMA,
+                    },
                 },
                 "required": [
                     "id",
@@ -922,6 +931,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "evidence",
                     "lens",
                     "severity",
+                    "related_files",
                 ],
                 "additionalProperties": False,
             },
@@ -1064,28 +1074,73 @@ def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
-def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Partition fix items into per-file groups, preserving input order.
+def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition fix items by footprint (``{file} ∪ related_files``), widening-only.
 
-    Shared by the parallel fix loop: distinct files become distinct groups that
-    can run concurrently, while items targeting the same file stay together so
-    they run serially (no read-modify-write races). Group emission order is the
-    first-appearance order of each file; within-group order is input order, so a
-    ``severity_sorted`` input yields severity-ordered groups. Items with a
-    missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
-    disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
+    A finding's footprint is its primary ``file`` plus every ``related_files``
+    entry it carries. Any two groups whose footprints share a file are united
+    into one dispatch group (transitively), so a finding whose defect spans
+    sibling documents reaches a single agent that owns the whole overlapping
+    set. Grouping is widening-only: it unions intersecting footprints but never
+    splits a batch that already shares a primary file, preserving the
+    per-file read-modify-write race safety enforced by #170/#202.
+
+    Group emission order is first-appearance order of each group's earliest
+    item; within-group order is input order. The returned group key is the
+    group's representative primary file (the first item's ``file``, or
+    ``"<no-file>"``) -- sufficient for ``phase_fix_parallel``'s failures dict
+    and per-group budget. Items with a missing/None file bucket into a single
+    ``"<no-file>"`` group (cannot prove disjoint -> serialize for safety).
+
+    Pure: no I/O, no mutation of inputs.
 
     Returns:
-        Ordered list of ``(file_key, items_for_file)`` tuples, where
-        *file_key* is the file path string or ``"<no-file>"`` for items
-        lacking a file, and *items_for_file* preserves the input order of
-        items assigned to that file.
+        Ordered list of ``(file_key, items_for_group)`` tuples.
     """
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        key = item.get("file") or "<no-file>"
-        grouped.setdefault(key, []).append(item)
-    return list(grouped.items())
+    if not items:
+        return []
+
+    # Union-find over item indices: two items are linked iff their footprints
+    # share a file.
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    file_to_indices: dict[str, list[int]] = {}
+    for i, item in enumerate(items):
+        footprint = {(item.get("file") or "<no-file>")} | {
+            f for f in (item.get("related_files") or []) if isinstance(f, str)
+        }
+        for f in footprint:
+            for j in file_to_indices.setdefault(f, []):
+                union(i, j)
+            file_to_indices[f].append(i)
+
+    roots = [find(i) for i in range(len(items))]
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    first_seen: dict[int, int] = {}
+    for i, item in enumerate(items):
+        r = roots[i]
+        if r not in grouped:
+            grouped[r] = []
+            first_seen[r] = i
+        grouped[r].append(item)
+
+    result: list[tuple[str, list[dict[str, Any]]]] = []
+    for root in sorted(first_seen, key=lambda rt: first_seen[rt]):
+        grp = grouped[root]
+        key = grp[0].get("file") or "<no-file>"
+        result.append((key, grp))
+    return result
 
 
 RECOMMENDATION_VERDICTS_SCHEMA = {
@@ -1105,6 +1160,48 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
                 },
                 "required": ["issue_id", "verdict", "evidence",
                              "unverified_assumptions"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
+# The four fix-verify verdicts -- single authority (issue #744). Every
+# consumer -- the output schema below, ``phase_fix_verify``'s allowed-value
+# filter, and the orchestrator's actionable/retargetable subsets -- derives its
+# valid values from this constant, so a rename/reorder propagates in one place
+# instead of lockstep edits across parallel literals. ``FIX_VERIFY_ACTIONABLE_VERDICTS``
+# is the subset a later round re-dispatches; a verdict outside it (notably
+# ``resolved``) is a terminal pass. ``FIX_VERIFY_RETARGETABLE_VERDICTS`` is the
+# subset that may carry a corrected target ``path`` (the phase enforces that
+# conditional shape because JSON Schema cannot express it).
+FIX_VERIFY_VERDICTS: tuple[str, ...] = ("resolved", "unresolved", "wrong_target", "regressed")
+FIX_VERIFY_ACTIONABLE_VERDICTS: tuple[str, ...] = ("unresolved", "wrong_target", "regressed")
+FIX_VERIFY_RETARGETABLE_VERDICTS: tuple[str, ...] = ("wrong_target", "regressed")
+
+
+FIX_VERIFY_VERDICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "integer"},
+                    "verdict": {"type": "string",
+                                "enum": list(FIX_VERIFY_VERDICTS)},
+                    # Strict-mode required (Codex rejects optional properties,
+                    # see test_output_schema_strict.py). ``path`` is null for
+                    # resolved/unresolved and a repo-relative file for
+                    # wrong_target/regressed; the phase enforces the conditional
+                    # requirement because JSON Schema cannot express it.
+                    "path": {"type": ["string", "null"]},
+                    "reason": {"type": "string"},
+                },
+                "required": ["issue_id", "verdict", "path", "reason"],
                 "additionalProperties": False,
             },
         },
@@ -1787,6 +1884,120 @@ async def phase_verify_recommendations(
     return output_path, payload
 
 
+async def phase_fix_verify(
+    backend: Backend,
+    work: WorkContext,
+    items: list[dict[str, Any]],
+    changed_hunks: str,
+    *,
+    console_lock: anyio.Lock | None = None,
+    round_number: int = 1,
+) -> list[dict[str, Any]]:
+    """Post-round fix verifier: one read-only verdict per dispatched finding.
+
+    Runs AFTER every fix group in a round finishes (the round barrier — the
+    caller invokes this once per footprint group). The agent audits the
+    round's changed hunks only (never the whole tree) and returns exactly one
+    verdict per listed finding from the four-value enum: ``resolved``,
+    ``unresolved``, ``wrong_target(path)``, or ``regressed(path)``.
+
+    Hard contracts:
+      - Read-only: ``run_agent(..., read_only=True)`` delegates enforcement to
+        the backend. A verification turn that attempts to edit a file fails
+        that step.
+      - Advisory: a non-``resolved`` verdict schedules follow-up work in a
+        later round (or the terminal report); it never fails the run and never
+        reverts the patch.
+      - Dispatched-count == outcome-count: every item passed in comes back with
+        exactly one verdict dict keyed by its canonical ``id``. A finding the
+        agent omitted coerces to ``unresolved`` ("no verifier verdict") — the
+        honest non-fixed terminal — never silently dropped.
+
+    The prompt is built through the registered ``fix-verify`` prompt (the
+    built-in ``build_fix_verify_prompt``; a fork may override it). Verdict
+    coercion mirrors ``_coerce_verdicts_payload`` (fail-open, non-dict entries
+    dropped), then ``path`` for ``wrong_target``/``regressed`` verdicts is
+    defaulted/cleaned here because a conditional ``required`` is not
+    expressible in JSON Schema.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the verifier's cwd.
+        items: The round's dispatched canonical items (the exact set the fix
+            phase was handed this round). Verdicts are keyed by each item's
+            canonical ``id``.
+        changed_hunks: The round's diff text (changed hunks only) the verifier
+            audits. May be empty (e.g. a resume without captured hunks); the
+            verifier is told the hunks are all it may inspect.
+        console_lock: Optional lock serializing interactive progress output.
+
+    Returns:
+        Ordered list of per-finding verdict dicts, one per dispatched item,
+        each ``{"issue_id": int, "verdict": str, "reason": str, "path"?: str}``.
+    """
+    del console_lock  # interactive progress is not printed per finding here
+    if not items:
+        return []
+
+    prompt = get_registry().prompt("fix-verify")(
+        items=items,
+        changed_hunks=changed_hunks,
+        cwd=work.repo,
+        round_number=round_number,
+    )
+
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=FIX_VERIFY_VERDICTS_SCHEMA,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        phase=DaydreamPhase.VERIFY,
+        read_only=True,
+    )
+
+    candidate: Any = result
+    if isinstance(result, str):
+        try:
+            candidate = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            candidate = None
+    payload = _coerce_verdicts_payload(candidate)
+    by_id: dict[int, dict[str, Any]] = {}
+    for entry in payload["verdicts"]:
+        issue_id = entry.get("issue_id")
+        if not isinstance(issue_id, int):
+            continue
+        verdict = entry.get("verdict")
+        if verdict not in FIX_VERIFY_VERDICTS:
+            continue
+        cleaned: dict[str, Any] = {
+            "issue_id": issue_id,
+            "verdict": verdict,
+            "reason": entry.get("reason") or "",
+        }
+        path = entry.get("path")
+        if verdict in FIX_VERIFY_RETARGETABLE_VERDICTS and isinstance(path, str) and path.strip():
+            cleaned["path"] = path.strip()
+        by_id[issue_id] = cleaned
+
+    # Invariant: dispatched-count == outcome-count. Findings the agent omitted
+    # get the honest non-fixed terminal, never a silent drop.
+    verdicts: list[dict[str, Any]] = []
+    for item in items:
+        issue_id = item.get("id")
+        entry = by_id.get(issue_id) if isinstance(issue_id, int) else None
+        if entry is None:
+            entry = {
+                "issue_id": issue_id,
+                "verdict": "unresolved",
+                "reason": "no verifier verdict",
+            }
+        verdicts.append(entry)
+    return verdicts
+
+
 # Shared scope/precedence/contract guardrails appended to every fix prompt
 # (single-finding ``phase_fix`` and batched ``phase_fix_batched``). Kept in one
 # place so the two prompt paths can never drift.
@@ -1829,6 +2040,11 @@ ASCII ``''`` / ``""`` into typographic smart quotes (``”`` ``“`` ``’`` ``�
 and never introduce smart quotes when writing new code or comments — use plain
 ASCII straight quotes so the committed tree stays byte-clean and re-reviews do
 not re-surface a typographic finding.
+
+Forbid working-tree git mutation: many fix agents share ONE working tree, and
+a tree mutation is a data-loss race. `git stash`, `git checkout`, `git reset`,
+and `git commit` are each a refusal — if you believe one is needed, stop and
+report why instead of running it.
 """
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
@@ -1857,6 +2073,18 @@ def _item_evidence(item: dict[str, Any]) -> str:
     not re-declared in three ad-hoc forms.
     """
     return str(item.get("evidence", "") or "")
+
+
+def _item_related_files(item: dict[str, Any]) -> list[str]:
+    """Return a finding's ``related_files`` paths, or ``[]`` when none.
+
+    Surfaced to the fix prompt in the same breath as the primary ``File:`` so
+    a deduplicated cross-file finding dispatched alone still names every sibling
+    file it may edit. Mirrors the footprint grouping's
+    tolerance of non-string entries (ignored, not an error), so surfacing them
+    can never fail a group that already dispatched around them.
+    """
+    return [f for f in (item.get("related_files") or []) if isinstance(f, str)]
 
 
 def _repo_relative_path(repo: Path, value: str) -> str:
@@ -1975,16 +2203,30 @@ def _build_verifier_suffix(item: dict[str, Any]) -> str:
     """Build the recommendation-verifier block for one finding.
 
     Mirrors the single-finding verdict/evidence/assumptions text so batched and
-    single-finding prompts carry identical per-finding verifier guidance.
+    single-finding prompts carry identical per-finding verifier guidance. Also
+    carries the post-fix fix-verifier's prior-round verdict + reason forward on
+    a re-dispatched finding (issue #744), so the fix agent knows why the
+    previous round was not accepted.
 
     Args:
         item: Feedback item, optionally carrying ``verifier_verdict``,
-            ``evidence``, and ``unverified_assumptions``.
+            ``evidence``, and ``unverified_assumptions`` (pre-fix
+            recommendation verifier) or ``fix_verify_verdict`` /
+            ``fix_verify_reason`` (post-fix round verifier, re-dispatch only).
 
     Returns:
         The verifier block (with leading newline) when a verdict is present;
         otherwise an empty string.
     """
+    fix_verify_verdict = item.get("fix_verify_verdict")
+    fix_verify_reason = item.get("fix_verify_reason")
+    if fix_verify_verdict:
+        out = f"\nPrevious round fix-verify verdict: {fix_verify_verdict}."
+        if fix_verify_reason:
+            out += f" Verifier reason: {fix_verify_reason}."
+        out += " Re-address this finding accordingly."
+        return out
+
     verifier_verdict = item.get("verifier_verdict")
     if not verifier_verdict:
         return ""
@@ -2060,9 +2302,10 @@ def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str
     Shared preflight for the batched and parallel fix entry points: rejects
     the whole batch when ANY item's reference is missing/non-string or
     unconfined (fixed, non-reflective :class:`UnconfinedFindingError`), before
-    any grouping, progress output, or prompt construction. All batch items
-    target the same file, so the first item's canonical resolution is the
-    group's.
+    any grouping, progress output, or prompt construction. The returned value
+    is only the group's leading file for the batched prompt header; each row's
+    ``File:`` line is resolved per item (footprint groups can span differing
+    primary files).
     """
     file_ref = _resolve_finding_file_ref(repo, items[0].get("file"))
     for item in items[1:]:
@@ -2115,6 +2358,8 @@ async def phase_fix(
     line = item.get("line", "Unknown")
     evidence = _item_evidence(item)
     evidence_line = f"\nEvidence: {evidence}" if evidence else ""
+    related_files = _item_related_files(item)
+    related_line = f"\nRelated files: {', '.join(related_files)}" if related_files else ""
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
@@ -2124,7 +2369,7 @@ async def phase_fix(
 {description}
 
 File: {file_ref}
-Line: {line}{evidence_line}
+Line: {line}{related_line}{evidence_line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
@@ -2161,7 +2406,9 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         progress_callback=progress_cb,
     )
     async with (console_lock if console_lock is not None else anyio.Lock()):
-        print_fix_complete(console, item_num, total)
+        # Verdict unknown at fix time (issue #744); the post-fix fix-verify
+        # step renders the honest resolved/attempted-not-fixed line.
+        print_fix_complete(console, item_num, total, outcome=None)
 
 
 async def phase_fix_batched(
@@ -2179,11 +2426,14 @@ async def phase_fix_batched(
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
-    All ``items`` must target the same file; the caller (``phase_fix_parallel``)
-    groups them with ``group_items_by_file``. Batching collapses N per-finding
-    ``run_agent`` calls into one so the agent reads the file's context once and
-    produces a single coherent patch. A single-item group delegates straight to
-    ``phase_fix`` — there is no batched prompt to build.
+    ``items`` normally target the same file; the caller (``phase_fix_parallel``)
+    groups them (via ``group_items_by_footprint``). Batching collapses N
+    per-finding ``run_agent`` calls into one so the agent reads the file's
+    context once and produces a single coherent patch. A footprint group can
+    however span items from differing primary files (intersecting footprints);
+    the batched prompt still names each row's own resolved ``File:``. A
+    single-item group delegates straight to ``phase_fix`` — there is no batched
+    prompt to build.
 
     Args:
         backend: The Backend to execute against.
@@ -2218,8 +2468,9 @@ async def phase_fix_batched(
     count = len(items)
     # Validate EVERY item's file reference before any progress output or prompt
     # construction: a single unconfined (or missing/non-string) reference
-    # rejects the whole batch. All items target the same file, so the returned
-    # first item's canonical resolution is the group's.
+    # rejects the whole batch. A batch can span differing primary files, so the
+    # returned first item's canonical resolution is only the batched header's
+    # headline file (each row resolves its own).
     file_ref = _preflight_finding_file_refs(work.repo, items)
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
@@ -2231,11 +2482,15 @@ async def phase_fix_batched(
     findings_block = ""
     for idx, item in enumerate(items, start=1):
         desc = item.get("description", "No description")
+        item_file = _resolve_finding_file_ref(work.repo, item.get("file"))
         line = item.get("line", "Unknown")
         evidence = _item_evidence(item)
-        findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
+        findings_block += f"\n{idx}. {desc}\n   File: {item_file}\n   Line: {line}\n"
         if evidence:
             findings_block += f"   Evidence: {evidence}\n"
+        related_files = _item_related_files(item)
+        if related_files:
+            findings_block += f"   Related files: {', '.join(related_files)}\n"
 
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}
@@ -2284,7 +2539,9 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         for item_num in item_nums:
-            print_fix_complete(console, item_num, total)
+            # Verdict unknown at the fix turn; the fix-verify step owns the
+            # terminal resolved/attempted-not-fixed line (issue #744).
+            print_fix_complete(console, item_num, total, outcome=None)
 
 
 async def phase_fix_parallel(
@@ -2302,9 +2559,10 @@ async def phase_fix_parallel(
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
-    Items are grouped by ``file`` (preserving the caller's severity ordering).
-    Each file-group becomes one task whose findings are fixed together in a
-    single ``phase_fix_batched`` call (one ``run_agent`` turn per file), while
+    Items are grouped by footprint (the item's ``file`` union its
+    ``related_files``, widening-only), preserving the caller's severity order.
+    Each footprint-group becomes one task whose findings are fixed together in a
+    single ``phase_fix_batched`` call (one ``run_agent`` turn per group), while
     distinct files run concurrently under an ``anyio.CapacityLimiter``. If the
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
     Same-file serialization prevents concurrent writes to the *same named file*;
@@ -2364,7 +2622,7 @@ async def phase_fix_parallel(
     # recompute them.
     _preflight_finding_file_refs(work.repo, items)
 
-    raw_groups = group_items_by_file(items)
+    raw_groups = group_items_by_footprint(items)
     # Assign stable 1-based counters by pairing each item with its number
     # directly, avoiding fragile id()-keyed dicts whose keys are memory
     # addresses and can collide if dicts are reallocated between loops.

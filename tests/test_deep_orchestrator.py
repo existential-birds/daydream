@@ -719,6 +719,176 @@ async def test_parallel_fix_same_file_no_race(
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
 
 
+async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A finding whose footprint intersects another group is dispatched to ONE
+    agent owning both -- observable as ONE batched fix turn covering both files,
+    not two per-file turns."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
+    stub.merge_items = [
+        _merge_item(1, "a.py", "high"),
+        {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
+        _merge_item(3, "c.py", "high"),
+    ]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    # a.py and b.py findings fixed in ONE batched turn (footprint union);
+    # c.py is a separate per-finding turn. (The fixture also dispatches its own
+    # in-scope structural item -- api.py "Sample issue" -- as its own turn.)
+    fix_calls = [c for c in stub.calls
+                 if c["prompt"].lower().startswith("fix this issue")
+                 or c["prompt"].lower().startswith("fix these")]
+    batched = [c for c in fix_calls if "fix these" in c["prompt"].lower()]
+    assert len(batched) == 1  # a.py and b.py fixed together, not two per-file turns
+    assert "issues in " in batched[0]["prompt"]
+    assert len(fix_calls) == 3  # merged {a,b} group + c.py + fixture structural item
+
+
+async def test_fix_verify_turn_is_read_only(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """AC: verification is strictly read-only. The stub records ``read_only``
+    per call (stub_backend.py:276), so the real-path run must show every
+    fix-verify turn arriving with ``read_only=True``."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    verify_calls = [c for c in stub.calls if "fix-verify" in c["prompt"]]
+    assert verify_calls, "expected a fix-verify turn"
+    assert all(c["read_only"] is True for c in verify_calls)
+
+
+async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: every dispatched finding has a recorded terminal outcome; all
+    resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high"),
+                        _merge_item(2, "App.tsx", "medium")]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"
+    assert outcomes_p.exists()
+    outcomes = json.loads(outcomes_p.read_text())
+    # every dispatched finding (incl. structural) has exactly one recorded outcome
+    assert sorted(int(k) for k in outcomes) == [1, 2, 3]
+    assert all(v["verdict"] == "resolved" for v in outcomes.values())
+    # one round only (all resolved -> BreakLoop on round 1)
+    fix_calls = [c for c in stub.calls
+                 if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
+    assert len(fix_calls) == 2  # one per file group, no re-dispatch
+
+
+async def test_fix_verify_loop_redispatch_resolves_second_round(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
+    second round, verifies resolved -> the loop ran twice and the outcome is
+    resolved."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_verify_resolve_after_round = 2  # round 1 -> unresolved, round 2 -> resolved
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes_p = multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json"
+    outcomes = json.loads(outcomes_p.read_text())
+    assert outcomes["1"]["verdict"] == "resolved"
+    fix_calls = [c for c in stub.calls
+                 if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
+    assert len(fix_calls) == 2  # loop ran twice: round 1 + re-dispatch round 2
+
+
+async def test_fix_verify_wrong_target_retargets_within_scope(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: a wrong_target retarget re-dispatches to the corrected file, but
+    only inside the allowed edit set (#336 net never widens)."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # round 1 verifier says: defect really lives in App.tsx
+    stub.fix_verify_verdicts = {1: {"issue_id": 1, "verdict": "wrong_target",
+                                    "path": "App.tsx", "reason": "moved"}}
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
+    assert outcomes["1"]["verdict"] == "resolved"
+    assert outcomes["1"].get("path") == "App.tsx"
+
+
+async def test_unresolved_finding_reported_attempted_not_fixed(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: a finding still unresolved after the last round appears as
+    attempted-not-fixed, never counted/shown as fixed."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
+    assert outcomes["1"]["verdict"] == "unresolved"
+    # fix applied was NOT asserted for the unresolved finding (no "Fix applied" line for it)
+    assert all(v["verdict"] == "unresolved" for v in outcomes.values())
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
@@ -3562,6 +3732,20 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     assert record_paths == sorted(record_paths), (
         f"records not in sorted order: {record_paths}"
     )
+
+
+def test_merge_prompt_emits_related_files_instruction():
+    from pathlib import Path
+
+    from daydream.deep.prompts import build_merge_prompt
+
+    prompt = build_merge_prompt(
+        per_stack_records_paths=[Path("a-records.json")],
+        intent_path=Path("intent.md"), alternatives_path=Path("alt.md"),
+        dedup_candidates_path=Path("dedup.json"), output_path=Path("o.json"),
+    )
+    assert "related_files" in prompt
+
 
 
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(

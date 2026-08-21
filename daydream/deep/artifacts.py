@@ -149,6 +149,18 @@ def fix_failures_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "fix-failures.json"
 
 
+def fix_outcomes_path(deep_dir_path: Path) -> Path:
+    """Post-fix verifier outcomes ({finding_id: verdict} JSON, issue #744).
+
+    Sidecar adjacent to :func:`fix_failures_path`: every finding the fix phase
+    dispatched has exactly one recorded terminal verdict here (``resolved`` /
+    ``unresolved`` / ``wrong_target`` / ``regressed``), so an attempted-but-
+    unconfirmed finding cannot silently pass as fixed. Accumulates across
+    rounds; deleted when empty.
+    """
+    return deep_dir_path / "fix-outcomes.json"
+
+
 def fix_quality_gate_path(deep_dir_path: Path) -> Path:
     """Fix-phase anti-degradation quality gate verdict (issue #315).
 

@@ -1068,6 +1068,49 @@ async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, make_work, 
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_batched_prompt_lists_related_files(
+    tmp_path, make_work, silence_console,
+):
+    """A deduplicated cross-file finding names every other file it touches.
+
+    The outcome of the footprint grouping is useless if the fix agent never
+    learns which sibling files are in-scope. Both the single-finding and
+    batched fix prompts must render a ``Related files:`` line from the item's
+    sibling set, so the agent edits the whole footprint and not just the
+    primary ``File:``.
+    """
+    from daydream.phases import phase_fix, phase_fix_batched
+
+    silence_console("daydream.phases")
+
+    # Single-finding path: a cross-file finding reaches ``phase_fix`` alone.
+    single = ScriptedBackend()
+    item = {
+        "id": 1,
+        "description": "Cross-file contract drift",
+        "file": "src/a.py",
+        "line": 10,
+        "related_files": ["src/b.py", "src/c.py"],
+    }
+    await phase_fix(single, make_work(tmp_path), item, 1, 1)
+    assert "Related files: src/b.py, src/c.py" in single.prompts[0]
+    assert "File: src/a.py" in single.prompts[0]
+
+    # Batched prompt: each row carries its own related-files line.
+    batched = ScriptedBackend()
+    items = [
+        {"id": 1, "description": "Cross-file contract drift", "file": "src/a.py",
+         "line": 10, "related_files": ["src/b.py"]},
+        {"id": 2, "description": "Same-file sibling", "file": "src/a.py", "line": 88},
+    ]
+    await phase_fix_batched(batched, make_work(tmp_path), items, [1, 2], 2)
+    prompt = batched.prompts[0]
+    assert "Related files: src/b.py" in prompt
+    # A sibling-less row renders without the related-files line.
+    assert "Same-file sibling" in prompt
+
+
+@pytest.mark.asyncio
 async def test_phase_fix_batched_concise_fix_prompts_adds_directive(tmp_path, make_work, silence_console):
     """Batched same-file fixes carry backend concise-fix-prompt guidance."""
     from daydream.phases import phase_fix_batched
@@ -3886,20 +3929,105 @@ async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, make_work, s
     assert "same-turn echo" in backend.last_prompt
 
 
-def test_group_items_by_file_preserves_order_within_and_across_groups():
-    from daydream.phases import group_items_by_file
+def test_fix_guardrails_forbid_git_mutation():
+    from daydream.phases import _FIX_GUARDRAILS, GENERATED_FILES_PROMPT_RULE
 
-    items = [  # already severity_sorted by the caller
-        {"id": 1, "file": "a.py", "severity": "high"},
-        {"id": 2, "file": "b.py", "severity": "high"},
-        {"id": 3, "file": "a.py", "severity": "low"},
-        {"id": 4, "file": None, "severity": "low"},
+    text = _FIX_GUARDRAILS + GENERATED_FILES_PROMPT_RULE
+    for verb in ("git stash", "git checkout", "git reset", "git commit"):
+        assert verb in text, f"guardrails must forbid `{verb}`"
+
+
+def test_fix_verify_schema_rejects_bad_verdict():
+    import jsonschema
+
+    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
+
+    payload = {"verdicts": [
+        {"issue_id": 1, "verdict": "fixed-ish", "path": "a.py", "reason": "r"},
+    ]}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(payload, FIX_VERIFY_VERDICTS_SCHEMA)
+
+
+def test_fix_verify_schema_accepts_all_four_verdicts():
+    import jsonschema
+
+    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
+
+    for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
+        entry = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        # ``path`` is strict-mode required (see test_output_schema_strict.py)
+        # but nullable; wrong_target/regressed carry the corrected file.
+        if verdict in ("wrong_target", "regressed"):
+            entry["path"] = "corrected.py"
+        else:
+            entry["path"] = None
+        jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
+
+
+def test_fix_verify_verdicts_are_single_source():
+    """The fix-verify verdicts live in ONE public constant, not scattered literals.
+
+    The schema enum, ``phase_fix_verify``'s allowed-value filter, and the
+    orchestrator's actionable/retargetable subsets must all derive from
+    ``FIX_VERIFY_VERDICTS`` in ``daydream.phases`` so a rename/reorder lands in
+    one place.
+    """
+    from daydream.phases import (
+        FIX_VERIFY_ACTIONABLE_VERDICTS,
+        FIX_VERIFY_RETARGETABLE_VERDICTS,
+        FIX_VERIFY_VERDICTS,
+        FIX_VERIFY_VERDICTS_SCHEMA,
+    )
+
+    enum = FIX_VERIFY_VERDICTS_SCHEMA["properties"]["verdicts"]["items"]\
+        ["properties"]["verdict"]["enum"]
+    assert enum == list(FIX_VERIFY_VERDICTS)
+    # Subsets are drawn from the same four-value authority.
+    assert set(FIX_VERIFY_ACTIONABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
+    assert set(FIX_VERIFY_RETARGETABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
+
+
+def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):
+    from rich.console import Console
+
+    from daydream.ui.summary import print_fix_complete
+
+    c = Console(record=True)
+    print_fix_complete(c, 1, 1, outcome="resolved")
+    print_fix_complete(c, 1, 1, outcome="unresolved")
+    print_fix_complete(c, 1, 1, outcome=None)  # during the fix turn: neutral
+    out = c.export_text()
+    assert "Fix applied" in out       # resolved asserts applied
+    assert out.count("Fix applied") == 1  # only the resolved one
+
+
+def test_group_items_by_footprint_unions_overlapping_footprints():
+    from daydream.phases import group_items_by_footprint
+
+    items = [
+        {"id": 1, "file": "a.py", "related_files": ["b.py"]},
+        {"id": 2, "file": "b.py"},                      # overlaps item 1 via b.py
+        {"id": 3, "file": "c.py"},                      # disjoint
     ]
-    groups = group_items_by_file(items)
-    assert [k for k, _ in groups] == ["a.py", "b.py", "<no-file>"]
-    assert [i["id"] for i in dict(groups)["a.py"]] == [1, 3]  # input order kept
-    assert sum(len(v) for _, v in groups) == len(items)  # nothing dropped
-    assert group_items_by_file([]) == []
+    groups = group_items_by_footprint(items)
+    # 1 and 2 must be in ONE group (shared b.py); 3 separate.
+    assert len(groups) == 2
+    a_group = next(it for _, it in groups if any(i["id"] == 1 for i in it))
+    assert {i["id"] for i in a_group} == {1, 2}
+
+
+def test_group_items_by_footprint_never_splits_same_file_batch():
+    from daydream.phases import group_items_by_footprint
+
+    items = [
+        {"id": 1, "file": "a.py"},
+        {"id": 2, "file": "a.py", "related_files": ["x.py"]},
+        {"id": 3, "file": "a.py"},
+    ]
+    groups = group_items_by_footprint(items)
+    assert len([g for _, g in groups]) == 1  # same primary file must never split (#170/#202)
+    assert {i["id"] for i in groups[0][1]} == {1, 2, 3}
 
 
 async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(tmp_path, monkeypatch, make_work):

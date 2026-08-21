@@ -294,8 +294,9 @@ unique step names, and use `config_phase` to reuse an existing config key.
 | 18 | `fix-gate` | `fix-gate` |
 | 19 | `verify` | `verify` |
 | 20 | `fix` | `fix` |
-| 21 | `test` | `test` |
-| 22 | `commit` | `fix` |
+| 21 | `fix-verify` | `verify` |
+| 22 | `test` | `test` |
+| 23 | `commit` | `fix` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble: `feedback` runs only the prefix (steps 1-5, ending at
@@ -311,6 +312,13 @@ report), and `config.findings_out is None` (a `--findings-out` run keeps the
 rendered report the user asked it to produce). It is skipped entirely on any
 non-zero (failure) exit so evidence survives, and removes the report per
 `--cleanup` / `--no-cleanup` / interactive-or-unattended prompt defaults (#335).
+
+`fix` and `fix-verify` (issue #744) are wrapped together in a `LoopGroup`
+(`fix-verify-loop`) capped at 3 rounds: each round dispatches findings, a
+read-only `fix-verify` step audits the round's changed hunks and returns one
+verdict per finding, and actionable verdicts re-dispatch in the next round
+until none remain (or the budget is spent). `fix-verify` uses the `verify`
+phase config key and its own registered `fix-verify` prompt.
 
 `per-stack-reviews` runs the TTT alternative-review (wonder) as well: on a fresh
 multi-stack run the two are siblings in one task group, so wonder has no step of
@@ -377,7 +385,7 @@ the `stack:<name>` slots (or a fork `StackRule`), never from a `phase:*` slot.
 
 ### Prompts
 
-The 14 registered prompt names and the exact kwargs their builders receive
+The 15 registered prompt names and the exact kwargs their builders receive
 (an override gets the same kwargs). All kwargs are keyword-only except where
 noted.
 
@@ -394,6 +402,7 @@ noted.
 | `suppression` | `suppression_input_path`, `diff_path`, `intent_path`, `alternatives_path`, `cwd`, `exploration_dir` |
 | `merge` | `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
+| `fix-verify` | `items`, `changed_hunks`, `cwd`, `round_number` |
 | `audit` | `category`, `skill_invocation`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `findings`, `cwd` |
 | `plan-writer` | `finding`, `recon_summary`, `verification_commands`, `cwd` |
@@ -602,10 +611,17 @@ r.register_phase(FlowStep(name="verify", run=_my_verify), replace=True)
 Remove-and-reinsert individual steps, or set the whole flow at once:
 
 ```python
+from daydream.extensions import LoopGroup
+
 r.set_flow("deep", ["exploration", "intent", "per-stack-reviews",
                     "per-stack-parse", "cross-stack-merge", "load-items",
                     "supervise", "post-review", "fix-gate", "verify",
-                    "fix", "test", "commit"])
+                    LoopGroup(
+                        name="fix-verify-loop",
+                        steps=("fix", "fix-verify"),
+                        max_iterations=lambda ctx: 3,
+                    ),
+                    "test", "commit"])
 ```
 
 Flow entries are resolved against registered phases by `run_flow`'s pre-flight

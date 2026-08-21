@@ -786,10 +786,10 @@ async def test_fix_cycle_items_severity_ordered(
     )
     monkeypatch.setattr("daydream.deep.orchestrator.phase_verify_recommendations", _stub_verify)
 
-    order: list[str] = []
+    order: list[list[str]] = []
 
     async def _spy_fix_parallel(_b, _w, items, **_k):
-        order.extend(item["severity"] for item in items)
+        order.append([item["severity"] for item in items])
         return {}
 
     async def _noop_test(*_a: Any, **_k: Any) -> tuple[bool, int, bool]:
@@ -806,9 +806,20 @@ async def test_fix_cycle_items_severity_ordered(
         make_config(feature_branch_repo, start_at="fix", shallow=True, assume="yes")
     )
     assert exit_code == 0
-    assert order == ["high", "low"], (
-        f"phase_fix_parallel did not receive severity-ordered items; got {order!r}"
+    assert order, "phase_fix_parallel was never called"
+    # The fix gate is a round-aware loop (issue #744): round 1 dispatches the
+    # full severity-sorted canonical list, so the HIGH item is fixed first.
+    assert order[0] == ["high", "low"], (
+        f"phase_fix_parallel did not receive severity-ordered items on round 1; got {order[0]!r}"
     )
+    # Every round (round 1 and any re-dispatch) preserves the canonical
+    # severity ordering derived from the severity-sorted item list.
+    for round_items in order:
+        assert round_items == sorted(
+            round_items, key=lambda s: {"high": 0, "low": 1}[s]
+        ), (
+            f"phase_fix_parallel received out-of-order severities {round_items!r}"
+        )
 
 
 # --- Task 4: non_interactive threading -------------------------------------
