@@ -719,6 +719,42 @@ async def test_parallel_fix_same_file_no_race(
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
 
 
+async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """A finding whose footprint intersects another group is dispatched to ONE
+    agent owning both -- observable as ONE batched fix turn covering both files,
+    not two per-file turns."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
+    stub.merge_items = [
+        _merge_item(1, "a.py", "high"),
+        {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
+        _merge_item(3, "c.py", "high"),
+    ]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    # a.py and b.py findings fixed in ONE batched turn (footprint union);
+    # c.py is a separate per-finding turn. (The fixture also dispatches its own
+    # in-scope structural item -- api.py "Sample issue" -- as its own turn.)
+    fix_calls = [c for c in stub.calls
+                 if c["prompt"].lower().startswith("fix this issue")
+                 or c["prompt"].lower().startswith("fix these")]
+    batched = [c for c in fix_calls if "fix these" in c["prompt"].lower()]
+    assert len(batched) == 1  # a.py and b.py fixed together, not two per-file turns
+    assert "issues in " in batched[0]["prompt"]
+    assert len(fix_calls) == 3  # merged {a,b} group + c.py + fixture structural item
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

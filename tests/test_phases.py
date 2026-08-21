@@ -3902,6 +3902,34 @@ def test_group_items_by_file_preserves_order_within_and_across_groups():
     assert group_items_by_file([]) == []
 
 
+def test_group_items_by_footprint_unions_overlapping_footprints():
+    from daydream.phases import group_items_by_footprint
+
+    items = [
+        {"id": 1, "file": "a.py", "related_files": ["b.py"]},
+        {"id": 2, "file": "b.py"},                      # overlaps item 1 via b.py
+        {"id": 3, "file": "c.py"},                      # disjoint
+    ]
+    groups = group_items_by_footprint(items)
+    # 1 and 2 must be in ONE group (shared b.py); 3 separate.
+    assert len(groups) == 2
+    a_group = next(it for _, it in groups if any(i["id"] == 1 for i in it))
+    assert {i["id"] for i in a_group} == {1, 2}
+
+
+def test_group_items_by_footprint_never_splits_same_file_batch():
+    from daydream.phases import group_items_by_footprint
+
+    items = [
+        {"id": 1, "file": "a.py"},
+        {"id": 2, "file": "a.py", "related_files": ["x.py"]},
+        {"id": 3, "file": "a.py"},
+    ]
+    groups = group_items_by_footprint(items)
+    assert len([g for _, g in groups]) == 1  # same primary file must never split (#170/#202)
+    assert {i["id"] for i in groups[0][1]} == {1, 2, 3}
+
+
 async def test_phase_fix_parallel_calls_count_serial_per_file_and_collects_failures(tmp_path, monkeypatch, make_work):
     import anyio
 

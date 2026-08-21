@@ -1089,6 +1089,76 @@ def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dic
     return list(grouped.items())
 
 
+def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition fix items by footprint (``{file} ∪ related_files``), widening-only.
+
+    A finding's footprint is its primary ``file`` plus every ``related_files``
+    entry it carries. Any two groups whose footprints share a file are united
+    into one dispatch group (transitively), so a finding whose defect spans
+    sibling documents reaches a single agent that owns the whole overlapping
+    set. Grouping is widening-only: it unions intersecting footprints but never
+    splits a batch that already shares a primary file, preserving the
+    per-file read-modify-write race safety described in ``group_items_by_file``
+    and enforced by #170/#202.
+
+    Group emission order is first-appearance order of each group's earliest
+    item; within-group order is input order. The returned group key is the
+    group's representative primary file (the first item's ``file``, or
+    ``"<no-file>"``) -- sufficient for ``phase_fix_parallel``'s failures dict
+    and per-group budget. Items with a missing/None file bucket into a single
+    ``"<no-file>"`` group (cannot prove disjoint -> serialize for safety).
+
+    Pure: no I/O, no mutation of inputs.
+
+    Returns:
+        Ordered list of ``(file_key, items_for_group)`` tuples.
+    """
+    if not items:
+        return []
+
+    # Union-find over item indices: two items are linked iff their footprints
+    # share a file.
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    file_to_indices: dict[str, list[int]] = {}
+    for i, item in enumerate(items):
+        footprint = {(item.get("file") or "<no-file>")} | {
+            f for f in (item.get("related_files") or []) if isinstance(f, str)
+        }
+        for f in footprint:
+            for j in file_to_indices.setdefault(f, []):
+                union(i, j)
+            file_to_indices[f].append(i)
+
+    roots = [find(i) for i in range(len(items))]
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    first_seen: dict[int, int] = {}
+    for i, item in enumerate(items):
+        r = roots[i]
+        if r not in grouped:
+            grouped[r] = []
+            first_seen[r] = i
+        grouped[r].append(item)
+
+    result: list[tuple[str, list[dict[str, Any]]]] = []
+    for root in sorted(first_seen, key=lambda rt: first_seen[rt]):
+        grp = grouped[root]
+        key = grp[0].get("file") or "<no-file>"
+        result.append((key, grp))
+    return result
+
+
 RECOMMENDATION_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -2181,7 +2251,7 @@ async def phase_fix_batched(
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
     All ``items`` must target the same file; the caller (``phase_fix_parallel``)
-    groups them with ``group_items_by_file``. Batching collapses N per-finding
+    groups them (via ``group_items_by_footprint``). Batching collapses N per-finding
     ``run_agent`` calls into one so the agent reads the file's context once and
     produces a single coherent patch. A single-item group delegates straight to
     ``phase_fix`` — there is no batched prompt to build.
@@ -2303,9 +2373,10 @@ async def phase_fix_parallel(
 ) -> dict[str, str]:
     """Phase 3 (parallel): Apply fixes file-partitioned and concurrently.
 
-    Items are grouped by ``file`` (preserving the caller's severity ordering).
-    Each file-group becomes one task whose findings are fixed together in a
-    single ``phase_fix_batched`` call (one ``run_agent`` turn per file), while
+    Items are grouped by footprint (the item's ``file`` union its
+    ``related_files``, widening-only), preserving the caller's severity order.
+    Each footprint-group becomes one task whose findings are fixed together in a
+    single ``phase_fix_batched`` call (one ``run_agent`` turn per group), while
     distinct files run concurrently under an ``anyio.CapacityLimiter``. If the
     batched turn raises, the group falls back to per-finding ``phase_fix`` calls.
     Same-file serialization prevents concurrent writes to the *same named file*;
@@ -2365,7 +2436,7 @@ async def phase_fix_parallel(
     # recompute them.
     _preflight_finding_file_refs(work.repo, items)
 
-    raw_groups = group_items_by_file(items)
+    raw_groups = group_items_by_footprint(items)
     # Assign stable 1-based counters by pairing each item with its number
     # directly, avoiding fragile id()-keyed dicts whose keys are memory
     # addresses and can collide if dicts are reallocated between loops.
