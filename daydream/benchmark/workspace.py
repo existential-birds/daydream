@@ -11,6 +11,7 @@ failures map to the documented exit codes.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -19,15 +20,20 @@ import yaml
 
 from daydream.benchmark.schema import (
     BenchmarkManifest,
+    CaseIndexEntry,
     Privacy,
+    PullRequestEntry,
     Source,
+    derive_workspace_state,
     normalize_hostname,
 )
 from daydream.benchmark.storage import (
     Transaction,
+    WorkspaceCorrupt,
     WorkspaceLock,
     ensure_private_dir,
     load_yaml_strict,
+    recover_startup,
 )
 
 _SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache", "harbor")
@@ -137,4 +143,49 @@ def init_workspace(
 
     return BenchmarkManifest.model_validate(
         load_yaml_strict(root / "benchmark.yaml")
+    )
+
+
+@dataclass
+class Ledger:
+    """The workspace's parsed ``pull_requests[]`` ledger."""
+
+    pull_requests: list[PullRequestEntry]
+
+
+@dataclass
+class WorkspaceStatus:
+    """Read-only derived status of a benchmark workspace."""
+
+    workspace_state: str
+    source: Source
+    repository_identity_resolved: bool
+    ledger: Ledger
+    cases: list[CaseIndexEntry]
+
+
+def workspace_status(root: Path) -> WorkspaceStatus:
+    """Return a read-only ``WorkspaceStatus`` for ``root``.
+
+    Runs startup recovery first, then reads + strictly validates
+    ``benchmark.yaml``. Takes **no** workspace lock so it is safe to run
+    concurrently with another read-only command.
+    """
+    root = Path(root)
+    recover_startup(root)
+    raw = load_yaml_strict(root / "benchmark.yaml")
+    try:
+        manifest = BenchmarkManifest.model_validate(raw)
+    except Exception as exc:
+        raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
+
+    pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
+    state = derive_workspace_state(pull_requests=pr_dicts, cases=[])
+    resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
+    return WorkspaceStatus(
+        workspace_state=state,
+        source=manifest.source,
+        repository_identity_resolved=resolved,
+        ledger=Ledger(pull_requests=manifest.pull_requests),
+        cases=manifest.cases,
     )

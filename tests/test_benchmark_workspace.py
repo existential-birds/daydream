@@ -56,3 +56,24 @@ def test_init_refuses_existing_nonempty_dir(tmp_path):
 def test_init_refuses_empty_reviewer_hosts(tmp_path):
     with pytest.raises((InitError, ValueError)):
         init_workspace(tmp_path / "ws", "O/R", [], ["h2.example.com"])
+
+
+def test_status_fresh_workspace_is_empty_and_unresolved(tmp_path):
+    from daydream.benchmark.workspace import init_workspace, workspace_status
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    st = workspace_status(root)
+    assert st.workspace_state == "empty"
+    assert st.repository_identity_resolved is False
+    assert st.ledger is not None and st.ledger.pull_requests == []
+
+
+def test_status_surfaces_unresolved_identity(tmp_path):
+    from daydream.benchmark.workspace import init_workspace, workspace_status
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    st = workspace_status(root)
+    assert st.source.hostname == "github.com"
+    assert st.source.repository_id is None and st.source.visibility == "unresolved"
