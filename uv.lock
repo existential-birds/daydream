@@ -207,6 +207,7 @@ dependencies = [
     { name = "pyfiglet" },
     { name = "pyjwt" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
     { name = "rich" },
     { name = "tree-sitter" },
     { name = "tree-sitter-go" },
@@ -221,7 +222,6 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-xdist" },
-    { name = "pyyaml" },
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
@@ -236,6 +236,7 @@ requires-dist = [
     { name = "pyfiglet", specifier = ">=1.0" },
     { name = "pyjwt", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.0" },
     { name = "tree-sitter", specifier = "==0.25.2" },
     { name = "tree-sitter-go", specifier = "==0.25.0" },
@@ -250,7 +251,6 @@ dev = [
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "pytest-xdist", specifier = ">=3.6" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.9" },
     { name = "types-pyyaml", specifier = ">=6.0" },
 ]
