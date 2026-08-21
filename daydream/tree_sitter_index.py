@@ -416,7 +416,9 @@ def _resolve_import(
 # files (e.g. ``app`` matches every file mentioning "app"). The static
 # ``imports`` edges still capture forward dependencies precisely, and the
 # dependency-tracer agent greps call sites itself, so skipping these loses
-# nothing but noise.
+# nothing but noise -- UNLESS the file actually defines a symbol, in which case
+# a reverse lookup is warranted (``_eligible_for_reverse_grep`` rescues
+# generic stems whose path appears in the symbol index; issue #745).
 _GENERIC_STEMS = frozenset(
     {
         "__init__", "mod", "index", "main", "app", "api", "base", "common",
@@ -435,12 +437,31 @@ def _is_generic_or_invalid_stem(stem: str) -> bool:
 
     Skips empty stems, stems in :data:`_GENERIC_STEMS`, and stems containing
     characters (NUL, CR, LF) that cannot be expressed in a grep patterns file.
+    A caller may still rescue a generic stem when its file defines a symbol
+    (see :func:`_eligible_for_reverse_grep`).
     """
     if not stem or stem in _GENERIC_STEMS:
         return True
     if "\x00" in stem or "\r" in stem or "\n" in stem:
         return True
     return False
+
+
+def _eligible_for_reverse_grep(path: str, defining_paths: set[str]) -> bool:
+    """Whether a modified path should be part of the reverse-import grep.
+
+    Invalid/empty stems are always skipped (they cannot be grepped). A generic
+    stem (in :data:`_GENERIC_STEMS`) is skipped UNLESS the file actually
+    defines a symbol per the symbol index (``defining_paths``) -- a ``config.py``
+    that defines ``load_config`` deserves a reverse lookup; one that defines
+    nothing stays skipped. Non-generic stems are always eligible.
+    """
+    stem = Path(path).stem
+    if not stem or "\x00" in stem or "\r" in stem or "\n" in stem:
+        return False
+    if stem in _GENERIC_STEMS and path not in defining_paths:
+        return False
+    return True
 
 
 _MAX_IMPORTERS = 40
@@ -450,23 +471,30 @@ _MAX_IMPORTERS = 40
 _CODE_PATHSPECS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in LANGUAGES)
 
 
-def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[str, list[str]]:
+def _build_importer_lookup(
+    repo_root: Path,
+    modified_paths: list[str],
+    defining_paths: set[str] | None = None,
+) -> dict[str, list[str]]:
     """Return one batched reverse-import lookup for all *modified_paths*.
 
     Feeds every changed module stem to a single :func:`git_ops.grep_fixed_matches`
     call, then groups the ``(path, pattern)`` pairs per modified path. Each
     modified path's list excludes that exact path and is capped at
     :data:`_MAX_IMPORTERS`, so paths sharing a stem keep separate, per-path
-    caps. Best-effort: a ``GitError`` (or no usable stems) degrades to empty
-    lists with zero git calls.
+    caps. ``defining_paths`` names the modified paths that define at least one
+    symbol per the symbol index; a generic-stem path in this set is rescued
+    from the generic-stem skip (issue #745). Best-effort: a ``GitError`` (or no
+    usable stems) degrades to empty lists with zero git calls.
     """
+    defining_paths = defining_paths or set()
     lookup: dict[str, list[str]] = {path: [] for path in modified_paths}
     unique_stems: list[str] = []
     seen_stems: set[str] = set()
     for path in modified_paths:
-        stem = Path(path).stem
-        if _is_generic_or_invalid_stem(stem):
+        if not _eligible_for_reverse_grep(path, defining_paths):
             continue
+        stem = Path(path).stem
         if stem in seen_stems:
             continue
         seen_stems.add(stem)
@@ -475,7 +503,9 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
         return lookup
 
     try:
-        pairs = git_ops.grep_fixed_matches(repo_root, unique_stems, word=True, pathspecs=_CODE_PATHSPECS)
+        pairs = git_ops.grep_fixed_matches(
+            repo_root, unique_stems, word=True, pathspecs=_CODE_PATHSPECS
+        )
     except GitError:
         return lookup
 
@@ -487,9 +517,9 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
         if path not in bucket:
             bucket.append(path)
     for path in modified_paths:
-        stem = Path(path).stem
-        if _is_generic_or_invalid_stem(stem):
+        if not _eligible_for_reverse_grep(path, defining_paths):
             continue
+        stem = Path(path).stem
         lookup[path] = [p for p in by_stem.get(stem, ()) if p != path][:_MAX_IMPORTERS]
     return lookup
 
@@ -595,7 +625,12 @@ def detect_affected_files(
         for entry in entries
         if entry.status != "D" and Path(entry.path).suffix in LANGUAGES
     ]
-    importers_by_path = _build_importer_lookup(repo_root, reverse_paths)
+    # A generic-stem file (e.g. ``config``) is rescued from the reverse-import
+    # skip when it actually defines a symbol (issue #745); compute the defining
+    # set once from the same parse used for the forward edges.
+    symbol_index = build_symbol_index(repo_root, reverse_paths)
+    defining_paths = {d["path"] for entries in symbol_index.values() for d in entries}
+    importers_by_path = _build_importer_lookup(repo_root, reverse_paths, defining_paths)
     go_package_index: dict[str, tuple[Path, ...]] | None = None
 
     for entry in entries:

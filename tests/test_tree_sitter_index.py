@@ -452,3 +452,19 @@ def test_symbol_def_rust_returns_file_and_line_range(tmp_path: Path):
     assert symbol_def(idx, "Widget") == [
         {"path": "lib.rs", "line": 5, "end_line": 7, "kind": "class"}
     ]
+
+
+def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path):
+    """A generic-stem file that actually defines a symbol must not be skipped
+    by the reverse-import lookup (config.py -> app.py ``imported_by`` edge)."""
+    (tmp_path / "config.py").write_text("def load_config():\n    return {}\n")
+    (tmp_path / "app.py").write_text("import config\n")
+    diff = (
+        "diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n"
+        "@@ -1 +1,2 @@\n x\n+y\n"
+    )
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", ".")
+    _commit(tmp_path, "init")
+    results = detect_affected_files(diff, tmp_path, depth=1)
+    assert any(r.path == "app.py" and r.role == "imported_by" for r in results)
