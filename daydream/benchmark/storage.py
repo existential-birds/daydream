@@ -415,13 +415,9 @@ class Transaction:
         _fsync_file(self._journal_path())
 
     def _cleanup(self) -> None:
-        """Remove the journal + staging dir if the target set is complete."""
+        """Remove the journal + staging dir, leaving an empty ``transactions/`` root."""
         if self._dir.exists():
             shutil.rmtree(self._dir, ignore_errors=True)
-        txn_root = self._root / "transactions"
-        if txn_root.exists() and not any(txn_root.iterdir()):
-            with suppress(OSError):
-                txn_root.rmdir()
 
     def __enter__(self) -> "Transaction":
         return self
@@ -467,7 +463,7 @@ def recover_startup(
     root: Path,
     *,
     indexed: set[str] | None = None,
-    on_disk: set[Path | str] | None = None,
+    on_disk: set[Path] | None = None,
 ) -> None:
     """Recover an interrupted journal before reading workspace state.
 
@@ -501,9 +497,13 @@ def recover_startup(
 
 
 def _empty_transactions(root: Path) -> None:
+    """Remove any leftover per-op journal dirs (keep the empty ``transactions/`` root)."""
     txn_root = root / "transactions"
-    if txn_root.exists():
-        shutil.rmtree(txn_root, ignore_errors=True)
+    if not txn_root.exists():
+        return
+    for op_dir in txn_root.iterdir():
+        if op_dir.is_dir():
+            shutil.rmtree(op_dir, ignore_errors=True)
 
 
 def _recover_one_journal(root: Path, journal_path: Path, op_dir: Path) -> None:
@@ -576,7 +576,7 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         shutil.rmtree(op_dir, ignore_errors=True)
 
 
-def _apply_orphan_rule(root: Path, indexed: set[str], on_disk: set[Path | str]) -> None:
+def _apply_orphan_rule(root: Path, indexed: set[str], on_disk: set[Path]) -> None:
     indexed_norm = {p.replace(os.sep, "/").lstrip("/") for p in indexed}
     disk_rel: set[str] = set()
     for item in on_disk:

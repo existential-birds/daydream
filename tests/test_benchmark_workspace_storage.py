@@ -162,3 +162,21 @@ def test_referenced_missing_file_is_corruption(tmp_path):
     manifest.write_text("references a missing case\n")
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
+
+
+def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
+    # For each named boundary, drive a transaction that injects a crash there,
+    # then recover_startup and assert the workspace is either the complete
+    # before-state or the complete after-state — never checksum drift.
+    for boundary in ("staged", "backup", "journal", "data", "manifest"):
+        target = tmp_path / f"t-{boundary}.yaml"
+        target.write_text("before")
+        with Transaction(tmp_path, op_id=f"op-{boundary}", kind="write") as tx:
+            tx.stage(target.relative_to(tmp_path), b"after")
+            tx.prepare()
+            tx.inject_crash(boundary)
+        recover_startup(tmp_path)
+        assert target.read_text() in ("before", "after")
+        assert not (tmp_path / "transactions").exists() or not list(
+            (tmp_path / "transactions").iterdir()
+        )
