@@ -1184,6 +1184,30 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
     "additionalProperties": False,
 }
 
+FIX_VERIFY_VERDICTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "issue_id": {"type": "integer"},
+                    "verdict": {"type": "string",
+                                "enum": ["resolved", "unresolved",
+                                         "wrong_target", "regressed"]},
+                    "path": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["issue_id", "verdict", "reason"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["verdicts"],
+    "additionalProperties": False,
+}
+
 def _confidence_and_convention_instructions() -> str:
     """Prompt language for QUAL-02 confidence, QUAL-03 conventions, QUAL-04 error handling.
 
@@ -1856,6 +1880,118 @@ async def phase_verify_recommendations(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     return output_path, payload
+
+
+async def phase_fix_verify(
+    backend: Backend,
+    work: WorkContext,
+    items: list[dict[str, Any]],
+    changed_hunks: str,
+    *,
+    console_lock: anyio.Lock | None = None,
+) -> list[dict[str, Any]]:
+    """Post-round fix verifier: one read-only verdict per dispatched finding.
+
+    Runs AFTER every fix group in a round finishes (the round barrier — the
+    caller invokes this once per round, never per group). The agent audits the
+    round's changed hunks only (never the whole tree) and returns exactly one
+    verdict per listed finding from the four-value enum: ``resolved``,
+    ``unresolved``, ``wrong_target(path)``, or ``regressed(path)``.
+
+    Hard contracts:
+      - Read-only: ``run_agent(..., read_only=True)`` delegates enforcement to
+        the backend. A verification turn that attempts to edit a file fails
+        that step.
+      - Advisory: a non-``resolved`` verdict schedules follow-up work in a
+        later round (or the terminal report); it never fails the run and never
+        reverts the patch.
+      - Dispatched-count == outcome-count: every item passed in comes back with
+        exactly one verdict dict keyed by its canonical ``id``. A finding the
+        agent omitted coerces to ``unresolved`` ("no verifier verdict") — the
+        honest non-fixed terminal — never silently dropped.
+
+    The prompt is built through the registered ``fix-verify`` prompt (the
+    built-in ``build_fix_verify_prompt``; a fork may override it). Verdict
+    coercion mirrors ``_coerce_verdicts_payload`` (fail-open, non-dict entries
+    dropped), then ``path`` for ``wrong_target``/``regressed`` verdicts is
+    defaulted/cleaned here because a conditional ``required`` is not
+    expressible in JSON Schema.
+
+    Args:
+        backend: The Backend to execute against.
+        work: Workspace context; ``work.repo`` is the verifier's cwd.
+        items: The round's dispatched canonical items (the exact set the fix
+            phase was handed this round). Verdicts are keyed by each item's
+            canonical ``id``.
+        changed_hunks: The round's diff text (changed hunks only) the verifier
+            audits. May be empty (e.g. a resume without captured hunks); the
+            verifier is told the hunks are all it may inspect.
+        console_lock: Optional lock serializing interactive progress output.
+
+    Returns:
+        Ordered list of per-finding verdict dicts, one per dispatched item,
+        each ``{"issue_id": int, "verdict": str, "reason": str, "path"?: str}``.
+    """
+    del console_lock  # interactive progress is not printed per finding here
+    if not items:
+        return []
+
+    prompt = get_registry().prompt("fix-verify")(
+        items=items,
+        changed_hunks=changed_hunks,
+        cwd=work.repo,
+    )
+
+    result, _, _ = await run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=FIX_VERIFY_VERDICTS_SCHEMA,
+        tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=DEFAULT_WALL_BUDGET_S,
+        phase=DaydreamPhase.VERIFY,
+        read_only=True,
+    )
+
+    candidate: Any = result
+    if isinstance(result, str):
+        try:
+            candidate = json.loads(result)
+        except (json.JSONDecodeError, ValueError):
+            candidate = None
+    payload = _coerce_verdicts_payload(candidate)
+    by_id: dict[int, dict[str, Any]] = {}
+    for entry in payload["verdicts"]:
+        issue_id = entry.get("issue_id")
+        if not isinstance(issue_id, int):
+            continue
+        verdict = entry.get("verdict")
+        if verdict not in ("resolved", "unresolved", "wrong_target", "regressed"):
+            continue
+        cleaned: dict[str, Any] = {
+            "issue_id": issue_id,
+            "verdict": verdict,
+            "reason": entry.get("reason") or "",
+        }
+        path = entry.get("path")
+        if verdict in ("wrong_target", "regressed") and isinstance(path, str) and path.strip():
+            cleaned["path"] = path.strip()
+        by_id[issue_id] = cleaned
+
+    # Invariant: dispatched-count == outcome-count. Findings the agent omitted
+    # get the honest non-fixed terminal, never a silent drop.
+    verdicts: list[dict[str, Any]] = []
+    for item in items:
+        issue_id = item.get("id")
+        entry = by_id.get(issue_id) if isinstance(issue_id, int) else None
+        if entry is None:
+            entry = {
+                "issue_id": issue_id,
+                "verdict": "unresolved",
+                "reason": "no verifier verdict",
+            }
+        verdicts.append(entry)
+    return verdicts
 
 
 # Shared scope/precedence/contract guardrails appended to every fix prompt

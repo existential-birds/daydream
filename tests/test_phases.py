@@ -3910,6 +3910,30 @@ def test_fix_guardrails_forbid_git_mutation():
         assert verb in text, f"guardrails must forbid `{verb}`"
 
 
+def test_fix_verify_schema_rejects_bad_verdict():
+    import jsonschema
+
+    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
+
+    payload = {"verdicts": [
+        {"issue_id": 1, "verdict": "fixed-ish", "reason": "r"},
+    ]}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(payload, FIX_VERIFY_VERDICTS_SCHEMA)
+
+
+def test_fix_verify_schema_accepts_all_four_verdicts():
+    import jsonschema
+
+    from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
+
+    for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
+        entry = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        if verdict in ("wrong_target", "regressed"):
+            entry["path"] = "corrected.py"
+        jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
+
+
 def test_group_items_by_footprint_unions_overlapping_footprints():
     from daydream.phases import group_items_by_footprint
 

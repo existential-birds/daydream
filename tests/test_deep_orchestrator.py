@@ -755,6 +755,30 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     assert len(fix_calls) == 3  # merged {a,b} group + c.py + fixture structural item
 
 
+async def test_fix_verify_turn_is_read_only(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """AC: verification is strictly read-only. The stub records ``read_only``
+    per call (stub_backend.py:276), so the real-path run must show every
+    fix-verify turn arriving with ``read_only=True``."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    verify_calls = [c for c in stub.calls if "fix-verify" in c["prompt"]]
+    assert verify_calls, "expected a fix-verify turn"
+    assert all(c["read_only"] is True for c in verify_calls)
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

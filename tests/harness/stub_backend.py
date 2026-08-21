@@ -85,6 +85,12 @@ class StubBackend:
         # "contradicts" to exercise verdict propagation into the phase_fix prompt.
         self.verifier_verdict: str = "consistent"
         self.verifier_unverified_assumptions: list[str] = []
+        # Post-fix fix-verifier knobs (#744). fix_verify_verdicts overrides the
+        # verdict for a finding id (default: resolved); when None every dispatched
+        # finding resolves. fix_verify_requires_read_only pins the phase's
+        # read_only=True contract (default True).
+        self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
+        self.fix_verify_requires_read_only: bool = True
         # Counts test-suite invocations so a test can fail the FIRST run (driving
         # the heal loop into choice "2") and pass the SECOND.
         self.test_suite_calls: int = 0
@@ -795,6 +801,27 @@ class StubBackend:
                         }
                     ]
                 },
+                continuation=None,
+            )
+            return
+
+        # Post-fix fix-verifier (issue #744). Discriminator is the role sentence
+        # of build_fix_verify_prompt. Returns one verdict per dispatched finding
+        # id rendered in the prompt (default resolved), honoring the
+        # fix_verify_verdicts override map. Read-only enforcement is pinned:
+        # when fix_verify_requires_read_only and the call arrived
+        # read_only=False, raise (the phase must ALWAYS pass read_only=True).
+        if "post-fix fix-verifier agent" in pl:
+            if self.fix_verify_requires_read_only and not read_only:
+                raise AssertionError("fix-verify turn must arrive read_only=True")
+            ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
+            verdicts = [
+                (self.fix_verify_verdicts or {}).get(i, {"issue_id": i, "verdict": "resolved", "reason": "stub"})
+                for i in ids
+            ]
+            yield TextEvent(text="")
+            yield ResultEvent(
+                structured_output={"verdicts": verdicts},
                 continuation=None,
             )
             return
