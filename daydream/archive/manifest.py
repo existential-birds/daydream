@@ -439,8 +439,10 @@ def build_manifest(
             verbatim on the manifest.
         recommended_capture: Which tree produced the archived ``recommended.patch``
             (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
-            re-capture), or ``None`` on legacy runs. Absent sidecar defaults
-            ``recommended_patch_capture`` to ``"pre_test"``.
+            re-capture), or ``None`` on legacy runs. On fix-bearing flows an
+            absent sidecar defaults ``recommended_patch_capture`` to ``"pre_test"``;
+            flows with no fix phase (review-only / improve / feedback) leave it
+            ``None`` since they never produce a fix-phase fallback capture.
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
             from ``status``/``archive_status`` (archive finalization).
@@ -542,7 +544,11 @@ def build_manifest(
         fix_failures=fix_failures or None,
         fix_leftover_untracked=fix_leftover_untracked or None,
         fix_quality_gate=fix_quality_gate or None,
-        recommended_patch_capture=recommended_capture or "pre_test",
+        recommended_patch_capture=(
+            recommended_capture
+            if recommended_capture
+            else ("pre_test" if runs_fix else None)
+        ),
         source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,

@@ -19,7 +19,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
@@ -300,6 +300,30 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     return [str(p) for p in data]
 
 
+def _read_session_bound_json_artifact(
+    target_dir: Path, session_id: str | None, resolver: Callable[[Path], Path]
+) -> dict[str, Any] | None:
+    """Read a session-bound ``deep/*.json`` sidecar if it matches this run.
+
+    Shared reader for the deep-flow sidecar artifacts (fix-quality-gate,
+    recommended-capture): parses the JSON written at ``resolver`` under
+    ``<target_dir>/.daydream/deep`` and returns it only when its
+    ``session_id`` matches the current run's -- an artifact left behind by a
+    DIFFERENT session (e.g. a prior deep run on the same target repo) must not
+    be attributed to this run (#329). Returns ``None`` when the file is
+    absent, empty, malformed, unbound (no ``session_id`` key), or bound to
+    another session.
+    """
+    if session_id is None:
+        return None
+    data = _read_json_artifact(resolver(target_dir / ".daydream" / "deep"), dict)
+    if data is None:
+        return None
+    if data.get("session_id") != session_id:
+        return None
+    return data
+
+
 def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
     """Read ``deep/fix-quality-gate.json`` from the source tree, if present.
 
@@ -314,14 +338,7 @@ def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str
     """
     from daydream.deep.artifacts import fix_quality_gate_path
 
-    if session_id is None:
-        return None
-    data = _read_json_artifact(fix_quality_gate_path(target_dir / ".daydream" / "deep"), dict)
-    if data is None:
-        return None
-    if data.get("session_id") != session_id:
-        return None
-    return data
+    return _read_session_bound_json_artifact(target_dir, session_id, fix_quality_gate_path)
 
 
 def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
@@ -337,16 +354,7 @@ def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[
     """
     from daydream.deep.artifacts import recommended_capture_path
 
-    if session_id is None:
-        return None
-    data = _read_json_artifact(
-        recommended_capture_path(target_dir / ".daydream" / "deep"), dict
-    )
-    if data is None:
-        return None
-    if data.get("session_id") != session_id:
-        return None
-    return data
+    return _read_session_bound_json_artifact(target_dir, session_id, recommended_capture_path)
 
 
 def _copy_bundle(

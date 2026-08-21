@@ -3782,6 +3782,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
     # exact tree _step_commit commits. Runs only on the success path (after the
     # test-failure early return) and only in flows with a fix/test cycle.
     # Best-effort: a raise writes nothing and leaves the pre-test patch intact.
+    re_captured = False
     try:
         git_ops.capture_recommended_patch_with_base(
             ctx.work.repo,
@@ -3790,17 +3791,21 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
             ctx.work.repo / ".daydream" / "recommended.patch",
             preexisting_untracked=ctx.data.get("pre_fix_untracked"),
         )
+        re_captured = True
     except Exception:
         pass
     # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
-    try:
-        recommended_capture_path(ctx.data["dd"]).write_text(
-            json.dumps(
-                {"session_id": _current_session_id(), "capture_point": "post_test"}, indent=2
+    # Only record "post_test" when the re-capture succeeded; otherwise the patched
+    # tree on disk is still the pre-test capture, not the post-heal tree.
+    if re_captured:
+        try:
+            recommended_capture_path(ctx.data["dd"]).write_text(
+                json.dumps(
+                    {"session_id": _current_session_id(), "capture_point": "post_test"}, indent=2
+                )
             )
-        )
-    except Exception:
-        pass
+        except Exception:
+            pass
     return None
 
 
