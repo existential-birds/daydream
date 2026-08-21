@@ -161,6 +161,17 @@ def fix_outcomes_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "fix-outcomes.json"
 
 
+def recommended_capture_path(deep_dir_path: Path) -> Path:
+    """Capture-point sidecar recording which tree produced recommended.patch.
+
+    Mirrors :func:`fix_quality_gate_path`: written session-bound by the deep
+    orchestrator's post-test re-capture (``"post_test"``) or, when absent,
+    defaulted to ``"pre_test"`` by the archive manifest builder. The archive
+    reads this file to record which capture produced the archived patch.
+    """
+    return deep_dir_path / "recommended-capture.json"
+
+
 def fix_quality_gate_path(deep_dir_path: Path) -> Path:
     """Fix-phase anti-degradation quality gate verdict (issue #315).
 

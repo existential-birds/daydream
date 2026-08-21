@@ -67,6 +67,7 @@ from daydream.deep.artifacts import (
     merged_report_path,
     per_stack_failures_path,
     per_stack_records_path,
+    recommended_capture_path,
     test_verdict_path,
 )
 from daydream.deep.artifacts import (
@@ -3462,6 +3463,13 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     # (_step_test) so it measures the same base on the same trust gate.
     ctx.data["pre_fix_ref"] = pre_fix_ref
     ctx.data["pre_fix_snapshot_captured"] = pre_fix_snapshot_captured
+    # Thread the raw pre-fix base onto ctx.data so _step_test's post-test
+    # re-capture passes an IDENTICAL base to the archived recommended.patch.
+    # pre_fix_head is None when a snapshot was captured (the snapshot is the
+    # base), and the pre-fix HEAD SHA when the tree was clean — exactly what
+    # the first capture passed at :3367-3368.
+    ctx.data["pre_fix_snapshot"] = pre_fix_snapshot
+    ctx.data["pre_fix_head"] = pre_fix_head
     residual_guard_result = _revert_out_of_scope_edits(
         work,
         pre_fix_ref=pre_fix_ref,
@@ -3739,6 +3747,7 @@ def _render_fix_outcome_summary(
 
 async def _step_test(ctx: FlowContext) -> Stop | None:
     """Post-fix test validation."""
+    from daydream import git_ops
     async with phase_scope(DaydreamPhase.TEST):
         passed, retries, proceed = await phase_test_and_heal(
             ctx.backend_for("test"), ctx.work, feedback_items=ctx.data["items"]
@@ -3767,6 +3776,31 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
             "pre-fix snapshot; HEAD may include edits present before the fix pass."
         ),
     )
+    # Issue #743: best-effort post-test re-capture. The pre-test capture above
+    # (in _step_fix) predates test-and-heal edits; re-capture the post-heal
+    # (post-scrub) tree here so the archived recommended.patch reproduces the
+    # exact tree _step_commit commits. Runs only on the success path (after the
+    # test-failure early return) and only in flows with a fix/test cycle.
+    # Best-effort: a raise writes nothing and leaves the pre-test patch intact.
+    try:
+        git_ops.capture_recommended_patch_with_base(
+            ctx.work.repo,
+            ctx.data.get("pre_fix_snapshot"),
+            ctx.data.get("pre_fix_head"),
+            ctx.work.repo / ".daydream" / "recommended.patch",
+            preexisting_untracked=ctx.data.get("pre_fix_untracked"),
+        )
+    except Exception:
+        pass
+    # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
+    try:
+        recommended_capture_path(ctx.data["dd"]).write_text(
+            json.dumps(
+                {"session_id": _current_session_id(), "capture_point": "post_test"}, indent=2
+            )
+        )
+    except Exception:
+        pass
     return None
 
 

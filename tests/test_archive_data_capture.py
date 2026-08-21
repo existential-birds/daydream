@@ -114,6 +114,11 @@ def _install_deep_capture_backend(
     return stub
 
 
+async def _ok_with_heal_edit(target: Path):
+    (target / "heal_edit.py").write_text("def healed():\n    pass\n")
+    return await _ok()
+
+
 # --- AC1 + AC3: default deep run populates eval metrics AND captures recommended.patch ---
 
 
@@ -198,6 +203,34 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
     recommended = (run_dir / "recommended.patch").read_text()
     assert "migrations/0002_add_x.sql" in recommended  # fix-created file present
     assert "notes.txt" not in recommended              # pre-existing file excluded
+
+
+async def test_deep_heal_edit_lands_in_archived_recommended_patch(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path
+) -> None:
+    remote = bare_remote(archive_dir.parent / "origin.git")
+    git(multi_stack_target, "remote", "add", "archive", str(remote))
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)  # real_internal_phases=False
+    stub.fix_edit_line = "# daydream recommended change\n"
+    monkeypatch.setattr(
+        "daydream.deep.orchestrator.phase_test_and_heal",
+        lambda *a, **k: _ok_with_heal_edit(multi_stack_target),
+    )
+
+    exit_code = await run(
+        RunConfig(target=str(multi_stack_target), assume="yes", output_mode="loop", cleanup=False)
+    )
+    assert exit_code == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    # The heal edit was written after the pre-test capture; only a post-test
+    # re-capture can put it in the archived patch.
+    assert "heal_edit.py" in (run_dir / "recommended.patch").read_text()
+    # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
+    sidecar = json.loads(
+        (multi_stack_target / ".daydream" / "deep" / "recommended-capture.json").read_text()
+    )
+    assert sidecar == {"session_id": run_dir.name, "capture_point": "post_test"}
 
 
 async def test_deep_archive_commit_excludes_preexisting_untracked_files(
