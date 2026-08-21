@@ -23,8 +23,9 @@ from typing import TYPE_CHECKING, Any
 
 from daydream.archive.git_context import capture_git_context
 from daydream.archive.index import upsert_run
-from daydream.archive.manifest import build_manifest
+from daydream.archive.manifest import _flow_fix_test_steps, build_manifest
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.trajectory import DaydreamRunFlow
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,30 @@ if TYPE_CHECKING:
     from daydream.runner import RunConfig
     from daydream.trajectory import TrajectoryRecorder
     from daydream.workspace import WorkContext
+
+
+def _flow_runs_merge(flow: DaydreamRunFlow, flow_name: str | None) -> bool:
+    """Whether the executed flow runs the deep cross-stack/single-stack merge.
+
+    The deep pipeline's merge step runs in every non-feedback mode -- loop and
+    shallow (NORMAL/DEEP) run the full fix cycle, and review/comment (TTT) run
+    the spine up to ``post-review`` (which still executes the merge). Feedback
+    (PR) runs only the comment-fetch prefix and never enters the spine, and
+    improve-only never invokes the deep orchestrator, so neither runs merge.
+    Custom flows are classified from their registered pipeline (a fork
+    composing the built-in deep merge step is detected as it runs), mirroring
+    ``_flow_fix_test_steps`` in ``archive.manifest``.
+    """
+    if flow is DaydreamRunFlow.PR:
+        return False
+    if flow is DaydreamRunFlow.IMPROVE:
+        return False
+    if flow is DaydreamRunFlow.CUSTOM:
+        from daydream.archive.manifest import _flow_phase_steps, _runtime_flow_name
+
+        steps = _flow_phase_steps(_runtime_flow_name(flow, flow_name))
+        return any("merge" in step for step in steps)
+    return True
 
 
 def get_archive_dir() -> Path:
@@ -155,6 +180,32 @@ def _archive_run_inner(
     if fix_failures:
         status = "partial"
 
+    # 3c. Executable provenance + pipeline outcome. Best-effort by contract:
+    #     capture_executable_provenance never raises (per-field "unknown"), and
+    #     derive_phase_states/derive_pipeline_status never raise on bad artifacts
+    #     (absent/malformed -> absent/neutral). A failure here must never abort
+    #     the archive (the surrounding archive_run try/except is a second net).
+    from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
+    from daydream.archive.provenance import capture_executable_provenance
+
+    provenance = capture_executable_provenance()
+    runs_fix, runs_test = _flow_fix_test_steps(recorder.run_flow, config.flow_name)
+    # Gate the per-phase derivation to only the phases THIS flow actually runs:
+    # the deep artifacts it reads are session-agnostic, so a non-deep flow on a
+    # previously deep-reviewed repo must not inherit a prior run's state (#336,
+    # #762). ``runs_merge`` mirrors the ``_flow_fix_test_steps`` classification.
+    runs_merge = _flow_runs_merge(recorder.run_flow, config.flow_name)
+    phase_states = derive_phase_states(
+        target_dir,
+        phase_events=getattr(recorder, "_phase_events", []),
+        runs_merge=runs_merge,
+        runs_fix=runs_fix,
+        runs_test=runs_test,
+    )
+    pipeline_status = derive_pipeline_status(
+        status, fix_failures, phase_states, runs_fix=runs_fix, runs_test=runs_test,
+    )
+
     # 4. Build and write manifest
     source_path = str(work.source) if work is not None else str(target_dir)
     manifest = build_manifest(
@@ -169,6 +220,9 @@ def _archive_run_inner(
         fix_failures=fix_failures,
         fix_leftover_untracked=fix_leftover_untracked,
         fix_quality_gate=fix_quality_gate,
+        pipeline_status=pipeline_status,
+        phase_states=phase_states,
+        provenance=provenance,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")

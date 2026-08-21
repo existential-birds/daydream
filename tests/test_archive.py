@@ -1483,7 +1483,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (4)."""
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (6)."""
     from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
     db_path = tmp_path / "index.db"
@@ -1529,7 +1529,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     conn.close()
     assert "has_posterior" in runs_cols
     assert {"reviewer_logins", "has_posterior"} <= lo_cols
-    assert user_version == SCHEMA_VERSION == 5
+    assert user_version == SCHEMA_VERSION == 6
 
     obs = latest_label_observation(tmp_path, "mig-1")
     assert obs is not None
@@ -1946,3 +1946,203 @@ def test_build_manifest_omits_per_stack_review_on_merge_fix_resume(tmp_path: Pat
         assert m.per_stack_review_model is None, f"start_at={start_at}"
         assert "per_stack_review_backend" not in run, f"start_at={start_at}"
         assert "per_stack_review_model" not in run, f"start_at={start_at}"
+
+
+def test_manifest_splits_status_from_pipeline():
+    from daydream.archive.provenance import ExecutableProvenance
+    m = Manifest(
+        session_id="s-1", status="complete", archive_status="complete",
+        pipeline_status="failed", phase_states={
+            "merge": {"ran": True, "status": "failed"},
+            "fix": {"ran": False, "status": "absent"},
+            "test": {"ran": False, "status": "absent"},
+        },
+        daydream=ExecutableProvenance(version="0.27.0", install_source="git",
+                                      commit="abc", dirty=False,
+                                      container_digest="unknown"),
+    )
+    d = m.to_dict()
+    assert d["status"] == "complete"
+    assert d["archive_status"] == "complete"
+    assert d["pipeline_status"] == "failed"
+    assert d["phase_states"]["merge"]["status"] == "failed"
+    # Namespace separation: executable provenance never merged into git.*
+    assert d["daydream"]["version"] == "0.27.0"
+    assert d["git"]["head_sha"] is None  # target-repo sha stays in git.*
+    assert "commit" not in d["git"]
+
+
+def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path):
+    # A pre-#762 Manifest carries no archive_status/pipeline_status/phase_states/
+    # daydream keys. Indexing it and reading it back through the production
+    # query_runs path surfaces the new fields as explicit schema-default
+    # sentinels (pipeline_status "unknown"), never a KeyError and never a
+    # fabricated value.
+    upsert_run(tmp_path, Manifest())
+    row = query_runs(tmp_path)[0]
+    assert row["pipeline_status"] == "unknown"
+    assert row["archive_status"] == "complete"
+    assert row["daydream_version"] is None
+
+
+def _write_deep(target: Path, name: str, data):
+    deep = target / ".daydream" / "deep"
+    deep.mkdir(parents=True, exist_ok=True)
+    (deep / name).write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_merge_failed_discriminates_on_merge_key_not_merged_items(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["merge"]["ran"] is True
+    assert states["merge"]["status"] == "failed"   # merged-items present is NOT sufficient
+
+
+def test_merge_succeeded_when_items_and_no_merge_key(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["merge"]["status"] == "succeeded"
+
+
+def test_test_failed_from_verdict(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 1, "ignored": False})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["test"]["ran"] is True
+    assert states["test"]["status"] == "failed"
+
+
+def test_test_absent_when_no_verdict(tmp_path):
+    from daydream.archive import pipeline
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["test"]["ran"] is False
+    assert states["test"]["status"] == "absent"
+
+
+def test_fix_partial_from_failures(tmp_path):
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[])
+    assert states["fix"]["status"] == "partial"
+
+
+def test_pipeline_status_precedence():
+    from daydream.archive import pipeline
+    # cancelled beats everything when archive partial with no fix failures
+    assert pipeline.derive_pipeline_status("partial", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "succeeded"}}) == "cancelled"
+    # merge failed -> failed even though archive_status complete
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "failed"},
+         "fix": {"ran": False, "status": "absent"},
+         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "failed"
+    # test failed -> failed
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "failed"}}) == "failed"
+    # flow runs test but it never ran -> partial
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": False, "status": "absent"}}, runs_test=True) == "partial"
+    # clean deep run -> succeeded
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "succeeded"},
+         "test": {"ran": True, "status": "succeeded"}}) == "succeeded"
+    # all-absent (a flow that runs neither fix nor test and surfaced no phase
+    # evidence) -> unknown, never succeeded
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": False, "status": "absent"},
+         "fix": {"ran": False, "status": "absent"},
+         "test": {"ran": False, "status": "absent"}},
+        runs_fix=False, runs_test=False) == "unknown"
+    # an unexpected/unknown per-phase status drives the _UNKNOWN branch
+    assert pipeline.derive_pipeline_status("complete", None,
+        {"merge": {"ran": True, "status": "succeeded"},
+         "fix": {"ran": True, "status": "unknown"},
+         "test": {"ran": True, "status": "succeeded"}}) == "unknown"
+
+
+def test_non_deep_flow_ignores_stale_deep_artifacts(tmp_path):
+    # Issue #336: derive_phase_states is flow-aware. A prior deep run left
+    # session-agnostic merge/fix/test artifacts in target_dir/.daydream/deep;
+    # a non-deep flow run afterwards must NOT inherit them as its own pipeline
+    # state -- the phases it does not run read absent regardless of disk.
+    from daydream.archive import pipeline
+    _write_deep(tmp_path, "merged-items.json", {"items": []})
+    _write_deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _write_deep(tmp_path, "test-verdict.json", {"passed": False})
+    _write_deep(tmp_path, "fix-failures.json", {"src/a.py": "reverted"})
+    # TTT review runs the merge spine but never the fix/test cycle.
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[],
+                                          runs_merge=True, runs_fix=False, runs_test=False)
+    assert states["merge"]["status"] == "failed"   # merge ran (spine wrote fresh artifacts)
+    assert states["fix"] == {"ran": False, "status": "absent"}    # stale fix ignored
+    assert states["test"] == {"ran": False, "status": "absent"}   # stale test ignored
+    # An improve-only flow runs none of the deep phases at all.
+    states = pipeline.derive_phase_states(tmp_path, phase_events=[],
+                                          runs_merge=False, runs_fix=False, runs_test=False)
+    assert all(s == {"ran": False, "status": "absent"} for s in states.values())
+
+
+
+def _deep(tmp_path: Path, name: str, data):
+    d = tmp_path / ".daydream" / "deep"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: MakeConfig):
+    from daydream.archive import _archive_run_inner
+    from tests.harness.trajectory import make_recorder
+    _deep(tmp_path, "merged-items.json", {"items": []})
+    _deep(tmp_path, "per-stack-failures.json", {"__merge__": {"message": "x"}})
+    _deep(tmp_path, "test-verdict.json", {"passed": False, "retries": 0, "ignored": False})
+    recorder = make_recorder(tmp_path)  # run_flow NORMAL; fake config with archive=False
+    config = make_config(tmp_path, archive=False)
+    _archive_run_inner(recorder=recorder, target_dir=tmp_path, config=config,
+                       status="complete", run_eval=False, work=None, upload=False)
+    manifest_path = sorted(get_archive_dir().glob("runs/*/manifest.json"))[-1]
+    m = json.loads(manifest_path.read_text())
+    assert m["archive_status"] == "complete"   # cleanly archived...
+    assert m["pipeline_status"] == "failed"    # ...but the pipeline failed
+    assert m["phase_states"]["merge"]["status"] == "failed"
+    assert m["daydream"]["version"]  # executable provenance recorded
+    assert m["daydream"]["commit"]  # a real SHA or the "unknown" sentinel, never blank
+
+
+def test_schema_additive_columns_and_migration(tmp_path):
+    from daydream.archive import _schema
+    db = tmp_path / "index.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'complete')")
+    conn.commit()
+    conn.close()
+    # _migrate_schema adds the new columns idempotently to an existing table
+    _schema._migrate_schema(sqlite3.connect(db))
+    cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(runs)").fetchall()}
+    assert "archive_status" in cols and "pipeline_status" in cols and "phase_states" in cols
+    assert "daydream_version" in cols and "daydream_commit" in cols and "daydream_dirty" in cols
+
+
+def test_upsert_run_persists_pipeline_fields(tmp_path):
+    from daydream.archive import index
+    from daydream.archive.manifest import Manifest
+    from daydream.archive.provenance import ExecutableProvenance
+    m = Manifest(session_id="s-2", status="complete", archive_status="complete",
+                 pipeline_status="failed", phase_states={"merge": {"ran": True, "status": "failed"}},
+                 daydream=ExecutableProvenance(version="0.27.0", install_source="git",
+                                               commit="abc", dirty=False, container_digest="unknown"))
+    index.upsert_run(tmp_path, m)
+    row = index.query_runs(tmp_path, "session_id = ?", ("s-2",))[0]
+    assert row["archive_status"] == "complete"
+    assert row["pipeline_status"] == "failed"
+    assert row["daydream_version"] == "0.27.0"
+    assert row["daydream_dirty"] == 0

@@ -66,6 +66,7 @@ def _seed_divergent_archive(archive_dir: Path) -> None:
         rubric_json=json.dumps(SILVER_RUBRIC_PINNED),
         observed_at="2026-03-01T00:00:00+00:00",
         valid_at="2026-03-01T00:00:00+00:00",
+        pipeline_status="succeeded",
     )
     # Newer silver generation (different label + evidence so the auto-dedup
     # doesn't swallow it); it wins the cache but is observed AFTER the pin.
@@ -80,6 +81,7 @@ def _seed_divergent_archive(archive_dir: Path) -> None:
         rubric_json=json.dumps(SILVER_RUBRIC_POSTERIOR),
         observed_at="2026-03-01T00:00:00+00:00",
         valid_at="2026-09-01T00:00:00+00:00",  # outcome true only after the pin
+        pipeline_status="succeeded",
     )
 
     conn = sqlite3.connect(str(archive_dir / "index.db"))

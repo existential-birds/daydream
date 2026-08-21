@@ -400,6 +400,15 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         default="complete",
         help="Match manifest.status exactly (default: 'complete')",
     )
+    parser.add_argument(
+        "--pipeline-status",
+        type=str,
+        default="succeeded",
+        dest="pipeline_status",
+        help="Match pipeline_status exactly (succeeded/failed/partial/cancelled/"
+             "unknown; default: 'succeeded' — excludes failed/partial runs that "
+             "archived as complete)",
+    )
 
     # Stratification
     parser.add_argument(
@@ -512,6 +521,7 @@ def _handle_build_corpus_command(argv: list[str]) -> int:
         config = BuildCorpusConfig(
             out_path=args.out,
             filters=filters,
+            pipeline_status=args.pipeline_status,
             stratify_by=args.stratify_by,
             max_stack_share=args.max_stack_share,
             dry_run=args.dry_run,
