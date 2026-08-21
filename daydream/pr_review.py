@@ -622,6 +622,11 @@ def snap_to_hunk(
 ) -> int | None:
     """Return a valid in-hunk line for a PR comment, or None if too far.
 
+    A no-op-on-valid backstop (issue #745): the pre-report location validator
+    (``daydream.deep.location_validator``) owns pre-report authority; posting
+    keeps this snap against the LIVE branch diff for placement, passing valid
+    lines through unchanged.
+
     If ``line`` falls inside a hunk, return it unchanged. If it is within
     ``tolerance`` lines of a hunk boundary, snap to the nearest boundary
     so the GitHub API receives a line that actually appears in the diff.
