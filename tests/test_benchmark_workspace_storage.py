@@ -1,11 +1,11 @@
 import fcntl
-import os
 import stat
 
 import pytest
 
 from daydream.benchmark.storage import (
     LockContentionError,
+    Transaction,
     WorkspaceCorrupt,
     WorkspaceLock,
     atomic_write_json,
@@ -13,6 +13,7 @@ from daydream.benchmark.storage import (
     ensure_private_dir,
     load_json_strict,
     load_yaml_strict,
+    recover_startup,
     sha256_file,
 )
 
@@ -95,3 +96,69 @@ def test_workspace_lock_contention_raises(tmp_path):
         fcntl.flock(held, fcntl.LOCK_EX)
         with pytest.raises(LockContentionError):
             WorkspaceLock(tmp_path, blocking=False).__enter__()
+
+
+def _stage(ctx, path, content):
+    ctx.stage(path, content.encode())
+
+
+def test_transaction_commit_replaces_all_and_manifest_last(tmp_path):
+    data_a = tmp_path / "cases" / "a.yaml"
+    manifest = tmp_path / "benchmark.yaml"
+    (tmp_path / "cases").mkdir(parents=True, exist_ok=True)
+    with Transaction(tmp_path, op_id="op-1", kind="write") as tx:
+        _stage(tx, data_a, "case-a")
+        _stage(tx, manifest, "manifest-v2")
+        tx.commit()
+    assert data_a.read_text() == "case-a"
+    assert manifest.read_text() == "manifest-v2"
+    assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
+
+
+def test_prepared_journal_rolls_back_on_startup(tmp_path):
+    data = tmp_path / "cases" / "b.yaml"
+    data.parent.mkdir(parents=True)
+    with Transaction(tmp_path, op_id="op-2", kind="write") as tx:
+        _stage(tx, data, "new-b")
+        tx.prepare()  # fsync prepared, do NOT commit -> simulates crash
+    recover_startup(tmp_path)
+    assert not data.exists()
+
+
+def test_committing_journal_rolls_back_in_reverse(tmp_path):
+    target = tmp_path / "target.yaml"
+    target.write_text("old")
+    with Transaction(tmp_path, op_id="op-3", kind="write") as tx:
+        _stage(tx, target, "new")
+        tx.prepare()
+        tx.begin_commit()  # set state=committing, apply target with new
+        tx.inject_crash()  # leave committing incomplete, applied=1
+    assert target.read_text() == "new"
+    recover_startup(tmp_path)
+    assert target.read_text() == "old"  # restored from backup
+
+
+def test_complete_journal_is_verified_and_cleaned(tmp_path):
+    target = tmp_path / "target.yaml"
+    target.write_text("old")
+    with Transaction(tmp_path, op_id="op-4", kind="write") as tx:
+        _stage(tx, target, "new")
+        tx.commit()
+        tx.force_state("complete")  # simulate crash right after mark-complete, before journal removal
+    recover_startup(tmp_path)
+    assert target.read_text() == "new"  # after state verified, journal cleaned
+
+
+def test_no_journal_orphan_is_corruption(tmp_path):
+    orphan = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("case")
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path, indexed=set(), on_disk={orphan})
+
+
+def test_referenced_missing_file_is_corruption(tmp_path):
+    manifest = tmp_path / "benchmark.yaml"
+    manifest.write_text("references a missing case\n")
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
