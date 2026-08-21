@@ -70,9 +70,6 @@ def _resolve_install_source() -> str:
         dist = distribution("daydream")
         if dist is None:
             return "unknown"
-        dist = distribution("daydream")
-        if dist is None:
-            return "unknown"
         try:
             direct_url_json = dist.read_text("direct_url.json")
             if direct_url_json is None:

@@ -193,6 +193,7 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
     for SQLite storage.
     """
     conn = _get_connection(archive_dir)
+    daydream = manifest.daydream
     try:
         conn.execute(
             _UPSERT_SQL,
@@ -205,20 +206,20 @@ def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
                 "phase_states": json.dumps(manifest.phase_states)
                 if manifest.phase_states is not None
                 else None,
-                "daydream_version": manifest.daydream.version
-                if manifest.daydream is not None
+                "daydream_version": daydream.version
+                if daydream is not None
                 else None,
-                "daydream_install_source": manifest.daydream.install_source
-                if manifest.daydream is not None
+                "daydream_install_source": daydream.install_source
+                if daydream is not None
                 else None,
-                "daydream_commit": manifest.daydream.commit
-                if manifest.daydream is not None
+                "daydream_commit": daydream.commit
+                if daydream is not None
                 else None,
-                "daydream_dirty": int(manifest.daydream.dirty)
-                if manifest.daydream is not None and isinstance(manifest.daydream.dirty, bool)
+                "daydream_dirty": int(daydream.dirty)
+                if daydream is not None and isinstance(daydream.dirty, bool)
                 else None,
-                "daydream_container_digest": manifest.daydream.container_digest
-                if manifest.daydream is not None
+                "daydream_container_digest": daydream.container_digest
+                if daydream is not None
                 else None,
                 "run_flow": manifest.run_flow,
                 "skill": manifest.skill,

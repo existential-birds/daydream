@@ -15,10 +15,10 @@ Exports:
         per-phase states.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
+from daydream.archive import _read_json_artifact
 from daydream.trajectory import DaydreamPhase
 
 # Phase status values shared by phase_states entries and pipeline_status.
@@ -27,23 +27,6 @@ _FAILED = "failed"
 _PARTIAL = "partial"
 _ABSENT = "absent"
 _UNKNOWN = "unknown"
-
-
-def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
-    """Read a JSON artifact, returning ``None`` when absent, empty, or malformed.
-
-    Mirrors ``daydream/archive/__init__.py:_read_json_artifact``: any read
-    failure degrades to ``None`` ("we cannot know"), never a raise.
-    """
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
-        return None
-    if not isinstance(data, expected_type) or not data:
-        return None
-    return data
 
 
 def _deep_dir(target_dir: Path) -> Path:
@@ -128,7 +111,10 @@ def derive_pipeline_status(
     2. ``failed`` when merge or test reports failed.
     3. ``partial`` when ``fix_failures`` are present.
     4. ``partial`` when a phase the flow runs never ran (run stopped early).
-    5. ``succeeded`` when every phase is succeeded or absent.
+    5. ``succeeded`` when every phase is succeeded or absent AND at least one
+       phase actually ran (a flow that runs neither fix nor test surfaces no
+       derivable phase signal, so an early-aborted/failed run must not be
+       archived as unqualified success).
     6. else ``unknown``.
     """
     if archive_status == "partial" and not fix_failures:
@@ -147,4 +133,13 @@ def derive_pipeline_status(
         status = (phase_states.get(name) or {}).get("status")
         if status is not None and status not in (_SUCCEEDED, _ABSENT):
             return _UNKNOWN
-    return _SUCCEEDED
+    # Only claim success when at least one derivable phase actually ran. A flow
+    # that runs neither fix nor test (TTT review, improve-only) surfaces no
+    # phase evidence, so every phase reading ``absent`` means we cannot tell a
+    # clean profile from an early aborted/failed run — report ``unknown``.
+    if any(
+        (phase_states.get(name) or {}).get("status") == _SUCCEEDED
+        for name in ("merge", "fix", "test")
+    ):
+        return _SUCCEEDED
+    return _UNKNOWN

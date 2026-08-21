@@ -1483,7 +1483,7 @@ def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
     """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
     is migrated/recreated on the next connection: runs gains has_posterior via
     ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (4)."""
+    columns, and PRAGMA user_version reaches SCHEMA_VERSION (6)."""
     from daydream.archive.index import _CREATE_TABLE, SCHEMA_VERSION
 
     db_path = tmp_path / "index.db"
@@ -1972,14 +1972,17 @@ def test_manifest_splits_status_from_pipeline():
     assert "commit" not in d["git"]
 
 
-def test_legacy_manifest_reads_new_fields_as_unknown():
-    legacy = {k: v for k, v in Manifest().to_dict().items()
-              if k not in ("archive_status", "pipeline_status", "phase_states", "daydream")}
-    # A raw manifest.json dict without the new keys still yields explicit
-    # unknown for consumers, never a KeyError and never a fabricated value.
-    assert legacy.get("pipeline_status", "unknown") == "unknown"
-    assert legacy.get("archive_status", "unknown") == "unknown"
-    assert legacy.get("daydream", "unknown") == "unknown"
+def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path):
+    # A pre-#762 Manifest carries no archive_status/pipeline_status/phase_states/
+    # daydream keys. Indexing it and reading it back through the production
+    # query_runs path surfaces the new fields as explicit schema-default
+    # sentinels (pipeline_status "unknown"), never a KeyError and never a
+    # fabricated value.
+    upsert_run(tmp_path, Manifest())
+    row = query_runs(tmp_path)[0]
+    assert row["pipeline_status"] == "unknown"
+    assert row["archive_status"] == "complete"
+    assert row["daydream_version"] is None
 
 
 def _write_deep(target: Path, name: str, data):
@@ -2077,7 +2080,7 @@ def test_merge_failed_archives_failed_pipeline(tmp_path: Path, make_config: Make
     assert m["pipeline_status"] == "failed"    # ...but the pipeline failed
     assert m["phase_states"]["merge"]["status"] == "failed"
     assert m["daydream"]["version"]  # executable provenance recorded
-    assert m["daydream"]["commit"] in {"unknown"} or m["daydream"]["commit"]
+    assert m["daydream"]["commit"]  # a real SHA or the "unknown" sentinel, never blank
 
 
 def test_schema_additive_columns_and_migration(tmp_path):

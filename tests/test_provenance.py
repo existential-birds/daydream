@@ -32,6 +32,21 @@ def test_install_source_is_known_or_unknown():
     assert p.install_source in {"editable", "git", "package", "unknown"}
 
 
+def test_commit_and_dirty_unknown_on_git_error(monkeypatch):
+    from daydream.git_ops import GitError
+
+    def _raise(_repo):
+        raise GitError("synthetic git failure")
+
+    monkeypatch.setattr("daydream.git_ops.head_sha", _raise)
+    monkeypatch.setattr("daydream.git_ops.status_porcelain", _raise)
+    p = provenance.capture_executable_provenance()
+    # A deterministic git failure must resolve to the explicit "unknown"
+    # sentinel, never raise and never fabricate a value.
+    assert p.commit == "unknown"
+    assert p.dirty == "unknown"
+
+
 def test_to_dict_never_omits_unknown():
     p = provenance.capture_executable_provenance()
     d = p.to_dict()

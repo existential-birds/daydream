@@ -534,7 +534,6 @@ def test_corpus_can_filter_on_pipeline_status(tmp_path, archive_dir):
     cfg = BuildCorpusConfig(out_path=tmp_path / "out.jsonl",
                             filters=CorpusFilters(status="complete"),
                             pipeline_status="succeeded", archive_dir=archive_dir)
-    assert cfg.pipeline_status == "succeeded"
     where, params = _build_query(filters=cfg.filters)
     # The status gate itself is unchanged...
     assert "status = ?" in where and "complete" in params
