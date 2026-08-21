@@ -51,9 +51,7 @@ def _diff_change_bytes(diff: str) -> dict[str, int]:
     return sizes
 
 
-def _shard_assigning(
-    receipts: dict[str, dict[str, list[str]]], filename: str
-) -> tuple[str, dict[str, list[str]]]:
+def _shard_assigning(receipts: dict[str, dict[str, list[str]]], filename: str) -> tuple[str, dict[str, list[str]]]:
     """The (name, receipt) of the python shard that assigns ``filename``.
 
     Membership lookup rather than a bare ``python#N`` subscript, so a change to
@@ -87,14 +85,16 @@ async def _drive_canary(
     stub.per_stack_emit_reads = True
     stub.per_stack_unread = unread
     stub.parse_by_stack = parse_by_stack
-    exit_code = await run(make_config(
-        target,
-        deep_shard_enabled=True,
-        deep_shard_max_files=CANARY_MAX_FILES,
-        deep_shard_max_bytes=CANARY_MAX_BYTES,
-        deep_shard_fanout_cap=CANARY_FANOUT_CAP,
-        deep_shard_frontier_max=CANARY_FRONTIER_MAX,
-    ))
+    exit_code = await run(
+        make_config(
+            target,
+            deep_shard_enabled=True,
+            deep_shard_max_files=CANARY_MAX_FILES,
+            deep_shard_max_bytes=CANARY_MAX_BYTES,
+            deep_shard_fanout_cap=CANARY_FANOUT_CAP,
+            deep_shard_frontier_max=CANARY_FRONTIER_MAX,
+        )
+    )
     assert exit_code == 0
     return target / ".daydream" / "deep"
 
@@ -105,19 +105,15 @@ def test_sibling_frontier_target_shape(sibling_frontier_target: Path) -> None:
     pys = {p.name for p in repo.glob("*.py")}
     assert pys == {"core.py"} | {f"mod{i}.py" for i in range(12)}
     # All files changed on the feature branch (diff vs main is non-empty).
-    changed = set(
-        _git(repo, "diff", "--name-only", "main..HEAD").splitlines()
-    )
+    changed = set(_git(repo, "diff", "--name-only", "main..HEAD").splitlines())
     assert changed == {p.name for p in repo.glob("*.py")}
     # Real, tree-sitter-parseable cross-file import edges are physically present.
-    assert all(
-        "from core import core_helper" in (repo / f"mod{i}.py").read_text()
-        for i in range(12)
-    )
+    assert all("from core import core_helper" in (repo / f"mod{i}.py").read_text() for i in range(12))
 
 
 async def test_deep_canary_sharding_and_sibling_frontier(
-    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+    sibling_frontier_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
     """AC1-5/7: enabled sharding at deterministic bounds yields >=2 shards,
@@ -128,12 +124,18 @@ async def test_deep_canary_sharding_and_sibling_frontier(
     # locked byte budget that is python#2 (asserted below by membership lookup,
     # so shard-name drift surfaces a targeted message, not a bare subscript).
     deep = await _drive_canary(
-        sibling_frontier_target, monkeypatch, make_config,
+        sibling_frontier_target,
+        monkeypatch,
+        make_config,
         unread=frozenset({"mod5.py"}),
         parse_by_stack={
-            "python#2": {"severity": "high", "confidence": "HIGH",
-                         "file": "mod3.py", "line": 1,
-                         "description": "finding on mod3"}
+            "python#2": {
+                "severity": "high",
+                "confidence": "HIGH",
+                "file": "mod3.py",
+                "line": 1,
+                "description": "finding on mod3",
+            }
         },
     )
 
@@ -187,19 +189,22 @@ async def test_deep_canary_sharding_and_sibling_frontier(
 
 
 async def test_deep_canary_no_redundant_sweep_when_all_covered(
-    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+    sibling_frontier_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
 ) -> None:
     """AC6: when every changed file carries valid evidence, pre_sweep
     uncovered_files is empty and the sweep is skipped."""
     deep = await _drive_canary(
-        sibling_frontier_target, monkeypatch, make_config,
+        sibling_frontier_target,
+        monkeypatch,
+        make_config,
     )
     stats = json.loads((deep / "coverage-stats.json").read_text())
     pre = stats["pre_sweep"]
-    assert pre["uncovered_files"] == []          # no file lacks evidence
-    assert stats["attempted_files"] == []        # sweep dispatched nothing
-    assert pre["coverage_ratio"] == 1.0          # full coverage pre-sweep
+    assert pre["uncovered_files"] == []  # no file lacks evidence
+    assert stats["attempted_files"] == []  # sweep dispatched nothing
+    assert pre["coverage_ratio"] == 1.0  # full coverage pre-sweep
 
 
 def test_deep_canary_golden_fixtures_are_well_formed() -> None:
@@ -216,12 +221,8 @@ def test_deep_canary_golden_fixtures_are_well_formed() -> None:
     uncovered then attempted). It compares shape, not bytes, so benign
     shard-name drift can't break it.
     """
-    golden_receipt = json.loads(
-        (Path(__file__).parent / "fixtures" / "deep" / "coverage-receipts.json").read_text()
-    )
-    golden_stats = json.loads(
-        (Path(__file__).parent / "fixtures" / "deep" / "coverage-stats.json").read_text()
-    )
+    golden_receipt = json.loads((Path(__file__).parent / "fixtures" / "deep" / "coverage-receipts.json").read_text())
+    golden_stats = json.loads((Path(__file__).parent / "fixtures" / "deep" / "coverage-stats.json").read_text())
     py_shards = {k: v for k, v in golden_receipt.items() if k.startswith("python#")}
     assert len(py_shards) >= 2
     assert any(r["frontier_files"] for r in py_shards.values())
