@@ -51,3 +51,22 @@ def test_to_dict_never_omits_unknown():
     p = provenance.capture_executable_provenance()
     d = p.to_dict()
     assert set(d) == {"version", "install_source", "commit", "dirty", "container_digest"}
+
+
+def test_install_source_unknown_on_distribution_error(monkeypatch):
+    """Deterministically exercise the distribution-failure branch of
+    _resolve_install_source: when importlib.metadata.distribution("daydream")
+    is unavailable (e.g. a non-installed/import-time-only environment), the
+    field must resolve to the explicit "unknown" sentinel, never raise.
+
+    Closes the remaining smoke-test gap in finding #5 (daydream covered the
+    git-error branch; this covers the distribution-error branch).
+    """
+    import importlib.metadata
+
+    def _raise(_name):
+        raise importlib.metadata.PackageNotFoundError("synthetic dist lookup failure")
+
+    monkeypatch.setattr(importlib.metadata, "distribution", _raise)
+    p = provenance.capture_executable_provenance()
+    assert p.install_source == "unknown"
