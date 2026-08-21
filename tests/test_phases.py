@@ -4180,3 +4180,35 @@ async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched()
     assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed"]
     assert "verdicts" not in FEEDBACK_SCHEMA["properties"]  # base schema untouched
     assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
+
+
+def test_merge_validates_finding_locations_before_write(tmp_path: Path):
+    """A beyond-tolerance citation is demoted-with-annotation, not snapped."""
+    from daydream.hunk_index import write_hunk_index
+    from daydream.phases import _write_single_stack_merged_items
+
+    dd = tmp_path / ".daydream" / "deep"
+    dd.mkdir(parents=True)
+    write_hunk_index(
+        tmp_path / ".daydream",
+        "diff --git a/orchestrator.py b/orchestrator.py\n--- a/orchestrator.py\n+++ b/orchestrator.py\n"
+        "@@ -2270,3 +2284,5 @@\n x\n+x1\n+x2\n",
+    )
+    records = [
+        {
+            "id": 1,
+            "description": "off-citation",
+            "file": "orchestrator.py",
+            "line": 2272,
+            "severity": "high",
+            "confidence": "HIGH",
+            "rationale": "r",
+            "evidence": "e",
+        }
+    ]
+    _write_single_stack_merged_items(tmp_path, dd, records, None)
+    from daydream.deep.artifacts import merged_items_path
+
+    items = json.loads(merged_items_path(dd).read_text())["items"]
+    assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
+    assert "location_note" in items[0]  # demoted-with-annotation

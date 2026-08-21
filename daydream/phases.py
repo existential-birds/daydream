@@ -4282,8 +4282,10 @@ def _append_structural_and_write_merged(
         defaulting to HIGH/high only for unlabeled records -- the structural
         lens remains high-conviction by default and must not be demoted at
         sort time;
-      - normalize the combined list (fresh unique ids) and write the canonical
-        ``merged-items.json``;
+      - validate every finding ``file:line`` against the persisted hunk index
+        (snap-in-tolerance, demote-with-annotation beyond-tolerance; issue
+        #745), THEN normalize the combined list (fresh unique ids) and write
+        the canonical ``merged-items.json``;
       - render ``review-output.md`` from the canonical items and copy it to
         ``canonical_path`` (the deep artifact dir avoids sandbox write
         restrictions on repo-root dotfiles).
@@ -4369,6 +4371,21 @@ def _append_structural_and_write_merged(
             f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
             f"(ids: {dropped_ids}), wrote {sidecar_path}",
         )
+
+    # Pre-report finding-location validation (issue #745): the persisted hunk
+    # index (``load_hunk_index(items_path.parent.parent)`` -- ``.daydream``) is
+    # the run-time authority for changed line ranges. A citation beyond
+    # tolerance is demoted-with-annotation (a ``location_note`` carried through
+    # normalize_items); an in-tolerance citation is snapped to the nearest hunk
+    # boundary. This is THE choke point both merge paths share, so no
+    # unverified citation reaches merged-items / review-output. Fail-open: a
+    # missing index validates nothing (pre-change behavior); the validator
+    # never raises and never rejects.
+    from daydream.deep.location_validator import validate_records
+    from daydream.hunk_index import load_hunk_index
+
+    index = load_hunk_index(items_path.parent.parent)
+    evidenced = validate_records(index, evidenced)
 
     items = normalize_items(evidenced)
     items_path.write_text(json.dumps({"items": items}, indent=2))
