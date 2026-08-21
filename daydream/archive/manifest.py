@@ -241,6 +241,11 @@ class Manifest:
     # diff.patch fallback must not fire. Defaults True for every new manifest;
     # legacy manifests simply omit the key.
     recommended_patch_supported: bool = True
+    # Provenance flag recording which capture produced the archived
+    # recommended.patch (issue #743): ``"post_test"`` = the post-heal
+    # re-capture (the exact tree committed), ``"pre_test"`` = the fix-phase
+    # fallback capture. ``None`` on legacy manifests (which predate the field).
+    recommended_patch_capture: str | None = None
     session_id: str = ""
     archived_at: str = ""
     status: str = "complete"
@@ -325,6 +330,7 @@ class Manifest:
         return {
             "schema_version": self.schema_version,
             "recommended_patch_supported": self.recommended_patch_supported,
+            **_omit_falsy(recommended_patch_capture=self.recommended_patch_capture),
             "session_id": self.session_id,
             "archived_at": self.archived_at,
             "status": self.status,
@@ -407,6 +413,7 @@ def build_manifest(
     fix_failures: dict[str, str] | None = None,
     fix_leftover_untracked: list[str] | None = None,
     fix_quality_gate: dict[str, Any] | None = None,
+    recommended_capture: str | None = None,
     pipeline_status: str = "unknown",
     phase_states: dict[str, Any] | None = None,
     provenance: Any | None = None,
@@ -430,6 +437,10 @@ def build_manifest(
         fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
             (issue #315), or ``None`` when the artifact is absent. Recorded
             verbatim on the manifest.
+        recommended_capture: Which tree produced the archived ``recommended.patch``
+            (``"pre_test"`` = fix-phase fallback, ``"post_test"`` = post-heal
+            re-capture), or ``None`` on legacy runs. Absent sidecar defaults
+            ``recommended_patch_capture`` to ``"pre_test"``.
         pipeline_status: Pipeline-outcome aggregate (succeeded/failed/partial/
             cancelled/unknown) derived from per-phase terminal states; distinct
             from ``status``/``archive_status`` (archive finalization).
@@ -531,6 +542,7 @@ def build_manifest(
         fix_failures=fix_failures or None,
         fix_leftover_untracked=fix_leftover_untracked or None,
         fix_quality_gate=fix_quality_gate or None,
+        recommended_patch_capture=recommended_capture or "pre_test",
         source_path=source_path,
         remote_url=git_ctx.remote_url,
         repo_slug=git_ctx.repo_slug,

@@ -231,6 +231,8 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
         (multi_stack_target / ".daydream" / "deep" / "recommended-capture.json").read_text()
     )
     assert sidecar == {"session_id": run_dir.name, "capture_point": "post_test"}
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["recommended_patch_capture"] == "post_test"
 
 
 async def test_deep_archive_commit_excludes_preexisting_untracked_files(

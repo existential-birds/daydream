@@ -918,6 +918,40 @@ def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path):
     assert _read_fix_quality_gate(tmp_path, "sess-42") is None
 
 
+def test_read_recommended_capture_requires_matching_session(tmp_path: Path):
+    from daydream.archive import _read_recommended_capture
+
+    cap = {"session_id": "sess-42", "capture_point": "post_test"}
+    p = tmp_path / ".daydream" / "deep" / "recommended-capture.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps(cap))
+
+    assert _read_recommended_capture(tmp_path, "sess-42") == cap
+    assert _read_recommended_capture(tmp_path, "sess-other") is None
+    assert _read_recommended_capture(tmp_path, None) is None
+
+
+def test_read_recommended_capture_absent_is_none(tmp_path: Path):
+    from daydream.archive import _read_recommended_capture
+
+    assert _read_recommended_capture(tmp_path, "sess-42") is None
+
+
+def test_manifest_recommended_patch_capture_defaults_pre_test(tmp_path: Path):
+    m = _build(tmp_path)  # no recommended_capture arg => sidecar absent
+    assert m.recommended_patch_capture == "pre_test"
+    assert m.to_dict()["recommended_patch_capture"] == "pre_test"
+
+
+def test_manifest_recommended_patch_capture_omitted_when_none():
+    assert "recommended_patch_capture" not in Manifest().to_dict()
+
+
+def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path):
+    m = _build(tmp_path, recommended_capture="post_test")
+    assert m.to_dict()["recommended_patch_capture"] == "post_test"
+
+
 def test_get_archive_dir_creates_structure(monkeypatch, tmp_path: Path):
     target = tmp_path / "custom_archive"
     monkeypatch.setenv("DAYDREAM_ARCHIVE_DIR", str(target))

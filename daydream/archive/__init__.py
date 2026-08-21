@@ -177,6 +177,7 @@ def _archive_run_inner(
     fix_failures = _read_fix_failures(target_dir)
     fix_leftover_untracked = _read_fix_leftover_untracked(target_dir)
     fix_quality_gate = _read_fix_quality_gate(target_dir, recorder.session_id)
+    recommended_capture = _read_recommended_capture(target_dir, recorder.session_id)
     if fix_failures:
         status = "partial"
 
@@ -220,6 +221,7 @@ def _archive_run_inner(
         fix_failures=fix_failures,
         fix_leftover_untracked=fix_leftover_untracked,
         fix_quality_gate=fix_quality_gate,
+        recommended_capture=(recommended_capture or {}).get("capture_point"),
         pipeline_status=pipeline_status,
         phase_states=phase_states,
         provenance=provenance,
@@ -315,6 +317,31 @@ def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str
     if session_id is None:
         return None
     data = _read_json_artifact(fix_quality_gate_path(target_dir / ".daydream" / "deep"), dict)
+    if data is None:
+        return None
+    if data.get("session_id") != session_id:
+        return None
+    return data
+
+
+def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
+    """Read ``deep/recommended-capture.json`` from the source tree, if present.
+
+    Written by the deep orchestrator's best-effort post-test re-capture
+    (#743): ``{"session_id": ..., "capture_point": "post_test"}`` recording
+    which tree produced the archived ``recommended.patch``. Returns the parsed
+    dict only when its ``session_id`` matches the current run's -- an artifact
+    left behind by a DIFFERENT session must not be attributed to this run.
+    Returns ``None`` when the file is absent, empty, malformed, unbound, or
+    bound to another session (mirrors :func:`_read_fix_quality_gate`).
+    """
+    from daydream.deep.artifacts import recommended_capture_path
+
+    if session_id is None:
+        return None
+    data = _read_json_artifact(
+        recommended_capture_path(target_dir / ".daydream" / "deep"), dict
+    )
     if data is None:
         return None
     if data.get("session_id") != session_id:
