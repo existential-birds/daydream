@@ -323,6 +323,48 @@ def shard_many_python_target(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def sibling_frontier_target(tmp_path: Path) -> Path:
+    """Git repo with core.py + 12 cross-importing spokes, all changed on branch.
+
+    The issue #763 canary fixture: 13 changed python files (one ``core.py`` plus
+    12 ``mod{i}.py`` spokes each importing ``core_helper``), so the deep
+    sharder splits the python stack into multiple shards and the sibling
+    frontier (``dependency_frontier_read``) coverage path is exercised. Every
+    file carries a real tree-sitter-parseable cross-file import edge, and
+    ``mod5.py`` gets 7 lines changed so the fail-open sweep can fire on it.
+    """
+    project = tmp_path / "canary"
+    project.mkdir()
+    (project / "core.py").write_text("def core_helper():\n    return 1\n")
+    for i in range(12):
+        (project / f"mod{i}.py").write_text(
+            "from core import core_helper\n"
+            f"def mod{i}_fn(): return core_helper() + {i}\n"
+        )
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    # Rewrite every file changed on the feature branch. mod5.py gets 7 added
+    # lines so its hunk exceeds min_hunk_lines and the sweep can fire on it.
+    (project / "core.py").write_text(
+        "def core_helper():\n    return 1\n# v2\n"
+    )
+    for i in range(12):
+        content = (
+            "from core import core_helper\n"
+            f"def mod{i}_fn() -> int: return core_helper() + {i}\n"
+            "# v2\n"
+        )
+        if i == 5:
+            content += "# extra0\n# extra1\n# extra2\n# extra3\n# extra4\n# extra5\n"
+        (project / f"mod{i}.py").write_text(content)
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
+@pytest.fixture
 def rust_wire_target(tmp_path: Path) -> Path:
     """Git repo with a Rust + Markdown diff on a feature branch.
 
