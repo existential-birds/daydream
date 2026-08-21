@@ -1,9 +1,13 @@
+import fcntl
+import os
 import stat
 
 import pytest
 
 from daydream.benchmark.storage import (
+    LockContentionError,
     WorkspaceCorrupt,
+    WorkspaceLock,
     atomic_write_json,
     atomic_write_yaml,
     ensure_private_dir,
@@ -57,3 +61,37 @@ def test_sha256_file(tmp_path):
     p = tmp_path / "f.bin"
     p.write_bytes(b"hello")
     assert sha256_file(p) == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+def test_workspace_lock_acquire_release(tmp_path):
+    with WorkspaceLock(tmp_path):
+        lock_file = tmp_path / ".benchmark.lock"
+        assert lock_file.exists()
+    # released: re-acquirable
+    with WorkspaceLock(tmp_path):
+        pass
+
+
+def test_workspace_lock_contention_is_explicit(tmp_path):
+    # A second exclusive holder on a SEPARATE open file description must be
+    # surfaced explicitly, never silently ignored. Use a non-blocking probe so
+    # this cannot deadlock against the first holder's flock (flock conflicts
+    # across open file descriptions even within one process).
+    first = WorkspaceLock(tmp_path)
+    first.__enter__()
+    try:
+        with open(tmp_path / ".benchmark.lock", "w") as held:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Our own WorkspaceLock handle is reentrant on the same fd.
+        with WorkspaceLock(tmp_path, blocking=False):
+            pass
+    finally:
+        first.__exit__(None, None, None)
+
+
+def test_workspace_lock_contention_raises(tmp_path):
+    lock_path = tmp_path / ".benchmark.lock"
+    with open(lock_path, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(LockContentionError):
+            WorkspaceLock(tmp_path, blocking=False).__enter__()

@@ -11,11 +11,13 @@ Every parse failure raises :class:`WorkspaceCorrupt` naming the offending file
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import tempfile
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -148,3 +150,68 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@dataclass
+class _HeldLock:
+    """A workspace lock currently held by this process (fd + reuse depth)."""
+
+    fd: int
+    depth: int
+
+
+class WorkspaceLock:
+    """An ``fcntl``-backed exclusive lock scoped to a workspace root directory.
+
+    Holds ``LOCK_EX`` (blocking) or ``LOCK_EX | LOCK_NB`` on a sibling
+    ``<root>/.benchmark.lock`` file. The lock is process-reentrant per root:
+    nested acquisitions within the same process share the same open fd and
+    only bump a depth counter, so a command that holds the lock across its own
+    journal writes cannot deadlock against itself.
+
+    The ``.benchmark.lock`` file itself is left on disk after release (removal
+    races are unsafe), and mutual-exclusion among separate OS processes is
+    provided by the kernel ``fcntl.flock`` byte-range lock.
+    """
+
+    _held: dict[Path, _HeldLock] = {}
+
+    def __init__(self, root: Path, *, blocking: bool = True) -> None:
+        self._root = Path(root)
+        self._blocking = blocking
+        self._acquired = False
+
+    def __enter__(self) -> "WorkspaceLock":
+        held = WorkspaceLock._held.get(self._root)
+        if held is not None:
+            # Already holding the lock for this root in this process — reentrant
+            # on the same open file description. Bump the depth and reuse the fd.
+            held.depth += 1
+            self._acquired = False
+            return self
+
+        lock_path = self._root / ".benchmark.lock"
+        self._root.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        flags = fcntl.LOCK_EX | (0 if self._blocking else fcntl.LOCK_NB)
+        try:
+            fcntl.flock(fd, flags)
+        except BlockingIOError:
+            os.close(fd)
+            raise LockContentionError(
+                f"workspace is locked by another process: {self._root}"
+            ) from None
+        WorkspaceLock._held[self._root] = _HeldLock(fd=fd, depth=1)
+        self._acquired = True
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        held = WorkspaceLock._held.get(self._root)
+        if held is None:
+            return False
+        held.depth -= 1
+        if held.depth <= 0:
+            fcntl.flock(held.fd, fcntl.LOCK_UN)
+            os.close(held.fd)
+            WorkspaceLock._held.pop(self._root, None)
+        return False
