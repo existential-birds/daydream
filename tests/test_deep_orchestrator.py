@@ -864,6 +864,31 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     assert outcomes["1"].get("path") == "App.tsx"
 
 
+async def test_unresolved_finding_reported_attempted_not_fixed(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
+) -> None:
+    """Spec: a finding still unresolved after the last round appears as
+    attempted-not-fixed, never counted/shown as fixed."""
+    from daydream.runner import run
+
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects()
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
+    exit_code = await run(
+        make_config(
+            multi_stack_target, assume="yes", output_mode="loop", non_interactive=False
+        )
+    )
+    assert exit_code == 0
+    outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
+    assert outcomes["1"]["verdict"] == "unresolved"
+    # fix applied was NOT asserted for the unresolved finding (no "Fix applied" line for it)
+    assert all(v["verdict"] == "unresolved" for v in outcomes.values())
+
+
 async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:

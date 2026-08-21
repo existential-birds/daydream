@@ -2389,7 +2389,9 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
         progress_callback=progress_cb,
     )
     async with (console_lock if console_lock is not None else anyio.Lock()):
-        print_fix_complete(console, item_num, total)
+        # Verdict unknown at fix time (issue #744); the post-fix fix-verify
+        # step renders the honest resolved/attempted-not-fixed line.
+        print_fix_complete(console, item_num, total, outcome=None)
 
 
 async def phase_fix_batched(
@@ -2512,7 +2514,9 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
         )
     async with (console_lock if console_lock is not None else anyio.Lock()):
         for item_num in item_nums:
-            print_fix_complete(console, item_num, total)
+            # Verdict unknown at the fix turn; the fix-verify step owns the
+            # terminal resolved/attempted-not-fixed line (issue #744).
+            print_fix_complete(console, item_num, total, outcome=None)
 
 
 async def phase_fix_parallel(

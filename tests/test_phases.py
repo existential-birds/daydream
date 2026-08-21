@@ -3934,6 +3934,19 @@ def test_fix_verify_schema_accepts_all_four_verdicts():
         jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
 
 
+def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):
+    from daydream.ui.summary import print_fix_complete
+    from rich.console import Console
+
+    c = Console(record=True)
+    print_fix_complete(c, 1, 1, outcome="resolved")
+    print_fix_complete(c, 1, 1, outcome="unresolved")
+    print_fix_complete(c, 1, 1, outcome=None)  # during the fix turn: neutral
+    out = c.export_text()
+    assert "Fix applied" in out       # resolved asserts applied
+    assert out.count("Fix applied") == 1  # only the resolved one
+
+
 def test_group_items_by_footprint_unions_overlapping_footprints():
     from daydream.phases import group_items_by_footprint
 

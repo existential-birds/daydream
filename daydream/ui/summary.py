@@ -56,17 +56,35 @@ def print_fix_progress(
     console.print(text)
 
 
-def print_fix_complete(console: Console, item_num: int, total: int) -> None:
-    """Print fix completion indicator.
+def print_fix_complete(
+    console: Console,
+    item_num: int,
+    total: int,
+    outcome: str | None = None,
+) -> None:
+    """Print per-finding fix completion, gated on the fix-verify verdict.
+
+    At fix time the verdict is not yet known (issue #744): the post-fix
+    fix-verify step has not run, so a neutral line is printed instead of
+    claiming an unverified "applied". Only a ``resolved`` verdict may claim
+    "✔ Fix applied"; any other verdict is reported honestly as
+    attempted-not-fixed.
 
     Args:
         item_num: Current item number (1-indexed).
-
+        outcome: The finding's terminal fix-verify verdict (``resolved`` /
+            ``unresolved`` / ``wrong_target`` / ``regressed``), or ``None``
+            during the fix turn when it is not yet known.
     """
     text = Text()
     text.append("  ", style=Style())
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
-    text.append("✔ Fix applied", style=STYLE_GREEN)
+    if outcome == "resolved":
+        text.append("✔ Fix applied", style=STYLE_GREEN)
+    elif outcome is None:
+        text.append("Fix attempted", style=STYLE_BOLD_CYAN)
+    else:
+        text.append("Attempted, not fixed", style=STYLE_ORANGE)
     console.print(text)
 
 
