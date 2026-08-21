@@ -398,11 +398,28 @@ class Transaction:
         halts. This is the acceptance-test hook that proves a crash restores
         either the whole before- or after-state.
         """
-        if boundary in (None, "staged", "backup", "journal"):
+        if boundary is None or boundary in ("staged", "backup"):
+            # Staging (and any backup file) is written but no journal is
+            # persisted yet — recovery finds nothing and leaves the target
+            # perfectly ``before``.
             return
-        if boundary in ("data", "manifest"):
+        if boundary == "journal":
+            # Persist the ``prepared`` journal; recovery rolls the staged set
+            # back (no target was ever replaced).
+            self.prepare()
+            return
+        if boundary == "data":
+            # Begin the commit: targets are applied under ``committing`` and
+            # recovery rolls them back from backups.
             self.prepare()
             self.begin_commit()
+            return
+        if boundary == "manifest":
+            # Run the full commit to ``complete`` so recovery verifies the
+            # whole after-state.
+            self.prepare()
+            self.begin_commit()
+            self.force_state("complete")
             return
         raise ValueError(f"unknown crash boundary {boundary!r}")
 

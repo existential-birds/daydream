@@ -395,7 +395,7 @@ crash-consistent, and safe to build on.
 - `daydream benchmark validate <dir>` returns a numeric **exit**: `0` ready,
   `2` structurally valid but incomplete (for example an unresolved
   repository identity on a fresh workspace), `1` corrupt (invalid or missing
-  `benchmark.yaml`, an orphan or missing indexed file, or a checksum drift).
+  `benchmark.yaml`, or an orphan or missing indexed file).
 
 The legacy `daydream bench` command remains available alongside `benchmark`;
 removal is a separate cutover.

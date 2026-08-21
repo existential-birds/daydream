@@ -54,7 +54,7 @@ def test_init_refuses_existing_nonempty_dir(tmp_path):
 
 
 def test_init_refuses_empty_reviewer_hosts(tmp_path):
-    with pytest.raises((InitError, ValueError)):
+    with pytest.raises(InitError):
         init_workspace(tmp_path / "ws", "O/R", [], ["h2.example.com"])
 
 

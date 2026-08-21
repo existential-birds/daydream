@@ -167,16 +167,28 @@ def test_referenced_missing_file_is_corruption(tmp_path):
 def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
     # For each named boundary, drive a transaction that injects a crash there,
     # then recover_startup and assert the workspace is either the complete
-    # before-state or the complete after-state — never checksum drift.
+    # before-state or the complete after-state — never checksum drift. Each
+    # boundary advances the journal to its own distinct position (open staging
+    # vs prepared vs committing vs complete) rather than blanket-preparing, so
+    # the after-recovery (complete) branch is exercised too.
     for boundary in ("staged", "backup", "journal", "data", "manifest"):
         target = tmp_path / f"t-{boundary}.yaml"
         target.write_text("before")
         with Transaction(tmp_path, op_id=f"op-{boundary}", kind="write") as tx:
             tx.stage(target.relative_to(tmp_path), b"after")
-            tx.prepare()
             tx.inject_crash(boundary)
         recover_startup(tmp_path)
-        assert target.read_text() in ("before", "after")
-        assert not (tmp_path / "transactions").exists() or not list(
-            (tmp_path / "transactions").iterdir()
-        )
+        if boundary in ("staged", "backup"):
+            # Crash before the journal is written: recovery has nothing to do
+            # and leaves the pristine target untouched.
+            assert target.read_text() == "before"
+        elif boundary in ("journal", "data"):
+            # Prepared/committing journals roll back to the whole before-state.
+            assert target.read_text() == "before"
+        else:  # manifest
+            # A complete journal is verified against the after-state and kept.
+            assert target.read_text() == "after"
+        if boundary not in ("staged", "backup"):
+            assert not (tmp_path / "transactions").exists() or not list(
+                (tmp_path / "transactions").iterdir()
+            )

@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -474,38 +474,40 @@ _EVIDENCE_REASON = Literal[
 ]
 
 
-class EvidenceExclusion(BaseModel):
+class _NoteForOther(BaseModel):
+    """Require a note on an exclusion model when ``reason == "other"``."""
+
+    _exclusion_noun: ClassVar[str] = "exclusion"
+
+    @model_validator(mode="after")
+    def _note_for_other(self) -> "_NoteForOther":
+        if self.reason == "other" and not self.note:
+            raise ValueError(f"{self._exclusion_noun} with reason 'other' requires a note")
+        return self
+
+
+class EvidenceExclusion(_NoteForOther):
     """A reason an individual finding/evidence item was excluded from gold."""
 
     model_config = ConfigDict(extra="forbid")
+    _exclusion_noun: ClassVar[str] = "evidence exclusion"
 
     source_id: str
     reason: _EVIDENCE_REASON
     note: str | None = None
 
-    @model_validator(mode="after")
-    def _note_for_other(self) -> "EvidenceExclusion":
-        if self.reason == "other" and not self.note:
-            raise ValueError("evidence exclusion with reason 'other' requires a note")
-        return self
-
 
 _CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case", "other"]
 
 
-class CaseExclusion(BaseModel):
+class CaseExclusion(_NoteForOther):
     """Why an entire case was excluded from the dataset."""
 
     model_config = ConfigDict(extra="forbid")
+    _exclusion_noun: ClassVar[str] = "case exclusion"
 
     reason: _CASE_EXCLUSION_REASON
     note: str | None = None
-
-    @model_validator(mode="after")
-    def _note_for_other(self) -> "CaseExclusion":
-        if self.reason == "other" and not self.note:
-            raise ValueError("case exclusion with reason 'other' requires a note")
-        return self
 
 
 class Curation(BaseModel):
@@ -570,8 +572,6 @@ class CaseDocument(BaseModel):
 
 def snapshot_head_sha(snapshot: "SnapshotReady | SnapshotUnreplayable") -> str | None:
     """The 40-hex head SHA of a snapshot, or None when unknown (unreplayable)."""
-    if snapshot.status == "ready":
-        return snapshot.original_head_sha
     return snapshot.original_head_sha
 
 
@@ -692,6 +692,4 @@ def classify_validation(*, ready: bool, incomplete: bool, corrupt: bool) -> int:
         return 1
     if ready:
         return 0
-    if incomplete:
-        return 2
     return 2

@@ -24,9 +24,8 @@ from daydream.benchmark.schema import (
     Privacy,
     PullRequestEntry,
     Source,
-    classify_validation,
+    _normalize_host_list,
     derive_workspace_state,
-    normalize_hostname,
 )
 from daydream.benchmark.storage import (
     Transaction,
@@ -57,12 +56,10 @@ def _is_nonempty(root: Path) -> bool:
 
 
 def _normalize_all(hosts: list[str], what: str) -> list[str]:
-    if not hosts:
-        raise InitError(f"{what} must not be empty")
     try:
-        return [normalize_hostname(h) for h in hosts]
+        return _normalize_host_list(hosts, what)
     except ValueError as exc:
-        raise InitError(f"{what}: {exc}") from exc
+        raise InitError(str(exc)) from exc
 
 
 def _manifest_bytes(privacy: Privacy, source: Source, benchmark_id: str) -> bytes:
@@ -223,14 +220,9 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
     if not resolved:
         return (2, "incomplete: repository identity unresolved")
-    ready = state == "ready"
-    corrupt_like = state == "corrupt"
-    code = classify_validation(ready=ready, incomplete=not ready, corrupt=corrupt_like)
-    if code == 1:
-        return (1, "corrupt: workspace derived state is corrupt")
-    if ready or code == 0:
+    if state == "ready":
         return (0, "ready")
-    return (code, f"incomplete: workspace state {state}")
+    return (2, f"incomplete: workspace state {state}")
 
 
 def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:

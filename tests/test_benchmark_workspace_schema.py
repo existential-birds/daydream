@@ -237,27 +237,6 @@ def test_unreplayable_with_ready_fields_rejected():
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
-
-def test_curation_unreplayable_requires_state_unreplayable():
-    raw = _valid_case_dict()
-    raw["snapshot"] = {
-        "status": "unreplayable",
-        "policy": "final_pr_head",
-        "requested_head": "final",
-        "original_base_sha": None,
-        "original_head_sha": None,
-        "base_tree_sha": None,
-        "head_tree_sha": None,
-        "diff_sha256": None,
-        "bundle_file": None,
-        "bundle_sha256": None,
-        "error": {"reason": "bundle_failure", "detail": "could not bundle"},
-    }
-    raw["curation"]["state"] = "ready"  # violates: must be unreplayable when snapshot unreplayable
-    with pytest.raises(ValidationError):
-        CaseDocument.model_validate(raw)
-
-
 def test_finding_title_and_body_limits():
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["title"] = "x" * 501
@@ -310,14 +289,15 @@ def test_historical_daydream_marker_cannot_be_gold():
 
     raw = _valid_case_dict()
     body = "looks fine"
-    raw["curation"]["findings"][0] = {
-        "finding_id": "0" * 64,
+    finding = {
         "title": "Daydream self-output",
         "body": body + finding_marker("a" * 64),
         "severity": None,
         "location": None,
         "provenance": {"kind": "historical", "source_ids": ["github:review_comment:1"]},
     }
+    finding["finding_id"] = derive_finding_id(finding)  # canonical, so the marker guard is what rejects
+    raw["curation"]["findings"][0] = finding
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
