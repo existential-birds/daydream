@@ -8,7 +8,11 @@ cross-importing ``sibling_frontier_target`` fixture.
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
+
+import pytest
 
 from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import install_stub_backend
@@ -39,3 +43,63 @@ def test_sibling_frontier_target_shape(sibling_frontier_target: Path) -> None:
         "from core import core_helper" in (repo / f"mod{i}.py").read_text()
         for i in range(12)
     )
+
+
+async def test_deep_canary_sharding_and_sibling_frontier(
+    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1-5/7: enabled sharding at DEFAULT bounds yields >=2 shards, each
+    bounded, with non-empty sibling frontier, dependency_frontier_read credit,
+    and a fail-open sweep for the unread frontier file."""
+    from daydream.runner import RunConfig, run
+
+    stub = install_stub_backend(monkeypatch, sibling_frontier_target)
+    stub.per_stack_emit_reads = True
+    stub.per_stack_unread = frozenset({"mod5.py"})
+    stub.parse_by_stack = {
+        "python#1": {"severity": "high", "confidence": "HIGH",
+                     "file": "mod3.py", "line": 1,
+                     "description": "finding on mod3"}
+    }
+    exit_code = await run(RunConfig(
+        target=str(sibling_frontier_target), cleanup=False,
+        deep_shard_enabled=True,
+        deep_shard_max_files=5, deep_shard_max_bytes=12288,
+        deep_shard_fanout_cap=16, deep_shard_frontier_max=8,
+    ))
+    assert exit_code == 0
+    deep = sibling_frontier_target / ".daydream" / "deep"
+
+    # AC1: >=2 stack-python#N review descriptors.
+    shards = sorted(p for p in deep.glob("stack-python#*-review.md"))
+    assert len(shards) >= 2
+
+    # AC3: coverage-receipts.json records assigned/inline/frontier per shard.
+    receipts = json.loads((deep / "coverage-receipts.json").read_text())
+    py_receipts = {k: v for k, v in receipts.items() if k.startswith("python#")}
+    assert py_receipts, "no python shards in receipts"
+    for r in py_receipts.values():
+        assert set(r) == {"assigned_files", "inline_files", "frontier_files"}
+    # Non-empty sibling frontier on at least one shard (the canary's point).
+    assert any(r["frontier_files"] for r in py_receipts.values())
+
+    # AC2: every shard within the default 5-file bound (bytes are dwarfed).
+    for r in py_receipts.values():
+        assert len(r["assigned_files"]) <= 5
+
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre = stats["pre_sweep"]
+    cbe = pre["coverage_by_evidence"]
+
+    # AC4: >=1 file credited dependency_frontier_read, absent from uncovered.
+    assert cbe["dependency_frontier_read"] >= 1
+    assert "core.py" not in pre["uncovered_files"]  # core is a sibling frontier file, read by python#0
+
+    # Clean vs finding contrast: mod3.py has_findings, mod0.py clean.
+    rec1 = json.loads((deep / "stack-python#1-records.json").read_text())
+    verdicts1 = {e["path"]: e["verdict"] for e in rec1["verdicts"]}
+    assert verdicts1["mod3.py"] == "has_findings"
+
+    # AC5: the unread frontier file stays uncovered and is dispatched to sweep.
+    assert "mod5.py" in pre["uncovered_files"]
+    assert "mod5.py" in stats["attempted_files"]
