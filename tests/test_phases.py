@@ -3902,6 +3902,14 @@ def test_group_items_by_file_preserves_order_within_and_across_groups():
     assert group_items_by_file([]) == []
 
 
+def test_fix_guardrails_forbid_git_mutation():
+    from daydream.phases import _FIX_GUARDRAILS, GENERATED_FILES_PROMPT_RULE
+
+    text = _FIX_GUARDRAILS + GENERATED_FILES_PROMPT_RULE
+    for verb in ("git stash", "git checkout", "git reset", "git commit"):
+        assert verb in text, f"guardrails must forbid `{verb}`"
+
+
 def test_group_items_by_footprint_unions_overlapping_footprints():
     from daydream.phases import group_items_by_footprint
 

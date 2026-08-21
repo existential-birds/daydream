@@ -1900,6 +1900,11 @@ ASCII ``''`` / ``""`` into typographic smart quotes (``”`` ``“`` ``’`` ``�
 and never introduce smart quotes when writing new code or comments — use plain
 ASCII straight quotes so the committed tree stays byte-clean and re-reviews do
 not re-surface a typographic finding.
+
+Forbid working-tree git mutation: many fix agents share ONE working tree, and
+a tree mutation is a data-loss race. `git stash`, `git checkout`, `git reset`,
+and `git commit` are each a refusal — if you believe one is needed, stop and
+report why instead of running it.
 """
     + GENERATED_FILES_PROMPT_RULE
     + "\n"
