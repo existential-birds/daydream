@@ -4,6 +4,23 @@ import pytest
 from daydream.phases import MERGED_ITEMS_SCHEMA, normalize_items
 
 
+def test_schema_accepts_related_files():
+    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
+            "lens": "cross-stack", "severity": "high",
+            "related_files": ["b.py", "svc/handler.py"]}
+    jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
+
+
+def test_schema_rejects_non_string_related_files():
+    item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
+            "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",
+            "lens": "per-stack", "severity": "medium",
+            "related_files": [42]}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
+
+
 def test_schema_requires_lens_and_severity():
     item = {"id": 1, "description": "d", "file": "a.py", "line": 4,
             "confidence": "HIGH", "rationale": "r", "evidence": "a.py:4",

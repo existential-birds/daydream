@@ -911,6 +911,7 @@ MERGED_ITEMS_SCHEMA: dict[str, Any] = {
                     "evidence": {"type": "string"},
                     "lens": {"type": "string", "enum": ["per-stack", "cross-stack", "structural", "wonder"]},
                     "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "related_files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
                 },
                 "required": [
                     "id",

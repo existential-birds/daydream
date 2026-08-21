@@ -3564,6 +3564,20 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     )
 
 
+def test_merge_prompt_emits_related_files_instruction():
+    from pathlib import Path
+
+    from daydream.deep.prompts import build_merge_prompt
+
+    prompt = build_merge_prompt(
+        per_stack_records_paths=[Path("a-records.json")],
+        intent_path=Path("intent.md"), alternatives_path=Path("alt.md"),
+        dedup_candidates_path=Path("dedup.json"), output_path=Path("o.json"),
+    )
+    assert "related_files" in prompt
+
+
+
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
