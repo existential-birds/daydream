@@ -157,6 +157,7 @@ from daydream.ui import (
     phase_subtitle,
     print_dim,
     print_error,
+    print_fix_complete,
     print_info,
     print_phase_hero,
     print_preflight_notice,
@@ -3107,6 +3108,20 @@ def _scrub_smart_quotes(
         )
 
 
+# Actionable verdicts shared by every round/report consumer (issue #744).
+# Single authority: _round_dispatch_items, _actionable_verdicts, and
+# _render_fix_outcome_summary all derive actionability from this set, so a
+# verdict added here flows through every round in one place. Anything not in
+# this set (notably ``resolved``) is a terminal pass and is never
+# re-dispatched.
+ACTIONABLE_VERDICTS = ("unresolved", "wrong_target", "regressed")
+
+# Verdicts that may carry a corrected target ``path`` for re-dispatch (a
+# subset of ACTIONABLE_VERDICTS: only these retarget the file; ``unresolved``
+# keeps the item's full file next round).
+RETARGETABLE_VERDICTS = ("wrong_target", "regressed")
+
+
 def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Derive THIS round's fix dispatch set from prior fix-verify outcomes (#744).
 
@@ -3130,10 +3145,10 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     for item in canonical:
         iid = item.get("id")
         outcome = outcomes.get(iid) if isinstance(iid, int) else None
-        if not outcome or outcome.get("verdict") not in ("unresolved", "wrong_target", "regressed"):
+        if not outcome or outcome.get("verdict") not in ACTIONABLE_VERDICTS:
             continue
         copy = dict(item)
-        if outcome.get("verdict") in ("wrong_target", "regressed"):
+        if outcome.get("verdict") in RETARGETABLE_VERDICTS:
             path = outcome.get("path")
             if isinstance(path, str) and path in allowed:
                 copy["file"] = path
@@ -3142,6 +3157,34 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
         copy["fix_verify_reason"] = outcome.get("reason") or ""
         dispatched.append(copy)
     return dispatched
+
+
+def _capture_fix_round_snapshot(
+    work: WorkContext,
+    pre_fix_ref: str,
+    changed_after_fix: list[str] | None,
+) -> str:
+    """Issue #744: capture the round's changed hunks for post-fix fix-verify.
+
+    Returns the round's worktree diff (the hunks the fix pass produced) as a
+    single string for the read-only verifier, which audits only these hunks,
+    never the whole tree. The caller computes ``changed_after_fix`` against
+    ``pre_fix_ref`` after the residual net + scrub, so the verifier sees the
+    exact state the round left behind. Best-effort: ``None`` (no diff context,
+    i.e. a failed enumeration) or a diff failure degrades to an empty hunks
+    string, never a crash.
+    """
+    from daydream import git_ops
+
+    if changed_after_fix is None:
+        return ""
+    try:
+        return git_ops.diff_worktree_against(
+            work.repo, pre_fix_ref, sorted(changed_after_fix)
+        )
+    except git_ops.GitError as exc:
+        print_warning(console, f"Could not capture round diff for fix-verify: {exc}")
+        return ""
 
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
@@ -3437,23 +3480,17 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 "HEAD may include edits present before the fix pass."
             ),
         )
-    # Issue #744: capture the round's changed-file set + hunks for the post-fix
-    # fix-verify step (read-only verifier audits the round's hunks only, never
-    # the whole tree). Written after the residual net + scrub so the verifier
-    # sees the exact state the round left behind; best-effort (enumeration or
-    # diff failure degrades to an empty hunks string, never a crash).
-    if changed_after_fix is not None:
-        ctx.data["fix_round_changed"] = sorted(changed_after_fix)
-        try:
-            ctx.data["fix_round_hunks"] = git_ops.diff_worktree_against(
-                work.repo, pre_fix_ref, sorted(changed_after_fix)
-            )
-        except git_ops.GitError as exc:
-            print_warning(console, f"Could not capture round diff for fix-verify: {exc}")
-            ctx.data["fix_round_hunks"] = ""
-    else:
-        ctx.data["fix_round_changed"] = []
-        ctx.data["fix_round_hunks"] = ""
+    # Issue #744: capture the round's changed hunks for the post-fix fix-verify
+    # step (read-only verifier audits the round's hunks only, never the whole
+    # tree). Written after the residual net + scrub so the verifier sees the
+    # exact state the round left behind; best-effort (a failed enumeration or
+    # diff degrades to an empty hunks string, never a crash). Only ``hunks``
+    # crosses the round barrier -- the changed-file set stays local to this
+    # step (the quality gate consumes it live below), so no ``fix_round_changed``
+    # intermediate is written.
+    ctx.data["fix_round_hunks"] = _capture_fix_round_snapshot(
+        work, pre_fix_ref, changed_after_fix
+    )
     # Issue #315: post-fix anti-degradation gate over the files the fix phase
     # edited. Tree is post-fix here (every applied or budget-preserved fix is
     # intact); a regression is flagged and surfaced, never fatal.
@@ -3506,6 +3543,40 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _merge_round_verdicts(
+    round_items: list[dict[str, Any]],
+    per_group_verdicts: Iterable[list[dict[str, Any]]],
+) -> dict[int, dict[str, Any]]:
+    """Id-keyed merge of one round's per-fix-group verdicts (issue #744).
+
+    A ``wrong_target`` retarget is re-dispatched to the corrected path; when
+    that re-dispatch finally resolves, keep the path on the terminal outcome
+    so the record says where the defect was actually fixed (#336 net never
+    widened). Verdicts lacking an int ``issue_id`` are dropped.
+    """
+    merged: dict[int, dict[str, Any]] = {}
+    for verdicts in per_group_verdicts:
+        for verdict in verdicts:
+            issue_id = verdict.get("issue_id")
+            if not isinstance(issue_id, int):
+                continue
+            prior = next(
+                (i for i in round_items if i.get("id") == issue_id), None
+            )
+            if (
+                verdict.get("verdict") == "resolved"
+                and prior is not None
+                and prior.get("fix_verify_verdict") == "wrong_target"
+                and isinstance(prior.get("fix_verify_path"), str)
+            ):
+                stored = dict(verdict)
+                stored["path"] = prior["fix_verify_path"]
+            else:
+                stored = verdict
+            merged[issue_id] = stored
+    return merged
+
+
 async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
     """Post-round fix verifier step (issue #744): one verdict per dispatched finding.
 
@@ -3526,7 +3597,10 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
     from daydream import git_ops
     from daydream.phases import group_items_by_footprint, phase_fix_verify
 
-    round_items: list[dict[str, Any]] = ctx.data.get("fix_round_items") or list(ctx.data["items"])
+    round_value = ctx.data.get("fix_round_items")
+    round_items: list[dict[str, Any]] = (
+        list(round_value) if round_value is not None else list(ctx.data["items"])
+    )
     if not round_items:
         _persist_fix_outcomes(ctx.data["dd"], ctx.data.get("fix_outcomes") or {})
         return BreakLoop()
@@ -3541,37 +3615,19 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
     outcomes: dict[int, dict[str, Any]] = ctx.data.setdefault("fix_outcomes", {})
     iteration = ctx.data.get("iteration")
     async with phase_scope(DaydreamPhase.VERIFY):
+        per_group_verdicts: list[list[dict[str, Any]]] = []
         groups = group_items_by_footprint(round_items)
         for _, group_items in groups:
-            verdicts = await phase_fix_verify(
-                ctx.backend_for("verify"),
-                ctx.work,
-                group_items,
-                hunks,
-                round_number=iteration if isinstance(iteration, int) else 1,
-            )
-            for verdict in verdicts:
-                issue_id = verdict.get("issue_id")
-                if not isinstance(issue_id, int):
-                    continue
-                # A wrong_target retarget is re-dispatched to the corrected
-                # path; when that re-dispatch finally resolves, keep the path
-                # on the terminal outcome so the record says where the defect
-                # was actually fixed (#336 net never widened).
-                prior = next(
-                    (i for i in round_items if i.get("id") == issue_id), None
+            per_group_verdicts.append(
+                await phase_fix_verify(
+                    ctx.backend_for("verify"),
+                    ctx.work,
+                    group_items,
+                    hunks,
+                    round_number=iteration if isinstance(iteration, int) else 1,
                 )
-                if (
-                    verdict.get("verdict") == "resolved"
-                    and prior is not None
-                    and prior.get("fix_verify_verdict") == "wrong_target"
-                    and isinstance(prior.get("fix_verify_path"), str)
-                ):
-                    stored = dict(verdict)
-                    stored["path"] = prior["fix_verify_path"]
-                    outcomes[issue_id] = stored
-                else:
-                    outcomes[issue_id] = verdict
+            )
+    outcomes.update(_merge_round_verdicts(round_items, per_group_verdicts))
     actionable = _actionable_verdicts(outcomes)
     iteration = ctx.data.get("iteration")
     # Budget spent (iteration == 3), a flat/no-loop pass (iteration unset), or
@@ -3581,7 +3637,9 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
     if actionable and iteration not in (None, 3):
         return None
     _persist_fix_outcomes(ctx.data["dd"], outcomes)
-    _render_fix_outcome_summary(ctx.data["dd"], outcomes)
+    _render_fix_outcome_summary(
+        ctx.data["dd"], list(ctx.data["items"]), outcomes
+    )
     return BreakLoop()
 
 
@@ -3590,7 +3648,7 @@ def _actionable_verdicts(outcomes: dict[int, dict[str, Any]]) -> list[str]:
     return [
         v["verdict"]
         for v in outcomes.values()
-        if v.get("verdict") in ("unresolved", "wrong_target", "regressed")
+        if v.get("verdict") in ACTIONABLE_VERDICTS
     ]
 
 
@@ -3609,24 +3667,33 @@ def _persist_fix_outcomes(dd: Path, outcomes: dict[int, dict[str, Any]]) -> None
         fix_outcomes_p.unlink()
 
 
-def _render_fix_outcome_summary(dd: Path, outcomes: dict[int, dict[str, Any]]) -> None:
-    """Render the terminal per-finding fix-outcome summary (issue #744).
+def _render_fix_outcome_summary(
+    dd: Path,
+    items: list[dict[str, Any]],
+    outcomes: dict[int, dict[str, Any]],
+) -> None:
+    """Render the terminal per-finding fix-verdict lines (issue #744).
 
-    Best-effort reporting read: distinguishes resolved findings from
-    attempted-not-fixed ones. Task 7 builds the honest user-facing lines; the
-    sidecar is the durable record.
+    Single production call site exercising ``print_fix_complete``'s verdict
+    gating, so the honest ``resolved``/attempted-not-fixed branches are
+    actually reached rather than dead next to a separate aggregate summary.
+    Reuses the same 1-based numbering used during the fix turn so each
+    terminal verdict line matches the neutral "Fix attempted" line printed
+    for that finding. ``fix-outcomes.json`` remains the durable record.
     """
-    resolved = [k for k, v in outcomes.items() if v.get("verdict") == "resolved"]
-    attempted = [
-        k for k, v in outcomes.items()
-        if v.get("verdict") in ("unresolved", "wrong_target", "regressed")
-    ]
     if not outcomes:
         return
-    parts = [f"fix outcomes: {len(resolved)} resolved, {len(attempted)} attempted-not-fixed"]
-    if attempted:
-        parts.append(f"not fixed: {sorted(attempted)}")
-    print_info(console, "; ".join(parts))
+    numbering = {
+        item["id"]: num
+        for num, item in enumerate(items, start=1)
+        if isinstance(item.get("id"), int)
+    }
+    total = len(items)
+    for issue_id, verdict in outcomes.items():
+        num = numbering.get(issue_id)
+        if num is None:
+            continue
+        print_fix_complete(console, num, total, outcome=verdict.get("verdict"))
 
 
 

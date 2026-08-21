@@ -3916,7 +3916,7 @@ def test_fix_verify_schema_rejects_bad_verdict():
     from daydream.phases import FIX_VERIFY_VERDICTS_SCHEMA
 
     payload = {"verdicts": [
-        {"issue_id": 1, "verdict": "fixed-ish", "reason": "r"},
+        {"issue_id": 1, "verdict": "fixed-ish", "path": "a.py", "reason": "r"},
     ]}
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(payload, FIX_VERIFY_VERDICTS_SCHEMA)

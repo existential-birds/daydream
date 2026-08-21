@@ -1908,7 +1908,7 @@ async def phase_fix_verify(
     """Post-round fix verifier: one read-only verdict per dispatched finding.
 
     Runs AFTER every fix group in a round finishes (the round barrier — the
-    caller invokes this once per round, never per group). The agent audits the
+    caller invokes this once per footprint group). The agent audits the
     round's changed hunks only (never the whole tree) and returns exactly one
     verdict per listed finding from the four-value enum: ``resolved``,
     ``unresolved``, ``wrong_target(path)``, or ``regressed(path)``.
@@ -2302,9 +2302,10 @@ def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str
     Shared preflight for the batched and parallel fix entry points: rejects
     the whole batch when ANY item's reference is missing/non-string or
     unconfined (fixed, non-reflective :class:`UnconfinedFindingError`), before
-    any grouping, progress output, or prompt construction. All batch items
-    target the same file, so the first item's canonical resolution is the
-    group's.
+    any grouping, progress output, or prompt construction. The returned value
+    is only the group's leading file for the batched prompt header; each row's
+    ``File:`` line is resolved per item (footprint groups can span differing
+    primary files).
     """
     file_ref = _resolve_finding_file_ref(repo, items[0].get("file"))
     for item in items[1:]:
@@ -2423,11 +2424,14 @@ async def phase_fix_batched(
 ) -> None:
     """Phase 3 (batched): Apply all findings for ONE file in a single fix turn.
 
-    All ``items`` must target the same file; the caller (``phase_fix_parallel``)
-    groups them (via ``group_items_by_footprint``). Batching collapses N per-finding
-    ``run_agent`` calls into one so the agent reads the file's context once and
-    produces a single coherent patch. A single-item group delegates straight to
-    ``phase_fix`` — there is no batched prompt to build.
+    ``items`` normally target the same file; the caller (``phase_fix_parallel``)
+    groups them (via ``group_items_by_footprint``). Batching collapses N
+    per-finding ``run_agent`` calls into one so the agent reads the file's
+    context once and produces a single coherent patch. A footprint group can
+    however span items from differing primary files (intersecting footprints);
+    the batched prompt still names each row's own resolved ``File:``. A
+    single-item group delegates straight to ``phase_fix`` — there is no batched
+    prompt to build.
 
     Args:
         backend: The Backend to execute against.
@@ -2462,8 +2466,9 @@ async def phase_fix_batched(
     count = len(items)
     # Validate EVERY item's file reference before any progress output or prompt
     # construction: a single unconfined (or missing/non-string) reference
-    # rejects the whole batch. All items target the same file, so the returned
-    # first item's canonical resolution is the group's.
+    # rejects the whole batch. A batch can span differing primary files, so the
+    # returned first item's canonical resolution is only the batched header's
+    # headline file (each row resolves its own).
     file_ref = _preflight_finding_file_refs(work.repo, items)
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
@@ -2475,9 +2480,10 @@ async def phase_fix_batched(
     findings_block = ""
     for idx, item in enumerate(items, start=1):
         desc = item.get("description", "No description")
+        item_file = _resolve_finding_file_ref(work.repo, item.get("file"))
         line = item.get("line", "Unknown")
         evidence = _item_evidence(item)
-        findings_block += f"\n{idx}. {desc}\n   File: {file_ref}\n   Line: {line}\n"
+        findings_block += f"\n{idx}. {desc}\n   File: {item_file}\n   Line: {line}\n"
         if evidence:
             findings_block += f"   Evidence: {evidence}\n"
 
