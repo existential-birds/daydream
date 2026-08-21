@@ -29,11 +29,11 @@ from daydream.deep.prompts import (
 )
 from daydream.eval.analyzer import (
     _agent_label,
-    _files_from_diff,
     _read_paths_for_call,
     _records_issues,
     load_trajectories,
 )
+from daydream.hunk_index import files_in_index, load_hunk_index
 from daydream.phases import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
@@ -429,7 +429,10 @@ def compute_uncovered_files(
         no review agent covered.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
-    diff_files = _files_from_diff(daydream_dir / "diff.patch")
+    # The changed-file set comes from the persisted hunk index (written at
+    # gather right after diff materialization) rather than re-reading
+    # ``diff.patch``. Fail-open: a missing index degrades to no changed files.
+    diff_files = files_in_index(load_hunk_index(daydream_dir))
 
     review_reads: set[str] = set()
     for traj in trajectories["forked"]:
@@ -497,18 +500,22 @@ def hunk_change_line_count(hunks: str) -> int:
 
 def filter_sweepable_files(
     uncovered_files: list[str],
-    diff: str,
+    index: dict[str, Any],
     *,
     min_hunk_lines: int,
     max_files: int,
 ) -> tuple[list[str], list[str], list[str]]:
     """Budget-filter the uncovered list into the files actually swept.
 
-    A file is sweepable only when its hunks contain at least ``min_hunk_lines``
-    added/removed lines -- a trivially small hunk does not justify a second
-    pass. The sweepable set is capped at ``max_files`` in diff order (the
-    uncovered list arrives sorted); the remainder is reported as
-    skipped-for-capacity rather than silently dropped.
+    ``index`` is the persisted hunk index (as loaded by
+    ``daydream.hunk_index.load_hunk_index``) -- the run-time authority for
+    changed-file hunk sizes. A file is sweepable only when its index entry's
+    ``added_total + removed_total`` is at least ``min_hunk_lines`` -- a
+    trivially small hunk does not justify a second pass. A file absent from
+    the index is treated as too small (``skipped_small``), mirroring today's
+    ``block is None`` behavior. The sweepable set is capped at ``max_files``
+    in diff order (the uncovered list arrives sorted); the remainder is
+    reported as skipped-for-capacity rather than silently dropped.
 
     Returns:
         ``(swept_files, skipped_small_hunk_files, skipped_capacity_files)``.
@@ -520,8 +527,8 @@ def filter_sweepable_files(
     swept: list[str] = []
     skipped_small: list[str] = []
     for file in uncovered_files:
-        block = diff_block_for_file(diff, file)
-        if block is None or hunk_change_line_count(block) < min_hunk_lines:
+        info = index.get(file)
+        if info is None or (info["added_total"] + info["removed_total"]) < min_hunk_lines:
             skipped_small.append(file)
             continue
         swept.append(file)

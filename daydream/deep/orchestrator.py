@@ -1617,6 +1617,8 @@ def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
 
 async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     """Run the uncovered-file sweep body (issue #309)."""
+    from daydream.hunk_index import load_hunk_index
+
     config = ctx.config
     dd = ctx.data["dd"]
     recorder = get_current_recorder()
@@ -1640,7 +1642,7 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
 
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
-        full_diff,
+        load_hunk_index(dd.parent),
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(config),
         max_files=_uncovered_sweep_max_files(config),
     )
