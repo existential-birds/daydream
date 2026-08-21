@@ -8,11 +8,16 @@ from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
     PullRequestEntry,
+    TransitionError,
     case_id_for,
+    classify_validation,
     derive_finding_id,
     derive_gold_mode,
     derive_gold_status,
+    derive_workspace_state,
     normalize_hostname,
+    validate_case_transition,
+    validate_pr_transition,
 )
 
 
@@ -321,3 +326,70 @@ def test_gold_status_and_mode_derived():
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"
     assert derive_gold_mode(case.curation) == "historical"
+
+
+@pytest.mark.parametrize(
+    "frm,to",
+    [("pending", "fetched"), ("pending", "fetch_failed"), ("fetch_failed", "fetched"), ("fetched", "fetched")],
+)
+def test_valid_pr_transitions(frm, to):
+    validate_pr_transition(frm, to)  # must not raise
+
+
+@pytest.mark.parametrize("frm,to", [("fetched", "pending"), ("pending", "draft")])
+def test_invalid_pr_transition_rejected(frm, to):
+    with pytest.raises(TransitionError):
+        validate_pr_transition(frm, to)
+
+
+@pytest.mark.parametrize(
+    "frm,to",
+    [
+        ("draft", "ready"),
+        ("draft", "excluded"),
+        ("draft", "unreplayable"),
+        ("ready", "stale"),
+        ("ready", "draft"),
+        ("stale", "ready"),
+        ("stale", "excluded"),
+        ("unreplayable", "excluded"),
+        ("excluded", "draft"),
+        ("excluded", "unreplayable"),
+    ],
+)
+def test_valid_case_transitions(frm, to):
+    validate_case_transition(frm, to)
+
+
+@pytest.mark.parametrize("frm,to", [("ready", "excluded"), ("stale", "draft"), ("draft", "stale")])
+def test_invalid_case_transition_rejected(frm, to):
+    with pytest.raises(TransitionError):
+        validate_case_transition(frm, to)
+
+
+def test_derived_workspace_state_empty_vs_collecting():
+    assert derive_workspace_state(pull_requests=[], cases=[]) == "empty"
+    assert (
+        derive_workspace_state(pull_requests=[{"number": 1, "import_state": "pending"}], cases=[])
+        == "collecting"
+    )
+    assert (
+        derive_workspace_state(
+            pull_requests=[],
+            cases=[
+                {
+                    "case_id": "pr-000001-0123456789ab",
+                    "pr_number": 1,
+                    "case_file": "x.yaml",
+                    "curation_state": "ready",
+                }
+            ],
+        )
+        == "ready"
+    )
+
+
+def test_classify_validation_codes():
+    assert classify_validation(ready=True, incomplete=False, corrupt=False) == 0
+    assert classify_validation(ready=False, incomplete=True, corrupt=False) == 2
+    assert classify_validation(ready=False, incomplete=False, corrupt=True) == 1

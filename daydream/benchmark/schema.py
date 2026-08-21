@@ -594,3 +594,104 @@ def derive_gold_mode(curation: Curation) -> str:
     if "authored" in kinds:
         return "mixed"
     return "historical"
+
+
+# ---------------------------------------------------------------------------
+# state transitions, derived workspace state, 0/2/1 classifier
+# ---------------------------------------------------------------------------
+
+
+class TransitionError(Exception):
+    """An invalid PR-import or case-curation state transition."""
+
+    def __init__(self, frm: str, to: str):
+        super().__init__(f"invalid transition {frm!r} -> {to!r}")
+        self.frm = frm
+        self.to = to
+
+
+_PR_TRANSITIONS: dict[str, set[str]] = {
+    "pending": {"fetched", "fetch_failed"},
+    "fetch_failed": {"fetched"},
+    "fetched": {"fetched"},
+}
+
+_CASE_TRANSITIONS: dict[str, set[str]] = {
+    "draft": {"ready", "excluded", "unreplayable"},
+    "ready": {"stale", "draft"},
+    "stale": {"ready", "excluded"},
+    "unreplayable": {"excluded"},
+    "excluded": {"draft", "unreplayable"},
+}
+
+
+def validate_pr_transition(frm: str, to: str) -> None:
+    """Raise :class:`TransitionError` unless ``frm -> to`` is a valid PR ledger move."""
+    allowed = _PR_TRANSITIONS.get(frm, set())
+    if to not in allowed:
+        raise TransitionError(frm, to)
+
+
+def validate_case_transition(frm: str, to: str) -> None:
+    """Raise :class:`TransitionError` unless ``frm -> to`` is a valid curation move."""
+    allowed = _CASE_TRANSITIONS.get(frm, set())
+    if to not in allowed:
+        raise TransitionError(frm, to)
+
+
+def derive_workspace_state(
+    *,
+    pull_requests: list[dict] | None = None,
+    cases: list[dict] | None = None,
+) -> str:
+    """Derive the workspace state from ledger + case index.
+
+    Priority per §5: ``collecting`` > ``stale`` > ``ready`` > ``empty``. A
+    ``corrupt`` flag (schema/checksum/path/bundle) is surfaced by the caller
+    via ``classify_validation``; here we only reason over the ledger/index.
+    """
+    pull_requests = pull_requests or []
+    cases = cases or []
+    any_collecting = False
+    any_stale = False
+    any_ready = False
+    any_draft_or_unreplayable = False
+
+    for pr in pull_requests:
+        state = pr.get("import_state")
+        if state in ("pending", "fetch_failed"):
+            any_collecting = True
+
+    for c in cases:
+        cs = c.get("curation_state")
+        if cs in ("draft", "unreplayable"):
+            any_draft_or_unreplayable = True
+        elif cs == "stale":
+            any_stale = True
+        elif cs == "ready":
+            any_ready = True
+
+    if any_collecting:
+        return "collecting"
+    if any_draft_or_unreplayable:
+        return "curating"
+    if any_stale:
+        return "stale"
+    if any_ready:
+        return "ready"
+    return "empty"
+
+
+def classify_validation(*, ready: bool, incomplete: bool, corrupt: bool) -> int:
+    """Map readiness to a ``0``/``2``/``1`` validation exit code.
+
+    ``0`` ready; ``2`` structurally valid but incomplete; ``1`` corrupt.
+    ``corrupt`` always takes precedence over ``incomplete``.
+    """
+    if corrupt:
+        return 1
+    if ready:
+        return 0
+    if incomplete:
+        return 2
+    return 2
