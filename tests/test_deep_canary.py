@@ -103,3 +103,27 @@ async def test_deep_canary_sharding_and_sibling_frontier(
     # AC5: the unread frontier file stays uncovered and is dispatched to sweep.
     assert "mod5.py" in pre["uncovered_files"]
     assert "mod5.py" in stats["attempted_files"]
+
+
+async def test_deep_canary_no_redundant_sweep_when_all_covered(
+    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC6: when every changed file carries valid evidence, pre_sweep
+    uncovered_files is empty and the sweep is skipped."""
+    from daydream.runner import RunConfig, run
+
+    stub = install_stub_backend(monkeypatch, sibling_frontier_target)
+    stub.per_stack_emit_reads = True  # read every assigned file; no unread knob
+    exit_code = await run(RunConfig(
+        target=str(sibling_frontier_target), cleanup=False,
+        deep_shard_enabled=True,
+        deep_shard_max_files=5, deep_shard_max_bytes=12288,
+        deep_shard_fanout_cap=16, deep_shard_frontier_max=8,
+    ))
+    assert exit_code == 0
+    deep = sibling_frontier_target / ".daydream" / "deep"
+    stats = json.loads((deep / "coverage-stats.json").read_text())
+    pre = stats["pre_sweep"]
+    assert pre["uncovered_files"] == []          # no file lacks evidence
+    assert stats["attempted_files"] == []        # sweep dispatched nothing
+    assert pre["coverage_ratio"] == 1.0          # full coverage pre-sweep
