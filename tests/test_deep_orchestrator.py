@@ -8484,3 +8484,19 @@ async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
     assert verdicts_generic["notes.txt"]["verdict"] == "not_reviewed"  # read-gated, never clean
     assert verdicts_generic["notes.txt"]["lines_read"] == 8
     assert verdicts_generic["README.md"]["verdict"] == "clean"  # read, though not declared
+
+
+async def test_per_stack_prompt_points_at_hunk_index(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer prompts source changed-line ranges from the hunk index, not
+    a diff.patch re-read (AC#1)."""
+    _silence(monkeypatch)
+    prompts = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    prompt = next(c["prompt"] for c in prompts if "Relevant diff hunks" in c["prompt"])
+    assert "hunk-index.json" in prompt or "changed line ranges" in prompt.lower()
+    assert "do NOT re-Read diff.patch" in prompt or "diff.patch" not in prompt

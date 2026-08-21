@@ -495,7 +495,9 @@ def _diff_instruction(
         by ``_diff_blocks_for_files`` and under the byte bound), the hunks are
         inlined and the ``Read it directly`` instruction is DROPPED. The agent
         has what it needs without a tool-call round-trip for the static
-        ``diff.patch`` file.
+        ``diff.patch`` file. The inline text additionally names
+        `.daydream/hunk-index.json` as the authoritative changed-line source
+        (AC#1: reviewers must not re-derive ranges with ``git diff``).
       - When ``inline_diff`` is ``None`` (byte budget exceeded / no matching
         blocks / caller had no diff text), today's path-pointer text is used
         unchanged so the agent can still locate the full diff for whole-file
@@ -514,6 +516,10 @@ def _diff_instruction(
             "Relevant diff hunks for your stack (inlined; do NOT re-Read "
             "diff.patch for these — the hunks are already here):\n\n"
             f"{inline_diff.rstrip()}\n\n"
+            "Changed line ranges are authoritative in `.daydream/hunk-index.json` "
+            "— do not re-derive them with `git diff` (the index is written once "
+            "at gather and is the single persisted source of changed-file/line "
+            "ranges).\n\n"
             "Focus on hunks that touch your stack's files. Read the source file "
             "FIRST; you may only comment on hunks you have read. The inlined "
             "hunks are not a substitute for reading the file."
