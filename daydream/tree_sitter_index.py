@@ -119,6 +119,22 @@ RUST_IMPORT_QUERY = """
 (use_declaration argument: (_) @import)
 """
 
+# Definition queries (symbol index). Mirror the import-query style: capture the
+# whole definition node as ``@def`` so we can read its field-named ``name`` node
+# and its 1-based start/end lines.
+PYTHON_DEF_QUERY = """
+(function_definition) @def
+(class_definition) @def
+"""
+
+RUST_DEF_QUERY = """
+(function_item) @def
+(struct_item) @def
+(enum_item) @def
+(trait_item) @def
+(impl_item) @def
+"""
+
 
 def _query_for_language(language_id: str) -> str | None:
     """Return the import query string for the given language id, or None."""
@@ -131,6 +147,58 @@ def _query_for_language(language_id: str) -> str | None:
     if language_id == "rust":
         return RUST_IMPORT_QUERY
     return None
+
+
+def _def_query_for_language(language_id: str) -> str | None:
+    """Return the definition query string for a language, or None."""
+    if language_id == "python":
+        return PYTHON_DEF_QUERY
+    if language_id == "rust":
+        return RUST_DEF_QUERY
+    return None
+
+
+def _definition_kind(node_type: str) -> str:
+    """Map a tree-sitter definition node type to ``function``/``class``."""
+    if node_type in ("function_definition", "function_item"):
+        return "function"
+    return "class"
+
+
+def extract_definitions(
+    parser: Parser, source: bytes, query_string: str
+) -> list[dict[str, object]]:
+    """Parse ``source`` and return captured definition records.
+
+    Returns a list of ``{name, line, end_line, kind}`` dicts where ``line``/``end_line``
+    are 1-based (``start_point[0] + 1`` / ``end_point[0] + 1``). ``kind`` is
+    ``"function"`` or ``"class"``. Returns an empty list on any parse/query
+    failure (graceful degradation per D-06, matching ``extract_imports``).
+    """
+    try:
+        tree = parser.parse(source)
+        language = parser.language
+        if language is None:
+            return []
+        query = Query(language, query_string)
+        cursor = QueryCursor(query)
+        captures = cursor.captures(tree.root_node)
+        result: list[dict[str, object]] = []
+        for node in captures.get("def", []):
+            name_node = node.child_by_field_name("name")
+            if name_node is None or name_node.text is None:
+                continue
+            result.append(
+                {
+                    "name": name_node.text.decode("utf-8", errors="replace"),
+                    "line": node.start_point[0] + 1,
+                    "end_line": node.end_point[0] + 1,
+                    "kind": _definition_kind(node.type),
+                }
+            )
+        return result
+    except Exception:
+        return []
 
 
 def extract_imports(parser: Parser, source: bytes, query_string: str) -> list[str]:
@@ -427,6 +495,64 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
 
 
 # --- Public API --------------------------------------------------------------
+
+
+def build_symbol_index(repo_root: Path, paths: list[str]) -> dict[str, list[dict[str, object]]]:
+    """Build a symbol index of function/class definitions for ``paths``.
+
+    Only Python and Rust sources are indexed (the issue's symbol scope). Each
+    path is resolved relative to ``repo_root``; a file that parses or queries
+    with no definitions simply contributes nothing (graceful degradation per
+    D-06).
+
+    Returns ``{name: [{"path", "line", "end_line", "kind"}]}`` keyed by
+    definition name (a name can be defined in multiple files).
+    """
+    index: dict[str, list[dict[str, object]]] = {}
+    for path in paths:
+        lang_entry = LANGUAGES.get(Path(path).suffix)
+        if lang_entry is None:
+            continue
+        language_id, _factory = lang_entry
+        query_string = _def_query_for_language(language_id)
+        if query_string is None:
+            continue
+        abs_path = repo_root / path
+        try:
+            source = abs_path.read_bytes()
+        except (FileNotFoundError, OSError):
+            continue
+        parser = get_parser(language_id)
+        if parser is None:
+            continue
+        for definition in extract_definitions(parser, source, query_string):
+            index.setdefault(str(definition["name"]), []).append(
+                {
+                    "path": path,
+                    "line": definition["line"],
+                    "end_line": definition["end_line"],
+                    "kind": definition["kind"],
+                }
+            )
+    return index
+
+
+def symbol_def(index: dict[str, list[dict[str, object]]], name: str) -> list[dict[str, object]]:
+    """Return the ``[{"path", "line", "end_line", "kind"}]`` entries for ``name``.
+
+    Empty list when the name is not defined in the indexed files (the sole
+    consumer, the dependency tracer / reverse-ref logic, treats it as "no
+    defined symbol").
+    """
+    return index.get(name, [])
+
+
+def symbol_body(
+    index: dict[str, list[dict[str, object]]], name: str
+) -> list[dict[str, object]]:
+    """Alias of :func:`symbol_def` -- this issue scopes ``symbol_body`` to the
+    definition-level (file+line range) entries; no body-text extraction."""
+    return symbol_def(index, name)
 
 
 def detect_affected_files(

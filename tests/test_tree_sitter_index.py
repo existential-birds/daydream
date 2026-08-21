@@ -416,3 +416,39 @@ def test_is_generic_or_invalid_stem_skips_nul_cr_lf(stem: str) -> None:
 @pytest.mark.parametrize("stem", ["widget", "gadget", "indexer", "app_store"])
 def test_is_generic_or_invalid_stem_accepts_specific_stems(stem: str) -> None:
     assert _is_generic_or_invalid_stem(stem) is False
+
+
+# --- Symbol index (definitions + line numbers) ------------------------------
+
+
+def test_symbol_def_python_returns_file_and_line_range(tmp_path: Path):
+    from daydream.tree_sitter_index import build_symbol_index, symbol_def
+
+    (tmp_path / "widget.py").write_text(
+        "def compute_total(x):\n    return x + 1\n\nclass Box:\n    pass\n"
+    )
+    (tmp_path / "config.py").write_text("SETTINGS = {}\ndef load():\n    return SETTINGS\n")
+    idx = build_symbol_index(tmp_path, ["widget.py", "config.py"])
+    assert symbol_def(idx, "compute_total") == [
+        {"path": "widget.py", "line": 1, "end_line": 2, "kind": "function"}
+    ]
+    assert symbol_def(idx, "Box") == [
+        # tree-sitter's ``class_definition`` node spans the body, so the
+        # definition-range end is line 5 (the ``pass`` line), not the header.
+        {"path": "widget.py", "line": 4, "end_line": 5, "kind": "class"}
+    ]
+
+
+def test_symbol_def_rust_returns_file_and_line_range(tmp_path: Path):
+    from daydream.tree_sitter_index import build_symbol_index, symbol_def
+
+    (tmp_path / "lib.rs").write_text(
+        "pub fn total(x: i64) -> i64 {\n    x\n}\n\npub struct Widget {\n    pub id: u32,\n}\n"
+    )
+    idx = build_symbol_index(tmp_path, ["lib.rs"])
+    assert symbol_def(idx, "total") == [
+        {"path": "lib.rs", "line": 1, "end_line": 3, "kind": "function"}
+    ]
+    assert symbol_def(idx, "Widget") == [
+        {"path": "lib.rs", "line": 5, "end_line": 7, "kind": "class"}
+    ]
