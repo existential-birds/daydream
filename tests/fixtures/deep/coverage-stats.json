@@ -1,0 +1,38 @@
+{
+  "pre_sweep": {
+    "files_in_diff": 13,
+    "files_read_by_reviewers": 12,
+    "coverage_ratio": 0.9231,
+    "uncovered_files": [
+      "mod5.py"
+    ],
+    "coverage_by_evidence": {
+      "source_read": 12,
+      "inline_hunk_reviewed": 12,
+      "dependency_frontier_read": 8
+    }
+  },
+  "attempted_files": [
+    "mod5.py"
+  ],
+  "completed_files": [
+    "mod5.py"
+  ],
+  "covered_files": [
+    "mod5.py"
+  ],
+  "post_sweep": {
+    "files_read_by_reviewers": 13,
+    "coverage_ratio": 1.0
+  },
+  "sweep_finding_count": 1,
+  "sweep_skipped_capacity": 0,
+  "sweep_skipped_small_hunks": 0,
+  "sweep_skipped_capacity_files": [],
+  "sweep_skipped_small_hunks_files": [],
+  "sweep_parse_dropped": 0,
+  "sweep_failures": {},
+  "sweep_attempt_status": {
+    "mod5.py": "read"
+  }
+}
