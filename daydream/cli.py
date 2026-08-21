@@ -43,7 +43,7 @@ from daydream.agent import (
     console,
     get_current_backends,
 )
-from daydream.benchmark.cli import _handle_bench_command
+from daydream.benchmark.cli import _handle_bench_command, _handle_benchmark_command
 from daydream.config_file import DaydreamFileConfig, load_file_config
 from daydream.phases import UnconfinedFindingError
 from daydream.runner import RunConfig, run, run_feedback
@@ -73,6 +73,7 @@ KNOWN_VERBS = {
     "bench",
     "post-findings",
     "setup",
+    "benchmark",
     "ext",
 }
 
@@ -1887,6 +1888,9 @@ def main() -> None:
 
         if verb == "bench":
             sys.exit(_handle_bench_command(argv[1:]))
+
+        if verb == "benchmark":
+            sys.exit(_handle_benchmark_command(argv[1:]))
 
         if verb == "post-findings":
             sys.exit(_handle_post_findings_command(argv[1:]))
