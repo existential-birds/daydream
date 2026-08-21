@@ -3939,8 +3939,9 @@ def test_fix_verify_schema_accepts_all_four_verdicts():
 
 
 def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):
-    from daydream.ui.summary import print_fix_complete
     from rich.console import Console
+
+    from daydream.ui.summary import print_fix_complete
 
     c = Console(record=True)
     print_fix_complete(c, 1, 1, outcome="resolved")
