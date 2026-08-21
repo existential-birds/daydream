@@ -103,7 +103,7 @@ def _register_builtin_flows(registry: Registry) -> None:
                     max_iterations=lambda ctx: 3,
                 )
             )
-        else:
+        elif step.name != "fix-verify":
             entries.append(step.name)
     registry.set_flow("deep", entries)
 

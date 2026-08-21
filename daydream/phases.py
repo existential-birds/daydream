@@ -1074,30 +1074,6 @@ def severity_sorted(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda it: _SEVERITY_RANK.get(it.get("severity") or "", 1))
 
 
-def group_items_by_file(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Partition fix items into per-file groups, preserving input order.
-
-    Shared by the parallel fix loop: distinct files become distinct groups that
-    can run concurrently, while items targeting the same file stay together so
-    they run serially (no read-modify-write races). Group emission order is the
-    first-appearance order of each file; within-group order is input order, so a
-    ``severity_sorted`` input yields severity-ordered groups. Items with a
-    missing/None file bucket into a single ``"<no-file>"`` group (cannot prove
-    disjoint -> serialize for safety). Pure: no I/O, no mutation of inputs.
-
-    Returns:
-        Ordered list of ``(file_key, items_for_file)`` tuples, where
-        *file_key* is the file path string or ``"<no-file>"`` for items
-        lacking a file, and *items_for_file* preserves the input order of
-        items assigned to that file.
-    """
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        key = item.get("file") or "<no-file>"
-        grouped.setdefault(key, []).append(item)
-    return list(grouped.items())
-
-
 def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
     """Partition fix items by footprint (``{file} ∪ related_files``), widening-only.
 
@@ -1107,8 +1083,7 @@ def group_items_by_footprint(items: list[dict[str, Any]]) -> list[tuple[str, lis
     sibling documents reaches a single agent that owns the whole overlapping
     set. Grouping is widening-only: it unions intersecting footprints but never
     splits a batch that already shares a primary file, preserving the
-    per-file read-modify-write race safety described in ``group_items_by_file``
-    and enforced by #170/#202.
+    per-file read-modify-write race safety enforced by #170/#202.
 
     Group emission order is first-appearance order of each group's earliest
     item; within-group order is input order. The returned group key is the
@@ -1193,6 +1168,20 @@ RECOMMENDATION_VERDICTS_SCHEMA = {
     "additionalProperties": False,
 }
 
+# The four fix-verify verdicts -- single authority (issue #744). Every
+# consumer -- the output schema below, ``phase_fix_verify``'s allowed-value
+# filter, and the orchestrator's actionable/retargetable subsets -- derives its
+# valid values from this constant, so a rename/reorder propagates in one place
+# instead of lockstep edits across parallel literals. ``FIX_VERIFY_ACTIONABLE_VERDICTS``
+# is the subset a later round re-dispatches; a verdict outside it (notably
+# ``resolved``) is a terminal pass. ``FIX_VERIFY_RETARGETABLE_VERDICTS`` is the
+# subset that may carry a corrected target ``path`` (the phase enforces that
+# conditional shape because JSON Schema cannot express it).
+FIX_VERIFY_VERDICTS: tuple[str, ...] = ("resolved", "unresolved", "wrong_target", "regressed")
+FIX_VERIFY_ACTIONABLE_VERDICTS: tuple[str, ...] = ("unresolved", "wrong_target", "regressed")
+FIX_VERIFY_RETARGETABLE_VERDICTS: tuple[str, ...] = ("wrong_target", "regressed")
+
+
 FIX_VERIFY_VERDICTS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -1203,8 +1192,7 @@ FIX_VERIFY_VERDICTS_SCHEMA = {
                 "properties": {
                     "issue_id": {"type": "integer"},
                     "verdict": {"type": "string",
-                                "enum": ["resolved", "unresolved",
-                                         "wrong_target", "regressed"]},
+                                "enum": list(FIX_VERIFY_VERDICTS)},
                     # Strict-mode required (Codex rejects optional properties,
                     # see test_output_schema_strict.py). ``path`` is null for
                     # resolved/unresolved and a repo-relative file for
@@ -1982,7 +1970,7 @@ async def phase_fix_verify(
         if not isinstance(issue_id, int):
             continue
         verdict = entry.get("verdict")
-        if verdict not in ("resolved", "unresolved", "wrong_target", "regressed"):
+        if verdict not in FIX_VERIFY_VERDICTS:
             continue
         cleaned: dict[str, Any] = {
             "issue_id": issue_id,
@@ -1990,7 +1978,7 @@ async def phase_fix_verify(
             "reason": entry.get("reason") or "",
         }
         path = entry.get("path")
-        if verdict in ("wrong_target", "regressed") and isinstance(path, str) and path.strip():
+        if verdict in FIX_VERIFY_RETARGETABLE_VERDICTS and isinstance(path, str) and path.strip():
             cleaned["path"] = path.strip()
         by_id[issue_id] = cleaned
 
@@ -2085,6 +2073,18 @@ def _item_evidence(item: dict[str, Any]) -> str:
     not re-declared in three ad-hoc forms.
     """
     return str(item.get("evidence", "") or "")
+
+
+def _item_related_files(item: dict[str, Any]) -> list[str]:
+    """Return a finding's ``related_files`` paths, or ``[]`` when none.
+
+    Surfaced to the fix prompt in the same breath as the primary ``File:`` so
+    a deduplicated cross-file finding dispatched alone still names every sibling
+    file it may edit. Mirrors the footprint grouping's
+    tolerance of non-string entries (ignored, not an error), so surfacing them
+    can never fail a group that already dispatched around them.
+    """
+    return [f for f in (item.get("related_files") or []) if isinstance(f, str)]
 
 
 def _repo_relative_path(repo: Path, value: str) -> str:
@@ -2358,6 +2358,8 @@ async def phase_fix(
     line = item.get("line", "Unknown")
     evidence = _item_evidence(item)
     evidence_line = f"\nEvidence: {evidence}" if evidence else ""
+    related_files = _item_related_files(item)
+    related_line = f"\nRelated files: {', '.join(related_files)}" if related_files else ""
 
     async with (console_lock if console_lock is not None else anyio.Lock()):
         console.print()
@@ -2367,7 +2369,7 @@ async def phase_fix(
 {description}
 
 File: {file_ref}
-Line: {line}{evidence_line}
+Line: {line}{related_line}{evidence_line}
 
 Make the minimal change needed. {_FIX_GUARDRAILS}"""
     # Issue #336 — concrete allowed-files list (reviewed diff). None leaves
@@ -2486,6 +2488,9 @@ async def phase_fix_batched(
         findings_block += f"\n{idx}. {desc}\n   File: {item_file}\n   Line: {line}\n"
         if evidence:
             findings_block += f"   Evidence: {evidence}\n"
+        related_files = _item_related_files(item)
+        if related_files:
+            findings_block += f"   Related files: {', '.join(related_files)}\n"
 
     prompt = f"""Fix these {count} issues in {file_ref}:
 {findings_block}

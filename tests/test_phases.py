@@ -1068,6 +1068,49 @@ async def test_phase_fix_batched_prompt_lists_all_findings(tmp_path, make_work, 
 
 
 @pytest.mark.asyncio
+async def test_phase_fix_batched_prompt_lists_related_files(
+    tmp_path, make_work, silence_console,
+):
+    """A deduplicated cross-file finding names every other file it touches.
+
+    The outcome of the footprint grouping is useless if the fix agent never
+    learns which sibling files are in-scope. Both the single-finding and
+    batched fix prompts must render a ``Related files:`` line from the item's
+    sibling set, so the agent edits the whole footprint and not just the
+    primary ``File:``.
+    """
+    from daydream.phases import phase_fix, phase_fix_batched
+
+    silence_console("daydream.phases")
+
+    # Single-finding path: a cross-file finding reaches ``phase_fix`` alone.
+    single = ScriptedBackend()
+    item = {
+        "id": 1,
+        "description": "Cross-file contract drift",
+        "file": "src/a.py",
+        "line": 10,
+        "related_files": ["src/b.py", "src/c.py"],
+    }
+    await phase_fix(single, make_work(tmp_path), item, 1, 1)
+    assert "Related files: src/b.py, src/c.py" in single.prompts[0]
+    assert "File: src/a.py" in single.prompts[0]
+
+    # Batched prompt: each row carries its own related-files line.
+    batched = ScriptedBackend()
+    items = [
+        {"id": 1, "description": "Cross-file contract drift", "file": "src/a.py",
+         "line": 10, "related_files": ["src/b.py"]},
+        {"id": 2, "description": "Same-file sibling", "file": "src/a.py", "line": 88},
+    ]
+    await phase_fix_batched(batched, make_work(tmp_path), items, [1, 2], 2)
+    prompt = batched.prompts[0]
+    assert "Related files: src/b.py" in prompt
+    # A sibling-less row renders without the related-files line.
+    assert "Same-file sibling" in prompt
+
+
+@pytest.mark.asyncio
 async def test_phase_fix_batched_concise_fix_prompts_adds_directive(tmp_path, make_work, silence_console):
     """Batched same-file fixes carry backend concise-fix-prompt guidance."""
     from daydream.phases import phase_fix_batched
@@ -3886,22 +3929,6 @@ async def test_verifier_prompt_carries_gate_zero_protocol(tmp_path, make_work, s
     assert "same-turn echo" in backend.last_prompt
 
 
-def test_group_items_by_file_preserves_order_within_and_across_groups():
-    from daydream.phases import group_items_by_file
-
-    items = [  # already severity_sorted by the caller
-        {"id": 1, "file": "a.py", "severity": "high"},
-        {"id": 2, "file": "b.py", "severity": "high"},
-        {"id": 3, "file": "a.py", "severity": "low"},
-        {"id": 4, "file": None, "severity": "low"},
-    ]
-    groups = group_items_by_file(items)
-    assert [k for k, _ in groups] == ["a.py", "b.py", "<no-file>"]
-    assert [i["id"] for i in dict(groups)["a.py"]] == [1, 3]  # input order kept
-    assert sum(len(v) for _, v in groups) == len(items)  # nothing dropped
-    assert group_items_by_file([]) == []
-
-
 def test_fix_guardrails_forbid_git_mutation():
     from daydream.phases import _FIX_GUARDRAILS, GENERATED_FILES_PROMPT_RULE
 
@@ -3936,6 +3963,29 @@ def test_fix_verify_schema_accepts_all_four_verdicts():
         else:
             entry["path"] = None
         jsonschema.validate({"verdicts": [entry]}, FIX_VERIFY_VERDICTS_SCHEMA)
+
+
+def test_fix_verify_verdicts_are_single_source():
+    """The fix-verify verdicts live in ONE public constant, not scattered literals.
+
+    The schema enum, ``phase_fix_verify``'s allowed-value filter, and the
+    orchestrator's actionable/retargetable subsets must all derive from
+    ``FIX_VERIFY_VERDICTS`` in ``daydream.phases`` so a rename/reorder lands in
+    one place.
+    """
+    from daydream.phases import (
+        FIX_VERIFY_ACTIONABLE_VERDICTS,
+        FIX_VERIFY_RETARGETABLE_VERDICTS,
+        FIX_VERIFY_VERDICTS,
+        FIX_VERIFY_VERDICTS_SCHEMA,
+    )
+
+    enum = FIX_VERIFY_VERDICTS_SCHEMA["properties"]["verdicts"]["items"]\
+        ["properties"]["verdict"]["enum"]
+    assert enum == list(FIX_VERIFY_VERDICTS)
+    # Subsets are drawn from the same four-value authority.
+    assert set(FIX_VERIFY_ACTIONABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
+    assert set(FIX_VERIFY_RETARGETABLE_VERDICTS) < set(FIX_VERIFY_VERDICTS)
 
 
 def test_print_fix_complete_gates_on_resolved(monkeypatch, capsys):

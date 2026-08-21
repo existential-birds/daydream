@@ -112,6 +112,8 @@ from daydream.generated_files import (
     related_manifest_paths,
 )
 from daydream.phases import (
+    FIX_VERIFY_ACTIONABLE_VERDICTS,
+    FIX_VERIFY_RETARGETABLE_VERDICTS,
     PER_STACK_RECORD_SCHEMA,
     UNCOVERED_SWEEP_SCHEMA,
     CrossStackMergeError,
@@ -3109,17 +3111,16 @@ def _scrub_smart_quotes(
 
 
 # Actionable verdicts shared by every round/report consumer (issue #744).
-# Single authority: _round_dispatch_items, _actionable_verdicts, and
-# _render_fix_outcome_summary all derive actionability from this set, so a
-# verdict added here flows through every round in one place. Anything not in
-# this set (notably ``resolved``) is a terminal pass and is never
-# re-dispatched.
-ACTIONABLE_VERDICTS = ("unresolved", "wrong_target", "regressed")
+# Aliases into the single authority in ``daydream.phases`` (FIX_VERIFY_VERDICTS),
+# so _round_dispatch_items, _actionable_verdicts, and _render_fix_outcome_summary
+# all derive actionability from one source. Anything not in this set (notably
+# ``resolved``) is a terminal pass and is never re-dispatched.
+ACTIONABLE_VERDICTS = FIX_VERIFY_ACTIONABLE_VERDICTS
 
 # Verdicts that may carry a corrected target ``path`` for re-dispatch (a
 # subset of ACTIONABLE_VERDICTS: only these retarget the file; ``unresolved``
 # keeps the item's full file next round).
-RETARGETABLE_VERDICTS = ("wrong_target", "regressed")
+RETARGETABLE_VERDICTS = FIX_VERIFY_RETARGETABLE_VERDICTS
 
 
 def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -3179,12 +3180,44 @@ def _capture_fix_round_snapshot(
     if changed_after_fix is None:
         return ""
     try:
-        return git_ops.diff_worktree_against(
+        diff = git_ops.diff_worktree_against(
             work.repo, pre_fix_ref, sorted(changed_after_fix)
         )
     except git_ops.GitError as exc:
         print_warning(console, f"Could not capture round diff for fix-verify: {exc}")
         return ""
+    return _append_new_file_hunks(work.repo, changed_after_fix, diff)
+
+
+def _append_new_file_hunks(
+    repo: Path, changed_files: list[str], hunks: str
+) -> str:
+    """Append added-file hunks for changed files that are still untracked (issue #4).
+
+    ``git diff <ref> -- <paths>`` never emits content for paths that were
+    untracked at the base ref, so a fix that resolves a finding by creating a
+    new file would have that file absent from the hunks the fix-verify agent
+    is mandated to audit. Re-snapshot the worktree's untracked set and render
+    each changed path in it as an added-file hunk so the new file is named in
+    the verifier's hunks (its content stays in the tree for the read-only
+    verifier to Read, not inlined into the prompt). Best-effort: a failed
+    enumeration degrades to the tracked hunks only, never a crash.
+    """
+    from daydream import git_ops
+
+    untracked = set(git_ops.list_untracked(repo))
+    new_files = sorted({p for p in changed_files if p in untracked})
+    if not new_files:
+        return hunks
+    pieces: list[str] = [hunks] if hunks else []
+    for rel in new_files:
+        pieces.append(
+            f"diff --git a/{rel} b/{rel}\n"
+            "new file mode 100644\n"
+            f"--- /dev/null\n"
+            f"+++ b/{rel}\n"
+        )
+    return "\n".join(pieces)
 
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
@@ -3549,24 +3582,26 @@ def _merge_round_verdicts(
 ) -> dict[int, dict[str, Any]]:
     """Id-keyed merge of one round's per-fix-group verdicts (issue #744).
 
-    A ``wrong_target`` retarget is re-dispatched to the corrected path; when
-    that re-dispatch finally resolves, keep the path on the terminal outcome
-    so the record says where the defect was actually fixed (#336 net never
-    widened). Verdicts lacking an int ``issue_id`` are dropped.
+    A retargetable verdict (the ``RETARGETABLE_VERDICTS`` members
+    ``wrong_target``/``regressed``) is re-dispatched to the corrected path;
+    when that re-dispatch finally resolves, keep the path on the terminal
+    outcome so the record says where the defect was actually fixed (#336 net
+    never widened). Verdicts lacking an int ``issue_id`` are dropped.
     """
     merged: dict[int, dict[str, Any]] = {}
+    round_items_by_id = {
+        item["id"]: item for item in round_items if isinstance(item.get("id"), int)
+    }
     for verdicts in per_group_verdicts:
         for verdict in verdicts:
             issue_id = verdict.get("issue_id")
             if not isinstance(issue_id, int):
                 continue
-            prior = next(
-                (i for i in round_items if i.get("id") == issue_id), None
-            )
+            prior = round_items_by_id.get(issue_id)
             if (
                 verdict.get("verdict") == "resolved"
                 and prior is not None
-                and prior.get("fix_verify_verdict") == "wrong_target"
+                and prior.get("fix_verify_verdict") in RETARGETABLE_VERDICTS
                 and isinstance(prior.get("fix_verify_path"), str)
             ):
                 stored = dict(verdict)
@@ -3606,10 +3641,15 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
         return BreakLoop()
     hunks: str = ctx.data.get("fix_round_hunks") or ""
     if not hunks:
-        # Best-effort worktree diff (changes the round produced vs HEAD); a
-        # failed capture degrades to the whole-tree message below, never raises.
+        # Best-effort whole-tree fallback: diff every uncommitted tracked change
+        # vs HEAD and append any untracked files as added hunks, so a lost round
+        # snapshot still lets the verifier audit the real tree rather than
+        # degrading to "(no hunks provided)". Never raises.
         try:
             hunks = git_ops.diff(ctx.work.repo, "HEAD", "HEAD")
+            hunks = _append_new_file_hunks(
+                ctx.work.repo, list(git_ops.list_untracked(ctx.work.repo)), hunks
+            )
         except git_ops.GitError:
             hunks = ""
     outcomes: dict[int, dict[str, Any]] = ctx.data.setdefault("fix_outcomes", {})
@@ -3629,7 +3669,6 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
             )
     outcomes.update(_merge_round_verdicts(round_items, per_group_verdicts))
     actionable = _actionable_verdicts(outcomes)
-    iteration = ctx.data.get("iteration")
     # Budget spent (iteration == 3), a flat/no-loop pass (iteration unset), or
     # nothing left to re-dispatch all terminate the loop. In every terminal
     # case the accumulated outcomes are persisted and the honest per-finding
@@ -3637,9 +3676,7 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | None:
     if actionable and iteration not in (None, 3):
         return None
     _persist_fix_outcomes(ctx.data["dd"], outcomes)
-    _render_fix_outcome_summary(
-        ctx.data["dd"], list(ctx.data["items"]), outcomes
-    )
+    _render_fix_outcome_summary(ctx.data["dd"], round_items, outcomes)
     return BreakLoop()
 
 
@@ -3677,9 +3714,12 @@ def _render_fix_outcome_summary(
     Single production call site exercising ``print_fix_complete``'s verdict
     gating, so the honest ``resolved``/attempted-not-fixed branches are
     actually reached rather than dead next to a separate aggregate summary.
-    Reuses the same 1-based numbering used during the fix turn so each
-    terminal verdict line matches the neutral "Fix attempted" line printed
-    for that finding. ``fix-outcomes.json`` remains the durable record.
+    ``items`` is the final round's dispatch set, so numbering reuses the same
+    1-based counters printed during that round's fix turn: each terminal
+    verdict line matches the neutral "Fix attempted" line for a finding
+    dispatched that round. ``fix-outcomes.json`` (keyed by canonical id)
+    remains the durable record, so a finding resolved in an earlier round but
+    not re-dispatched may be absent from this terminal render.
     """
     if not outcomes:
         return
