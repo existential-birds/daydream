@@ -3141,7 +3141,7 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     if iteration in (None, 1) or not outcomes:
         return [dict(i) for i in canonical]
     allowed = set(_resolve_changed_files(ctx) or [])
-    allowed |= {i.get("file") for i in canonical if i.get("file")}
+    allowed |= {f for i in canonical if isinstance((f := i.get("file")), str)}
     dispatched: list[dict[str, Any]] = []
     for item in canonical:
         iid = item.get("id")
