@@ -24,6 +24,7 @@ from daydream.benchmark.schema import (
     Privacy,
     PullRequestEntry,
     Source,
+    classify_validation,
     derive_workspace_state,
     normalize_hostname,
 )
@@ -141,9 +142,7 @@ def init_workspace(
             tx.stage("benchmark.yaml", _manifest_bytes(privacy, source, benchmark_id))
             tx.commit()
 
-    return BenchmarkManifest.model_validate(
-        load_yaml_strict(root / "benchmark.yaml")
-    )
+    return BenchmarkManifest.model_validate(load_yaml_strict(root / "benchmark.yaml"))
 
 
 @dataclass
@@ -189,3 +188,61 @@ def workspace_status(root: Path) -> WorkspaceStatus:
         ledger=Ledger(pull_requests=manifest.pull_requests),
         cases=manifest.cases,
     )
+
+
+def validate_workspace(root: Path) -> tuple[int, str]:
+    """Validate a workspace, returning a ``(exit_code, human_label)`` pair.
+
+    ``0`` ready; ``2`` structurally valid but incomplete (e.g. unresolved
+    repository identity); ``1`` corrupt (invalid/missing ``benchmark.yaml``,
+    an orphan/missing indexed file, or a checksum-mismatched import/case).
+    Expected workspace errors map to ``1`` + a label — a raw traceback is the
+    wrong surface for a bench validation.
+    """
+    root = Path(root)
+    try:
+        recover_startup(root)
+        raw = load_yaml_strict(root / "benchmark.yaml")
+        manifest = BenchmarkManifest.model_validate(raw)
+    except Exception as exc:  # schema/checksum/unreadable all map to corruption
+        return (1, f"corrupt: invalid benchmark.yaml ({exc})")
+
+    # Orphan + missing-indexed-file rule over the case/import set.
+    try:
+        recover_startup(
+            root,
+            indexed=_case_index_paths(manifest),
+            on_disk=_scan_case_files(root),
+        )
+    except WorkspaceCorrupt as exc:
+        return (1, f"corrupt: {exc}")
+
+    pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
+    state = derive_workspace_state(pull_requests=pr_dicts, cases=[])
+    resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
+
+    if not resolved:
+        return (2, "incomplete: repository identity unresolved")
+    ready = state == "ready"
+    corrupt_like = state == "corrupt"
+    code = classify_validation(ready=ready, incomplete=not ready, corrupt=corrupt_like)
+    if code == 1:
+        return (1, "corrupt: workspace derived state is corrupt")
+    if ready or code == 0:
+        return (0, "ready")
+    return (code, f"incomplete: workspace state {state}")
+
+
+def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
+    return {c.case_file for c in manifest.cases}
+
+
+def _scan_case_files(root: Path) -> set[Path]:
+    cases_dir = root / "cases"
+    if not cases_dir.exists():
+        return set()
+    found: set[Path] = set()
+    for entry in cases_dir.rglob("*"):
+        if entry.is_file():
+            found.add(entry)
+    return found

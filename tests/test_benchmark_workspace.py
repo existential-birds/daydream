@@ -77,3 +77,34 @@ def test_status_surfaces_unresolved_identity(tmp_path):
     st = workspace_status(root)
     assert st.source.hostname == "github.com"
     assert st.source.repository_id is None and st.source.visibility == "unresolved"
+
+
+def test_validate_fresh_workspace_returns_2(tmp_path):
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    code, label = validate_workspace(root)
+    assert code == 2  # structurally valid but incomplete (unresolved repo identity)
+    assert "incomplete" in label
+
+
+def test_validate_corrupt_manifest_returns_1(tmp_path):
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    (root / "benchmark.yaml").write_text("schema_version: 1\nbogus_key: true\n")
+    code, label = validate_workspace(root)
+    assert code == 1  # schema corruption
+    assert "corrupt" in label.lower() or "invalid" in label.lower()
+
+
+def test_validate_missing_manifest_returns_1(tmp_path):
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    root = tmp_path / "ws"
+    init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
+    (root / "benchmark.yaml").unlink()
+    code, _ = validate_workspace(root)
+    assert code == 1
