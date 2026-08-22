@@ -322,3 +322,28 @@ def test_corrupt_workspace_returns_1_no_traceback(tmp_path, fake_gh, capsys):
     rc = run_curate_tui(ws, read_line=_scripted("q"))
     assert rc == 1
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_bare_evidence_number_opens_pager(tmp_path, fake_gh, monkeypatch, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    seen = {}
+    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager",
+                        lambda body: seen.update(body=body))
+    run_curate_tui(ws, case_id, read_line=_scripted("1", "q"))
+    assert seen["body"] and "please fix" in seen["body"]     # full body to pager
+
+
+def test_resume_reflects_persisted_state(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import render_index_table, run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    # session 1: accept + mark ready + quit
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    # session 2 (resume): the index reflects the persisted ready state
+    from daydream.benchmark import curation as cu
+    cases = cu.list_cases(ws)
+    assert cases[0]["state"] == "ready"
+    assert "ready" in render_index_table(cases)

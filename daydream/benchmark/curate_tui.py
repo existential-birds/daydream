@@ -471,6 +471,14 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
 
 
 
+def _launch_pager(text: str) -> None:
+    """Display *text* in the platform pager (default ``less -R``)."""
+    try:
+        subprocess.run(["less", "-R"], input=text, text=True, check=False)
+    except (subprocess.SubprocessError, OSError):
+        print(text)
+
+
 def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
     """Run one case session; returns ``"quit"`` or ``"done"``."""
     print(render_case(cu.get_case(root, case_id)))
@@ -478,6 +486,14 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
         try:
             action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
             if action not in _ACTIONS:
+                if action.isdigit():
+                    candidates = cu.get_case(root, case_id).get("candidates") or []
+                    index = int(action) - 1
+                    if not (0 <= index < len(candidates)):
+                        print(f"no evidence number {action}")
+                    else:
+                        _launch_pager(candidates[index].get("body") or "")
+                    continue
                 print(f"unknown action: {action}")
                 continue
             outcome = _run_action(action, root, case_id, cu.get_case(root, case_id), read_line)
@@ -487,6 +503,10 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
                 print(render_case(cu.get_case(root, case_id)))
         except KeyboardInterrupt:
             print("interrupted \u2014 prior actions preserved")
+
+
+
+
 
 
 
