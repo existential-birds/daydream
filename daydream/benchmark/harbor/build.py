@@ -408,6 +408,19 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     gold_path.parent.mkdir(parents=True, exist_ok=True)
     gold_path.write_bytes(gold_bytes)
 
+    # Immutable, deterministic per-case verifier metadata beside the gold file
+    # (no timestamps): opaque case id + base/head refs + the hidden-gold sentinel.
+    metadata = {
+        "schema_version": 1,
+        "case_id": key,
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": TEMPLATE_VERSION,
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+    }
+    meta_path = case_stage / "tests" / "verifier-metadata.json"
+    meta_path.write_text(json.dumps(metadata, sort_keys=True))
+
     oracle = build_oracle_artifact(key, findings)
     oracle_bytes = json.dumps(oracle).encode("utf-8")
     oracle_path = case_stage / "solution" / "golden-review.json"
@@ -419,7 +432,8 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     files: dict[str, str] = {}
     for rel in (
         "README.md", "instruction.md", "environment/repository.bundle",
-        "tests/golden-review.json", "solution/golden-review.json",
+        "tests/golden-review.json", "tests/verifier-metadata.json",
+        "solution/golden-review.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
@@ -435,6 +449,10 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
         "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
         "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "verifier_script_sha256": hashlib.sha256(
+            (case_stage / "tests" / "score_review.py").read_bytes()
+            + (case_stage / "tests" / "verifier_core.py").read_bytes()
+        ).hexdigest(),
         "files": files,
     }
 
