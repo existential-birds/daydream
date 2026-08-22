@@ -107,6 +107,30 @@ def test_manifest_rejects_empty_host_allowlists():
         BenchmarkManifest.model_validate(base)
 
 
+def test_privacy_classification_and_policies_are_literals():
+    m = _valid_manifest()
+    for key, bad in [("classification", "public"), ("reviewer_data", "everything"),
+                     ("judge_data", "full"), ("archive", "enabled"), ("uploads", "enabled")]:
+        raw = dict(m)
+        raw["privacy"] = dict(m["privacy"])
+        raw["privacy"][key] = bad
+        with pytest.raises(ValidationError):
+            BenchmarkManifest.model_validate(raw)
+
+
+def test_snapshot_policy_is_literal():
+    raw = _valid_case_dict()
+    raw["snapshot"]["policy"] = "some_head"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_reviewer_judge_hosts_stay_lists():
+    m = BenchmarkManifest.model_validate(_valid_manifest())
+    assert m.privacy.reviewer_allowed_hosts == ["api.anthropic.com"]
+    assert m.privacy.judge_allowed_hosts == ["api.anthropic.com"]
+
+
 def test_manifest_rejects_bad_uuid():
     base = _valid_manifest()
     base["benchmark_id"] = "not-a-uuid"

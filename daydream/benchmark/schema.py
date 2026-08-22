@@ -146,13 +146,13 @@ class Privacy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    classification: str
-    reviewer_data: str
+    classification: Literal["confidential"]
+    reviewer_data: Literal["source_snapshot"]
     reviewer_allowed_hosts: list[str]
-    judge_data: str
+    judge_data: Literal["finding_text_and_location_only"]
     judge_allowed_hosts: list[str]
-    archive: str
-    uploads: str
+    archive: Literal["disabled"]
+    uploads: Literal["disabled"]
 
     @field_validator("reviewer_allowed_hosts")
     @classmethod
@@ -306,15 +306,8 @@ class _SnapshotBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str
-    policy: str
+    policy: Literal["final_pr_head", "explicit_head"]
     requested_head: str
-
-    @field_validator("policy")
-    @classmethod
-    def _policy_nonblank(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("policy must not be blank")
-        return v
 
 
 class SnapshotReady(_SnapshotBase):
