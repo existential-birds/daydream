@@ -321,3 +321,20 @@ def test_score_malformed_artifact_is_verifier_error():
            "findings": [{"candidate_id": "not-hex"}]}
     r = score_review([], art, [])
     assert r.reward == 0.0 and r.verifier_error == 1
+
+def test_empty_side_resolves_with_zero_verdicts():
+    # clean/0 and N/0 both resolve deterministically with an EMPTY verdict set
+    r0 = score_review([], _artifact([]), [])
+    assert r0.reward == 1.0
+    rn = score_review([_gold()], _artifact([]), [])
+    assert rn.reward == 0.0 and rn.fn == 1
+    # passing any verdict for an empty side must not change the result (ignored/not required)
+    assert score_review([], _artifact([]), [Verdict("g", "c", True, 0.9, "")]).reward == 1.0
+
+
+def test_reward_dict_is_numeric_only_with_all_keys():
+    d = score_review([_gold()], _artifact(_valid_findings(1)), []).to_dict()
+    assert set(d) == {"reward", "tp", "fp", "fn", "precision", "recall", "f1",
+                      "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error"}
+    for k, v in d.items():
+        assert isinstance(v, (int, float)) and not isinstance(v, bool)
