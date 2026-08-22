@@ -261,3 +261,64 @@ def test_stage_accepts_absolute_inside_root(tmp_path):
         _stage(tx, target, "ok")
         tx.commit()
     assert target.read_text() == "ok"
+
+
+def _write_corrupt_journal(tmp_path, op_id, mutate):
+    """Build a valid prepared transaction, then corrupt its journal doc."""
+    target = tmp_path / "target.yaml"
+    target.write_text("old")  # pre-existing target so "untouched" is observable
+    with Transaction(tmp_path, op_id=op_id, kind="write") as tx:
+        _stage(tx, target, "old")
+        tx.prepare()
+    jf = tmp_path / "transactions" / op_id / "journal.json"
+    doc = load_json_strict(jf)
+    mutate(doc)
+    atomic_write_json(jf, doc)
+
+
+def test_journal_invalid_state_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-1", lambda d: d.__setitem__("state", "bogus"))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+    assert (tmp_path / "target.yaml").read_text() == "old"  # target untouched
+
+
+def test_journal_opid_mismatch_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-2", lambda d: d.__setitem__("op_id", "other-dir"))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+
+
+def test_journal_rel_escape_fails_closed(tmp_path):
+    outside = tmp_path.parent / "escaped-by-journal.bin"
+    outside.unlink(missing_ok=True)
+    _write_corrupt_journal(tmp_path, "op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+    assert not outside.exists()  # no path outside the workspace changed
+
+
+def test_journal_stage_with_separator_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-4", lambda d: d["targets"][0].__setitem__("stage", "sub/stage-0000.bin"))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+
+
+def test_journal_duplicate_target_rel_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-5",
+        lambda d: d["targets"].append(dict(d["targets"][0])))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+
+
+def test_journal_applied_count_out_of_bounds_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-6", lambda d: d.__setitem__("applied_count", 99))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+
+
+def test_journal_replacement_order_unknown_target_fails_closed(tmp_path):
+    _write_corrupt_journal(tmp_path, "op-7",
+        lambda d: d.__setitem__("replacement_order", ["not-a-target"]))
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)

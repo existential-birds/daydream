@@ -563,11 +563,66 @@ def _empty_transactions(root: Path) -> None:
             shutil.rmtree(op_dir, ignore_errors=True)
 
 
+def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
+    """Strictly validate a journal document, failing closed with no mutation.
+
+    Every check here is a hard requirement: a journal that violates any rule
+    is corruption, never something to silently skip or partially trust. The
+    validator performs no filesystem mutation — it only proves the doc is
+    structurally sound and that every path it names resolves within ``root``.
+    Recovery readers then trust the validated ``rel`` strings.
+    """
+    state = doc.get("state")
+    if state not in ("prepared", "committing", "complete"):
+        raise WorkspaceCorrupt(f"{root}: invalid journal state {state!r}")
+    if doc.get("op_id") != op_dir.name:
+        raise WorkspaceCorrupt(
+            f"{root}: journal op_id {doc.get('op_id')!r} does not match dir {op_dir.name!r}"
+        )
+    targets = doc.get("targets")
+    if not isinstance(targets, list):
+        raise WorkspaceCorrupt(f"{root}: journal targets is not a list")
+    rels: set[str] = set()
+    for t in targets:
+        if not isinstance(t, dict) or not isinstance(t.get("rel"), str):
+            raise WorkspaceCorrupt(f"{root}: malformed journal target entry")
+        rel = _resolve_target(root, t["rel"])
+        if rel in rels:
+            raise WorkspaceCorrupt(f"{root}: duplicate target rel in journal: {rel!r}")
+        rels.add(rel)
+        for field in ("stage",):
+            val = t.get(field)
+            if not isinstance(val, str) or os.path.basename(val) != val:
+                raise WorkspaceCorrupt(f"{root}: journal target {rel!r} {field} is not a bare filename")
+        backup = t.get("backup")
+        if backup is not None and (
+            not isinstance(backup, str) or os.path.basename(backup) != backup
+        ):
+            raise WorkspaceCorrupt(f"{root}: journal target {rel!r} backup is not a bare filename")
+    order = doc.get("replacement_order")
+    if not isinstance(order, list):
+        raise WorkspaceCorrupt(f"{root}: journal replacement_order is not a list")
+    order_rels: set[str] = set()
+    for item in order:
+        if not isinstance(item, str):
+            raise WorkspaceCorrupt(f"{root}: journal replacement_order entry is not a string")
+        order_rels.add(item)
+        if item not in rels:
+            raise WorkspaceCorrupt(
+                f"{root}: journal replacement_order names unknown target {item!r}"
+            )
+    applied = doc.get("applied_count")
+    if not isinstance(applied, int) or not (0 <= applied <= len(order)):
+        raise WorkspaceCorrupt(f"{root}: journal applied_count is out of bounds")
+
+
 def _recover_one_journal(root: Path, journal_path: Path, op_dir: Path) -> None:
     try:
         doc = load_json_strict(journal_path)
     except WorkspaceCorrupt as exc:
         raise WorkspaceCorrupt(f"{root}: unreadable transaction journal: {exc}") from exc
+    # Fail closed: validate the whole doc BEFORE any unlink/replace/rmdir.
+    _validate_journal(root, op_dir, doc)
     state = doc.get("state")
     if state == "prepared":
         _rollback_prepared(root, op_dir, doc)
