@@ -1,5 +1,7 @@
 """Tests for the stdlib-only harbor verifier core module."""
 
+import json
+
 import pytest
 
 from daydream.benchmark.harbor.verifier_core import (
@@ -12,6 +14,9 @@ from daydream.benchmark.harbor.verifier_core import (
     parse_candidate_finding,
     parse_gold_finding,
     retained_edges,
+    reward_details,
+    reward_details_to_json,
+    reward_to_json,
     score_review,
     validate_candidate_artifact,
     validate_gold_set,
@@ -338,3 +343,29 @@ def test_reward_dict_is_numeric_only_with_all_keys():
                       "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error"}
     for k, v in d.items():
         assert isinstance(v, (int, float)) and not isinstance(v, bool)
+
+def test_reward_to_json_is_numeric_only():
+    art = _artifact(_valid_findings(1))
+    cand = _valid_findings(1)[0]
+    r = score_review([_gold()], art, [Verdict("a" * 64, cand["candidate_id"], True, 0.9, "same")])
+    d = json.loads(reward_to_json(r))
+    assert all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in d.values())
+
+
+def test_reward_details_shape_and_no_source_leak():
+    gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
+    cands = [
+        parse_candidate_finding(_cand(candidate_id="c" * 64, title="f1")),
+        parse_candidate_finding(_cand(candidate_id="d" * 64, title="f2")),
+    ]
+    vs = [Verdict("a" * 64, cands[0].candidate_id, True, 0.9, "same bug")]
+    m = {("a" * 64, cands[0].candidate_id)}
+    details = reward_details(gold, cands, vs, m)
+    for key in ("verdicts", "matches", "unmatched_gold", "unmatched_candidates"):
+        assert key in details
+    assert details["unmatched_gold"] == ["b" * 64]
+    assert sorted(details["unmatched_candidates"]) == sorted([cands[1].candidate_id])
+    blob = reward_details_to_json(details)
+    assert "same bug" in blob  # reasoning is kept
+    assert "Cache key not scoped" not in blob  # finding body/title never leaks
+    assert "f1" not in blob  # candidate content never leaks

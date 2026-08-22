@@ -539,3 +539,63 @@ def score_review(
         clean_pass=0,
         verifier_error=0,
     )
+
+
+# ---------------------------------------------------------------------------
+# reward / reward-details serialization
+# ---------------------------------------------------------------------------
+
+
+def reward_to_json(reward: Reward) -> str:
+    """Serialize a Reward to a numeric-only JSON document."""
+    return json.dumps(reward.to_dict())
+
+
+def _candidate_id(finding: object) -> str:
+    if isinstance(finding, dict):
+        try:
+            return finding["candidate_id"]
+        except KeyError as exc:
+            raise VerifierError("missing candidate_id") from exc
+    return getattr(finding, "candidate_id")
+
+
+def reward_details(
+    gold: list[object],
+    candidates: list[object],
+    verdicts: list[Verdict],
+    matches: set[tuple[str, str]],
+) -> dict[str, object]:
+    """Capture verdicts, selected matches, and unmatched gold/candidates.
+
+    Never embeds finding title/body/path content, source, or diffs — only ids
+    and verdict reasoning.
+    """
+    matched_gold = {g for g, _ in matches}
+    matched_candidates = {c for _, c in matches}
+    gold_ids = [_finding_id(g) for g in gold]
+    cand_ids = [_candidate_id(c) for c in candidates]
+    return {
+        "verdicts": [
+            {
+                "gold_id": v.gold_id,
+                "candidate_id": v.candidate_id,
+                "match": v.match,
+                "confidence": v.confidence,
+                "reasoning": v.reasoning,
+            }
+            for v in verdicts
+        ],
+        "matches": [
+            {"gold_id": g, "candidate_id": c} for g, c in sorted(matches)
+        ],
+        "unmatched_gold": [gid for gid in gold_ids if gid not in matched_gold],
+        "unmatched_candidates": sorted(
+            cid for cid in cand_ids if cid not in matched_candidates
+        ),
+    }
+
+
+def reward_details_to_json(details: dict[str, object]) -> str:
+    """Serialize a reward-details dict to JSON."""
+    return json.dumps(details)
