@@ -72,8 +72,52 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
     return load_yaml_strict(path)
 
 
+def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
+    """Change stats (files, lines) for a case snapshot's ``base..head`` diff.
+
+    Only a snapshot whose ``status == "ready"`` with a non-blank original base
+    and head SHA is queried: runs ``git diff --numstat <base> <head>`` against
+    the shared bare mirror and sums the per-file added/deleted counts. Returns
+    ``(0, 0)`` for any non-ready snapshot. Raises :class:`CurationError` naming
+    the case when the mirror read fails for a ready snapshot — counts are never
+    fabricated.
+    """
+    if snapshot_doc.get("status") != "ready":
+        return 0, 0
+    base = snapshot_doc.get("original_base_sha") or ""
+    head = snapshot_doc.get("original_head_sha") or ""
+    if not base or not head:
+        return 0, 0
+    mirror = snapshot.mirror(root)
+    try:
+        proc = git_ops._run_git(
+            mirror, ["diff", "--numstat", base, head], retries=0
+        )
+    except git_ops.GitError as exc:
+        raise CurationError(f"case {case_id} mirror read failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise CurationError(f"case {case_id} mirror cannot serve its change diff")
+    files = 0
+    lines = 0
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            files += 1
+            lines += int(parts[0]) + int(parts[1])
+        except ValueError:
+            continue
+    return files, lines
+
+
 def list_cases(root: Path) -> list[dict[str, Any]]:
-    """Read-only index of the workspace's cases with derived curation state."""
+    """Read-only index of the workspace's cases with derived curation state.
+
+    Each row adds ``evidence_count``, ``changed_files``, and ``changed_lines``
+    to the existing case_id/pr_number/state/gold_mode/gold_count/snapshot_status/
+    head_prefix keys.
+    """
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
     for case in manifest.get("cases", []):
@@ -86,6 +130,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
         snapshot_doc = doc.get("snapshot") or {}
         snapshot_status = snapshot_doc.get("status", "imported")
         head_sha = snapshot_doc.get("original_head_sha") or ""
+        changed_files, changed_lines = _changed_file_stats(root, case_id, snapshot_doc)
         try:
             gold_mode = schema.derive_gold_mode(_curation_model(curation))
         except ValidationError:
@@ -98,6 +143,9 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
+            "evidence_count": len(doc.get("candidates") or []),
+            "changed_files": changed_files,
+            "changed_lines": changed_lines,
         })
     return out
 

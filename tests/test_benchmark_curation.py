@@ -449,6 +449,34 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
         cu._head_file_line_count(ws, head_sha, "missing.py")
 
 
+def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
+    # numstat + evidence-count claims confirmed by tests/test_spike_issue775_reads.py
+    from daydream.benchmark import curation as cu
+    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+
+    cases = cu.list_cases(ws)
+    assert cases[0]["evidence_count"] == 1          # one seeded candidate
+    assert cases[0]["changed_files"] == 2           # base.py + feature.py
+    assert cases[0]["changed_lines"] == 6           # 2 + 4 (base edit + feature add)
+    # a non-ready snapshot degrades to zero stats without raising
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["snapshot"] = {"status": "imported", "policy": "final_pr_head",
+                       "requested_head": "final"}
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    c2 = cu.list_cases(ws)[0]
+    assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
+
+
+def test_list_cases_ready_mirror_failure_raises(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    import shutil
+    shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
+    with pytest.raises(cu.CurationError):
+        cu.list_cases(ws)
+
+
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
