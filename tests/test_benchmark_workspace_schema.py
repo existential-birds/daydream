@@ -14,6 +14,7 @@ from daydream.benchmark.schema import (
     ImportDocument,
     Provenance,
     PullRequestEntry,
+    PullRequestMeta,
     TransitionError,
     case_id_for,
     classify_validation,
@@ -216,12 +217,18 @@ def _valid_import_document():
         "pull_request": {
             "number": 101,
             "url": "https://github.com/o/r/pull/101",
+            "html_url": "https://github.com/o/r/pull/101",
             "title": "Fix cache",
+            "body": "fixes the cache",
             "state": "open",
+            "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
+            "body_sha256": hashlib.sha256("fixes the cache".encode()).hexdigest(),
             "base": {"ref": "main", "sha": "b" * 40},
             "head": {"ref": "feature/cache", "sha": "h" * 40},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
             "author": {"login": "alice", "type": "User"},
         },
         "evidence": [_evidence("inline_comment", 7)],
@@ -273,6 +280,65 @@ def test_import_and_case_pull_request_share_shape():
     assert pr.number == 101 and pr.author.login == "alice" and pr.head.sha == "h" * 40
 
 
+def test_pull_request_meta_accepts_full_field_set():
+    m = PullRequestMeta.model_validate({
+        "number": 101, "url": "https://github.com/o/r/pull/101",
+        "html_url": "https://github.com/o/r/pull/101",
+        "title": "Fix cache", "body": "fixes the cache\n\nsecond line",
+        "state": "open",
+        "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
+        "body_sha256": hashlib.sha256("fixes the cache\n\nsecond line".encode()).hexdigest(),
+        "base": {"sha": "b" * 40, "ref": "main"},
+        "head": {"sha": "a" * 40, "ref": "feature/cache"},
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "merged_at": None, "closed_at": None,
+        "author": {"login": "alice", "type": "User"},
+    })
+    assert m.number == 101 and m.body == "fixes the cache\n\nsecond line"
+    assert m.head.ref == "feature/cache"
+
+
+def test_pull_request_meta_predate_reads_empty_and_validates():
+    # predate import: lacks the additive body/digest/html_url/merged/closed fields
+    m = PullRequestMeta.model_validate({
+        "number": 101, "url": "https://github.com/o/r/pull/101",
+        "title": "Fix cache", "state": "open",
+        "base": {"ref": "main", "sha": "b" * 40},
+        "head": {"sha": "a" * 40},                 # no head.ref (old import dropped it)
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "author": {"login": "alice", "type": "User"},
+    })
+    assert m.body == "" and m.title_sha256 == "" and m.body_sha256 == ""
+    assert m.merged_at is None and m.closed_at is None and m.html_url == ""
+    assert m.head.ref is None
+
+
+def test_pull_request_meta_fails_closed_on_malformed_required():
+    base = {
+        "number": 101, "url": "u", "title": "t", "state": "open",
+        "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "author": {"login": "a", "type": "User"},
+    }
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(dict(base, number="abc"))
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(dict(base, head={"ref": "x"}))  # no sha
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(dict(base, bogus=1))            # extra forbid
+
+
+def test_pull_request_meta_digests_are_64hex_and_match_body_when_present():
+    full = {"number": 1, "url": "u", "title": "t", "state": "open",
+            "base": {"sha": "b" * 40}, "head": {"sha": "a" * 40},
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "author": {"login": "a", "type": "User"}, "body": "hello"}
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(dict(full, body_sha256="zz"))
+    with pytest.raises(ValidationError):
+        PullRequestMeta.model_validate(dict(full, body_sha256=hashlib.sha256(b"other").hexdigest()))
+
+
 def test_evidence_requires_canonical_source_id_and_body_hash():
     e = _evidence("inline_comment", 7)
     e["source_id"] = "not-canonical"
@@ -291,12 +357,18 @@ def _valid_case_dict():
         "pull_request": {
             "number": 101,
             "url": "https://github.com/o/r/pull/101",
+            "html_url": "https://github.com/o/r/pull/101",
             "title": "Fix cache",
+            "body": "fix",
             "state": "open",
+            "title_sha256": hashlib.sha256(b"Fix cache").hexdigest(),
+            "body_sha256": hashlib.sha256("fix".encode()).hexdigest(),
             "base": {"ref": "main", "sha": "b" * 40},
             "head": {"ref": "feature/cache", "sha": "h" * 40},
             "created_at": "2026-01-01T00:00:00Z",
             "updated_at": "2026-01-01T00:00:00Z",
+            "merged_at": None,
+            "closed_at": None,
             "author": {"login": "alice", "type": "User"},
         },
         "snapshot": {

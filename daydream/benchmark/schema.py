@@ -607,7 +607,14 @@ class _PrRef(BaseModel):
 
 
 class PullRequestMeta(BaseModel):
-    """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``."""
+    """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``.
+
+    Required structural fields (number/url/title/state/base/head/timestamps/author)
+    fail closed when missing or malformed. The additive fields (``html_url``,
+    ``body``, ``title_sha256``/``body_sha256``, ``merged_at``/``closed_at``)
+    default empty/None so predate imports that lack them read as empty, while a
+    newly imported PR carries the full set (``extra="forbid"`` everywhere).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -620,11 +627,38 @@ class PullRequestMeta(BaseModel):
     created_at: datetime
     updated_at: datetime
     author: _EvidenceAuthor
+    html_url: str = ""
+    body: str = ""
+    title_sha256: str = ""
+    body_sha256: str = ""
+    merged_at: datetime | None = None
+    closed_at: datetime | None = None
 
-    @field_validator("created_at", "updated_at", mode="before")
+    @field_validator("created_at", "updated_at", "merged_at", "closed_at", mode="before")
     @classmethod
-    def _ts(cls, v: str | datetime) -> datetime:
+    def _ts(cls, v: str | datetime | None) -> datetime | None:
+        if v is None:
+            return None
         return _rfc3339(v)
+
+    @field_validator("title_sha256", "body_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        if v != "":
+            return _hex64(v)
+        return v
+
+    @model_validator(mode="after")
+    def _body_hash_consistency(self) -> "PullRequestMeta":
+        if self.body_sha256 != "" and self.body_sha256 != hashlib.sha256(
+            self.body.encode("utf-8")
+        ).hexdigest():
+            raise ValueError("body_sha256 must equal sha256(body)")
+        if self.title_sha256 != "" and self.title_sha256 != hashlib.sha256(
+            self.title.encode("utf-8")
+        ).hexdigest():
+            raise ValueError("title_sha256 must equal sha256(title)")
+        return self
 
 
 class CaseSource(BaseModel):
