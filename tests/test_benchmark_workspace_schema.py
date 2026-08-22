@@ -305,7 +305,7 @@ def test_historical_daydream_marker_cannot_be_gold():
 def test_gold_status_and_mode_derived():
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"
-    assert derive_gold_mode(case.curation) == "historical"
+    assert derive_gold_mode(case.curation) == "edited"
 
 
 @pytest.mark.parametrize(

@@ -47,8 +47,6 @@ _REPOSITORY_SHAPE = re.compile(r"^[^/]+/[^/]+$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
-_EMPTY_OR_NUL = re.compile(r"[\x00]")
-
 
 def normalize_hostname(raw: str) -> str:
     """Normalize a DNS hostname, stripping scheme/credentials/port/query path.
@@ -391,9 +389,6 @@ class Location(BaseModel):
         return self
 
 
-_SOURCE_ID_RE = re.compile(r"^[A-Za-z0-9_./:-]+$")
-
-
 class Provenance(BaseModel):
     """Where a finding came from (historical review output, edited, or authored)."""
 
@@ -600,6 +595,8 @@ def derive_gold_mode(curation: Curation) -> str:
         return "authored"
     if "authored" in kinds:
         return "mixed"
+    if kinds == {"edited"}:
+        return "edited"
     return "historical"
 
 
@@ -653,9 +650,10 @@ def derive_workspace_state(
 ) -> str:
     """Derive the workspace state from ledger + case index.
 
-    Priority per §5: ``collecting`` > ``stale`` > ``ready`` > ``empty``. A
-    ``corrupt`` flag (schema/checksum/path/bundle) is surfaced by the caller
-    via ``classify_validation``; here we only reason over the ledger/index.
+    Priority per §5: ``collecting`` > ``curating`` > ``stale`` > ``ready`` >
+    ``empty``. A ``corrupt`` flag (schema/checksum/path/bundle) is surfaced by
+    the caller via ``classify_validation``; here we only reason over the
+    ledger/index.
     """
     pull_requests = pull_requests or []
     cases = cases or []

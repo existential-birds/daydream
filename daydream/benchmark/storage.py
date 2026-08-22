@@ -266,6 +266,7 @@ class Transaction:
         self._replacement_order: list[str] = []
         self._applied_count = 0
         self._state: str = "open"
+        self._created_dirs: list[str] = []
         self._journal_document: dict[str, Any] | None = None
 
     # -- journal helpers ----------------------------------------------------
@@ -293,6 +294,7 @@ class Transaction:
             "state": self._state,
             "replacement_order": self._replacement_order,
             "applied_count": self._applied_count,
+            "created_dirs": self._created_dirs,
             "targets": targets,
         }
 
@@ -304,6 +306,20 @@ class Transaction:
     # -----------------------------------------------------------------------
     # pipeline
     # -----------------------------------------------------------------------
+
+    def create_dir(self, target_rel: str | Path) -> None:
+        """Create a ``0700`` directory that this journal atomically owns.
+
+        Directory creation is recorded in the journal so an interrupted
+        transaction (``prepared`` / ``committing``) is rolled back by
+        ``recover_startup`` (only empty directories are removed). This lets
+        ``init_workspace`` build the private scaffold subdirs through the same
+        crash-consistent journal instead of leaving them outside it.
+        """
+        rel = _rel_of(self._root, target_rel)
+        ensure_private_dir(self._root / rel)
+        if rel not in self._created_dirs:
+            self._created_dirs.append(rel)
 
     def stage(self, target_rel: str | Path, content: bytes) -> None:
         """Stage ``content`` for an atomic replace of ``target_rel``.
@@ -563,6 +579,7 @@ def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
                 (op_dir / backup).unlink()
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
+    _remove_created_dirs(root, doc)
 
 
 def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
@@ -577,7 +594,7 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
             continue
         target = root / rel
         backup = t.get("backup")
-        if backup:
+        if backup is not None:
             os.replace(op_dir / backup, target)
             os.chmod(target, 0o600)
         else:
@@ -585,6 +602,20 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
                 target.unlink()
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
+    _remove_created_dirs(root, doc)
+
+
+
+def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
+    """Remove scaffold subdirs created by an interrupted transaction.
+
+    Only empty directories are removed, deepest first — a subdir that already
+    holds real user content is preserved for the caller to adjudicate.
+    """
+    created = doc.get("created_dirs") or []
+    for rel in sorted(created, key=len, reverse=True):
+        with suppress(OSError):
+            (root / rel).rmdir()
 
 
 def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
