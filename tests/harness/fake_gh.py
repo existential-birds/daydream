@@ -192,6 +192,14 @@ def _handle_pr_list(argv: list[str], state: Path) -> tuple[int, str, str]:
 def _handle_repo_view(argv: list[str], state: Path) -> tuple[int, str, str]:
     _record(state, {"kind": "repo view", "argv": argv, "stdin": ""})
     responses = _read_responses(state)
+    # The import-prs preflight passes an OWNER/REPO positional + --json and
+    # expects the full resolved identity object; legacy callers pass only
+    # ``--json nameWithOwner -q .nameWithOwner`` and get the bare slug.
+    if any(tok for tok in argv[2:] if not tok.startswith("-")):
+        full = responses.get("repo-view-full")
+        if full is None:
+            return 1, "", "fake gh: no repo-view-full response configured\n"
+        return 0, json.dumps(full) + "\n", ""
     value = responses.get("repo-view")
     if value is None:
         if "pr-view" not in responses:

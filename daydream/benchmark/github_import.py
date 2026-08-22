@@ -13,10 +13,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -37,16 +40,122 @@ def _run_gh_api_user(root: Path) -> dict:
 
 def _gh_auth_git_credential(root: Path) -> str:
     """Run the command-scoped git credential helper and return its protocol text."""
-    proc = git_ops._run_gh(root, ["auth", "git-credential"])
-    if proc.returncode != 0:
-        raise git_ops.GitError(f"gh auth git-credential failed: {proc.stderr.strip()}")
-    return proc.stdout
+    return git_ops.gh_auth_git_credential(root)
 
 
 def _git_ls_remote(root: Path, url: str) -> str:
     """Run an authenticated ``git ls-remote <url>`` and return the refs text."""
-    proc = git_ops._run_git(root, ["ls-remote", url])
-    return proc.stdout
+    return git_ops.git_ls_remote(root, url)
+
+
+class PreflightError(Exception):
+    """A preflight check failed with an exact ``{code, message}`` pair."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"preflight failed: {code}: {message}")
+        self.code = code
+        self.message = message
+
+
+@dataclass
+class PreflightResult:
+    """The authenticated identity + resolved repository captured by preflight."""
+
+    login: str
+    repository_id: int
+    visibility: str
+
+
+def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
+    """Resolve a repository's identity and the caller's read access to it."""
+    proc = git_ops._run_gh(
+        root,
+        ["repo", "view", repo_slug, "--json", "id,nameWithOwner,url,visibility,defaultBranchRef"],
+    )
+    if proc.returncode != 0:
+        raise PreflightError("no_access", f"cannot read repository {repo_slug}: {proc.stderr.strip()}")
+    try:
+        view = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise PreflightError("repo_unresolved", f"repo view returned invalid JSON: {exc}") from exc
+    if not isinstance(view, dict) or view.get("id") is None:
+        raise PreflightError("repo_unresolved", f"repo view of {repo_slug} returned no identity")
+    return view
+
+
+def _resolve_identity(root: Path, repo_slug: str) -> tuple[int, str]:
+    """Fill the immutable repository identity atomically on first success.
+
+    Stage ``benchmark.yaml`` (the only mutated file) through one
+    :class:`Transaction` under the workspace lock, so a crash restores the
+    whole before- or after-state. A concurrent partial state is surfaced as
+    :class:`PreflightError` rather than repaired.
+    """
+    view = _run_repo_view(root, repo_slug)
+    repository_id = int(view["id"])
+    visibility = str(view.get("visibility") or "").lower()
+    if visibility not in ("public", "private"):
+        raise PreflightError("repo_unresolved", f"unrecognized visibility {visibility!r}")
+    with storage.WorkspaceLock(root):
+        raw = storage.load_yaml_strict(root / "benchmark.yaml")
+        current = raw.get("source") or {}
+        if current.get("repository_id") is not None or current.get("visibility") != "unresolved":
+            raise PreflightError("repo_unresolved", "repository identity is already resolved")
+        raw["source"]["repository_id"] = repository_id
+        raw["source"]["visibility"] = visibility
+        with storage.Transaction(
+            root, op_id="identity-" + repo_slug.replace("/", "_"), kind="identity"
+        ) as tx:
+            tx.stage("benchmark.yaml", yaml.safe_dump(raw, sort_keys=False).encode("utf-8"))
+            tx.commit()
+    return repository_id, visibility
+
+
+def preflight(root: Path, pr_count: int) -> PreflightResult:
+    """Run the six fixed-order preflight checks before any fetch.
+
+    Fails the run at the first failing check with an exact ``{code, message}``
+    pair (:class:`PreflightError`). Repository identity resolves once and is
+    immutable for the workspace's lifetime.
+    """
+    root = Path(root)
+    if shutil.which("git") is None or shutil.which("gh") is None:
+        raise PreflightError("missing_binary", "git and gh binaries must be reachable")
+
+    status = _run_gh_preflight_status(root)
+    if status.returncode != 0:
+        raise PreflightError("not_authenticated", "gh is not authenticated to github.com")
+
+    try:
+        user = _run_gh_api_user(root)
+    except git_ops.GitError as exc:
+        raise PreflightError("auth_failed", str(exc)) from exc
+    login = user.get("login") if isinstance(user, dict) else None
+    if not login:
+        raise PreflightError("auth_failed", "gh api user returned no login")
+
+    raw = storage.load_yaml_strict(root / "benchmark.yaml")
+    source = raw.get("source") or {}
+    repo_slug = source.get("repository") or ""
+    repository_id = source.get("repository_id")
+    visibility = source.get("visibility", "unresolved")
+    if repository_id is None and visibility == "unresolved":
+        repository_id, visibility = _resolve_identity(root, repo_slug)
+    elif (repository_id is None) != (visibility == "unresolved"):
+        raise PreflightError("repo_unresolved", "repository identity is in a partial/corrupt state")
+    if visibility not in ("public", "private"):
+        raise PreflightError("repo_unresolved", "repository identity did not resolve to public/private")
+
+    try:
+        _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
+    except git_ops.GitError as exc:
+        raise PreflightError("git_preflight_failed", str(exc)) from exc
+
+    print(f"authenticated identity: {login}")
+    print(f"repository visibility: {visibility}")
+    print(f"requested PR count: {pr_count}")
+    print(f"local destination: {root / 'imports'}")
+    return PreflightResult(login=login, repository_id=int(repository_id), visibility=visibility)
 
 
 class ImportTargetError(Exception):

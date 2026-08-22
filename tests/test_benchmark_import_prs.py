@@ -190,3 +190,32 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
     )
     assert targets.pr_numbers == [9, 7, 42]     # stable: CLI order then file order; dupes collapsed
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
+
+
+def _seed_manifest(ws):
+    """Build an initialized private workspace with an unresolved Source (o/r)."""
+    from daydream.benchmark.workspace import init_workspace
+
+    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+
+
+def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)  # Source(provider=github, hostname=github.com, repository=o/r, repository_id=None, visibility=unresolved)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response(
+        "repo-view-full",
+        value={"id": 5, "nameWithOwner": "o/r",
+               "url": "https://github.com/o/r", "visibility": "PRIVATE", "defaultBranchRef": {"name": "main"}},
+    )
+    out = gi.preflight(ws, pr_count=2)
+    assert out.login == "octocat" and out.repository_id == 5 and out.visibility == "private"
+    # identity written atomically into benchmark.yaml source block
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert raw["source"]["repository_id"] == 5 and raw["source"]["visibility"] == "private"
+    # second preflight is a no-op on identity (immutable, already resolved)
+    out2 = gi.preflight(ws, pr_count=1)
+    assert out2.repository_id == 5
