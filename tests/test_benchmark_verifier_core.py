@@ -307,6 +307,16 @@ def test_score_gold_no_candidates():
     assert r.fp == 0 and r.clean_task == 0
 
 
+def test_score_zero_match_reward_is_zero():
+    # nonempty gold and nonempty candidates with zero matching edges → f1/reward 0.0
+    gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
+    art = _artifact(_valid_findings(2))
+    r = score_review(gold, art, [])
+    assert (r.tp, r.fp, r.fn) == (0, 2, 2)
+    assert r.precision == 0.0 and r.recall == 0.0
+    assert r.f1 == 0.0 and r.reward == 0.0
+
+
 def test_score_f1_example():
     # 3 gold / 2 candidates, TP=2, FN=1 → precision 1.0, recall 0.6666666667, f1 0.8
     gold = [_gold(), _gold(finding_id="b" * 64, title="B"), _gold(finding_id="c" * 64, title="C")]

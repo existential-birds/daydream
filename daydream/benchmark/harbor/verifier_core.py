@@ -1,6 +1,6 @@
 """Pure review scoring core for the Daydream Harbor verifier.
 
-Stdlib-only (dataclasses, hashlib, json, re, math) so this module can be
+Stdlib-only (dataclasses, hashlib, json, re) so this module can be
 copied byte-for-byte into a judge-free Harbor verifier image. No daydream
 source, no pydantic, no third-party imports.
 """
@@ -104,10 +104,9 @@ def _content_fields(raw: dict[str, object]) -> dict[str, object]:
 
 
 @dataclass(frozen=True)
-class GoldFinding:
-    """A hidden gold finding, validated with schema.py Finding limits."""
+class _FindingContent:
+    """Content fields shared by gold and candidate findings."""
 
-    finding_id: str
     title: str
     body: str
     severity: str | None
@@ -116,7 +115,6 @@ class GoldFinding:
     end_line: int
 
     def __post_init__(self) -> None:
-        _validate_hex64(self.finding_id, "finding id")
         _validate_title(self.title)
         _validate_body(self.body)
         _validate_severity(self.severity)
@@ -125,64 +123,50 @@ class GoldFinding:
 
 
 @dataclass(frozen=True)
-class CandidateFinding:
+class GoldFinding(_FindingContent):
+    """A hidden gold finding, validated with schema.py Finding limits."""
+
+    finding_id: str
+
+    def __post_init__(self) -> None:
+        _validate_hex64(self.finding_id, "finding id")
+        super().__post_init__()
+
+
+@dataclass(frozen=True)
+class CandidateFinding(_FindingContent):
     """A daydream candidate finding, validated with schema.py Finding limits."""
 
     candidate_id: str
-    title: str
-    body: str
-    severity: str | None
-    path: str
-    start_line: int
-    end_line: int
 
     def __post_init__(self) -> None:
         _validate_hex64(self.candidate_id, "candidate id")
-        _validate_title(self.title)
-        _validate_body(self.body)
-        _validate_severity(self.severity)
-        _validate_path(self.path)
-        _validate_lines(self.start_line, self.end_line)
+        super().__post_init__()
+
+
+def _finding_kwargs(
+    raw: dict[str, object], *, side: str, id_key: str
+) -> dict[str, object]:
+    """Validate a raw finding dict and return its model constructor kwargs."""
+    if not isinstance(raw, dict):
+        raise VerifierError(f"{side} finding must be a dict")
+    try:
+        ident = _validate_hex64(raw[id_key], id_key)
+    except KeyError as exc:
+        raise VerifierError(f"missing required field {exc.args[0]}") from exc
+    fields = _content_fields(raw)
+    fields[id_key] = ident
+    return fields
 
 
 def parse_gold_finding(raw: dict[str, object]) -> GoldFinding:
     """Validate a raw gold-finding dict and return a GoldFinding."""
-    if not isinstance(raw, dict):
-        raise VerifierError("gold finding must be a dict")
-    try:
-        ident = _validate_hex64(raw["finding_id"], "finding_id")
-    except KeyError as exc:
-        raise VerifierError(f"missing required field {exc.args[0]}") from exc
-    fields = _content_fields(raw)
-    return GoldFinding(
-        finding_id=ident,
-        title=fields["title"],  # type: ignore[arg-type]
-        body=fields["body"],  # type: ignore[arg-type]
-        severity=fields["severity"],  # type: ignore[arg-type]
-        path=fields["path"],  # type: ignore[arg-type]
-        start_line=fields["start_line"],  # type: ignore[arg-type]
-        end_line=fields["end_line"],  # type: ignore[arg-type]
-    )
+    return GoldFinding(**_finding_kwargs(raw, side="gold", id_key="finding_id"))  # type: ignore[arg-type]
 
 
 def parse_candidate_finding(raw: dict[str, object]) -> CandidateFinding:
     """Validate a raw candidate-finding dict and return a CandidateFinding."""
-    if not isinstance(raw, dict):
-        raise VerifierError("candidate finding must be a dict")
-    try:
-        ident = _validate_hex64(raw["candidate_id"], "candidate_id")
-    except KeyError as exc:
-        raise VerifierError(f"missing required field {exc.args[0]}") from exc
-    fields = _content_fields(raw)
-    return CandidateFinding(
-        candidate_id=ident,
-        title=fields["title"],  # type: ignore[arg-type]
-        body=fields["body"],  # type: ignore[arg-type]
-        severity=fields["severity"],  # type: ignore[arg-type]
-        path=fields["path"],  # type: ignore[arg-type]
-        start_line=fields["start_line"],  # type: ignore[arg-type]
-        end_line=fields["end_line"],  # type: ignore[arg-type]
-    )
+    return CandidateFinding(**_finding_kwargs(raw, side="candidate", id_key="candidate_id"))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -206,15 +190,7 @@ def derive_candidate_id(
     ordinal: int,
 ) -> str:
     """Return the deterministic sha256 candidate id for a finding."""
-    title = str(_finding_component(finding, "title") or "")
-    body = str(_finding_component(finding, "body") or "")
-    severity = str(_finding_component(finding, "severity") or "")
-    path = str(_finding_component(finding, "path"))
-    start_line = _component_int(finding, "start_line")
-    end_line = _component_int(finding, "end_line")
-    canonical = _SEP.join(
-        [title, body, severity, path, str(start_line), str(end_line)]
-    )
+    canonical = _SEP.join(str(part) for part in _canonical_tuple(finding))
     payload = _SEP.join([str(case_key), canonical, str(ordinal)])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -405,6 +381,39 @@ class Reward:
     clean_pass: int
     verifier_error: int
 
+    @classmethod
+    def _make(
+        cls,
+        *,
+        reward: float = 0.0,
+        tp: int = 0,
+        fp: int = 0,
+        fn: int = 0,
+        precision: float = 0.0,
+        recall: float = 0.0,
+        f1: float = 0.0,
+        gold_count: int = 0,
+        candidate_count: int = 0,
+        clean_task: int = 0,
+        clean_pass: int = 0,
+        verifier_error: int = 0,
+    ) -> "Reward":
+        """Build a Reward with the 12 \u00a710 fields defaulting to zero."""
+        return cls(
+            reward=reward,
+            tp=tp,
+            fp=fp,
+            fn=fn,
+            precision=precision,
+            recall=recall,
+            f1=f1,
+            gold_count=gold_count,
+            candidate_count=candidate_count,
+            clean_task=clean_task,
+            clean_pass=clean_pass,
+            verifier_error=verifier_error,
+        )
+
     def to_dict(self) -> dict[str, float | int]:
         """Numeric-only dict with exactly the 12 §10 keys."""
         return {
@@ -440,20 +449,7 @@ def _finding_id(finding: object) -> str:
 
 
 def _empty_side_error(gold_count: int) -> Reward:
-    return Reward(
-        reward=0.0,
-        tp=0,
-        fp=0,
-        fn=0,
-        precision=0.0,
-        recall=0.0,
-        f1=0.0,
-        gold_count=gold_count,
-        candidate_count=0,
-        clean_task=0,
-        clean_pass=0,
-        verifier_error=1,
-    )
+    return Reward._make(reward=0.0, gold_count=gold_count, verifier_error=1)
 
 
 def score_review(
@@ -470,49 +466,18 @@ def score_review(
     candidate_count = len(candidates)
 
     if gold_count == 0 and candidate_count == 0:
-        return Reward(
-            reward=1.0,
-            tp=0,
-            fp=0,
-            fn=0,
-            precision=1.0,
-            recall=1.0,
-            f1=1.0,
-            gold_count=0,
-            candidate_count=0,
-            clean_task=1,
-            clean_pass=1,
-            verifier_error=0,
+        return Reward._make(
+            reward=1.0, precision=1.0, recall=1.0, f1=1.0,
+            clean_task=1, clean_pass=1,
         )
     if gold_count == 0:
-        return Reward(
-            reward=0.0,
-            tp=0,
-            fp=candidate_count,
-            fn=0,
-            precision=0.0,
-            recall=1.0,
-            f1=0.0,
-            gold_count=0,
-            candidate_count=candidate_count,
-            clean_task=1,
-            clean_pass=0,
-            verifier_error=0,
+        return Reward._make(
+            fp=candidate_count, recall=1.0,
+            candidate_count=candidate_count, clean_task=1,
         )
     if candidate_count == 0:
-        return Reward(
-            reward=0.0,
-            tp=0,
-            fp=0,
-            fn=gold_count,
-            precision=1.0,
-            recall=0.0,
-            f1=0.0,
-            gold_count=gold_count,
-            candidate_count=0,
-            clean_task=0,
-            clean_pass=0,
-            verifier_error=0,
+        return Reward._make(
+            fn=gold_count, precision=1.0, gold_count=gold_count,
         )
 
     gold_ids = [_finding_id(g) for g in gold]
@@ -524,8 +489,8 @@ def score_review(
     fn = gold_count - tp
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
-    f1 = _f1(precision, recall)
-    return Reward(
+    f1 = 0.0 if tp == 0 else _f1(precision, recall)
+    return Reward._make(
         reward=f1,
         tp=tp,
         fp=fp,
@@ -535,9 +500,6 @@ def score_review(
         f1=f1,
         gold_count=gold_count,
         candidate_count=candidate_count,
-        clean_task=0,
-        clean_pass=0,
-        verifier_error=0,
     )
 
 
@@ -638,10 +600,7 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     mean_task_score = sum(rewards) / task_count if task_count else 1.0
     micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 1.0
     micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else 1.0
-    if micro_precision + micro_recall == 0:
-        micro_f1 = 1.0
-    else:
-        micro_f1 = 2 * micro_precision * micro_recall / (micro_precision + micro_recall)
+    micro_f1 = _f1(micro_precision, micro_recall)
     clean_accuracy = clean_correct / clean_total if clean_total else 1.0
 
     return {
