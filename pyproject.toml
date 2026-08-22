@@ -88,4 +88,5 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "--strict-markers"
 markers = [
     "live_codex: requires the real `codex` CLI on $PATH with valid auth; skipped automatically when codex is absent. Used by the real-CLI live smoke test in tests/test_codex_real_cli_contract.py.",
+    "live_gh: requires the installed gh with working auth; env-gated (DAYDREAM_LIVE_GH=1) so CI never needs network credentials. Used by the opt-in live preflight smoke test in tests/test_benchmark_gh_smoke.py.",
 ]
