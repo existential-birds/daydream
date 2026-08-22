@@ -346,8 +346,8 @@ def _gold_list(n: int = 2) -> list[dict]:
     for i in range(n):
         f = {"title": f"t{i}", "body": "b", "severity": "high",
              "path": "p", "start_line": 1, "end_line": 1}
-        payload = "\x1f".join([f["title"], f["body"], f["severity"],
-                               f["path"], str(f["start_line"]), str(f["end_line"])])
+        payload = "\x1f".join([str(f["title"]), str(f["body"]), str(f["severity"]),
+                               str(f["path"]), str(f["start_line"]), str(f["end_line"])])
         f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
         out.append(f)
     return out
@@ -767,8 +767,8 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp
     # past the cap and fail the whole task. A legal pair is judged, never voided.
     gold = [{"title": "t" * 500, "body": _DENSE_BODY,
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
-    payload = "\x1f".join([gold[0]["title"], gold[0]["body"], gold[0]["severity"],
-                            gold[0]["path"], str(gold[0]["start_line"]), str(gold[0]["end_line"])])
+    payload = "\x1f".join([str(gold[0]["title"]), str(gold[0]["body"]), str(gold[0]["severity"]),
+                            str(gold[0]["path"]), str(gold[0]["start_line"]), str(gold[0]["end_line"])])
     import hashlib as _h
     gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
     gold_path.write_text(json.dumps(gold))

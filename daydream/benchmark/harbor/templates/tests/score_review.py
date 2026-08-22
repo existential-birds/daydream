@@ -156,6 +156,8 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
     confidence, missing key, unknown key, non-dict input — raises
     ``VerifierError``; never silently coerces a fallback value.
     """
+    if not isinstance(raw, dict):
+        raise VerifierError("verdict must be a JSON object")
     verifier_core.validate_exact_keys(raw, {"match", "confidence", "reasoning"}, "verdict")
     if "match" not in raw:
         raise VerifierError("verdict missing required field 'match'")
