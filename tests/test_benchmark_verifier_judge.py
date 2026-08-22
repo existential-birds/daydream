@@ -801,7 +801,10 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module, tmp_path
     # pad ABOVE the 1 MiB cap so the raw byte size is the only signal
     artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
     out = tmp_path / "out"
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    client = _CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 
@@ -813,7 +816,10 @@ def test_run_verifier_rejects_cross_case_replay(sr_module, tmp_path) -> None:
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))
     out = tmp_path / "out"
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    client = _CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 
@@ -827,7 +833,10 @@ def test_run_verifier_rejects_ref_mismatch(sr_module, tmp_path) -> None:
     art["head_ref"] = "feature/x"  # not the bound head ref
     artifact_path.write_text(json.dumps(art))
     out = tmp_path / "out"
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    client = _CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 
@@ -844,7 +853,10 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -
     corrupted[-1] ^= 1
     gold_path.write_bytes(bytes(corrupted))
     out = tmp_path / "out"
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    client = _CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 

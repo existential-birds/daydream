@@ -159,13 +159,9 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
     if not isinstance(raw, dict):
         raise VerifierError("verdict must be a JSON object")
     verifier_core.validate_exact_keys(raw, {"match", "confidence", "reasoning"}, "verdict")
-    if "match" not in raw:
-        raise VerifierError("verdict missing required field 'match'")
     match = raw["match"]
     if not isinstance(match, bool):
         raise VerifierError(f"verdict 'match' must be a boolean, got {match!r}")
-    if "confidence" not in raw:
-        raise VerifierError("verdict missing required field 'confidence'")
     confidence = raw["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VerifierError(
@@ -173,8 +169,6 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
         )
     if not 0.0 <= confidence <= 1.0:
         raise VerifierError(f"verdict 'confidence' must be in [0,1], got {confidence!r}")
-    if "reasoning" not in raw:
-        raise VerifierError("verdict missing required field 'reasoning'")
     reasoning = raw["reasoning"]
     if not isinstance(reasoning, str):
         raise VerifierError(f"verdict 'reasoning' must be a string, got {reasoning!r}")
@@ -500,7 +494,12 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
     raw size alone, never reaching the judge. A ``JSONDecodeError`` becomes a
     ``VerifierError`` naming only the path (never content).
     """
-    raw = Path(path).read_bytes()
+    try:
+        raw = Path(path).read_bytes()
+    except FileNotFoundError:
+        raise VerifierError(f"input file not found: {Path(path)}") from None
+    except OSError as exc:
+        raise VerifierError(f"could not read {Path(path)}: {exc}") from exc
     if len(raw) > verifier_core.MAX_ARTIFACT_BYTES:
         raise VerifierError("candidate artifact exceeds 1 MiB (raw bytes)")
     try:
@@ -584,14 +583,16 @@ def run_verifier(
         candidates = verifier_core.validate_candidate_artifact(artifact_raw)
 
         metadata = _load_verifier_metadata(Path(gold_path))
-        if artifact_raw["case_id"] != metadata["case_id"]:
-            raise VerifierError("candidate case_id does not match the bound task")
-        if artifact_raw["base_ref"] != metadata["base_ref"]:
-            raise VerifierError("candidate base_ref does not match the bound task")
-        if artifact_raw["head_ref"] != metadata["head_ref"]:
-            raise VerifierError("candidate head_ref does not match the bound task")
+        for field in ("case_id", "base_ref", "head_ref"):
+            if artifact_raw[field] != metadata[field]:
+                raise VerifierError(f"candidate {field} does not match the bound task")
 
-        gold_bytes = Path(gold_path).read_bytes()
+        try:
+            gold_bytes = Path(gold_path).read_bytes()
+        except FileNotFoundError:
+            raise VerifierError(f"input file not found: {gold_path}") from None
+        except OSError as exc:
+            raise VerifierError(f"could not read {gold_path}: {exc}") from exc
         if hashlib.sha256(gold_bytes).hexdigest() != metadata["gold_sha256"]:
             raise VerifierError("gold digest mismatch")
         try:
