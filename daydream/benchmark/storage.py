@@ -733,7 +733,6 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     order = doc.get("replacement_order")
     if not isinstance(order, list):
         raise WorkspaceCorrupt(f"{root}: journal replacement_order is not a list")
-    order_rels: set[str] = set()
     for item in order:
         if not isinstance(item, str):
             raise WorkspaceCorrupt(f"{root}: journal replacement_order entry is not a string")

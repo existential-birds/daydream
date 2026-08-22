@@ -324,7 +324,8 @@ def test_journal_opid_mismatch_fails_closed(tmp_path):
 def test_journal_rel_escape_fails_closed(tmp_path):
     outside = tmp_path.parent / "escaped-by-journal.bin"
     outside.unlink(missing_ok=True)
-    _write_corrupt_journal(tmp_path, "op-3", lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"))
+    _write_corrupt_journal(tmp_path, "op-3",
+        lambda d: d["targets"][0].__setitem__("rel", "../../escaped-by-journal.bin"))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
     assert not outside.exists()  # no path outside the workspace changed
@@ -369,12 +370,16 @@ def test_cross_transaction_target_conflict_is_corruption(tmp_path):
 
 
 def test_disjoint_transactions_both_recover(tmp_path):
-    t1 = tmp_path / "a.yaml"; t2 = tmp_path / "b.yaml"
-    t1.write_text("a-before"); t2.write_text("b-before")
+    t1 = tmp_path / "a.yaml"
+    t2 = tmp_path / "b.yaml"
+    t1.write_text("a-before")
+    t2.write_text("b-before")
     with Transaction(tmp_path, op_id="op-a", kind="write") as tx:
-        _stage(tx, t1, "a-after"); tx.prepare()
+        _stage(tx, t1, "a-after")
+        tx.prepare()
     with Transaction(tmp_path, op_id="op-b", kind="write") as tx:
-        _stage(tx, t2, "b-after"); tx.prepare()
+        _stage(tx, t2, "b-after")
+        tx.prepare()
     recover_startup(tmp_path)  # disjoint targets must both roll back cleanly
     assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
 
@@ -415,12 +420,15 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path):
 def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path):
     # 3 targets; inject a crash after each individual rename/fsync boundary.
     for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
-        root = tmp_path / f"ws-{n}"; root.mkdir()
+        root = tmp_path / f"ws-{n}"
+        root.mkdir()
         before = {}
         for i in range(3):
             rel = f"cases/t{i}.yaml"
             before[rel] = f"before-{i}"
-            p = root / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(before[rel])
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(before[rel])
         with Transaction(root, op_id=f"op-{n}", kind="import") as tx:
             for i in range(3):
                 _stage(tx, root / f"cases/t{i}.yaml", f"after-{i}")
@@ -432,8 +440,10 @@ def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path):
 
 
 def test_single_target_target_boundary(tmp_path):
-    root = tmp_path / "ws"; root.mkdir()
-    t = root / "t.yaml"; t.write_text("before")
+    root = tmp_path / "ws"
+    root.mkdir()
+    t = root / "t.yaml"
+    t.write_text("before")
     with Transaction(root, op_id="op-1t", kind="write") as tx:
         _stage(tx, t, "after")
         tx.inject_crash(boundary="target-0")
@@ -443,16 +453,21 @@ def test_single_target_target_boundary(tmp_path):
 
 
 def test_verify_complete_preserves_0600_target(tmp_path):
-    t = tmp_path / "target.yaml"; t.write_text("old"); os.chmod(t, 0o600)
+    t = tmp_path / "target.yaml"
+    t.write_text("old")
+    os.chmod(t, 0o600)
     with Transaction(tmp_path, op_id="op-c", kind="write") as tx:
-        _stage(tx, t, "new"); tx.commit(); tx.force_state("complete")
+        _stage(tx, t, "new")
+        tx.commit()
+        tx.force_state("complete")
     recover_startup(tmp_path)
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
 
 
 def test_rollback_preserves_0700_scaffold_dir(tmp_path):
     with Transaction(tmp_path, op_id="op-i", kind="init") as tx:
-        tx.create_dir("cases"); tx.stage("cases/keep.yaml", b"keep")
+        tx.create_dir("cases")
+        tx.stage("cases/keep.yaml", b"keep")
         tx.prepare()
     (tmp_path / "cases" / "keep.yaml").write_text("keep")  # non-empty -> dir preserved
     recover_startup(tmp_path)
@@ -461,18 +476,25 @@ def test_rollback_preserves_0700_scaffold_dir(tmp_path):
 
 
 def test_rollback_committing_restored_target_is_0600(tmp_path):
-    t = tmp_path / "target.yaml"; t.write_text("old"); os.chmod(t, 0o600)
+    t = tmp_path / "target.yaml"
+    t.write_text("old")
+    os.chmod(t, 0o600)
     with Transaction(tmp_path, op_id="op-r", kind="write") as tx:
-        _stage(tx, t, "new"); tx.begin_commit(); tx.inject_crash()
+        _stage(tx, t, "new")
+        tx.begin_commit()
+        tx.inject_crash()
     recover_startup(tmp_path)
     assert t.read_text() == "old"
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
 
 
 def test_restart_recovery_is_idempotent(tmp_path):
-    t = tmp_path / "target.yaml"; t.write_text("old")
+    t = tmp_path / "target.yaml"
+    t.write_text("old")
     with Transaction(tmp_path, op_id="op-idem", kind="write") as tx:
-        _stage(tx, t, "new"); tx.begin_commit(); tx.inject_crash()
+        _stage(tx, t, "new")
+        tx.begin_commit()
+        tx.inject_crash()
     recover_startup(tmp_path)   # first pass: roll back committing journal
     first_txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
     recover_startup(tmp_path)   # second pass: must be a clean no-op
@@ -482,9 +504,12 @@ def test_restart_recovery_is_idempotent(tmp_path):
 
 
 def test_complete_restart_recovery_is_idempotent(tmp_path):
-    t = tmp_path / "target.yaml"; t.write_text("old")
+    t = tmp_path / "target.yaml"
+    t.write_text("old")
     with Transaction(tmp_path, op_id="op-idem2", kind="write") as tx:
-        _stage(tx, t, "new"); tx.commit(); tx.force_state("complete")
+        _stage(tx, t, "new")
+        tx.commit()
+        tx.force_state("complete")
     recover_startup(tmp_path)
     recover_startup(tmp_path)   # second pass: complete journal already verified+cleaned
     assert t.read_text() == "new"
