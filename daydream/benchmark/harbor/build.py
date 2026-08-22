@@ -12,6 +12,7 @@ command surface.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -24,12 +25,32 @@ from daydream.benchmark.harbor import verifier_core as vc
 TEMPLATE_VERSION = "1"
 
 
+_METRIC_AGG_BEGIN = "# __AGGREGATION_BODY_BEGIN__"
+_METRIC_AGG_END = "# __AGGREGATION_BODY_END__"
+
+
 class CompileError(Exception):
     """Raised on any compile/leakage/validation rejection."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.message = message
+
+
+def render_metric() -> bytes:
+    """Render the compiled ``metric.py`` with its aggregation body from verifier_core.
+
+    The template's ``aggregate_metrics`` placeholder between the two marker
+    comments is replaced, markers inclusive, with ``inspect.getsource(vc.
+    aggregate_metrics)`` so the compiled metric and the in-repo corpus pool
+    share one aggregation contract and cannot drift.
+    """
+    text = (_TEMPLATE_DIR / "metric.py").read_text(encoding="utf-8")
+    assert _METRIC_AGG_BEGIN in text and _METRIC_AGG_END in text
+    start = text.index(_METRIC_AGG_BEGIN)
+    stop = text.index(_METRIC_AGG_END) + len(_METRIC_AGG_END)
+    body = inspect.getsource(vc.aggregate_metrics)
+    return (text[:start] + body + text[stop:]).encode("utf-8")
 
 
 def derive_task_key(case_id: str) -> str:
@@ -566,7 +587,7 @@ def compile_workspace(root: Path) -> dict:
                 ).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
-            metric_bytes = (_TEMPLATE_DIR / "metric.py").read_bytes()
+            metric_bytes = render_metric()
             (stage / "metric.py").write_bytes(metric_bytes)
             (stage / "jobs").mkdir(exist_ok=True)
 

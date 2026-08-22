@@ -4,6 +4,7 @@ import importlib.util
 import os
 import sys
 import tomllib
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -839,8 +840,18 @@ def sr_module() -> Any:
 
 @pytest.fixture(scope="session")
 def sr_metric() -> Any:
-    """The loaded ``templates/metric.py`` corpus aggregation entry module."""
-    return _load_template_asset(_TEMPLATES / "metric.py", "metric")
+    """The rendered ``templates/metric.py`` corpus aggregation entry module.
+
+    Execs ``build.render_metric()`` output (the compiled artifact, aggregation
+    body injected from ``verifier_core``) instead of loading the static
+    template, so tests exercise exactly what ``compile_workspace`` ships.
+    The rendered shebang / ``# /// script`` lines are comments and exec-safe.
+    """
+    from daydream.benchmark.harbor import build
+
+    mod = types.ModuleType("metric")
+    exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
+    return mod
 
 
 def improve_fixture_test_command_anchor(pyproject: Path) -> int:

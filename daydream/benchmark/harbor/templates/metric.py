@@ -2,9 +2,12 @@
 """Self-contained corpus micro-metric aggregation for the Harbor verifier image.
 
 Stdlib only, never imports daydream (or the bundled verifier_core): the
-aggregation body is inlined so a compiled task's ``metric.py`` needs nothing but
-the stdlib. Reads one JSONL line per task — a reward dict or ``null`` (failed
-task) — and emits the pooled micro metrics.
+aggregation body is inlined at build time so a compiled task's ``metric.py``
+needs nothing but the stdlib. Reads one JSONL line per task — a reward dict or
+``null`` (failed task) — and writes the pooled micro metrics to the ``-o`` path.
+Invocation matches Harbor 0.21's ``uv run metric.py -i <rewards.jsonl> -o
+<metric.json>``; a missing input raises ``FileNotFoundError`` (uncaught ->
+nonzero exit, no output written — fail-closed, never partial).
 """
 # /// script
 # requires-python = ">=3.12"
@@ -13,7 +16,9 @@ task) — and emits the pooled micro metrics.
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -40,57 +45,18 @@ def _f1(precision: float, recall: float) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+# __AGGREGATION_BODY_BEGIN__
 def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float | int]:
-    """Aggregate per-task reward JSONL rows into pooled corpus micro metrics.
+    """Placeholder — replaced at build time by ``verifier_core.aggregate_metrics``.
 
-    Inline copy of ``verifier_core.aggregate_metrics`` so the compiled metric is
-    self-contained. A ``None`` row or a row with ``verifier_error == 1`` is a
-    failed task: reward 0 to the mean, zero counts, ``failed_task_count`` += 1.
-    Zero denominators evaluate to 1.0 throughout.
+    ``build.render_metric()`` splices ``inspect.getsource(verifier_core.
+    aggregate_metrics)`` over the region between the two marker comments, so the
+    compiled metric and the in-repo corpus pool can never drift.
     """
-    failed = 0
-    clean_correct = 0
-    clean_total = 0
-    rewards: list[float] = []
-    total_tp = total_fp = total_fn = 0
-
-    for row in rows:
-        if row is None or row.get("verifier_error") == 1:
-            failed += 1
-            rewards.append(0.0)
-            continue
-        total_tp += _as_int(row["tp"])
-        total_fp += _as_int(row["fp"])
-        total_fn += _as_int(row["fn"])
-        rewards.append(_as_float(row["reward"]))
-        if row.get("clean_task") == 1:
-            clean_total += 1
-            if _as_int(row["fp"]) == 0:
-                clean_correct += 1
-
-    task_count = len(rows)
-    mean_task_score = sum(rewards) / task_count if task_count else 1.0
-    micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 1.0
-    micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else 1.0
-    if total_tp == 0 and (total_tp + total_fp > 0 or total_tp + total_fn > 0):
-        micro_f1 = 0.0
-    else:
-        micro_f1 = _f1(micro_precision, micro_recall)
-    clean_accuracy = clean_correct / clean_total if clean_total else 1.0
-
-    return {
-        "micro_precision": micro_precision,
-        "micro_recall": micro_recall,
-        "micro_f1": micro_f1,
-        "mean_task_score": mean_task_score,
-        "clean_accuracy": clean_accuracy,
-        "task_count": task_count,
-        "clean_task_count": clean_total,
-        "failed_task_count": failed,
-        "total_tp": total_tp,
-        "total_fp": total_fp,
-        "total_fn": total_fn,
-    }
+    raise NotImplementedError(
+        "aggregation body is rendered at build time from verifier_core.aggregate_metrics"
+    )
+# __AGGREGATION_BODY_END__
 
 
 def aggregate_rewards_file(path: str) -> dict[str, float | int]:
@@ -112,9 +78,17 @@ def aggregate_rewards_file(path: str) -> dict[str, float | int]:
     return aggregate_metrics(rows)
 
 
-def main() -> int:
-    results = aggregate_rewards_file("/logs/verifier/reward.json")
-    print(json.dumps(results))
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Aggregate Harbor verifier rewards JSONL into pooled micro metrics.")
+    parser.add_argument("-i", "--input", required=True, help="JSONL rewards input (one reward dict or null per task)")
+    parser.add_argument("-o", "--output", required=True, help="JSON metric output path (written atomically)")
+    args = parser.parse_args(argv)
+    result = aggregate_rewards_file(args.input)
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out.parent / f".{out.name}.{os.getpid()}.tmp"
+    tmp.write_text(json.dumps(result), encoding="utf-8")
+    os.replace(tmp, out)
     return 0
 
 

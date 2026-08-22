@@ -8,6 +8,7 @@ fail loudly. ``templates/metric.py``'s inlined aggregation must equal
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -77,3 +78,25 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_
     assert result == expected  # same aggregation contract on the same rows
     assert result["failed_task_count"] == 1 and result["task_count"] == 3
     assert result["mean_task_score"] == (0.8 + 0.0 + 1.0) / 3
+
+
+def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> None:
+    from daydream.benchmark.harbor import build
+
+    metric_path = tmp_path / "metric.py"
+    metric_path.write_bytes(build.render_metric())
+    inp = tmp_path / "rewards.jsonl"
+    inp.write_text(
+        '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'
+        'null\n'
+        '{"reward":1.0,"tp":0,"fp":0,"fn":0,"clean_task":1}\n'
+    )
+    out = tmp_path / "out" / "metric.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(metric_path), "-i", str(inp), "-o", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(out.read_text())
+    assert result["task_count"] == 3  # attempted = all rows (stable across old/new aggregation)
+    assert not (out.parent / ".metric.json.tmp").exists()  # atomic write leaves no temp leftover
