@@ -72,11 +72,6 @@ _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
-def _truncate_utf8(value: str, max_bytes: int) -> str:
-    """Truncate ``value`` to at most ``max_bytes`` on a UTF-8 boundary."""
-    if len(value.encode("utf-8")) <= max_bytes:
-        return value
-    return value.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
 
 
 def _render_filled(
@@ -114,29 +109,18 @@ def _render_filled(
 def render_pair_prompt(gold: dict, candidate: dict, *, template: str) -> str:
     """Render a bounded, untrusted-fenced prompt for one gold/candidate pair.
 
-    If the filled template would exceed 24 KiB, the body fields (gold then
-    candidate) are truncated on a UTF-8 boundary until the result fits — the
-    only cap mechanism and it never fails the pair.
+    The untrusted finding fields are HTML-entity-escaped by ``_render_filled`` so
+    injected delimiters can never form structural blocks. If the rendered pair
+    still exceeds 24 KiB, fail deterministically with ``VerifierError`` — never
+    truncate the pair and never silently report a partial result.
     """
     gold_body = gold.get("body", "") or ""
     candidate_body = candidate.get("body", "") or ""
     filled = _render_filled(
         template, gold, candidate, gold_body=gold_body, candidate_body=candidate_body
     )
-    while len(filled.encode("utf-8")) > _PROMPT_CAP_BYTES:
-        if gold_body:
-            gold_body = _truncate_utf8(
-                gold_body, max(0, len(gold_body.encode("utf-8")) // 2)
-            )
-        elif candidate_body:
-            candidate_body = _truncate_utf8(
-                candidate_body, max(0, len(candidate_body.encode("utf-8")) // 2)
-            )
-        else:
-            break
-        filled = _render_filled(
-            template, gold, candidate, gold_body=gold_body, candidate_body=candidate_body
-        )
+    if len(filled.encode("utf-8")) > _PROMPT_CAP_BYTES:
+        raise VerifierError("rendered pair exceeds 24 KiB")
     return filled
 
 

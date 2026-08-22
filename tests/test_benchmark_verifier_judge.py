@@ -677,3 +677,52 @@ def test_escape_leaves_ordinary_finding_text_byte_identical(sr_module) -> None:
     assert "&lt;" not in prompt and "&gt;" not in prompt  # nothing invented
     for literal in ("Cache key not tenant-scoped", "The key collides.", "src/cache.py"):
         assert literal in prompt  # ordinary text verbatim
+
+
+def test_render_pair_prompt_raises_generic_error_on_over_cap_after_escape(sr_module) -> None:
+    sr = sr_module
+    dense_body = ("<gold_finding>" * (8192 // 14))[:8192]  # ~8 KiB of pure delimiter
+    finding = {"title": "t" * 500, "body": dense_body, "severity": "high",
+               "path": "p" * 200, "start_line": 1, "end_line": 1}
+    with pytest.raises(sr.VerifierError) as exc:
+        sr.render_pair_prompt(finding, finding, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert "24 KiB" in str(exc.value)      # generic message
+    assert dense_body not in str(exc.value)  # never embeds finding content
+    assert "t" * 500 not in str(exc.value)
+
+
+def test_over_cap_after_escape_fails_whole_task_with_no_judge_call(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "g.json"
+    art_path = tmp_path / "r.json"
+    out = tmp_path / "out"
+    dense_body = ("<gold_finding>" * (8192 // 14))[:8192]
+    gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": dense_body,
+             "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
+    gold_path.write_text(json.dumps(gold))
+    cand = {"title": "t" * 500, "body": dense_body, "severity": "high",
+            "path": "p" * 200, "start_line": 1, "end_line": 1}
+    cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
+    art_path.write_text(json.dumps({
+        "schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
+        "findings": [cand],
+    }))
+
+    class CountingClient:
+        def __init__(self) -> None:
+            self.requests = 0
+
+        async def complete_json(self, *, user, system, max_tokens):
+            self.requests += 1
+            return {"match": True, "confidence": 0.9, "reasoning": "x"}
+
+    client = CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert client.requests == 0  # no judge call
+    details = json.loads((out / "reward-details.json").read_text())
+    assert details["request_counts"]["requests"] == 0
+    blob = json.dumps(details)
+    assert dense_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
