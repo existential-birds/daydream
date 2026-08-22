@@ -67,6 +67,29 @@ def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
             cut = cut[:-1]
 
 
+_ESCAPED_HISTORICAL_TAGS = {
+    "<historical_pr_context>": "&lt;historical_pr_context&gt;",
+    "</historical_pr_context>": "&lt;/historical_pr_context&gt;",
+}
+
+
+def _escape_historical_delimiters(text: str) -> str:
+    """Neutralize the ``<historical_pr_context>`` block delimiters in untrusted text.
+
+    The PR title/body are untrusted reference data, not instructions. A literal
+    closing tag inside the body would terminate the ``<historical_pr_context>``
+    block early (the leak scan strips it non-greedily) and leak the remainder
+    into control-plane scanning; a literal opening tag could shift the
+    boundary. Escape both delimiters so the untrusted text never forms a real
+    delimiter.
+    """
+    return text.replace(
+        "<historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["<historical_pr_context>"]
+    ).replace(
+        "</historical_pr_context>", _ESCAPED_HISTORICAL_TAGS["</historical_pr_context>"]
+    )
+
+
 def bounded_pr_context(
     pull_request: dict, *, max_bytes: int = MAX_PR_CONTEXT_BYTES
 ) -> str:
@@ -80,8 +103,8 @@ def bounded_pr_context(
     marker line is emitted inside the block, before the closing tag. The digest
     is computed over the full pre-truncation ``title:\n<body>`` text.
     """
-    title = str(pull_request.get("title") or "")
-    body = str(pull_request.get("body") or "")
+    title = _escape_historical_delimiters(str(pull_request.get("title") or ""))
+    body = _escape_historical_delimiters(str(pull_request.get("body") or ""))
     title_line = f"title: {title}"
     body_line = f"body: {body}"
     full = f"{title_line}\n{body_line}"
@@ -102,7 +125,6 @@ def bounded_pr_context(
         t_title, t_body = truncated_text, ""
         if not t_title.startswith("title: "):
             t_title = "title: " + t_title
-    marker = f"[truncated; full_body_sha256={hashlib.sha256(full.encode('utf-8')).hexdigest()}]"
     marker = f"[truncated; full_body_sha256={hashlib.sha256(full.encode('utf-8')).hexdigest()}]"
     return (
         f"<historical_pr_context>\n{t_title}\nbody: {t_body}\n{marker}\n"
@@ -403,7 +425,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     return {
         "key": key,
         "case_id": case_id,
-        "pr_number": int(pull_request["number"]),
+        "pr_number": int(pull_request.get("number") or 0),
         "repository": repo_slug,
         "original_base_sha": snapshot.get("original_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
