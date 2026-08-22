@@ -224,3 +224,40 @@ def test_import_crash_transaction_restores_before_or_after(tmp_path):
             assert not (tmp_path / "transactions").exists() or not list(
                 (tmp_path / "transactions").iterdir()
             )
+
+
+def test_stage_rejects_rel_escape(tmp_path):
+    outside = tmp_path.parent / "escaped.bin"
+    outside.unlink(missing_ok=True)
+    with Transaction(tmp_path, op_id="op-esc", kind="write") as tx:
+        with pytest.raises(WorkspaceCorrupt):
+            tx.stage("../escaped.bin", b"x")
+    assert not outside.exists()
+
+
+def test_stage_rejects_absolute_outside(tmp_path):
+    outside = tmp_path.parent / "outside" / "evil.bin"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    with Transaction(tmp_path, op_id="op-abs", kind="write") as tx:
+        with pytest.raises(WorkspaceCorrupt):
+            tx.stage(str(outside), b"x")
+    assert not outside.exists()
+
+
+def test_stage_rejects_symlink_parent_escape(tmp_path):
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
+    with Transaction(tmp_path, op_id="op-sym", kind="write") as tx:
+        with pytest.raises(WorkspaceCorrupt):
+            tx.stage("cases/x.yaml", b"x")
+    assert not (outside / "x.yaml").exists()
+
+
+def test_stage_accepts_absolute_inside_root(tmp_path):
+    target = tmp_path / "cases" / "a.yaml"
+    target.parent.mkdir(parents=True)
+    with Transaction(tmp_path, op_id="op", kind="write") as tx:
+        _stage(tx, target, "ok")
+        tx.commit()
+    assert target.read_text() == "ok"

@@ -316,7 +316,7 @@ class Transaction:
         ``init_workspace`` build the private scaffold subdirs through the same
         crash-consistent journal instead of leaving them outside it.
         """
-        rel = _rel_of(self._root, target_rel)
+        rel = _resolve_target(self._root, target_rel)
         ensure_private_dir(self._root / rel)
         if rel not in self._created_dirs:
             self._created_dirs.append(rel)
@@ -328,7 +328,7 @@ class Transaction:
         ``transactions/<op_id>/`` and records before/after digests. The real
         target is not touched here.
         """
-        rel = _rel_of(self._root, target_rel)
+        rel = _resolve_target(self._root, target_rel)
         if rel in self._states:
             raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
         target = self._root / rel
@@ -385,6 +385,7 @@ class Transaction:
         _fsync_file(self._journal_path())
         for rel in self._replacement_order:
             st = self._states[rel]
+            rel = _resolve_target(self._root, rel)
             target = self._root / rel
             ensure_private_dir(target.parent)
             st.applied = True
@@ -488,11 +489,26 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _rel_of(root: Path, target: str | Path) -> str:
+def _resolve_target(root: Path, target: str | Path) -> str:
+    """Resolve ``target`` to a canonical POSIX rel, forcing it beneath ``root``.
+
+    The containment invariant is enforced at the *resolved* path, not the
+    literal string: a ``../x`` relative input, an absolute path, and a path
+    whose parent is a symlink to an outside directory all collapse to
+    "resolves outside root" and are rejected uniformly. Absolute paths that
+    resolve inside the root are accepted (the canonical ``rel`` is returned).
+    """
+    root_r = Path(root).resolve()
     p = Path(target)
-    if p.is_absolute():
-        return os.path.relpath(p, root).replace(os.sep, "/")
-    return p.as_posix()
+    candidate = p if p.is_absolute() else root_r / p
+    resolved = candidate.resolve()
+    try:
+        rel = resolved.relative_to(root_r)
+    except ValueError:
+        raise WorkspaceCorrupt(
+            f"{root}: target resolves outside the workspace root: {target!r}"
+        ) from None
+    return rel.as_posix()
 
 
 # ---------------------------------------------------------------------------
