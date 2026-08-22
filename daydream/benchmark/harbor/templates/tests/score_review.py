@@ -326,17 +326,28 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
         code = int(status_code) if status_code is not None else -1
         # 429 is retryable (rate limit); all other 4xx are terminal client errors.
         if 400 <= code < 500 and code != 429:
-            raise VerifierError(f"Judge request failed with HTTP {status_code}: {body_text}")
-        raise _Retryable(f"Judge request failed with HTTP {status_code}: {body_text}")
+            raise VerifierError(
+                f"Judge request failed with HTTP {status_code}: {_bounded_error(body_text)}"
+            )
+        raise _Retryable(
+            f"Judge request failed with HTTP {status_code}: {_bounded_error(body_text)}"
+        )
+    body = _response_bytes(response)
+    if len(body) > _RESPONSE_CAP_BYTES:
+        raise VerifierError("judge response body exceeds 256 KiB")  # terminal, never truncated
     try:
         parsed_body = response.json()
     except Exception as exc:
-        raise VerifierError(f"Judge response was not valid JSON: {exc}") from exc
+        raise VerifierError(
+            f"Judge response was not valid JSON: {_bounded_error(str(exc))}"
+        ) from exc
     text = content(parsed_body)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise VerifierError(f"Judge text content was not valid JSON: {exc}") from exc
+        raise VerifierError(
+            f"Judge text content was not valid JSON: {_bounded_error(str(exc))}"
+        ) from exc
     if not isinstance(parsed, dict):
         raise VerifierError("Judge text content JSON was not an object")
     return parsed
@@ -349,46 +360,55 @@ async def _complete_json_with_http(
     payload: dict[str, Any],
     headers: dict[str, str],
     content: Any,
-    allowlist: set[str] | None = None,
+    allowlist: set[str],
 ) -> dict[str, Any]:
     """Single retry/redirect/timeout policy shared by both judge clients.
 
     - Up to 3 attempts. Transport exceptions (including timeout) and HTTP
       429/5xx retry with exponential backoff (`2 ** attempt`); a terminal 4xx
       (non-429) and a malformed-JSON parse are not retried.
-    - 3xx responses: never follow a redirect to a host outside the request
-      URL's own host (allowlist); same-host redirects are followed once.
+    - 3xx responses: bounded credential-preserving redirects. At most
+      ``_MAX_REDIRECTS`` hops; each next target is resolved against the request
+      URL first (relative ``Location``) and must be inside the judge-host
+      ``allowlist``. Configured auth headers are preserved across the hop and
+      server-provided response headers are never replayed. A redirect-target
+      rejection or an exhausted hop count is a terminal ``VerifierError``,
+      never retried.
     - After 3 failed attempts, raise ``VerifierError`` — never a partial result.
     """
+    current_url = url
     for attempt in range(_MAX_RETRIES):
-        try:
+        hop = 0
+        while True:
             try:
-                response = await http.post(
-                    url, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
-                )
-            except Exception as exc:
-                raise _Retryable(f"Judge request failed: {exc}") from exc
-            status_code = getattr(response, "status_code", None)
-            if status_code is not None and 300 <= int(status_code) < 400:
-                headers = getattr(response, "headers", {}) or {}
-                location = headers.get("location")
-                if not location:
-                    raise VerifierError("Judge request redirected without a Location")
-                request_host = urllib.parse.urlparse(url).hostname
-                redirect_host = urllib.parse.urlparse(location).hostname
-                if redirect_host != request_host:
-                    raise VerifierError(
-                        "Judge request would redirect to a host outside the verifier allowlist"
+                try:
+                    response = await http.post(
+                        current_url, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
                     )
-                # Same-host redirect: follow once by re-issuing to the Location.
-                response = await http.post(
-                    location, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
-                )
-            return _parse_json_response(response, content=content)
-        except _Retryable:
-            if attempt == _MAX_RETRIES - 1:
-                raise VerifierError("Judge request failed after retries")
-            await asyncio.sleep(2**attempt)
+                except Exception as exc:
+                    raise _Retryable(f"Judge request failed: {exc}") from exc
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None and 300 <= int(status_code) < 400:
+                    if hop >= _MAX_REDIRECTS:
+                        raise VerifierError("judge request exceeded maximum redirects")
+                    response_headers = getattr(response, "headers", {}) or {}
+                    location = response_headers.get("location")
+                    if not location:
+                        raise VerifierError("judge request redirected without a Location")
+                    # Resolve relative Location against the request URL and
+                    # fail closed on cross-host/out-of-allowlist targets. The
+                    # configured ``headers`` are intentionally NOT replaced by
+                    # the response headers, so auth survives the hop and server
+                    # headers are never replayed.
+                    current_url = _resolve_redirect(current_url, location, allowlist)
+                    hop += 1
+                    continue
+                return _parse_json_response(response, content=content)
+            except _Retryable:
+                if attempt == _MAX_RETRIES - 1:
+                    raise VerifierError("Judge request failed after retries")
+                await asyncio.sleep(2**attempt)
+                break
     raise VerifierError("Judge request failed after retries")
 
 

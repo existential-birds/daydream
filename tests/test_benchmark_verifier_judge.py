@@ -155,7 +155,8 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
             )()
 
     raw = await sr._complete_json_with_http(
-        FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"]
+        FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"],
+        allowlist={"u"}
     )
     assert raw == {"match": True, "confidence": 0.8, "reasoning": "x"}
     assert len(attempts) == 3
@@ -169,7 +170,7 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
-            Always5xx(), url="u", payload={}, headers={}, content=lambda b: b
+            Always5xx(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
         )
     assert len(attempts) == 3  # 3 attempts then fail
 
@@ -186,7 +187,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
-            BadRequest(), url="u", payload={}, headers={}, content=lambda b: b
+            BadRequest(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
         )
     assert len(attempts) == 1  # terminal 4xx, no retry
 
@@ -210,6 +211,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
             payload={},
             headers={},
             content=lambda b: b,
+            allowlist={"api.anthropic.com"},
         )
 
 
@@ -1066,3 +1068,58 @@ async def test_clients_validate_initial_url_before_request(sr_module) -> None:
     with pytest.raises(sr.VerifierError):
         await c2.complete_json(user="u")
     assert len(calls) == 1  # no new request issued
+
+
+@pytest.mark.asyncio
+async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module) -> None:
+    sr = sr_module
+    seen = []
+    class Redirecting:
+        def __init__(self, hops): self.hops = list(hops)
+        async def post(self, url, *, headers, json, timeout):
+            seen.append((url, dict(headers)))
+            loc = self.hops.pop(0) if self.hops else None
+            if loc is not None:
+                return type("R", (), {"status_code": 302, "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"}, "text": ""})()
+            return type("R", (), {"status_code": 200, "text": "ok",
+                "json": lambda self: {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "x"}'}]}})()
+    allow = {"api.anthropic.com"}
+    client = Redirecting(["/v1/next"])  # relative Location, same host
+    raw = await sr._complete_json_with_http(
+        client, url="https://api.anthropic.com/v1/messages", payload={"x": 1},
+        headers={"x-api-key": "SECRET", "authorization": "Bearer K"}, content=lambda b: b["content"][0]["text"],
+        allowlist=allow)
+    assert raw["match"] is True
+    assert len(seen) == 2
+    final_url, final_headers = seen[-1]
+    assert final_url == "https://api.anthropic.com/v1/next"  # relative resolved
+    assert final_headers["x-api-key"] == "SECRET"             # configured header preserved
+    assert "x-server-token" not in final_headers             # server header never replayed
+
+    # cross-host redirect rejected
+    bad = Redirecting(["https://evil.example/x"])
+    with pytest.raises(sr.VerifierError):
+        await sr._complete_json_with_http(bad, url="https://api.anthropic.com/v1/messages",
+            payload={}, headers={"x-api-key": "K"}, content=lambda b: b, allowlist=allow)
+
+    # redirect loop bounded by _MAX_REDIRECTS
+    loop = Redirecting(["/v1/next"] * (sr._MAX_REDIRECTS + 1))
+    with pytest.raises(sr.VerifierError):
+        await sr._complete_json_with_http(loop, url="https://api.anthropic.com/v1/messages",
+            payload={}, headers={}, content=lambda b: b, allowlist=allow)
+
+
+@pytest.mark.asyncio
+async def test_response_body_is_size_capped_before_json_parse(sr_module) -> None:
+    sr = sr_module
+    calls = []
+    class Huge:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append(1)
+            return type("R", (), {"status_code": 200, "text": "", "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1),
+                                  "json": lambda self: {"content": [{"type": "text", "text": '{"match": true}'}]}})()
+    with pytest.raises(sr.VerifierError) as e:
+        await sr._complete_json_with_http(Huge(), url="u", payload={}, headers={},
+                                          content=lambda b: b, allowlist={"u"})
+    assert "256 KiB" in str(e.value) or "exceeds" in str(e.value)
+    assert len(calls) == 1  # oversized body is terminal, not retried
