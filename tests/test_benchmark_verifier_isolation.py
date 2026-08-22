@@ -29,20 +29,27 @@ _SENTINELS = {
 _JUDGE_KEY = "sk-or-isolation-only-7f1e"
 
 
+class _JudgeServer(HTTPServer):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.posted_bodies: list[bytes] = []
+
+
 class _Judge(BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        body = json.dumps({"choices": [{"message": {"content":
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.server.posted_bodies.append(body)  # observed by the leakage assertions below
+        resp = json.dumps({"choices": [{"message": {"content":
             '{"match": true, "confidence": 1.0, "reasoning": "identical"}'}}]}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(resp)
     def log_message(self, *a): pass
 
 
-def _serve() -> HTTPServer:
-    srv = HTTPServer(("127.0.0.1", 0), _Judge)
+def _serve() -> _JudgeServer:
+    srv = _JudgeServer(("127.0.0.1", 0), _Judge)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -65,11 +72,13 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
     # isolate the verifier in its own env dir
     verifier_dir = tmp_path / "verifier"
     verifier_dir.mkdir()
+    # the same template asset bundle asserted by test_generated_asset_tree_is_self_contained
     for rel in ("score_review.py", "verifier_core.py", "judge_prompt.md", "golden-review.json"):
         (verifier_dir / rel).write_bytes((_TEMPLATES_TESTS / rel).read_bytes())
     # task-binding metadata: run_verifier binds the candidate to the immutable
     # verifier-metadata.json beside the gold (case id + base/head refs + digest)
     gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
+    # case id tied to the shipped fixture via test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1
     (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
         "schema_version": 1,
         "case_id": "case-x",
@@ -108,8 +117,10 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
     assert rj["verifier_error"] == 0 and rj["reward"] == 1  # judged orbitally, not an error exit
     artifacts_blob = ((out_dir / "reward.json").read_text() + (out_dir / "reward-details.json").read_text()
                       + proc.stdout + proc.stderr)
+    judge_blob = b"".join(srv.posted_bodies).decode("utf-8", errors="replace")  # judge-bound channel: what the verifier POSTed
     for sentinel in list(_SENTINELS.values()) + ["REVIEWER_SECRET_SENTINEL_5d91", "PRIVATE_SOURCE_SENTINEL_2e4f",
                                                  "AGENT_OUTPUT_SENTINEL_6b3a", _JUDGE_KEY]:
         assert sentinel not in artifacts_blob        # no credential/source/agent/agent-key leakage
+        assert sentinel not in judge_blob            # ... nor through the judge request body
     for p, digest in zip((secret_file, source_file, agent_file), pre.values()):
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)

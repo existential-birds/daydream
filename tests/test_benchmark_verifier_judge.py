@@ -490,6 +490,10 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
         return type("R", (), {"verifier_error": 0, "reward": 1.0})()
 
     monkeypatch.setattr(sr, "run_verifier", fake_run_verifier)
+    # guard the env overrides: main() reads them from real os.environ and the
+    # assertions below expect the compile-time defaults
+    monkeypatch.delenv("DAYDREAM_JUDGE_ARTIFACT_PATH", raising=False)
+    monkeypatch.delenv("DAYDREAM_JUDGE_OUT_PATH", raising=False)
     sr.main()  # must not require real /tests or /logs — it only passes the paths through
     assert seen["gold"].endswith("golden-review.json")
     assert "tests" in Path(seen["gold"]).parts  # the __file__ sibling (templates/tests/)
