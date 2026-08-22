@@ -1164,3 +1164,22 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module, tmp_pat
     blob = json.dumps(details)
     assert "sk-ant-leakme123" not in blob and "<redacted>" in blob   # no credential, redacted
     assert len(details["errors"]) >= 1 and any("unexpected" in e for e in details["errors"])
+
+
+def test_main_fail_closed_on_bad_provider_and_reads_path_overrides(sr_module, tmp_path, monkeypatch) -> None:
+    sr = sr_module
+    out = tmp_path / "out"
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "nonsense")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.setenv("DAYDREAM_JUDGE_API_KEY", "k")
+    monkeypatch.setenv("DAYDREAM_JUDGE_ARTIFACT_PATH", str(tmp_path / "review.json"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_OUT_PATH", str(out))
+    (tmp_path / "review.json").write_text(json.dumps(
+        _candidate_artifact(sr, case_id="c", n=0)))
+    rc = sr.main()
+    assert rc == 1  # verifier_error
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("unsupported" in e or "expected anthropic or openai-compatible" in e
+               for e in details["errors"])  # typed diagnostic surfaced, not a barren client=None exit

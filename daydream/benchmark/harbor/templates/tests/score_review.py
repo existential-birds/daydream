@@ -646,6 +646,8 @@ _ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
 _ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
 _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
 _ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
+_ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
+_ENV_OUT_PATH = "DAYDREAM_JUDGE_OUT_PATH"
 _DEFAULT_PROVIDER = "anthropic"
 
 
@@ -920,23 +922,65 @@ def _build_client(env: dict[str, Any]) -> Any:
     return OpenAIJudgeClient(api_key, model, base_url=base_url, allowlist=allowlist)
 
 
+def _env_path(name: str, default: str) -> Path:
+    """Return ``Path(os.environ[name])`` when set, else ``Path(default)``.
+
+    The compiled-image defaults are unchanged; the overrides only relocate the
+    artifact/out paths for isolated subprocess runs (e.g. the isolation test).
+    """
+    value = os.environ.get(name)
+    return Path(value) if value else Path(default)
+
+
 def main() -> int:
-    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON."""
+    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON.
+
+    Provider selection is fail-closed: an unsupported ``DAYDREAM_JUDGE_PROVIDER``
+    or an out-of-allowlist judge host writes a typed bounded diagnostic artifact
+    (``reward.json``/``reward-details.json``) instead of a barren ``client=None``
+    exit with no provider reason. ``DAYDREAM_JUDGE_ARTIFACT_PATH`` /
+    ``DAYDREAM_JUDGE_OUT_PATH`` relocate the compiled defaults for isolated
+    subprocess runs; the compiled defaults ``/logs/artifacts/review.json`` and
+    ``/logs/verifier`` are unchanged.
+    """
     gold_path = Path(__file__).with_name("golden-review.json")
-    artifact_path = Path("/logs/artifacts/review.json")
-    out_dir = Path("/logs/verifier")
+    artifact_path = _env_path(_ENV_ARTIFACT_PATH, "/logs/artifacts/review.json")
+    out_dir = _env_path(_ENV_OUT_PATH, "/logs/verifier")
     env = {
         name: os.environ.get(name)
-        for name in (_ENV_PROVIDER, _ENV_MODEL, _ENV_API_KEY, _ENV_BASE_URL)
+        for name in (
+            _ENV_PROVIDER,
+            _ENV_MODEL,
+            _ENV_API_KEY,
+            _ENV_BASE_URL,
+            _ENV_ALLOWED_HOSTS,
+        )
     }
     try:
         client = _build_client(env)
-    except VerifierError:
+    except VerifierError as exc:
+        if env.get(_ENV_MODEL) and env.get(_ENV_API_KEY):
+            # Fail-closed provider/host rejection: a typed bounded diagnostic
+            # artifact naming only the rejected form -- never a barren exit.
+            provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+            model = env.get(_ENV_MODEL) or ""
+            reward = _write_error_artifact(
+                out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0
+            )
+            payload = (
+                reward.to_dict()
+                if hasattr(reward, "to_dict")
+                else {
+                    "verifier_error": int(getattr(reward, "verifier_error", 0)),
+                    "reward": float(getattr(reward, "reward", 0.0)),
+                }
+            )
+            print(json.dumps(payload))
+            return 1 if getattr(reward, "verifier_error", 0) else 0
+        # Missing MODEL/API_KEY keeps the compiled path: run_verifier emits its
+        # own "no judge client configured" typed diagnostic.
         client = None
-    try:
-        reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
-    except Exception:
-        reward = verifier_core.Reward(reward=0.0, gold_count=0, verifier_error=1)
+    reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
     payload = (
         reward.to_dict()
         if hasattr(reward, "to_dict")
