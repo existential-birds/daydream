@@ -6,10 +6,6 @@ are intercepted by the in-process ``fake_gh`` router. Subsequent
 collection/normalization/projection/orchestration tasks build on this seam.
 """
 
-import json
-
-import pytest
-
 _PR_HEADER = {
     "number": 101,
     "url": "https://github.com/o/r/pull/101",
@@ -204,7 +200,7 @@ def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
     from daydream.benchmark.storage import load_yaml_strict
 
     ws = tmp_path / "ws"
-    _seed_manifest(ws)  # Source(provider=github, hostname=github.com, repository=o/r, repository_id=None, visibility=unresolved)
+    _seed_manifest(ws)  # unresolved Source (repository=o/r)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
         "repo-view-full",
@@ -492,7 +488,7 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
 
 def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path, fake_gh):
     from daydream.benchmark.cli import _handle_benchmark_command
-    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+    from daydream.benchmark.storage import load_yaml_strict
 
     ws = tmp_path / "ws"
     _seed_manifest(ws)

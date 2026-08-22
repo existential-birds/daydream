@@ -147,6 +147,8 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
         raise PreflightError("repo_unresolved", "repository identity is in a partial/corrupt state")
     if visibility not in ("public", "private"):
         raise PreflightError("repo_unresolved", "repository identity did not resolve to public/private")
+    if not isinstance(repository_id, int):
+        raise PreflightError("incomplete_resolution", "repository identity lacks a numeric repository_id")
 
     try:
         _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
@@ -157,7 +159,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     print(f"repository visibility: {visibility}")
     print(f"requested PR count: {pr_count}")
     print(f"local destination: {root / 'imports'}")
-    return PreflightResult(login=login, repository_id=int(repository_id), visibility=visibility)
+    return PreflightResult(login=login, repository_id=repository_id, visibility=visibility)
 
 
 class ImportTargetError(Exception):
@@ -268,7 +270,8 @@ def _call_with_rate_limit_retry(
         error = git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
         if not isinstance(error, git_ops.RateLimitError):
             return proc
-        wait = min(error.retry_after if error.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S, _RATE_LIMIT_MAX_SLEEP_S)
+        retry_after = error.retry_after if error.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
+        wait = min(retry_after, _RATE_LIMIT_MAX_SLEEP_S)
         if attempt < _RATE_LIMIT_ATTEMPTS - 1:
             time.sleep(wait)
         last = proc
@@ -287,7 +290,8 @@ def _fetch_with_retry(root: Path, owner_repo: str, number: int):
 
 def _is_rate_limit_error(proc) -> bool:
     """True when a failed call's stderr carries a GitHub rate-limit signal."""
-    return isinstance(git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr), git_ops.RateLimitError)
+    error = git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
+    return isinstance(error, git_ops.RateLimitError)
 
 
 def _rest(root: Path, endpoint: str) -> list[Any]:

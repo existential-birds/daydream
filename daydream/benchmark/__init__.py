@@ -11,6 +11,7 @@ future issues.
 """
 
 from daydream.benchmark.config import BenchConfig
+from daydream.benchmark.github_import import run_import_prs
 from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import EVALUABLE_PRS, EvaluablePR, load_evaluable_prs
 from daydream.benchmark.schema import (
@@ -32,7 +33,6 @@ from daydream.benchmark.workspace import (
     validate_workspace,
     workspace_status,
 )
-from daydream.benchmark.github_import import run_import_prs
 
 __all__ = [
     "EVALUABLE_PRS",

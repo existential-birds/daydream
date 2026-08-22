@@ -779,7 +779,9 @@ class CaseDocument(BaseModel):
         return self
 
 
-def snapshot_head_sha(snapshot: "SnapshotReady | SnapshotUnreplayable") -> str | None:
+def snapshot_head_sha(
+    snapshot: "SnapshotReady | SnapshotUnreplayable | SnapshotImported",
+) -> str | None:
     """The 40-hex head SHA of a snapshot, or None when unknown (unreplayable)."""
     return snapshot.original_head_sha
 
