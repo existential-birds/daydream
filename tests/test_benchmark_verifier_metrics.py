@@ -33,3 +33,19 @@ def test_mean_task_score_and_counts():
     assert m["task_count"] == 4
     assert m["failed_task_count"] == 2  # None + verifier_error
     assert abs(m["mean_task_score"] - (1.0 + 0.5 + 0.0 + 0.0) / 4) < 1e-9
+
+def test_clean_accuracy_counts_only_clean_tasks():
+    rows = [
+        _row(1.0, 0, 0, 0, clean_task=1),  # correct clean (no FP)
+        _row(0.0, 0, 2, 0, clean_task=1),  # failed clean (clean gold with FPs)
+        _row(0.5, 1, 1, 1, clean_task=0),  # non-clean, excluded from denominator
+    ]
+    m = aggregate_metrics(rows)
+    assert m["clean_task_count"] == 2
+    assert abs(m["clean_accuracy"] - 0.5) < 1e-9  # 1 correct / 2 clean tasks
+
+
+def test_clean_accuracy_zero_clean_tasks_is_one():
+    m = aggregate_metrics([_row(0.5, 1, 1, 1, clean_task=0)])
+    assert m["clean_task_count"] == 0
+    assert m["clean_accuracy"] == 1.0  # zero-denominator → 1.0
