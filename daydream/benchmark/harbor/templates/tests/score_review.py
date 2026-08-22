@@ -28,6 +28,8 @@ class _AsyncHttpClient(Protocol):
 
 _VERIFIER_THRESHOLD = verifier_core.CONFIDENCE_THRESHOLD
 
+VerifierError = verifier_core.VerifierError
+
 JUDGE_PROMPT_TEMPLATE = (
     Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8")
 )
@@ -93,6 +95,38 @@ def render_pair_prompt(gold: dict, candidate: dict, *, template: str) -> str:
             template, gold, candidate, gold_body=gold_body, candidate_body=candidate_body
         )
     return filled
+
+
+def parse_verdict(raw: object) -> verifier_core.Verdict:
+    """Validate a raw judge verdict dict and return a ``Nondeterministic.Verdict``.
+
+    ``gold_id``/``candidate_id`` are placeholders the caller (``judge_pairs``)
+    stamps onto the returned verdict. Any violation — wrong type, out-of-range
+    confidence, missing key, non-dict input — raises ``VerifierError``; never
+    silently coerces a fallback value.
+    """
+    if not isinstance(raw, dict):
+        raise VerifierError("verdict must be a JSON object")
+    if "match" not in raw:
+        raise VerifierError("verdict missing required field 'match'")
+    match = raw["match"]
+    if not isinstance(match, bool):
+        raise VerifierError(f"verdict 'match' must be a boolean, got {match!r}")
+    if "confidence" not in raw:
+        raise VerifierError("verdict missing required field 'confidence'")
+    confidence = raw["confidence"]
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise VerifierError(f"verdict 'confidence' must be a number in [0,1], got {confidence!r}")
+    if not 0.0 <= confidence <= 1.0:
+        raise VerifierError(f"verdict 'confidence' must be in [0,1], got {confidence!r}")
+    if "reasoning" not in raw:
+        raise VerifierError("verdict missing required field 'reasoning'")
+    reasoning = raw["reasoning"]
+    if not isinstance(reasoning, str):
+        raise VerifierError(f"verdict 'reasoning' must be a string, got {reasoning!r}")
+    return verifier_core.Verdict(
+        gold_id="", candidate_id="", match=match, confidence=float(confidence), reasoning=reasoning
+    )
 
 
 def main() -> None:

@@ -46,3 +46,22 @@ def test_render_pair_prompt_is_bounded_and_fences_untrusted_text(sr_module, tmp_
     assert "<gold_finding>" in prompt and "</gold_finding>" in prompt
     assert "<candidate_finding>" in prompt and "</candidate_finding>" in prompt
     assert len(prompt.encode("utf-8")) <= 24 * 1024
+
+
+def test_parse_verdict_accepts_valid_and_rejects_malformed(sr_module) -> None:
+    sr = sr_module
+    ok = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "same defect"})
+    assert ok.match is True and ok.confidence == 0.9
+    nonmatch = sr.parse_verdict({"match": False, "confidence": 0.1, "reasoning": "different"})
+    assert nonmatch.match is False
+
+    for bad in (
+        {"match": "yes", "confidence": 0.9, "reasoning": "x"},  # match not bool
+        {"match": True, "confidence": 1.1, "reasoning": "x"},  # > 1.0
+        {"match": True, "confidence": -0.1, "reasoning": "x"},  # < 0.0
+        {"match": True, "confidence": 0.9},  # missing reasoning
+        {"match": True, "confidence": "0.9", "reasoning": "x"},  # confidence not numeric
+        "not a dict",  # not an object
+    ):
+        with pytest.raises(sr.VerifierError):
+            sr.parse_verdict(bad)
