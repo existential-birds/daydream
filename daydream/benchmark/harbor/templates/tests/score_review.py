@@ -278,6 +278,98 @@ class AnthropicJudgeClient:
             )
 
 
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_OPENROUTER_KEY_PREFIX = "sk-or-"
+_OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+_CHAT_COMPLETIONS_PATH = "/chat/completions"
+
+
+def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
+    """Resolve the Chat Completions base URL from the environment.
+
+    An explicit base URL always wins; an ``sk-or-`` OpenRouter key with no pin
+    routes to OpenRouter; anything else defaults to OpenAI direct.
+    """
+    if base_url_env:
+        return base_url_env
+    if api_key.startswith(_OPENROUTER_KEY_PREFIX):
+        return _OPENROUTER_BASE_URL
+    return _OPENAI_DEFAULT_BASE_URL
+
+
+def _openai_text(body: dict[str, Any]) -> str:
+    """Extract ``choices[0].message.content`` from an OpenAI-compatible response body."""
+    if not isinstance(body, dict):
+        raise VerifierError("Judge response body was not an object")
+    choices = body.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise VerifierError("Judge response missing a choices list")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise VerifierError("Judge response choice was not an object")
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        raise VerifierError("Judge response missing a message object")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise VerifierError("Judge response message content was not a string")
+    text = content.strip()
+    if not text:
+        raise VerifierError("Judge response message content was empty")
+    return text
+
+
+class OpenAIJudgeClient:
+    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        base_url: str,
+        http: _AsyncHttpClient | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+        self.http = http
+
+    async def complete_json(
+        self, *, user: str, system: str = "", max_tokens: int = 512
+    ) -> dict[str, Any]:
+        payload = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "content-type": "application/json",
+        }
+        url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
+        if self.http is not None:
+            return await _complete_json_with_http(
+                self.http,
+                url=url,
+                payload=payload,
+                headers=headers,
+                content=_openai_content,
+            )
+        async with httpx.AsyncClient() as http:
+            return await _complete_json_with_http(
+                http,
+                url=url,
+                payload=payload,
+                headers=headers,
+                content=_openai_content,
+            )
+
+
 def main() -> None:
     ...
 

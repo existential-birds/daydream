@@ -93,3 +93,39 @@ async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module) ->
     assert calls[0][0] == "https://api.anthropic.com/v1/messages"
     assert calls[0][1]["x-api-key"] == "sk-ant-x"
     assert calls[0][2]["model"] == "claude-x"
+
+
+@pytest.mark.asyncio
+async def test_openai_client_routes_base_url_and_posts_chat_completions(sr_module) -> None:
+    sr = sr_module
+    assert sr.resolve_base_url("sk-or-abc", None) == "https://openrouter.ai/api/v1"
+    assert sr.resolve_base_url("sk-xyz", None) == "https://api.openai.com/v1"
+    assert sr.resolve_base_url("sk-xyz", "https://custom.example/v1") == "https://custom.example/v1"
+
+    calls = []
+
+    class FakeClient:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append((url, headers, json, timeout))
+            return type(
+                "R",
+                (),
+                {
+                    "status_code": 200,
+                    "text": "ok",
+                    "json": lambda self: {
+                        "choices": [{"message": {"content": '{"match": false, "confidence": 0.2, "reasoning": "no"}'}}]
+                    },
+                },
+            )()
+
+    client = sr.OpenAIJudgeClient(
+        api_key="sk-or-abc",
+        model="m",
+        base_url="https://openrouter.ai/api/v1",
+        http=FakeClient(),
+    )
+    raw = await client.complete_json(user="<prompt>")
+    assert raw == {"match": False, "confidence": 0.2, "reasoning": "no"}
+    assert calls[0][0] == "https://openrouter.ai/api/v1/chat/completions"
+    assert calls[0][1]["Authorization"] == "Bearer sk-or-abc"
