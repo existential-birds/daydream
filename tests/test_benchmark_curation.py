@@ -374,6 +374,15 @@ def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path, fake
     assert raw["curation"]["gold_status"] == "findings"
 
 
+def test_stable_curation_types_exported():
+    import daydream.benchmark as bm
+    assert callable(bm.apply_gold_fragment)
+    assert callable(bm.accept_candidate)
+    assert callable(bm.mark_ready)
+    assert callable(bm.validate_case)
+    assert bm.CurationError
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
