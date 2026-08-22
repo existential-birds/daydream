@@ -591,10 +591,10 @@ def _derive_title(body: str) -> str:
 
 
 def _title_ok(title: str) -> bool:
-    """True when *title* is non-empty and within the 500 UTF-8 byte bound."""
+    """True when *title* is non-empty and within the 500-character bound."""
     if not title:
         return False
-    return 0 < len(title.encode("utf-8")) <= 500
+    return 0 < len(title) <= 500
 
 
 def _anchor_location(
