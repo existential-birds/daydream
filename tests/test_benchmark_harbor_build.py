@@ -421,6 +421,10 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
         groups[canon] = ordinal + 1
         expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
     assert [f["candidate_id"] for f in art["findings"]] == expected_ids
+    # exactly candidate-shaped: gold-only finding_id and provenance are absent
+    for entry in art["findings"]:
+        assert set(entry) == {"candidate_id", "title", "body", "severity",
+                              "path", "start_line", "end_line"}
     # round-trips through the verifier's own validation
     assert vc.validate_candidate_artifact(art)
 

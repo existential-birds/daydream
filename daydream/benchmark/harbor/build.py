@@ -177,8 +177,11 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     ``head_ref`` are the deterministic ``base`` / ``head`` refs. Findings are
     flattened (reusing :func:`_flatten_finding` -- a location-less finding
     raises :class:`CompileError`), ordered by ``finding_id`` ascending, and
-    assigned ordinal 0,1,2,... in that order; each entry's ``candidate_id`` is
-    derived via ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
+    assigned ordinal 0,1,2,... in that order; each entry is exactly
+    candidate-shaped -- ``candidate_id`` plus the flattened content fields
+    (``title``/``body``/``severity``/``path``/``start_line``/``end_line``),
+    never the gold-only ``finding_id`` -- with ``candidate_id`` derived via
+    ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
     """
     from daydream.benchmark.harbor import verifier_core as vc
     if not findings:
@@ -196,7 +199,7 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     # artifact re-derives identical ids under ``validate_candidate_artifact``.
     groups: dict[tuple, int] = {}
     entries = []
-    for flattened, fid in flat:
+    for flattened, _ in flat:
         canon = (
             str(flattened.get("title") or ""),
             str(flattened.get("body") or ""),
@@ -207,7 +210,7 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
         )
         ordinal = groups.get(canon, 0)
         groups[canon] = ordinal + 1
-        entry = {**flattened, "finding_id": fid}
+        entry = dict(flattened)
         entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
         entries.append(entry)
     return {
