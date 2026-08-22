@@ -41,11 +41,15 @@ def test_run_curate_tui_queue_renders_index_and_quits(tmp_path, fake_gh, capsys)
     assert case_id in table and "draft" in table and "historical" in table
     assert "101" in table and ("2" in table and "5" in table)
 
-    rc = run_curate_tui(ws, read_line=_scripted("q"))       # quit from the queue
+    # queue-mode navigation: out-of-range digit re-prompts, 'a' re-renders,
+    # then digit row-lookup selects the case and 'q' quits it.
+    rc = run_curate_tui(ws, read_line=_scripted("9", "a", "1", "q"))
     assert rc == 0
+    out = capsys.readouterr().out
+    assert "no case at row 9" in out
     # discriminating: the real case_id (from list_cases) must be rendered to stdout,
     # so a stub that ignores list_cases cannot pass
-    assert case_id in capsys.readouterr().out
+    assert case_id in out
 
 def test_render_case_shows_header_and_numbered_evidence(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
@@ -65,6 +69,27 @@ def test_run_curate_tui_unknown_action_reprompts(tmp_path, fake_gh, capsys):
     rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
     assert rc == 0
     assert "unknown" in capsys.readouterr().out
+
+
+def test_run_curate_tui_queue_bogus_case_id_reprompts(tmp_path, fake_gh, capsys):
+    """A non-digit selector that matches no known case_id reprompts (rc 0)
+    instead of letting get_case's CurationError kill the whole session."""
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    rc = run_curate_tui(ws, read_line=_scripted("bogus-id", "q"))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert case_id in out  # the index rendered before the prompt
+    assert "unknown case bogus-id" in out
+
+
+def test_reason_frozensets_are_the_service_constants():
+    """The client must not carry its own reason lists; a reason added on the
+    service side is visible to the TUI automatically (no drift)."""
+    import daydream.benchmark.curate_tui as tui
+    from daydream.benchmark import curation as cu
+    assert tui._EVIDENCE_REASONS is cu._EVIDENCE_REASONS
+    assert tui._CASE_EXCLUSION_REASONS is cu._CASE_EXCLUSION_REASONS
 
 
 def test_action_accept_persists_historical_finding(tmp_path, fake_gh):
@@ -280,9 +305,11 @@ def test_case_exclude_other_requires_note(tmp_path, fake_gh, capsys):
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
-    run_curate_tui(ws, case_id, read_line=_scripted("z", "other", "q"))  # no note
+    run_curate_tui(ws, case_id, read_line=_scripted("z", "other", "", "q"))  # empty note
     assert path.read_bytes() == before
-    assert "Traceback" not in capsys.readouterr().err
+    out = capsys.readouterr()
+    assert "case exclusion reason 'other' requires a note" in out.out
+    assert "Traceback" not in out.err
 
 
 def test_defer_is_ui_local_no_mutation(tmp_path, fake_gh, capsys):

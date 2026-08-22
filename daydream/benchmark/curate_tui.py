@@ -281,23 +281,10 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
     return "rerender"
 
 
-_EVIDENCE_REASONS = (
-    "fixed_before_snapshot",
-    "not_actionable",
-    "incorrect",
-    "duplicate",
-    "style_only",
-    "out_of_scope",
-    "other",
-)
-
-
-_CASE_EXCLUSION_REASONS = (
-    "unreplayable",
-    "not_suitable",
-    "duplicate_case",
-    "other",
-)
+# Single source of truth lives on the curation service; re-export here so a
+# reason added on one side cannot drift apart from the other.
+_EVIDENCE_REASONS = cu._EVIDENCE_REASONS
+_CASE_EXCLUSION_REASONS = cu._CASE_EXCLUSION_REASONS
 
 
 def _action_exclude_case(
@@ -545,6 +532,9 @@ def run_curate_tui(
                         print(f"no case at row {stripped}; try again")
                         continue
                     selected = cases[index]["case_id"]
+                elif stripped not in {case["case_id"] for case in cases}:
+                    print(f"unknown case {stripped}; try again")
+                    continue
                 if _run_case(root, selected, read) == "quit":
                     return 0
             except KeyboardInterrupt:

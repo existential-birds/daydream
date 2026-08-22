@@ -622,7 +622,7 @@ def _handle_benchmark_curate(args) -> int:
             return run_curate_tui(args.dir, args.case)
         print(
             "curate: interactive curation requires a TTY; pass --apply-gold <file> to apply "
-            "a reviewed gold draft (interactive client is issue #5)",
+            "a reviewed gold draft",
             file=sys.stderr,
         )
         return 1
