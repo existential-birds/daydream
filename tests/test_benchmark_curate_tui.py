@@ -65,3 +65,44 @@ def test_run_curate_tui_unknown_action_reprompts(tmp_path, fake_gh, capsys):
     rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
     assert rc == 0
     assert "unknown" in capsys.readouterr().out
+
+
+def test_action_accept_persists_historical_finding(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"]
+               if c["exact_acceptable"])
+
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))   # accept index 1
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert f["provenance"]["kind"] == "historical" and f["provenance"]["source_ids"] == [src]
+    assert raw["curation"]["state"] == "draft"
+
+
+def test_action_accept_invalid_index_mutates_nothing(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "999", "q"))  # bad idx
+    assert path.read_bytes() == before                       # unchanged
+
+
+def test_action_accept_non_exact_candidate_offers_edit_path(tmp_path, fake_gh, capsys):
+    import yaml
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["candidates"][0]["exact_acceptable"] = False
+    raw["candidates"][0]["not_exact_reason"] = "needs rework"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    after_rewrite = path.read_bytes()
+
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))
+    assert path.read_bytes() == after_rewrite                 # unchanged
+    assert "not exactly acceptable" in capsys.readouterr().out

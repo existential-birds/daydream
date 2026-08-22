@@ -134,8 +134,35 @@ _ACTIONS = frozenset("aenxcrdziq")
 _ACTION_PROMPT = "action [a/e/n/x/c/r/d/z/i/q]: "
 
 
+def _action_accept(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
+    """The ``[a]`` accept-candidate action: one exact-acceptable candidate."""
+    candidates = view.get("candidates") or []
+    text = _prompt(read_line, "candidate (number, 0 to cancel): ").strip()
+    if text == "0":
+        return "continue"
+    try:
+        indices = parse_indices(text, len(candidates))
+    except ValueError as exc:
+        print(str(exc))
+        return "continue"
+    cand = candidates[indices[0]]
+    src = cand["source_id"]
+    if not cand.get("exact_acceptable"):
+        print(f"{src} is not exactly acceptable \u2014 use [e] to edit it")
+        return "continue"
+    try:
+        cu.accept_candidate(root, case_id, src)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"accepted {src} as a historical finding")
+    return "rerender"
+
+
 def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
     """Dispatch one recognized action; returns the next action-loop outcome."""
+    if action == "a":
+        return _action_accept(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"
@@ -144,6 +171,7 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
         return "done"
     print(f"action [{action}]: not yet wired")
     return "continue"
+
 
 
 def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
@@ -157,6 +185,8 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
         outcome = _run_action(action, root, case_id, cu.get_case(root, case_id), read_line)
         if outcome in ("quit", "done"):
             return outcome
+        if outcome == "rerender":
+            print(render_case(cu.get_case(root, case_id)))
 
 
 
