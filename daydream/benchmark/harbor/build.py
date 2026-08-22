@@ -409,10 +409,13 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     gold_path.write_bytes(gold_bytes)
 
     # Immutable, deterministic per-case verifier metadata beside the gold file
-    # (no timestamps): opaque case id + base/head refs + the hidden-gold sentinel.
+    # (no timestamps): opaque task key + base/head refs + the hidden-gold sentinel.
+    # ``source_case_id`` is the schema-scoped case id the gold finding ids were
+    # derived with (the opaque ``case_id`` binds the candidate artifact).
     metadata = {
         "schema_version": 1,
         "case_id": key,
+        "source_case_id": case_id,
         "base_ref": "base",
         "head_ref": "head",
         "template_version": TEMPLATE_VERSION,

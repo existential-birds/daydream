@@ -478,7 +478,7 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
 
     gold = _load_json(case / "tests" / "golden-review.json")
     oracle = storage.load_json_strict(case / "solution" / "golden-review.json")
-    assert vc.validate_gold_set(gold)                       # gold passes gold-set validation
+    assert vc.validate_gold_set(gold, case_id=case_id)      # gold passes gold-set validation
     vc.validate_candidate_artifact(oracle)                 # oracle passes candidate validation
     assert [f["finding_id"] for f in gold] == sorted(f["finding_id"] for f in gold)
     # gold↔oracle agreement: same content fields, in the same finding_id order

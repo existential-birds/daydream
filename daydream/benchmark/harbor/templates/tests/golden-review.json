@@ -1,6 +1,6 @@
 [
   {
-    "finding_id": "ddcdd0b8729228dcaaa1259002bdd579ed4c872d6d4f5c1e6a9be0bbcfebbb12",
+    "finding_id": "0e2356faadfbf30a1087a14255ca9273ed0bd6bc1edc741f0b709c4e52c237b5",
     "title": "Cache key not tenant-scoped",
     "body": "The cache key collides across tenants.",
     "severity": "high",
@@ -9,7 +9,7 @@
     "end_line": 42
   },
   {
-    "finding_id": "1bd3098840e229306e03a15f7aa3da9a3aaacdde8d56af56e0cbeab5683fb91c",
+    "finding_id": "68f808c0cf14de126374b79475fc3e40793c54bac5664ddc1f49f54a1446852d",
     "title": "Response not validated",
     "body": "The response is interpolated without escaping.",
     "severity": "medium",
