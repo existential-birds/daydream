@@ -219,7 +219,7 @@ def test_accept_candidate_produces_historical_derived_finding(tmp_path, fake_gh)
     assert f["provenance"]["source_ids"] == [cand["source_id"]]
     assert f["title"] == cand["title"] and f["body"] == cand["body"]
     assert f["location"] == cand["location"]
-    assert f["finding_id"] == derive_finding_id(f)      # derived, content-addressed
+    assert f["finding_id"] == derive_finding_id(f, case_id=case_id)      # derived, content-addressed
     assert raw["curation"]["gold_status"] == "findings"
     assert raw["curation"]["gold_mode"] == "historical"
     assert raw["curation"]["state"] == "draft"           # accept on draft stays draft
@@ -248,7 +248,7 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
     f2 = raw["curation"]["findings"][0]
     assert f2["provenance"]["kind"] == "edited" and f2["finding_id"] != f["finding_id"]
     assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "edited"
-    assert f2["finding_id"] == derive_finding_id(f2)
+    assert f2["finding_id"] == derive_finding_id(f2, case_id=case_id)
 
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
@@ -367,7 +367,7 @@ def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path, fake
     cu.apply_gold_fragment(ws, case_id, fragment)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     f = raw["curation"]["findings"][0]
-    assert f["finding_id"] == derive_finding_id(f)          # forged id discarded
+    assert f["finding_id"] == derive_finding_id(f, case_id=case_id)          # forged id discarded
     assert f["provenance"]["kind"] == "historical"          # derived from candidate match
     assert raw["curation"]["state"] == "draft"              # never ready
     assert raw["curation"]["snapshot_attested"] is False
@@ -529,7 +529,7 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
     raw = load_yaml_strict(path)
     f1 = {"title": "dup", "body": "b", "severity": "low",
           "provenance": {"kind": "authored", "source_ids": []}}
-    f1["finding_id"] = derive_finding_id(f1)
+    f1["finding_id"] = derive_finding_id(f1, case_id=case_id)
     raw["curation"]["findings"] = [f1, dict(f1)]   # same canonical -> duplicates
     raw["curation"]["state"] = "draft"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
@@ -541,7 +541,7 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
         {"title": f"f{i}", "body": "b", "severity": "low",
          "provenance": {"kind": "authored", "source_ids": []}} for i in range(51)]
     for f in raw["curation"]["findings"]:
-        f["finding_id"] = derive_finding_id(f)
+        f["finding_id"] = derive_finding_id(f, case_id=case_id)
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(cu.CurationError):
         cu.validate_case(ws, case_id)

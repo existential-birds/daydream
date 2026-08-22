@@ -250,7 +250,7 @@ def test_evidence_requires_canonical_source_id_and_body_hash():
 
 def _valid_case_dict():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "case_id": "pr-000101-0123456789ab",
         "pull_request": {
             "number": 101,
@@ -288,8 +288,9 @@ def _valid_case_dict():
             "findings": [
                 {
                     "finding_id": _finding_id_for(
+                        "pr-000101-0123456789ab",
                         "Cache misses", "The cache layers never populate.", "high", "src/cache.py", 2, 2
-                    ) or "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    ),
                     "title": "Cache misses",
                     "body": "The cache layers never populate.",
                     "severity": "high",
@@ -303,14 +304,15 @@ def _valid_case_dict():
     }
 
 
-def _finding_id_for(title, body, severity, path, start_line, end_line):
+def _finding_id_for(case_id, title, body, severity, path, start_line, end_line):
     return derive_finding_id(
         {
             "title": title,
             "body": body,
             "severity": severity,
             "location": {"path": path, "start_line": start_line, "end_line": end_line},
-        }
+        },
+        case_id=case_id,
     )
 
 
@@ -401,13 +403,36 @@ def test_finding_location_must_be_relative_and_ordered():
 
 def test_finding_id_sha256_and_duplicate_rejection():
     f = _valid_case().curation.findings[0]
-    expected = derive_finding_id(f)
+    expected = derive_finding_id(f, case_id="pr-000101-0123456789ab")
     assert f.finding_id == expected
     # duplicate canonical finding in one case rejected
     raw = _valid_case_dict()
     raw["curation"]["findings"].append(raw["curation"]["findings"][0])
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+
+
+def test_finding_id_is_case_scoped():
+    f = _valid_case().curation.findings[0]
+    id1 = derive_finding_id(f, case_id="pr-000101-0123456789ab")
+    id2 = derive_finding_id(f, case_id="pr-000102-0123456789ab")
+    assert id1 != id2                      # identical content, different case -> different id
+
+
+def test_v2_case_rejects_noncanonical_finding_id():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["finding_id"] = "0" * 64   # wrong digest
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert "finding_id" in str(ei.value)
+
+
+def test_v1_legacy_case_loads_without_digest_check():
+    raw = _valid_case_dict()
+    raw["schema_version"] = 1
+    raw["curation"]["findings"][0]["finding_id"] = "e" * 64   # legacy id, not case-scoped
+    doc = CaseDocument.model_validate(raw)                    # must load (digest gated on v2)
+    assert doc.schema_version == 1
 
 
 def test_historical_daydream_marker_cannot_be_gold():
@@ -422,7 +447,8 @@ def test_historical_daydream_marker_cannot_be_gold():
         "location": None,
         "provenance": {"kind": "historical", "source_ids": ["github:review_comment:1"]},
     }
-    finding["finding_id"] = derive_finding_id(finding)  # canonical, so the marker guard is what rejects
+    # canonical, so the marker guard is what rejects
+    finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
     raw["curation"]["findings"][0] = finding
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)

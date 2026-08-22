@@ -552,7 +552,7 @@ def _curate_case(ws, case_file):
         "location": {"path": "a.py", "start_line": 4, "end_line": 4},
         "provenance": {"kind": "historical", "source_ids": ["github:inline_comment:1"]},
     }
-    finding["finding_id"] = derive_finding_id(finding)
+    finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
     raw["curation"] = {
         "state": "ready",
         "snapshot_attested": True,

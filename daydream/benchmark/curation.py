@@ -380,7 +380,7 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
         "location": candidate.get("location"),
         "provenance": {"kind": "historical", "source_ids": [source_id]},
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="accept")
@@ -438,7 +438,7 @@ def add_finding(
             "source_ids": source_ids,
         },
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="add")
@@ -472,7 +472,7 @@ def add_findings(
                 "source_ids": source_ids,
             },
         }
-        finding["finding_id"] = schema.derive_finding_id(finding)
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
         curation.setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="add")
@@ -494,7 +494,7 @@ def _build_replacement(
             "source_ids": source_ids,
         },
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     return finding
 
 
@@ -789,7 +789,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             raw, finding, list(frag.get("source_ids") or []), case_id=case_id
         )
         finding["provenance"] = {"kind": kind, "source_ids": source_ids}
-        finding["finding_id"] = schema.derive_finding_id(finding)
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
         findings.append(finding)
     curation["findings"] = findings
 

@@ -280,14 +280,18 @@ def _field_of(value: "Finding | dict", name: str) -> Any:
     return getattr(value, name, None)
 
 
-def derive_finding_id(finding: "Finding | dict") -> str:
-    """sha256 over the canonical (title, body, severity, path, start/end) tuple.
+def derive_finding_id(finding: "Finding | dict", *, case_id: str) -> str:
+    """sha256 over the case-scoped canonical (case_id, title, body, severity,
+    path, start/end) tuple.
 
     Nulls are normalized to the empty string; ``finding_id`` must equal this
     digest so a case's findings are content-addressable and dedupe-friendly.
+    ``case_id`` is required (keyword-only) so every caller binds findings to a
+    case.
     """
     payload = "\x1f".join(
         [
+            str(case_id or ""),
             str(_field_of(finding, "title") or ""),
             str(_field_of(finding, "body") or ""),
             str(_field_of(finding, "severity") or ""),
@@ -689,9 +693,7 @@ class Finding(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _canonical_id(self) -> "Finding":
-        if self.finding_id != derive_finding_id(self):
-            raise ValueError("finding_id is not the canonical sha256")
+    def _historical_marker(self) -> "Finding":
         if self.provenance.kind == "historical":
             text = f"{self.title}\n{self.body}"
             if FINDING_MARKER_RE.search(text):
@@ -787,7 +789,7 @@ class CaseDocument(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     case_id: str
     pull_request: PullRequestMeta
     snapshot: Snapshot
@@ -811,6 +813,16 @@ class CaseDocument(BaseModel):
         expected = case_id_for(pr_number, head)
         if self.case_id != expected:
             raise ValueError(f"case_id {self.case_id!r} mismatches {expected!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _canonical_finding_ids(self) -> "CaseDocument":
+        if self.schema_version == 2:
+            for i, f in enumerate(self.curation.findings):
+                if f.finding_id != derive_finding_id(f, case_id=self.case_id):
+                    raise ValueError(
+                        f"finding[{i}] finding_id is not the canonical sha256 for case {self.case_id}"
+                    )
         return self
 
     @model_validator(mode="after")

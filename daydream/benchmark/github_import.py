@@ -778,7 +778,7 @@ def _case_materialize(
                 "error": None,
             }
         case_doc: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "case_id": case_id,
             "pull_request": pull_request.model_dump(mode="json"),
             "snapshot": snapshot_doc,
