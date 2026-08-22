@@ -1,3 +1,4 @@
+import hashlib
 import tomllib
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from pydantic import ValidationError
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
+    EvidenceRecord,
+    ImportDocument,
     PullRequestEntry,
     TransitionError,
     case_id_for,
@@ -130,6 +133,59 @@ def test_ledger_entry_valid_and_fetch_failed_error_shape():
         error={"code": "E_AUTH", "message": "no access"},
     )
     assert failed.error["code"] == "E_AUTH"
+
+
+def _evidence(kind, db_id, **kw):
+    body = "see above"
+    base = {
+        "source_id": f"github:{kind}:{db_id}", "kind": kind, "database_id": db_id,
+        "node_id": "N1", "author": {"login": "bot[bot]", "type": "Bot"},
+        "body": body, "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z", "submitted_at": None, "is_bot": True,
+        "url": "https://github.com/o/r/pull/1#discussion_r1",
+    }
+    base.update(kw)
+    return base
+
+
+def _valid_import_document():
+    return {
+        "schema_version": 1,
+        "repository": {"id": 5, "name_with_owner": "o/r", "visibility": "private"},
+        "pull_request": {
+            "number": 101,
+            "url": "https://github.com/o/r/pull/101",
+            "title": "Fix cache",
+            "state": "open",
+            "base": {"ref": "main", "sha": "b" * 40},
+            "head": {"ref": "feature/cache", "sha": "h" * 40},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "author": {"login": "alice", "type": "User"},
+        },
+        "evidence": [_evidence("inline_comment", 7)],
+        "fetch": {"fetched_at": "2026-01-01T00:00:00Z", "etag": None, "payload_sha256": "a" * 64},
+    }
+
+
+def test_import_document_validates_and_forbids_unknown():
+    doc = _valid_import_document()
+    assert ImportDocument.model_validate(doc).pull_request["number"] == 101
+    doc["bogus"] = True
+    with pytest.raises(ValidationError):
+        ImportDocument.model_validate(doc)
+
+
+def test_evidence_requires_canonical_source_id_and_body_hash():
+    e = _evidence("inline_comment", 7)
+    e["source_id"] = "not-canonical"
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate(e)
+    e2 = _evidence("inline_comment", 8)
+    e2["body_sha256"] = "zz"
+    with pytest.raises(ValidationError):
+        EvidenceRecord.model_validate(e2)
 
 
 def _valid_case_dict():
