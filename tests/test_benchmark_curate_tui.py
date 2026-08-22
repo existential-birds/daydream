@@ -313,3 +313,12 @@ def test_ctrl_c_preserves_prior_actions_and_cleans_temp(tmp_path, fake_gh, capsy
     out = capsys.readouterr()
     assert "interrupted" in out.out
     assert "Traceback" not in out.err
+
+
+def test_corrupt_workspace_returns_1_no_traceback(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    (ws / "cases" / f"{case_id}.yaml").unlink()          # absent case file
+    rc = run_curate_tui(ws, read_line=_scripted("q"))
+    assert rc == 1
+    assert "Traceback" not in capsys.readouterr().err

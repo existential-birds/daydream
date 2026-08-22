@@ -8,6 +8,7 @@ deterministic tests; Rich stays available for live styling.
 
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +17,7 @@ import yaml
 from pydantic import ValidationError
 
 from daydream.benchmark import curation as cu
+from daydream.benchmark.storage import WorkspaceCorrupt
 
 
 def parse_indices(spec: str, n: int) -> list[int]:
@@ -502,28 +504,32 @@ def run_curate_tui(
     opens *case_id* once and returns its outcome.
     """
     read = read_line or input
-    if case_id is not None:
-        _run_case(root, case_id, read)
-        return 0
-    while True:
-        try:
-            cases = cu.list_cases(root)
-            print(render_index_table(cases))
-            text = _prompt(read, "case (id or number), or q: ")
-            if text in ("a", "A"):
-                continue
-            stripped = text.strip()
-            if stripped in ("q", "Q"):
-                return 0
-            selected: str = stripped
-            if stripped.isdigit():
-                index = int(stripped) - 1
-                if not (0 <= index < len(cases)):
-                    print(f"no case at row {stripped}; try again")
+    try:
+        if case_id is not None:
+            _run_case(root, case_id, read)
+            return 0
+        while True:
+            try:
+                cases = cu.list_cases(root)
+                print(render_index_table(cases))
+                text = _prompt(read, "case (id or number), or q: ")
+                if text in ("a", "A"):
                     continue
-                selected = cases[index]["case_id"]
-            if _run_case(root, selected, read) == "quit":
-                return 0
-        except KeyboardInterrupt:
-            print("interrupted \u2014 prior actions preserved")
+                stripped = text.strip()
+                if stripped in ("q", "Q"):
+                    return 0
+                selected: str = stripped
+                if stripped.isdigit():
+                    index = int(stripped) - 1
+                    if not (0 <= index < len(cases)):
+                        print(f"no case at row {stripped}; try again")
+                        continue
+                    selected = cases[index]["case_id"]
+                if _run_case(root, selected, read) == "quit":
+                    return 0
+            except KeyboardInterrupt:
+                print("interrupted \u2014 prior actions preserved")
+    except (cu.CurationError, WorkspaceCorrupt) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
