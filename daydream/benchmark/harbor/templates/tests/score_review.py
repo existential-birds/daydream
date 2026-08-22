@@ -7,6 +7,16 @@ Messages + OpenAI-compatible) behind one ``complete_json`` seam, strict verdict
 parsing, a shared retry/redirect/timeout policy, a concurrency-10 runner, and
 ``run_verifier`` which writes ``reward.json`` / ``reward-details.json``
 atomically.
+
+The external judge surface is fail-closed and bounded: exactly
+``anthropic | openai-compatible`` providers are accepted, the judge host must
+sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
+fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
+credential-preserving same-origin hops whose targets are re-validated against
+the allowlist, response/reasoning payloads are size-capped (rejected, never
+truncated-and-accepted), and every failure path writes typed bounded (redacted)
+diagnostics to ``reward.json`` / ``reward-details.json`` -- never a bare exit
+and never an unbounded or credential-bearing error.
 """
 
 from __future__ import annotations
@@ -15,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -42,6 +53,15 @@ JUDGE_PROMPT_TEMPLATE = (
 _PROMPT_CAP_BYTES = 24 * 1024
 _MAX_RETRIES = 3
 _REQUEST_TIMEOUT = 60.0
+
+# Hardening caps: response/reasoning payloads are rejected -- never truncated
+# and accepted -- above these sizes; redirects are bounded; diagnostics are
+# bounded and redacted before they reach any artifact or log.
+_RESPONSE_CAP_BYTES = 256 * 1024
+_REASONING_CAP_BYTES = 32 * 1024
+_MAX_REDIRECTS = 3
+_ERROR_TEXT_CAP_BYTES = 4096
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _ESCAPED_FINDING_TAGS = {
     "<gold_finding>": "&lt;gold_finding&gt;",
@@ -76,6 +96,121 @@ _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
 
+_REDACTION_PATTERNS = (
+    re.compile(r"sk-ant-[A-Za-z0-9]+"),
+    re.compile(r"sk-or-[A-Za-z0-9]+"),
+    re.compile(r"Bearer [A-Za-z0-9._~+/=-]+"),
+    re.compile(r"x-api-key:?\s*\S+"),
+    re.compile(r"[0-9a-fA-F]{32,}"),
+    re.compile(r"[A-Za-z0-9+/]{40,}={0,2}"),
+)
+
+
+def _normalize_host(host: str | None) -> str:
+    """Lowercase ``host`` and strip a trailing dot; never raises."""
+    if host is None:
+        return ""
+    return host.strip().lower().rstrip(".")
+
+
+def _effective_allowlist(base_url: str, env: dict[str, Any]) -> set[str]:
+    """Resolve the judge-host allowlist from env; absent -> own-host fail-closed.
+
+    A non-empty ``DAYDREAM_JUDGE_ALLOWED_HOSTS`` (whitespace/comma-separated)
+    wins; otherwise the effective allowlist is exactly the resolved judge
+    host of ``base_url`` so an unconfigured verifier can only ever reach its
+    own judge endpoint -- never an arbitrary host.
+    """
+    raw = (env or {}).get(_ENV_ALLOWED_HOSTS)
+    if raw:
+        hosts = {
+            _normalize_host(host)
+            for host in re.split(r"[\s,]+", str(raw))
+            if host.strip()
+        }
+        if hosts:
+            return hosts
+    return {_normalize_host(urllib.parse.urlsplit(base_url).hostname)}
+
+
+def _validate_base_url(url: str, allowlist: set[str]) -> str:
+    """Validate ``url`` against the hardened judge-request contract.
+
+    Rejects userinfo, any query string or fragment, non-HTTPS remote schemes
+    (``http`` is permitted only to a loopback host), and any host outside
+    ``allowlist``. Returns ``url`` unchanged; every rejection is a bounded
+    ``VerifierError`` naming only the rejected form -- never URL content.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is not None or parsed.password is not None:
+        raise VerifierError("judge URL must not contain userinfo")
+    if parsed.query:
+        raise VerifierError("judge URL must not contain a query string")
+    if parsed.fragment:
+        raise VerifierError("judge URL must not contain a fragment")
+    host = _normalize_host(parsed.hostname)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and host in _LOOPBACK_HOSTS
+    ):
+        raise VerifierError("judge URL must use https (loopback http allowed)")
+    if not host or host not in allowlist:
+        raise VerifierError("judge host is not in the verifier allowlist")
+    return url
+
+
+def _resolve_redirect(request_url: str, location: str, allowlist: set[str]) -> str:
+    """Resolve a redirect ``location`` against ``request_url`` and host-check it.
+
+    A relative ``Location`` is resolved against the request URL first, then the
+    resolved target is validated against ``allowlist`` exactly like an initial
+    base URL -- a cross-host, out-of-allowlist, or malformed target is a
+    terminal bounded ``VerifierError``.
+    """
+    resolved = urllib.parse.urljoin(request_url, location)
+    return _validate_base_url(resolved, allowlist)
+
+
+def _response_bytes(response: Any) -> bytes:
+    """Return the response payload as bytes, preferring ``.content``."""
+    content = getattr(response, "content", None)
+    if content is not None:
+        return bytes(content)
+    text = getattr(response, "text", "")
+    return str(text).encode("utf-8")
+
+
+def _redact_text(text: str) -> str:
+    """Replace credential-like content with ``<redacted>``."""
+    for pattern in _REDACTION_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    return text
+
+
+def _bounded_error(text: object) -> str:
+    """Redact ``text`` and bound it to ``_ERROR_TEXT_CAP_BYTES`` UTF-8 bytes.
+
+    Redaction runs before the truncation so a credential in the first bytes can
+    never survive a cut; truncation lands on a UTF-8 byte boundary. Empty input
+    returns ``""``; any non-empty input stays non-empty.
+    """
+    if not text:
+        return ""
+    redacted = _redact_text(str(text))
+    encoded = redacted.encode("utf-8")
+    if len(encoded) <= _ERROR_TEXT_CAP_BYTES:
+        return redacted
+    return encoded[:_ERROR_TEXT_CAP_BYTES].decode("utf-8", errors="ignore")
+
+
+def _bounded_repr(value: object) -> str:
+    """Return ``repr(value)`` redacted and bounded like any other error text.
+
+    Composes the module's single redact-and-bound seam (``_bounded_error``)
+    over ``repr`` so the four verdict-field diagnostics (match/confidence/
+    reasoning) never repeat the wrap and stay byte-identical to today's
+    output.
+    """
+    return _bounded_error(repr(value))
 
 
 def _render_filled(
@@ -179,17 +314,29 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
     verifier_core.validate_exact_keys(raw, {"match", "confidence", "reasoning"}, "verdict")
     match = raw["match"]
     if not isinstance(match, bool):
-        raise VerifierError(f"verdict 'match' must be a boolean, got {match!r}")
+        raise VerifierError(
+            f"verdict 'match' must be a boolean, got {_bounded_repr(match)}"
+        )
     confidence = raw["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VerifierError(
-            f"verdict 'confidence' must be a number in [0,1], got {confidence!r}"
+            f"verdict 'confidence' must be a number in [0,1], got {_bounded_repr(confidence)}"
         )
     if not 0.0 <= confidence <= 1.0:
-        raise VerifierError(f"verdict 'confidence' must be in [0,1], got {confidence!r}")
+        raise VerifierError(
+            f"verdict 'confidence' must be in [0,1], got {_bounded_repr(confidence)}"
+        )
     reasoning = raw["reasoning"]
     if not isinstance(reasoning, str):
-        raise VerifierError(f"verdict 'reasoning' must be a string, got {reasoning!r}")
+        raise VerifierError(
+            f"verdict 'reasoning' must be a string, got {_bounded_repr(reasoning)}"
+        )
+    # Reasoning is capped at 32 KiB and rejected -- never truncated-and-accepted
+    # -- so an oversized/untrusted value can never bloat a diagnostic.
+    if len(reasoning.encode("utf-8")) > _REASONING_CAP_BYTES:
+        raise VerifierError(
+            f"verdict reasoning exceeds {_REASONING_CAP_BYTES // 1024} KiB"
+        )
     return verifier_core.Verdict(
         gold_id="",
         candidate_id="",
@@ -204,24 +351,43 @@ class _Retryable(Exception):
 
 
 def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
-    """Parse an httpx-like response through the ``content`` extraction callable."""
+    """Parse an httpx-like response through the ``content`` extraction callable.
+
+    The raw body is size-capped (``_RESPONSE_CAP_BYTES``) BEFORE any status
+    handling, so an oversized body is rejected regardless of status code -- a
+    non-2xx (4xx/5xx) judge body must not bypass the cap. An over-cap body is a
+    terminal ``VerifierError`` (rejected, never truncated-and-accepted).
+    """
+    body = _response_bytes(response)
+    if len(body) > _RESPONSE_CAP_BYTES:
+        raise VerifierError(  # terminal, never truncated
+            f"judge response body exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+        )
     status_code = getattr(response, "status_code", None)
     if status_code is None or not 200 <= int(status_code) < 300:
-        body_text = getattr(response, "text", "")
+        body_text = body.decode("utf-8", errors="replace")
         code = int(status_code) if status_code is not None else -1
         # 429 is retryable (rate limit); all other 4xx are terminal client errors.
         if 400 <= code < 500 and code != 429:
-            raise VerifierError(f"Judge request failed with HTTP {status_code}: {body_text}")
-        raise _Retryable(f"Judge request failed with HTTP {status_code}: {body_text}")
+            raise VerifierError(
+                f"Judge request failed with HTTP {status_code}: {_bounded_error(body_text)}"
+            )
+        raise _Retryable(
+            f"Judge request failed with HTTP {status_code}: {_bounded_error(body_text)}"
+        )
     try:
         parsed_body = response.json()
     except Exception as exc:
-        raise VerifierError(f"Judge response was not valid JSON: {exc}") from exc
+        raise VerifierError(
+            f"Judge response was not valid JSON: {_bounded_error(str(exc))}"
+        ) from exc
     text = content(parsed_body)
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise VerifierError(f"Judge text content was not valid JSON: {exc}") from exc
+        raise VerifierError(
+            f"Judge text content was not valid JSON: {_bounded_error(str(exc))}"
+        ) from exc
     if not isinstance(parsed, dict):
         raise VerifierError("Judge text content JSON was not an object")
     return parsed
@@ -234,45 +400,58 @@ async def _complete_json_with_http(
     payload: dict[str, Any],
     headers: dict[str, str],
     content: Any,
+    allowlist: set[str],
 ) -> dict[str, Any]:
     """Single retry/redirect/timeout policy shared by both judge clients.
 
     - Up to 3 attempts. Transport exceptions (including timeout) and HTTP
       429/5xx retry with exponential backoff (`2 ** attempt`); a terminal 4xx
       (non-429) and a malformed-JSON parse are not retried.
-    - 3xx responses: never follow a redirect to a host outside the request
-      URL's own host (allowlist); same-host redirects are followed once.
+    - 3xx responses: bounded credential-preserving redirects. At most
+      ``_MAX_REDIRECTS`` hops per call; each next target is resolved against the
+      request URL first (relative ``Location``) and must be inside the judge-host
+      ``allowlist``. Configured auth headers are preserved across the hop and
+      server-provided response headers are never replayed. A redirect-target
+      rejection or an exhausted hop count is a terminal ``VerifierError``,
+      never retried.
     - After 3 failed attempts, raise ``VerifierError`` — never a partial result.
     """
+    current_url = url
+    hop = 0
     for attempt in range(_MAX_RETRIES):
-        try:
+        while True:
             try:
-                response = await http.post(
-                    url, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
-                )
-            except Exception as exc:
-                raise _Retryable(f"Judge request failed: {exc}") from exc
-            status_code = getattr(response, "status_code", None)
-            if status_code is not None and 300 <= int(status_code) < 400:
-                headers = getattr(response, "headers", {}) or {}
-                location = headers.get("location")
-                if not location:
-                    raise VerifierError("Judge request redirected without a Location")
-                request_host = urllib.parse.urlparse(url).hostname
-                redirect_host = urllib.parse.urlparse(location).hostname
-                if redirect_host != request_host:
-                    raise VerifierError(
-                        "Judge request would redirect to a host outside the verifier allowlist"
+                try:
+                    response = await http.post(
+                        current_url, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
                     )
-                # Same-host redirect: follow once by re-issuing to the Location.
-                response = await http.post(
-                    location, headers=headers, json=payload, timeout=_REQUEST_TIMEOUT
-                )
-            return _parse_json_response(response, content=content)
-        except _Retryable:
-            if attempt == _MAX_RETRIES - 1:
-                raise VerifierError("Judge request failed after retries")
-            await asyncio.sleep(2**attempt)
+                except Exception as exc:
+                    raise _Retryable(f"Judge request failed: {exc}") from exc
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None and 300 <= int(status_code) < 400:
+                    if hop >= _MAX_REDIRECTS:
+                        raise VerifierError("judge request exceeded maximum redirects")
+                    response_headers = getattr(response, "headers", {}) or {}
+                    location = response_headers.get("location")
+                    if not location:
+                        raise VerifierError("judge request redirected without a Location")
+                    # Resolve relative Location against the request URL and
+                    # fail closed on cross-host/out-of-allowlist targets. The
+                    # configured ``headers`` are intentionally NOT replaced by
+                    # the response headers, so auth survives the hop and server
+                    # headers are never replayed.
+                    current_url = _resolve_redirect(current_url, location, allowlist)
+                    hop += 1
+                    continue
+                return _parse_json_response(response, content=content)
+            except _Retryable:
+                if attempt < _MAX_RETRIES - 1:
+                    # A retry remains: back off 2 ** attempt seconds, then the
+                    # outer loop issues the next attempt.
+                    await asyncio.sleep(2**attempt)
+                break
+    # Reaching here means the final attempt failed: this single raise is the
+    # retry-exhaustion exit -- never a partial result.
     raise VerifierError("Judge request failed after retries")
 
 
@@ -292,18 +471,35 @@ def _anthropic_text(body: dict[str, Any]) -> str:
 
 
 class AnthropicJudgeClient:
-    """Small Anthropic Messages API client returning strict parsed JSON verdicts."""
+    """Small Anthropic Messages API client returning strict parsed JSON verdicts.
+
+    Validates the initial Messages URL against the effective judge-host
+    allowlist before any request (fail-closed); redirects are bounded and
+    allowlist-checked inside the shared ``_complete_json_with_http`` policy.
+    """
 
     def __init__(
-        self, api_key: str, model: str, *, http: _AsyncHttpClient | None = None
+        self,
+        api_key: str,
+        model: str,
+        *,
+        http: _AsyncHttpClient | None = None,
+        allowlist: set[str] | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.http = http
+        self.allowlist = allowlist
 
     async def complete_json(
         self, *, user: str, system: str = "", max_tokens: int = 512
     ) -> dict[str, Any]:
+        effective = self.allowlist or _effective_allowlist(
+            _ANTHROPIC_MESSAGES_URL, {}
+        )
+        # Fail closed before any request: a forced disallowed allowlist must
+        # reject the initial URL here, never after a POST has been issued.
+        _validate_base_url(_ANTHROPIC_MESSAGES_URL, effective)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -323,6 +519,7 @@ class AnthropicJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_anthropic_text,
+                allowlist=effective,
             )
         async with httpx.AsyncClient() as http:
             return await _complete_json_with_http(
@@ -331,6 +528,7 @@ class AnthropicJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_anthropic_text,
+                allowlist=effective,
             )
 
 
@@ -344,7 +542,10 @@ def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
     """Resolve the Chat Completions base URL from the environment.
 
     An explicit base URL always wins; an ``sk-or-`` OpenRouter key with no pin
-    routes to OpenRouter; anything else defaults to OpenAI direct.
+    routes to OpenRouter; anything else defaults to OpenAI direct. The resolved
+    URL is only a candidate: it is validated against the effective judge-host
+    allowlist (scheme/host/form) at the client build and initial-request sites
+    before any judge call.
     """
     if base_url_env:
         return base_url_env
@@ -376,7 +577,13 @@ def _openai_content(body: dict[str, Any]) -> str:
 
 
 class OpenAIJudgeClient:
-    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts."""
+    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts.
+
+    Validates the initial Chat Completions URL against the effective
+    judge-host allowlist before any request (fail-closed); redirects are
+    bounded and allowlist-checked inside the shared ``_complete_json_with_http``
+    policy -- identical to the Anthropic client.
+    """
     def __init__(
         self,
         api_key: str,
@@ -384,15 +591,24 @@ class OpenAIJudgeClient:
         *,
         base_url: str,
         http: _AsyncHttpClient | None = None,
+        allowlist: set[str] | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.http = http
+        self.allowlist = allowlist
 
     async def complete_json(
         self, *, user: str, system: str = "", max_tokens: int = 512
     ) -> dict[str, Any]:
+        url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
+        effective = self.allowlist or _effective_allowlist(
+            self.base_url, {}
+        )
+        # Fail closed before any request: a base URL host outside the allowlist
+        # is rejected here, never after a POST has been issued.
+        _validate_base_url(url, effective)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -406,7 +622,6 @@ class OpenAIJudgeClient:
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
         }
-        url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
         if self.http is not None:
             return await _complete_json_with_http(
                 self.http,
@@ -414,6 +629,7 @@ class OpenAIJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_openai_content,
+                allowlist=effective,
             )
         async with httpx.AsyncClient() as http:
             return await _complete_json_with_http(
@@ -422,6 +638,7 @@ class OpenAIJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_openai_content,
+                allowlist=effective,
             )
 
 
@@ -475,6 +692,9 @@ _ENV_PROVIDER = "DAYDREAM_JUDGE_PROVIDER"
 _ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
 _ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
 _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
+_ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
+_ENV_ARTIFACT_PATH = "DAYDREAM_JUDGE_ARTIFACT_PATH"
+_ENV_OUT_PATH = "DAYDREAM_JUDGE_OUT_PATH"
 _DEFAULT_PROVIDER = "anthropic"
 
 
@@ -608,6 +828,33 @@ def _error_details(provider: str, model: str, request_counts: dict[str, int], er
     }
 
 
+def _write_error_artifact(
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+    gold_count: int,
+) -> verifier_core.Reward:
+    """Write the fail-whole error artifacts and return the error reward.
+
+    Every failure path -- validation, binding, digest, judging, exhausted
+    retries, a missing client, or an unexpected runtime exception -- funnels
+    through here so ``reward.json``/``reward-details.json`` are always written
+    with typed bounded diagnostics, never a bare exit. ``errors`` must already
+    be bounded/redacted before the call.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    error_reward = verifier_core.Reward(
+        reward=0.0, gold_count=gold_count, verifier_error=1
+    )
+    details = _error_details(provider, model, request_counts, errors)
+    _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
+    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+    return error_reward
+
+
 def run_verifier(
     gold_path: str | Path,
     artifact_path: str | Path,
@@ -624,10 +871,12 @@ def run_verifier(
     the gold is then read as raw bytes and its sha256 must match the
     compiler-rendered ``gold_sha256`` sentinel before it is parsed and validated
     (canonical/unique gold ids). Any ``VerifierError`` (validation, binding,
-    digest, parsing, judging, exhausted retries, or a missing client) becomes a
-    ``Reward(reward=0, verifier_error=1)`` — the task fails whole, never
-    reporting a partial score. Both output files are written atomically (temp +
-    rename). Never emits source or diffs.
+    digest, parsing, judging, exhausted retries, or a missing client) -- and
+    any unexpected runtime exception -- becomes a typed bounded diagnostic that
+    still writes ``Reward(reward=0, verifier_error=1)`` plus both output files
+    atomically (temp + rename); the task fails whole, never reporting a
+    partial score and never escaping to a bare exit. Error text is redacted and
+    size-bounded before it reaches any artifact. Never emits source or diffs.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -670,7 +919,7 @@ def run_verifier(
             matches = verifier_core.maximum_matching(retained, gold_ids, cand_ids)
             request_counts["requests"] = counting.requests
             if counting.errors:
-                errors.extend(counting.errors)
+                errors.extend(_bounded_error(str(e)) for e in counting.errors)
 
         reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
         inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
@@ -679,47 +928,74 @@ def run_verifier(
         _atomic_write(out_dir, "reward-details.json", json.dumps(details))
         return reward
     except VerifierError as exc:
-        errors.insert(0, str(exc))
-        error_reward = verifier_core.Reward(
-            reward=0.0, gold_count=len(gold_parsed), verifier_error=1
+        errors.insert(0, _bounded_error(str(exc)))
+        return _write_error_artifact(
+            out_dir, provider, model, request_counts, errors, len(gold_parsed)
         )
-        details = _error_details(provider, model, request_counts, errors)
-        _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
-        _atomic_write(out_dir, "reward-details.json", json.dumps(details))
-        return error_reward
+    except Exception as exc:
+        # Unexpected runtime failures must not escape to a bare exit: they
+        # become a typed bounded diagnostic that still writes both artifacts.
+        errors.insert(0, _bounded_error(f"unexpected verifier failure: {exc}"))
+        return _write_error_artifact(
+            out_dir, provider, model, request_counts, errors, len(gold_parsed)
+        )
 
 
 def _build_client(env: dict[str, Any]) -> Any:
-    """Build the judge client from the DAYDREAM_JUDGE_* env surface."""
+    """Build the judge client from the DAYDREAM_JUDGE_* env surface.
+
+    Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
+    accepted (absent -> default ``anthropic``); anything else raises before any
+    request. The provider's base URL is resolved and the initial request URL is
+    validated against the effective judge-host allowlist at build time.
+    """
     provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
     if not model or not api_key:
         raise VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
+    if provider not in {"anthropic", "openai-compatible"}:
+        raise VerifierError(
+            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
+        )
     if provider == "anthropic":
-        return AnthropicJudgeClient(api_key, model)
-    return OpenAIJudgeClient(
-        api_key, model, base_url=resolve_base_url(api_key, env.get(_ENV_BASE_URL))
-    )
+        allowlist = _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
+        # Fail-closed at build time, matching the openai-compatible branch: the
+        # initial Messages URL is validated against the effective allowlist
+        # before any request can be issued, so both providers share identical
+        # validation timing.
+        _validate_base_url(_ANTHROPIC_MESSAGES_URL, allowlist)
+        return AnthropicJudgeClient(
+            api_key,
+            model,
+            allowlist=allowlist,
+        )
+    base_url = resolve_base_url(api_key, env.get(_ENV_BASE_URL))
+    allowlist = _effective_allowlist(base_url, env)
+    initial_url = base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
+    _validate_base_url(initial_url, allowlist)  # fail-closed before any request
+    return OpenAIJudgeClient(api_key, model, base_url=base_url, allowlist=allowlist)
 
 
-def main() -> int:
-    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON."""
-    gold_path = Path(__file__).with_name("golden-review.json")
-    artifact_path = Path("/logs/artifacts/review.json")
-    out_dir = Path("/logs/verifier")
-    env = {
-        name: os.environ.get(name)
-        for name in (_ENV_PROVIDER, _ENV_MODEL, _ENV_API_KEY, _ENV_BASE_URL)
-    }
-    try:
-        client = _build_client(env)
-    except VerifierError:
-        client = None
-    try:
-        reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
-    except Exception:
-        reward = verifier_core.Reward(reward=0.0, gold_count=0, verifier_error=1)
+def _env_path(name: str, default: str) -> Path:
+    """Return ``Path(os.environ[name])`` when set, else ``Path(default)``.
+
+    The compiled-image defaults are unchanged; the overrides only relocate the
+    artifact/out paths for isolated subprocess runs (e.g. the isolation test).
+    """
+    value = os.environ.get(name)
+    return Path(value) if value else Path(default)
+
+
+def _emit_reward(reward: verifier_core.Reward) -> int:
+    """Print the reward payload JSON and return the verifier-error exit code.
+
+    Shared by both ``main()`` terminal paths (a fail-closed client build
+    rejection and the completed ``run_verifier``) so the two failure/success
+    emissions cannot drift. ``Reward.to_dict()`` always exists (the compiled
+    verifier_core twin is byte-identical); the fallback dict is a defensive
+    guard that keeps the shape stable even if a duck-typed reward lacks it.
+    """
     payload = (
         reward.to_dict()
         if hasattr(reward, "to_dict")
@@ -730,6 +1006,49 @@ def main() -> int:
     )
     print(json.dumps(payload))
     return 1 if getattr(reward, "verifier_error", 0) else 0
+
+
+def main() -> int:
+    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON.
+
+    Provider selection is fail-closed: an unsupported ``DAYDREAM_JUDGE_PROVIDER``
+    or an out-of-allowlist judge host writes a typed bounded diagnostic artifact
+    (``reward.json``/``reward-details.json``) instead of a barren ``client=None``
+    exit with no provider reason. ``DAYDREAM_JUDGE_ARTIFACT_PATH`` /
+    ``DAYDREAM_JUDGE_OUT_PATH`` relocate the compiled defaults for isolated
+    subprocess runs; the compiled defaults ``/logs/artifacts/review.json`` and
+    ``/logs/verifier`` are unchanged.
+    """
+    gold_path = Path(__file__).with_name("golden-review.json")
+    artifact_path = _env_path(_ENV_ARTIFACT_PATH, "/logs/artifacts/review.json")
+    out_dir = _env_path(_ENV_OUT_PATH, "/logs/verifier")
+    env = {
+        name: os.environ.get(name)
+        for name in (
+            _ENV_PROVIDER,
+            _ENV_MODEL,
+            _ENV_API_KEY,
+            _ENV_BASE_URL,
+            _ENV_ALLOWED_HOSTS,
+        )
+    }
+    try:
+        client = _build_client(env)
+    except VerifierError as exc:
+        if env.get(_ENV_MODEL) and env.get(_ENV_API_KEY):
+            # Fail-closed provider/host rejection: a typed bounded diagnostic
+            # artifact naming only the rejected form -- never a barren exit.
+            provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+            model = env.get(_ENV_MODEL) or ""
+            reward = _write_error_artifact(
+                out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0
+            )
+            return _emit_reward(reward)
+        # Missing MODEL/API_KEY keeps the compiled path: run_verifier emits its
+        # own "no judge client configured" typed diagnostic.
+        client = None
+    reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
+    return _emit_reward(reward)
 
 
 if __name__ == "__main__":

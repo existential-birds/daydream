@@ -155,7 +155,8 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
             )()
 
     raw = await sr._complete_json_with_http(
-        FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"]
+        FlakyClient(), url="u", payload={}, headers={}, content=lambda b: b["content"][0]["text"],
+        allowlist={"u"}
     )
     assert raw == {"match": True, "confidence": 0.8, "reasoning": "x"}
     assert len(attempts) == 3
@@ -169,7 +170,7 @@ async def test_retry_policy_retries_transport_and_5xx_then_fails_after_exhaustio
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
-            Always5xx(), url="u", payload={}, headers={}, content=lambda b: b
+            Always5xx(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
         )
     assert len(attempts) == 3  # 3 attempts then fail
 
@@ -186,7 +187,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
 
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(
-            BadRequest(), url="u", payload={}, headers={}, content=lambda b: b
+            BadRequest(), url="u", payload={}, headers={}, content=lambda b: b, allowlist={"u"}
         )
     assert len(attempts) == 1  # terminal 4xx, no retry
 
@@ -210,6 +211,7 @@ async def test_terminal_4xx_is_not_retried_and_redirect_to_other_host_is_rejecte
             payload={},
             headers={},
             content=lambda b: b,
+            allowlist={"api.anthropic.com"},
         )
 
 
@@ -470,7 +472,7 @@ def test_provider_selection_builds_expected_client(sr_module, monkeypatch) -> No
         )
 
     assert isinstance(make("anthropic", None), sr.AnthropicJudgeClient)
-    assert isinstance(make("openai", "https://openrouter.ai/api/v1"), sr.OpenAIJudgeClient)
+    assert isinstance(make("openai-compatible", "https://openrouter.ai/api/v1"), sr.OpenAIJudgeClient)
     with pytest.raises(sr.VerifierError):
         make("anthropic", None, model=None)  # missing MODEL -> verifier error
     with pytest.raises(sr.VerifierError):
@@ -488,6 +490,10 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
         return type("R", (), {"verifier_error": 0, "reward": 1.0})()
 
     monkeypatch.setattr(sr, "run_verifier", fake_run_verifier)
+    # guard the env overrides: main() reads them from real os.environ and the
+    # assertions below expect the compile-time defaults
+    monkeypatch.delenv("DAYDREAM_JUDGE_ARTIFACT_PATH", raising=False)
+    monkeypatch.delenv("DAYDREAM_JUDGE_OUT_PATH", raising=False)
     sr.main()  # must not require real /tests or /logs — it only passes the paths through
     assert seen["gold"].endswith("golden-review.json")
     assert "tests" in Path(seen["gold"]).parts  # the __file__ sibling (templates/tests/)
@@ -986,3 +992,243 @@ def test_parse_verdict_rejects_unknown_key(sr_module) -> None:
     sr = sr_module
     with pytest.raises(sr.VerifierError):
         sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "ok", "extra": 1})
+
+
+def test_url_validation_and_allowlist_helpers(sr_module) -> None:
+    sr = sr_module
+    # allowlist resolution: explicit env wins; absent -> own-host fail-closed fallback
+    assert sr._effective_allowlist("https://api.openai.com/v1",
+                                   {"DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com  judge.example"}) \
+        == {"api.anthropic.com", "judge.example"}
+    assert sr._effective_allowlist("https://api.anthropic.com/v1/messages", {}) \
+        == {"api.anthropic.com"}
+
+    def rejects(url, allowlist):
+        with pytest.raises(sr.VerifierError):
+            sr._validate_base_url(url, allowlist)
+
+    allow = {"api.anthropic.com"}
+    sr._validate_base_url("https://api.anthropic.com/v1/messages", allow)               # ok
+    sr._validate_base_url("https://sub.api.anthropic.com/x", {"sub.api.anthropic.com"}) # sub in allowlist
+    rejects("https://user:pass@api.anthropic.com/v1", allow)       # userinfo
+    rejects("https://api.anthropic.com/v1?q=1", allow)             # query
+    rejects("https://api.anthropic.com/v1#frag", allow)            # fragment
+    rejects("http://api.anthropic.com/v1", allow)                  # non-HTTPS remote
+    rejects("https://evil.example/v1", allow)                      # host outside allowlist
+    sr._validate_base_url("http://127.0.0.1:8000/v1", {"127.0.0.1"})  # loopback http allowed
+
+    # redirect resolution: relative Location resolved against request URL, then host-checked
+    assert sr._resolve_redirect("https://api.anthropic.com/v1/messages",
+                                "/v1/next", {"api.anthropic.com"}) == "https://api.anthropic.com/v1/next"
+    with pytest.raises(sr.VerifierError):
+        sr._resolve_redirect("https://api.anthropic.com/v1/messages",
+                             "https://evil.example/x", {"api.anthropic.com"})
+
+
+def test_error_bounding_and_redaction(sr_module) -> None:
+    sr = sr_module
+    assert "sk-ant-abcdef1234567890" not in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
+    assert "<redacted>" in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
+    assert "Bearer sk-or-longtokenvalue123" not in sr._bounded_error("Authorization: Bearer sk-or-longtokenvalue123")
+    long = "x" * 5000
+    assert len(sr._bounded_error(long).encode("utf-8")) <= sr._ERROR_TEXT_CAP_BYTES
+
+
+def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module) -> None:
+    sr = sr_module
+    # absent provider defaults to anthropic (unchanged)
+    assert isinstance(sr._build_client(
+        {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
+         "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}),
+        sr.AnthropicJudgeClient)
+    # exactly anthropic | openai-compatible accepted
+    cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}
+    assert isinstance(sr._build_client(cert), sr.OpenAIJudgeClient)
+    # anything else fails closed BEFORE any request
+    for bad in ("martian", "garbage", "Anthropic"):
+        with pytest.raises(sr.VerifierError) as e:
+            sr._build_client({**cert, "DAYDREAM_JUDGE_PROVIDER": bad})
+        assert "expected anthropic or openai-compatible" in str(e.value)
+    # a base URL host outside the allowlist fails closed at build time
+    with pytest.raises(sr.VerifierError):
+        sr._build_client({**cert, "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})
+
+
+@pytest.mark.asyncio
+async def test_clients_validate_initial_url_before_request(sr_module) -> None:
+    sr = sr_module
+    calls = []
+    class F:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append(url)  # would be reached only if validation passed
+            verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
+            return type("R", (), {"status_code": 200, "text": "ok",
+                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
+    # anthropic validates the hardcoded constant -> ok when allowlist matches
+    c = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F())
+    assert await c.complete_json(user="u") is not None and len(calls) == 1
+    # a disallowed initial host fails closed before post is hit
+    c2 = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F(), allowlist={"evil.example"})
+    with pytest.raises(sr.VerifierError):
+        await c2.complete_json(user="u")
+    assert len(calls) == 1  # no new request issued
+
+
+@pytest.mark.asyncio
+async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module) -> None:
+    sr = sr_module
+    seen = []
+    class Redirecting:
+        def __init__(self, hops): self.hops = list(hops)
+        async def post(self, url, *, headers, json, timeout):
+            seen.append((url, dict(headers)))
+            loc = self.hops.pop(0) if self.hops else None
+            if loc is not None:
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"},
+                    "text": ""})()
+            verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
+            return type("R", (), {"status_code": 200, "text": "ok",
+                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
+    allow = {"api.anthropic.com"}
+    client = Redirecting(["/v1/next"])  # relative Location, same host
+    raw = await sr._complete_json_with_http(
+        client, url="https://api.anthropic.com/v1/messages", payload={"x": 1},
+        headers={"x-api-key": "SECRET", "authorization": "Bearer K"}, content=lambda b: b["content"][0]["text"],
+        allowlist=allow)
+    assert raw["match"] is True
+    assert len(seen) == 2
+    final_url, final_headers = seen[-1]
+    assert final_url == "https://api.anthropic.com/v1/next"  # relative resolved
+    assert final_headers["x-api-key"] == "SECRET"             # configured header preserved
+    assert "x-server-token" not in final_headers             # server header never replayed
+
+    # cross-host redirect rejected
+    bad = Redirecting(["https://evil.example/x"])
+    with pytest.raises(sr.VerifierError):
+        await sr._complete_json_with_http(bad, url="https://api.anthropic.com/v1/messages",
+            payload={}, headers={"x-api-key": "K"}, content=lambda b: b, allowlist=allow)
+
+    # redirect loop bounded by _MAX_REDIRECTS
+    loop = Redirecting(["/v1/next"] * (sr._MAX_REDIRECTS + 1))
+    with pytest.raises(sr.VerifierError):
+        await sr._complete_json_with_http(loop, url="https://api.anthropic.com/v1/messages",
+            payload={}, headers={}, content=lambda b: b, allowlist=allow)
+
+
+@pytest.mark.asyncio
+async def test_response_body_is_size_capped_before_json_parse(sr_module) -> None:
+    sr = sr_module
+    calls = []
+    class Huge:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append(1)
+            return type("R", (), {"status_code": 200, "text": "", "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1),
+                                  "json": lambda self: {"content": [{"type": "text", "text": '{"match": true}'}]}})()
+    with pytest.raises(sr.VerifierError) as e:
+        await sr._complete_json_with_http(Huge(), url="u", payload={}, headers={},
+                                          content=lambda b: b, allowlist={"u"})
+    assert "256 KiB" in str(e.value) or "exceeds" in str(e.value)
+    assert len(calls) == 1  # oversized body is terminal, not retried
+
+
+def test_verdict_reasoning_is_size_capped_and_errors_are_bounded(sr_module) -> None:
+    sr = sr_module
+    ok = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "short"})
+    assert ok.match is True
+    # over-cap reasoning rejected with a typed bounded diagnostic
+    with pytest.raises(sr.VerifierError) as e:
+        sr.parse_verdict({"match": True, "confidence": 0.9,
+                          "reasoning": "r" * (sr._REASONING_CAP_BYTES + 1)})
+    assert "reasoning" in str(e.value)
+    assert ("r" * 64) not in str(e.value)  # never embeds the oversized value
+    # non-string reasoning whose repr is huge is bounded
+    huge = {"match": True, "confidence": 0.9, "reasoning": ["x" * 5000]}
+    with pytest.raises(sr.VerifierError) as e:
+        sr.parse_verdict(huge)
+    assert len(str(e.value).encode("utf-8")) < 5000  # never echoes the full value
+
+
+def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "g.json"
+    gold_path.write_text(json.dumps(_gold_list(1, case_id="c")))
+    _write_metadata(gold_path, case_id="c")
+    art_path = tmp_path / "r.json"
+    art_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c", n=1)))
+    out = tmp_path / "out"
+    class Exploding:
+        async def complete_json(self, *, user, system, max_tokens):
+            raise RuntimeError("sk-ant-leakme123 boom %s" % ("y" * 1000))
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
+    # unexpected runtime exception no longer escapes to a bare exit
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    details = json.loads((out / "reward-details.json").read_text())
+    blob = json.dumps(details)
+    assert "sk-ant-leakme123" not in blob and "<redacted>" in blob   # no credential, redacted
+    assert len(details["errors"]) >= 1 and any("unexpected" in e for e in details["errors"])
+
+
+def test_main_fail_closed_on_bad_provider_and_reads_path_overrides(sr_module, tmp_path, monkeypatch) -> None:
+    sr = sr_module
+    out = tmp_path / "out"
+    monkeypatch.setenv("DAYDREAM_JUDGE_PROVIDER", "nonsense")
+    monkeypatch.setenv("DAYDREAM_JUDGE_MODEL", "m")
+    monkeypatch.setenv("DAYDREAM_JUDGE_API_KEY", "k")
+    monkeypatch.setenv("DAYDREAM_JUDGE_ARTIFACT_PATH", str(tmp_path / "review.json"))
+    monkeypatch.setenv("DAYDREAM_JUDGE_OUT_PATH", str(out))
+    (tmp_path / "review.json").write_text(json.dumps(
+        _candidate_artifact(sr, case_id="c", n=0)))
+    rc = sr.main()
+    assert rc == 1  # verifier_error
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("unsupported" in e or "expected anthropic or openai-compatible" in e
+               for e in details["errors"])  # typed diagnostic surfaced, not a barren client=None exit
+
+
+@pytest.mark.asyncio
+async def test_both_providers_share_identical_hardened_error_and_redirect_policy(sr_module) -> None:
+    sr = sr_module
+    allow = {"api.anthropic.com"}
+    anthropic = sr.AnthropicJudgeClient("k", "m", allowlist=allow)
+    openai = sr.OpenAIJudgeClient("k", "m", base_url="https://api.anthropic.com/v1", allowlist=allow)
+    for client in (anthropic, openai):
+        # identical redirect-hop bound: a forever-redirecting judge exhausts
+        # _MAX_REDIRECTS on both providers before the same VerifierError
+        seen = []
+        class RedirectRule:
+            async def post(self, url, *, headers, json, timeout):
+                seen.append(1)
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": "/v1/next", "x-srv": "NO-REPLAY"}, "text": ""})()
+        client.http = RedirectRule()
+        with pytest.raises(sr.VerifierError):
+            await client.complete_json(user="u")
+        assert len(seen) == (sr._MAX_REDIRECTS + 1)       # identical hop bound on both
+
+        # identical oversized-response diagnostic on both providers
+        class Oversize:
+            async def post(self, url, *, headers, json, timeout):
+                return type("R", (), {"status_code": 200, "text": "",
+                    "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1), "json": lambda self: {}})()
+        client.http = Oversize()
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "256 KiB" in str(e.value)
+
+        # identical out-of-allowlist redirect rejection on both providers
+        class BadRedirect:
+            async def post(self, url, *, headers, json, timeout):
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": "https://evil.example/x"}, "text": ""})()
+        client.http = BadRedirect()
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "allowlist" in str(e.value)
