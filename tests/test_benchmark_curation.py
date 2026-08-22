@@ -195,3 +195,18 @@ def test_spike_head_file_line_count_from_mirror(tmp_path, fake_gh):
     assert proc.returncode == 0
     assert len(proc.stdout.splitlines()) == 7
     assert base_sha != head_sha  # the seed produced a real base/head divergence
+
+
+def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
+
+    cases = cu.list_cases(ws)
+    assert [c["case_id"] for c in cases] == [case_id]
+    assert cases[0]["state"] == "draft" and cases[0]["gold_mode"] == "clean"
+
+    view = cu.list_case(ws, case_id)
+    assert view["snapshot"]["status"] == "ready"
+    assert cu._head_file_line_count(ws, head_sha, "feature.py") == 4
+    with pytest.raises(cu.CurationError):
+        cu._head_file_line_count(ws, head_sha, "missing.py")
