@@ -379,3 +379,24 @@ def test_reward_details_shape_and_no_source_leak():
     assert "same bug" in blob  # reasoning is kept
     assert "Cache key not scoped" not in blob  # finding body/title never leaks
     assert "f1" not in blob  # candidate content never leaks
+
+
+def test_artifact_rejects_unknown_top_level_key():
+    art = _artifact(_valid_findings(1))
+    art["smuggled"] = "x"
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(art)
+
+
+def test_artifact_rejects_unknown_finding_key():
+    fs = _valid_findings(1)
+    fs[0]["smuggled"] = "x"
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact(fs))
+
+
+def test_gold_set_rejects_unknown_finding_key():
+    g = _gold()
+    g["provenance"] = {"kind": "authored", "source_ids": []}
+    with pytest.raises(VerifierError):
+        validate_gold_set([g])
