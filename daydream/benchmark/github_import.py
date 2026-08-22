@@ -160,6 +160,94 @@ def _evidence_from_issue(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_REVIEW_THREADS_QUERY = """
+query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 50, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id isResolved isOutdated isResolvedBy subjectType path line originalLine side startSide
+          comments(first: 100) {
+            nodes { id databaseId body author { login type isBot } createdAt updatedAt url replyTo { id } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> dict[str, Any]:
+    db_id = int(comment["databaseId"])
+    body = comment.get("body") or ""
+    author = comment.get("author") or {}
+    subject = str(thread.get("subjectType") or "").lower()
+    subject_type = subject if subject in ("line", "file") else None
+    return {
+        "source_id": f"github:thread_comment:{db_id}",
+        "kind": "thread_comment",
+        "database_id": db_id,
+        "node_id": comment.get("id") or f"TH_{db_id}",
+        "author": {"login": author.get("login", ""), "type": author.get("type", "User")},
+        "body": body,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "created_at": comment.get("createdAt"),
+        "updated_at": comment.get("updatedAt") or comment.get("createdAt"),
+        "subject_type": subject_type,
+        "side": thread.get("side"),
+        "start_side": thread.get("startSide"),
+        "path": thread.get("path"),
+        "line": thread.get("line"),
+        "original_line": thread.get("originalLine"),
+        "resolved": bool(thread.get("isResolved", False)),
+        "outdated": bool(thread.get("isOutdated", False)),
+        "thread_id": thread.get("id"),
+        "reply_to_id": (comment.get("replyTo") or {}).get("id"),
+        "is_bot": bool(author.get("type") == "Bot"),
+        "url": comment.get("url") or "",
+    }
+
+
+def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[dict[str, Any]]:
+    """Paginate every review thread (and reply) for a PR via GraphQL.
+
+    A GraphQL ``errors`` block, a missing ``data.repository.pullRequest.reviewThreads``
+    key, or a failed call raises :class:`GitError` — never a silent empty fallback.
+    """
+    owner, name = owner_repo.split("/", 1)
+    all_nodes: list[dict[str, Any]] = []
+    after: str | None = None
+    while True:
+        variables: dict[str, Any] = {"owner": owner, "name": name, "number": number}
+        if after is not None:
+            variables["after"] = after
+        resp = git_ops.gh_api(
+            root,
+            "graphql",
+            method="POST",
+            idempotent=True,
+            input_data={"query": _REVIEW_THREADS_QUERY, "variables": variables},
+        )
+        if not isinstance(resp, dict):
+            raise git_ops.GitError("graphql reviewThreads returned a non-object response")
+        if resp.get("errors"):
+            raise git_ops.GitError(f"graphql reviewThreads failed: {resp['errors']}")
+        try:
+            threads = resp["data"]["repository"]["pullRequest"]["reviewThreads"]
+        except (KeyError, TypeError) as exc:
+            raise git_ops.GitError(f"graphql response missing reviewThreads: {exc}") from exc
+        all_nodes.extend(threads.get("nodes") or [])
+        page_info = threads.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        after = page_info.get("endCursor")
+        if after is None:
+            raise git_ops.GitError("graphql reviewThreads hasNextPage without an endCursor")
+    return all_nodes
+
+
 def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
     """sha256 over the canonical JSON of the evidence list."""
     canonical = json.dumps(
@@ -218,6 +306,10 @@ def fetch_and_normalize(
         evidence.append(_evidence_from_inline(raw))
     for raw in _rest(root, f"repos/{owner_repo}/issues/{number}/comments"):
         evidence.append(_evidence_from_issue(raw))
+
+    for thread in _graphql_review_threads(root, owner_repo, number):
+        for comment in thread.get("comments", {}).get("nodes", []):
+            evidence.append(_evidence_from_thread(thread, comment))
 
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
     base = header.get("base") or {}

@@ -84,3 +84,39 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
     assert doc.evidence[1].is_bot is True      # bot classification retained, not dropped
     assert doc.evidence[1].subject_type == "line" and doc.evidence[1].side == "RIGHT"
     assert all("--paginate" in (c.argv or []) for c in fake_gh.calls("GET"))
+
+
+def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    for ep, val in [
+        ("repos/o/r/pulls/101/reviews", []),
+        ("repos/o/r/pulls/101/comments", []),
+        ("repos/o/r/issues/101/comments", []),
+    ]:
+        fake_gh.set_response("GET", ep, val)
+    fake_gh._write_threads([
+        {"id": "thread_1", "isResolved": True,
+         "isOutdated": True, "isResolvedBy": None,
+         "subjectType": "LINE", "path": "a.py", "line": 4, "originalLine": 3,
+         "side": "RIGHT", "startSide": None,
+         "comments": {"nodes": [
+             {"id": "c1", "databaseId": 10, "body": "root", "author": {"login": "dave", "type": "User"},
+              "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r10"},
+             {"id": "c2", "databaseId": 11, "body": "reply", "replyTo": {"id": "c1"},
+              "author": {"login": "eve", "type": "User"},
+              "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r11"},
+         ]}},
+    ])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101, heads=["final"])
+    kinds = {e.kind for e in doc.evidence}
+    assert "thread_comment" in kinds
+    root = next(e for e in doc.evidence if e.database_id == 10)
+    reply = next(e for e in doc.evidence if e.database_id == 11)
+    assert root.resolved is True and root.outdated is True
+    assert root.side == "RIGHT" and root.path == "a.py" and root.line == 4
+    assert reply.kind == "thread_comment" and reply.reply_to_id == "c1"
+    assert reply.thread_id == "thread_1"
