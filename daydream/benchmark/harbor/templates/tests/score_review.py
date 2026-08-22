@@ -321,7 +321,6 @@ def _openai_content(body: dict[str, Any]) -> str:
 
 class OpenAIJudgeClient:
     """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts."""
-
     def __init__(
         self,
         api_key: str,
@@ -368,6 +367,52 @@ class OpenAIJudgeClient:
                 headers=headers,
                 content=_openai_content,
             )
+
+
+_JUDGE_CONCURRENCY = 10
+_MAX_PAIRS = 5000
+_MAX_JUDGE_TOKENS = 512
+_JUDGE_SYSTEM = (
+    "You determine whether two code-review findings describe the same defect. "
+    "Reply only with a single JSON object."
+)
+
+
+async def judge_pairs(
+    gold: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    client: Any,
+) -> list[verifier_core.Verdict]:
+    """Return one Verdict per gold x candidate pair, at most 10 in flight.
+
+    Enforces the fixed 5,000-pair cap before any judge call (fail-whole before
+    judging). Verdicts are collected in gold-major, candidate-minor order
+    regardless of completion order for deterministic ``reward-details`` output.
+    """
+    if len(gold) * len(candidates) > _MAX_PAIRS:
+        raise VerifierError("pair count exceeds 5000")
+    pairs = [(g, c) for g in gold for c in candidates]
+    semaphore = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+
+    async def _judge(pair: tuple[dict[str, Any], dict[str, Any]]) -> verifier_core.Verdict:
+        g, c = pair
+        async with semaphore:
+            raw = await client.complete_json(
+                user=render_pair_prompt(g, c, template=JUDGE_PROMPT_TEMPLATE),
+                system=_JUDGE_SYSTEM,
+                max_tokens=_MAX_JUDGE_TOKENS,
+            )
+        verdict = parse_verdict(raw)
+        return verifier_core.Verdict(
+            gold_id=g.get("finding_id", ""),
+            candidate_id=c.get("candidate_id", ""),
+            match=verdict.match,
+            confidence=verdict.confidence,
+            reasoning=verdict.reasoning,
+        )
+
+    return await asyncio.gather(*(_judge(pair) for pair in pairs))
 
 
 def main() -> None:
