@@ -64,15 +64,15 @@ class PreflightError(Exception):
 
 @dataclass
 class PreflightResult:
-    """The authenticated identity + resolved repository captured by preflight."""
+    """The authenticated identity + verified repository captured by preflight."""
 
     login: str
-    repository_id: int
+    repository_id: str
     visibility: str
 
 
 def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
-    """Resolve a repository's identity and the caller's read access to it."""
+    """Fetch the repository's current identity and the caller's read access to it."""
     proc = git_ops._run_gh(
         root,
         ["repo", "view", repo_slug, "--json", "id,nameWithOwner,url,visibility,defaultBranchRef"],
@@ -83,24 +83,46 @@ def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
         view = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise PreflightError("repo_unresolved", f"repo view returned invalid JSON: {exc}") from exc
-    if not isinstance(view, dict) or view.get("id") is None:
+    if not isinstance(view, dict):
         raise PreflightError("repo_unresolved", f"repo view of {repo_slug} returned no identity")
     return view
 
 
-def _resolve_identity(root: Path, repo_slug: str) -> tuple[int, str]:
-    """Fill the immutable repository identity atomically on first success.
+def _verify_repo_view(view: dict[str, Any], repo_slug: str) -> tuple[str, str]:
+    """Verify a repo view matches the workspace's exact repository identity.
 
-    Stage ``benchmark.yaml`` (the only mutated file) through one
-    :class:`Transaction` under the workspace lock, so a crash restores the
-    whole before- or after-state. A concurrent partial state is surfaced as
-    :class:`PreflightError` rather than repaired.
+    Returns ``(repository_id, visibility)``. Every mismatch, missing id, or
+    unrecognized visibility fails closed with :class:`PreflightError` — the
+    node id is an opaque string like ``R_kgD...`` and is never cast to int.
     """
-    view = _run_repo_view(root, repo_slug)
-    repository_id = int(view["id"])
+    name_with_owner = view.get("nameWithOwner")
+    if name_with_owner != repo_slug:
+        raise PreflightError(
+            "repo_mismatch", f"repo view returned {name_with_owner!r}, expected {repo_slug!r}"
+        )
+    if view.get("url") != f"https://github.com/{repo_slug}":
+        raise PreflightError(
+            "repo_mismatch",
+            f"repo view url {view.get('url')!r} does not canonicalize to https://github.com/{repo_slug}",
+        )
+    repository_id = view.get("id")
+    if not isinstance(repository_id, str) or not repository_id.strip() or repository_id.strip().isdigit():
+        raise PreflightError(
+            "repo_unresolved", f"repo view of {repo_slug} returned no opaque node id"
+        )
     visibility = str(view.get("visibility") or "").lower()
     if visibility not in ("public", "private"):
         raise PreflightError("repo_unresolved", f"unrecognized visibility {visibility!r}")
+    return repository_id, visibility
+
+
+def _persist_identity(root: Path, repo_slug: str, repository_id: str, visibility: str) -> None:
+    """Stage the resolved identity atomically (the only mutation during resolve).
+
+    Stage ``benchmark.yaml`` through one :class:`Transaction` under the
+    workspace lock, so a crash restores the whole before- or after-state. A
+    concurrent partial state is surfaced as :class:`PreflightError`.
+    """
     with storage.WorkspaceLock(root):
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         current = raw.get("source") or {}
@@ -113,15 +135,16 @@ def _resolve_identity(root: Path, repo_slug: str) -> tuple[int, str]:
         ) as tx:
             tx.stage("benchmark.yaml", yaml.safe_dump(raw, sort_keys=False).encode("utf-8"))
             tx.commit()
-    return repository_id, visibility
 
 
 def preflight(root: Path, pr_count: int) -> PreflightResult:
     """Run the six fixed-order preflight checks before any fetch.
 
     Fails the run at the first failing check with an exact ``{code, message}``
-    pair (:class:`PreflightError`). Repository identity resolves once and is
-    immutable for the workspace's lifetime.
+    pair (:class:`PreflightError`). Exact repository identity + read access is
+    re-verified **on every call** (every import and ``--refresh``) before any
+    authoring-file, manifest, or bundle mutation; a mismatch or lost access
+    fails closed.
     """
     root = Path(root)
     if shutil.which("git") is None or shutil.which("gh") is None:
@@ -142,16 +165,23 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     raw = storage.load_yaml_strict(root / "benchmark.yaml")
     source = raw.get("source") or {}
     repo_slug = source.get("repository") or ""
-    repository_id = source.get("repository_id")
-    visibility = source.get("visibility", "unresolved")
-    if repository_id is None and visibility == "unresolved":
-        repository_id, visibility = _resolve_identity(root, repo_slug)
-    elif (repository_id is None) != (visibility == "unresolved"):
+    stored_repository_id = source.get("repository_id")
+    stored_visibility = source.get("visibility", "unresolved")
+
+    # Re-verify current identity + read access on every run, before mutation.
+    view = _run_repo_view(root, repo_slug)
+    repository_id, visibility = _verify_repo_view(view, repo_slug)
+
+    if stored_repository_id is None and stored_visibility == "unresolved":
+        _persist_identity(root, repo_slug, repository_id, visibility)
+    elif (stored_repository_id is None) != (stored_visibility == "unresolved"):
         raise PreflightError("repo_unresolved", "repository identity is in a partial/corrupt state")
-    if visibility not in ("public", "private"):
-        raise PreflightError("repo_unresolved", "repository identity did not resolve to public/private")
-    if not isinstance(repository_id, int):
-        raise PreflightError("incomplete_resolution", "repository identity lacks a numeric repository_id")
+    elif stored_repository_id != repository_id or stored_visibility != visibility:
+        raise PreflightError(
+            "repo_mismatch",
+            f"repository identity changed (stored {stored_repository_id}/{stored_visibility}, "
+            f"verified {repository_id}/{visibility})",
+        )
 
     try:
         _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
@@ -1034,12 +1064,12 @@ def _repository_block(root: Path, owner_repo: str) -> dict[str, Any]:
         source = raw.get("source") or {}
         visibility = source.get("visibility", "unresolved")
         return {
-            "id": source.get("repository_id") or 0,
+            "id": source.get("repository_id") or "",
             "name_with_owner": source.get("repository") or owner_repo,
             "visibility": "public" if visibility == "public" else "private",
         }
     except Exception:
-        return {"id": 0, "name_with_owner": owner_repo, "visibility": "private"}
+        return {"id": "", "name_with_owner": owner_repo, "visibility": "private"}
 
 
 def fetch_and_normalize(

@@ -13,6 +13,8 @@ origin (no network).
 import os
 import subprocess
 
+import pytest
+
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
 _SEED_ENV = {
@@ -36,6 +38,15 @@ _PR_HEADER = {
     "created_at": "2026-01-01T00:00:00Z",
     "updated_at": "2026-01-01T00:00:00Z",
     "user": {"login": "alice", "type": "User"},
+}
+
+_REPO_ID = "R_kgDOABC123"
+_REPO_VIEW = {
+    "id": _REPO_ID,
+    "nameWithOwner": "o/r",
+    "url": "https://github.com/o/r",
+    "visibility": "PRIVATE",
+    "defaultBranchRef": {"name": "main"},
 }
 
 
@@ -272,19 +283,51 @@ def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
     ws = tmp_path / "ws"
     _seed_manifest(ws)  # unresolved Source (repository=o/r)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": 5, "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE", "defaultBranchRef": {"name": "main"}},
-    )
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
     out = gi.preflight(ws, pr_count=2)
-    assert out.login == "octocat" and out.repository_id == 5 and out.visibility == "private"
+    assert out.login == "octocat" and out.repository_id == _REPO_ID and out.visibility == "private"
     # identity written atomically into benchmark.yaml source block
     raw = load_yaml_strict(ws / "benchmark.yaml")
-    assert raw["source"]["repository_id"] == 5 and raw["source"]["visibility"] == "private"
-    # second preflight is a no-op on identity (immutable, already resolved)
+    assert raw["source"]["repository_id"] == _REPO_ID and raw["source"]["visibility"] == "private"
+    # a second preflight re-runs repo view and still matches (identity is
+    # immutable but re-verified on every import/refresh)
     out2 = gi.preflight(ws, pr_count=1)
-    assert out2.repository_id == 5
+    assert out2.repository_id == _REPO_ID
+
+
+def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)                                  # unresolved Source (repository=repo)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
+    out = gi.preflight(ws, pr_count=2)
+    assert out.login == "octocat" and out.repository_id == _REPO_ID and out.visibility == "private"
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert raw["source"]["repository_id"] == _REPO_ID and raw["source"]["visibility"] == "private"
+
+    # a later run sees a renamed/moved repository (node id changed) -> must fail closed
+    fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": "R_kgDDIFFERENT"})
+    with pytest.raises(gi.PreflightError) as ei:
+        gi.preflight(ws, pr_count=1)
+    assert ei.value.code == "repo_mismatch"
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert raw["source"]["repository_id"] == _REPO_ID    # unchanged: no mutation staged
+
+
+def test_preflight_rejects_numeric_node_id(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": 5})
+    with pytest.raises(gi.PreflightError) as ex:
+        gi.preflight(ws, pr_count=1)
+    assert ex.value.code == "repo_unresolved"
+
 
 
 def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
@@ -333,12 +376,7 @@ def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
     """Seed an unresolved workspace + canned preflight/REST data for pr 101."""
     _seed_manifest(ws)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": 5, "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
-    )
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
     fake_gh.set_response("GET", "repos/o/r/pulls/101", pull_header)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
