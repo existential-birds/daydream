@@ -648,6 +648,17 @@ def test_validate_bundle_inventory_rejects_extra_ref(tmp_path):
         assert "ref" in str(exc)
 
 
+def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    build.compile_workspace(ws)
+    rels = {str(p.relative_to(ws / "harbor")) for p in (ws / "harbor").rglob("*") if p.is_file()}
+    forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
+    assert not any(any(f in r for f in forbidden_substrs) for r in rels)
+    # every compiled path lives under a case dir, root control files, or the metric
+    assert all(r.startswith("case-") or r in {"README.md", "benchmark.lock.json", "metric.py"} for r in rels)
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
