@@ -45,4 +45,4 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, moc
     # pass still fires the per-stack reviews for the combined python stack +
     # the structural meta-stack.
     assert backend.parse_calls == 0
-    assert len(backend.review_prompts) >= 1
+    assert len(backend.review_prompts) == 2

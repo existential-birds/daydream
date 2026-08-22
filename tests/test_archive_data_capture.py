@@ -446,28 +446,6 @@ class _FixEditingBackend:
                 },
                 continuation=None,
             )
-        elif "extract" in pl and "json" in pl:
-            yield TextEvent(text="Parsed.")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "Add a guard",
-                            "file": "main.py",
-                            "line": 1,
-                            "confidence": "HIGH",
-                            "rationale": "guard missing",
-                            "evidence": "main.py:1",
-                        }
-                    ],
-                    # Issue #742: the deep per-stack parse schema requires a
-                    # ``verdicts`` property (Codex strict-mode output), so the
-                    # parse payload must carry it (empty when not exercised).
-                    "verdicts": [],
-                },
-                continuation=None,
-            )
         elif "fix this issue" in pl or pl.startswith("fix these"):
             main_py = self._repo / "main.py"
             main_py.write_text(main_py.read_text() + "# daydream recommended change\n")

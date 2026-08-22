@@ -8524,7 +8524,7 @@ async def test_no_parse_phase_and_records_from_output_schema(
     assert not any(
         "extract only actionable issues" in c["prompt"].lower() for c in prompts
     ), "a parse phase prompt fired; parse-* stage must be removed"
-    assert not any("parse" in str(c.get("backend", "")).lower() for c in prompts)
+    assert not any("parse" in str(c.get("model", "")).lower() for c in prompts)
 
     # (2) Per-stack records files exist and hold the reviewer's structured
     # output (the stub's per-stack branch emits "Sample issue").

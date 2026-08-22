@@ -1,6 +1,7 @@
 """phase_per_stack_reviews concurrency + correctness tests (D-17, D-18, D-38)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +80,22 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work) -> None:
     assert len(paths) == 3
     for p in paths:
         assert p.name.startswith("stack-") and p.name.endswith("-review.md")
+
+    # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
+    # output directly and the fan-out persists each stack's records to
+    # ``stack-<name>-records.json`` -- the on-disk input ``_step_per_stack_parse``
+    # / merge consume. A regression that stops persisting records.json would
+    # silently break merge while these md-path assertions still pass, so assert
+    # the records artifact exists and carries the declared issues/verdicts.
+    from daydream.deep.artifacts import deep_dir as _deep_dir
+    from daydream.deep.artifacts import per_stack_records_path
+
+    deep_dir_path = _deep_dir(tmp_path)
+    declared: dict[str, list[Any]] = {"issues": [], "verdicts": []}
+    for name in results:
+        records = per_stack_records_path(deep_dir_path, name)
+        assert records.is_file(), f"missing {records.name} for {name}"
+        assert json.loads(records.read_text()) == declared
     prompts = backend.prompts
     assert any("python" in p for p in prompts)
     assert any("react" in p for p in prompts)

@@ -66,8 +66,8 @@ def _unquote_git_path(quoted: str) -> str:
 def _header_path(raw: str) -> str | None:
     """Resolve the repo-relative path from a ``+++ `` file-header line.
 
-    Mirrors ``quote_scrub._header_path`` so the shared parser keys files
-    identically across every consumer: handles the plain ``+++ b/rel/path`` form,
+    The canonical shared parser (moved here from ``quote_scrub``) so every
+    consumer keys files identically: handles the plain ``+++ b/rel/path`` form,
     git's ``core.quotepath`` quoted form, and ``diff.noprefix`` output (no ``b/``
     prefix). A trailing tab (git appends one after space-containing paths) is
     stripped first. Returns ``None`` for the ``+++ /dev/null`` deletion header.
@@ -171,6 +171,23 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
             hunk["added_lines"] = sorted(hunk["added_lines"])
         info["added_lines"] = set(info["added_lines"])
     return result
+
+
+def range_distance(line: int, start: int, end: int) -> int:
+    """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
+
+    ``0`` when ``line`` lies inside the range, else the distance to the nearer
+    boundary (``start`` when ``line`` is below it, ``end`` when above). The
+    single shared two-sided boundary-distance primitive consumed by both the
+    pre-report location validator (``daydream.deep.location_validator``) and
+    the posting ``snap_to_hunk`` backstop in ``pr_review``, so the two cannot
+    drift on what ``in hunk`` / ``near boundary`` means (issue #745).
+    """
+    if start <= line <= end:
+        return 0
+    if line < start:
+        return start - line
+    return line - end
 
 
 def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]:

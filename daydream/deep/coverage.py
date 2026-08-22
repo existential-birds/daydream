@@ -34,7 +34,6 @@ from daydream.eval.analyzer import (
     load_trajectories,
 )
 from daydream.hunk_index import (
-    change_line_count,
     files_in_index,
     hunk_index_path,
     load_hunk_index,
@@ -515,13 +514,14 @@ def filter_sweepable_files(
     ``added_total + removed_total`` is at least ``min_hunk_lines`` -- a
     trivially small hunk does not justify a second pass. A file absent from
     the index is treated as too small (``skipped_small``), mirroring today's
-    ``block is None`` behavior. The sweepable set is capped at ``max_files``
-    in diff order (the uncovered list arrives sorted); the remainder is
-    reported as skipped-for-capacity rather than silently dropped.
+    ``block is None`` behavior. The sweepable set is capped at
+    ``max_files`` in path order (the uncovered list arrives path-sorted from
+    ``compute_uncovered_files``); the remainder is reported as
+    skipped-for-capacity rather than silently dropped.
 
     Returns:
         ``(swept_files, skipped_small_hunk_files, skipped_capacity_files)``.
-        The two skip lists name the omitted files in diff order (mirroring
+        The two skip lists name the omitted files in path order (mirroring
         ``swept_files``) so consumers can audit exactly which files the
         hunk-size floor and the capacity cap left out; the integer skip counts
         are ``len(...)`` of these lists.
@@ -530,7 +530,7 @@ def filter_sweepable_files(
     skipped_small: list[str] = []
     for file in uncovered_files:
         info = index.get(file)
-        if info is None or change_line_count(index, file) < min_hunk_lines:
+        if info is None or info["added_total"] + info["removed_total"] < min_hunk_lines:
             skipped_small.append(file)
             continue
         swept.append(file)

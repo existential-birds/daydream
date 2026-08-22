@@ -1063,6 +1063,60 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     return has_file_line or has_citation
 
 
+def _evidence_gate_then_validate(
+    raw_items: list[dict[str, Any]],
+    items_path: Path,
+) -> list[dict[str, Any]]:
+    """Evidence-gate ``raw_items``, then location-validate the survivors, in order.
+
+    The two steps are fused into one call because they encode OPPOSITE meanings
+    for the same confidence token: ``_is_evidenced`` reads ``confidence="LOW"``
+    as "speculative, drop" (legacy LOW-confidence prompt tolerance, issue #227),
+    while ``validate_records`` (``daydream.deep.location_validator``) WRITES
+    ``confidence="LOW"`` to demote-with-annotation a beyond-tolerance citation
+    that must still reach ``merged-items.json`` (issue #745). The two only
+    agree because the gate runs FIRST, on the raw reviewer records (where a LOW
+    confidence is genuinely speculative), and the validator runs only on the
+    already-evidenced survivors. Fusing both in one call makes that order
+    structurally unreachable -- a future refactor cannot hoist the validator
+    above the gate without editing this single function, surfacing the conflict
+    here instead of silently dropping every beyond-tolerance finding.
+
+    Writes the ``dropped-speculative.json`` audit sidecar beside ``items_path``
+    when any item is dropped, then returns the survivors after snap/demote
+    location validation.
+    """
+    from daydream.deep.location_validator import validate_records
+    from daydream.hunk_index import load_hunk_index
+
+    evidenced: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for item in raw_items:
+        (evidenced if _is_evidenced(item) else dropped).append(item)
+
+    if dropped:
+        sidecar_path = items_path.parent / "dropped-speculative.json"
+        dropped_ids = [d.get("id") for d in dropped]
+        sidecar_path.write_text(
+            json.dumps(
+                {
+                    "dropped_count": len(dropped),
+                    "dropped_ids": dropped_ids,
+                    "dropped_items": dropped,
+                },
+                indent=2,
+            )
+        )
+        print_info(
+            console,
+            f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
+            f"(ids: {dropped_ids}), wrote {sidecar_path}",
+        )
+
+    index = load_hunk_index(items_path.parent.parent)
+    return validate_records(index, evidenced)
+
+
 # Canonical severity ordering shared by the deep fix loop and the shallow fix
 # loop. Defined here (next to normalize_items / MERGED_ITEMS_SCHEMA) so both
 # callers can import a single helper rather than duplicate the map.
@@ -4365,52 +4419,20 @@ def _append_structural_and_write_merged(
             item.setdefault("severity", "high")
             structural_items.append(item)
 
-    # Structural evidence gate (issue #227): drop speculative / evidence-free
-    # findings BEFORE normalization so nothing ungrounded reaches the canonical
-    # merged-items.json (and therefore review-output.md, the fix stage, PR
-    # posting, or the benchmark). This is the single unconditional enforcement
-    # point shared by both merge paths. Dropped items are logged and written to
-    # an audit sidecar -- never silently discarded.
-    evidenced: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    for item in base_items + structural_items:
-        (evidenced if _is_evidenced(item) else dropped).append(item)
-
-    if dropped:
-        sidecar_path = items_path.parent / "dropped-speculative.json"
-        dropped_ids = [d.get("id") for d in dropped]
-        sidecar_path.write_text(
-            json.dumps(
-                {
-                    "dropped_count": len(dropped),
-                    "dropped_ids": dropped_ids,
-                    "dropped_items": dropped,
-                },
-                indent=2,
-            )
-        )
-        print_info(
-            console,
-            f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
-            f"(ids: {dropped_ids}), wrote {sidecar_path}",
-        )
-
-    # Pre-report finding-location validation (issue #745): the persisted hunk
-    # index (``load_hunk_index(items_path.parent.parent)`` -- ``.daydream``) is
-    # the run-time authority for changed line ranges. A citation beyond
-    # tolerance is demoted in place -- severity/confidence lowered and a
-    # ``location_note`` carried through normalize_items -- so it no longer
-    # reaches the report at full severity; an in-tolerance citation is snapped
-    # to the nearest hunk boundary with its evidence aligned. This is THE choke
-    # point both merge paths share, so no unverified citation reaches
-    # merged-items / review-output. Fail-open: a missing index validates
-    # nothing (pre-change behavior); the validator never raises and never
-    # rejects.
-    from daydream.deep.location_validator import validate_records
-    from daydream.hunk_index import load_hunk_index
-
-    index = load_hunk_index(items_path.parent.parent)
-    evidenced = validate_records(index, evidenced)
+    # Evidence gate, then pre-report location validation, in one fixed-order call
+    # (see ``_evidence_gate_then_validate``). The gate's ``LOW``-means-speculative
+    # and the validator's ``LOW``-means-demote agree only because the gate runs
+    # first on the raw records and the validator on the survivors; fusing them
+    # makes that order structurally unreachable (issue #745). The validator
+    # snaps in-tolerance citations to the nearest hunk boundary (aligning the
+    # evidence citation) and demotes-with-annotation beyond-tolerance ones
+    # (severity/confidence lowered, ``location_note`` carried through
+    # normalize_items), so no unverified citation reaches the report at full
+    # severity. Fail-open: a missing index validates nothing (pre-change
+    # behavior); the validator never raises and never rejects.
+    evidenced = _evidence_gate_then_validate(
+        base_items + structural_items, items_path
+    )
 
     items = normalize_items(evidenced)
     items_path.write_text(json.dumps({"items": items}, indent=2))

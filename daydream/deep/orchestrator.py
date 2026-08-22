@@ -1398,15 +1398,24 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         issues = _records_issues_or_empty(loaded)
         declared = loaded.get("verdicts") if isinstance(loaded, dict) else []
         declared = declared if isinstance(declared, list) else []
-        verdicts = _reconcile_stack_verdicts(
-            dd.parent,
-            recorder,
-            stack.stack_name,
-            assigned_files=stack_files[stack.stack_name],
-            declared_verdicts=declared,
-            parsed_records=issues,
-        )
-        records_path.write_text(json.dumps({"issues": issues, "verdicts": verdicts}, indent=2))
+        # Issue #745/#774: a `--start-at merge`/`fix` resume replays this step
+        # under a NEW session id, so the current session carries none of the
+        # prior run's `deep-<stack>` review forks and `_stack_review_reads`
+        # resolves to ``[]`` here. Re-running the reconciliation would downgrade
+        # the prior run's finalized clean verdicts back to `not_reviewed` and
+        # rewrite them to disk. The on-disk verdicts are already finalized;
+        # reconcile (and rewrite) only when this session actually ran the
+        # per-stack review fan-out above.
+        if ctx.config.start_at not in ("merge", "fix"):
+            verdicts = _reconcile_stack_verdicts(
+                dd.parent,
+                recorder,
+                stack.stack_name,
+                assigned_files=stack_files[stack.stack_name],
+                declared_verdicts=declared,
+                parsed_records=issues,
+            )
+            records_path.write_text(json.dumps({"issues": issues, "verdicts": verdicts}, indent=2))
         expected_paths.append(records_path)
     if missing_stacks:
         print_error(
@@ -1719,7 +1728,6 @@ async def _run_uncovered_sweep(ctx: FlowContext) -> None:
     sweep_records: list[dict[str, Any]] = []
     for file in sorted(sweep_records_by_file):
         sweep_records.extend(sweep_records_by_file[file])
-    stats["sweep_parse_dropped"] = 0
     stats["sweep_failures"] = {**sweep_failures}
     stats["completed_files"] = sorted(review_outputs)
     # Issue #309 finding 6: per-file attempt status. A completed review output
@@ -2130,6 +2138,21 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     return None
 
 
+def _emit_coverage_section(report: Path, deep_copy: Path, section: str) -> None:
+    """Write ``section`` into the canonical report and its deep-dir copy.
+
+    Shared by both branches of ``_append_coverage_section`` (the missing-index
+    and normal coverage paths) so the two write loops cannot drift. Appends
+    only when a target file does not already carry a ``## Coverage`` section;
+    an absent file is a silent no-op.
+    """
+    for target in (report, deep_copy):
+        if target.is_file():
+            text = target.read_text(encoding="utf-8")
+            if "## Coverage" not in text:
+                target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+
+
 def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
     """Append a short ``## Coverage`` section when the sweep produced stats.
 
@@ -2169,11 +2192,7 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
                 "- Coverage not available: hunk index is missing.",
             ]
             section = "\n".join(lines) + "\n"
-            for target in (report, deep_copy):
-                if target.is_file():
-                    text = target.read_text(encoding="utf-8")
-                    if "## Coverage" not in text:
-                        target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+            _emit_coverage_section(report, deep_copy, section)
             return
         files_in_diff = pre_sweep.get("files_in_diff")
         if not isinstance(files_in_diff, int):
@@ -2215,11 +2234,7 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
         if isinstance(skipped, int) and skipped:
             lines.append(f"- Sweep capacity-skipped files: {skipped}")
         section = "\n".join(lines) + "\n"
-        for target in (report, deep_copy):
-            if target.is_file():
-                text = target.read_text(encoding="utf-8")
-                if "## Coverage" not in text:
-                    target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
+        _emit_coverage_section(report, deep_copy, section)
     except Exception as exc:  # noqa: BLE001 -- advisory decoration: never fail the step
         print_warning(
             console,

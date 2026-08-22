@@ -429,7 +429,7 @@ def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path):
     from daydream.tree_sitter_index import build_symbol_index
 
     (tmp_path / "lib.rs").write_text(
-        "pub fn total(x: i64) -> i64 {\n    x\n}\n\npub struct Widget {\n    pub id: u32,\n}\n"
+        (Path(__file__).parent / "fixtures" / "symbols" / "lib.rs").read_text()
     )
     idx = build_symbol_index(tmp_path, ["lib.rs"])
     assert idx["total"] == [

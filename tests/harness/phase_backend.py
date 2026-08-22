@@ -31,6 +31,34 @@ from typing import Any
 from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
 
 
+def _shape_issues(
+    issues: list[dict[str, Any]],
+    severity: str | None = None,
+) -> list[dict[str, Any]]:
+    """Shape a parsed issue list into harness ground-shaped structured records.
+
+    Shared by the review and extract-json dispatch branches (both were
+    near-identical duplicate comprehensions). ``**it`` stays last so explicit
+    per-item fields still win over the grounded defaults. Only the review
+    branch pins a default ``severity``.
+    """
+    grounded: dict[str, Any] = {
+        "confidence": "HIGH",
+        "rationale": "harness fixture",
+        "evidence": "",
+    }
+    if severity is not None:
+        grounded["severity"] = severity
+    return [
+        {
+            **grounded,
+            "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
+            **it,
+        }
+        for it in issues
+    ]
+
+
 class PhaseDispatchBackend:
     """Prompt-heuristic dispatch fake with a per-iteration parse-results queue.
 
@@ -121,16 +149,7 @@ class PhaseDispatchBackend:
                     else []
                 )
                 self._review_call += 1
-                issues = [
-                    {
-                        "confidence": "HIGH",
-                        "rationale": "harness fixture",
-                        "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
-                        "severity": "medium",
-                        **it,
-                    }
-                    for it in issues
-                ]
+                issues = _shape_issues(issues, severity="medium")
                 yield ResultEvent(
                     structured_output={"issues": issues, "verdicts": []},
                     continuation=None,
@@ -144,21 +163,7 @@ class PhaseDispatchBackend:
                 else []
             )
             self._parse_call += 1
-            # The shallow parse path now applies the #227 evidence gate, which
-            # drops findings lacking grounded evidence. These harness items
-            # model loop behaviour (not the gate), so default each to a grounded
-            # shape so it survives to the fix phase. Explicit per-item fields
-            # still win (``**it`` last) so a test can deliberately emit a
-            # speculative item.
-            issues = [
-                {
-                    "confidence": "HIGH",
-                    "rationale": "harness fixture",
-                    "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
-                    **it,
-                }
-                for it in issues
-            ]
+            issues = _shape_issues(issues)
             yield TextEvent(text="Parsed.")
             # Issue #742: the deep per-stack parse schema requires a
             # ``verdicts`` property (Codex strict-mode output), so the parse

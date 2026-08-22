@@ -632,17 +632,18 @@ def snap_to_hunk(
     so the GitHub API receives a line that actually appears in the diff.
     Returns ``None`` when the line is beyond tolerance of every hunk.
     """
+    # Shared two-sided boundary-distance primitive (same as the pre-report
+    # validator) so posting and the validator agree on what ``in hunk`` /
+    # ``near boundary`` means (issue #745).
+    from daydream.hunk_index import range_distance
+
     best: int | None = None
     best_dist = tolerance + 1
     for start, end in hunks:
         if start <= line <= end:
             return line
-        if line < start:
-            dist = start - line
-            candidate = start
-        else:
-            dist = line - end
-            candidate = end
+        dist = range_distance(line, start, end)
+        candidate = start if line < start else end
         if dist <= tolerance and dist < best_dist:
             best = candidate
             best_dist = dist

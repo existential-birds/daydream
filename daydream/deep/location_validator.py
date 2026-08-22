@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from daydream.hunk_index import range_distance
 from daydream.pr_review import HUNK_TOLERANCE
 
 
@@ -90,11 +91,13 @@ def _ranges(hunks: list[dict[str, Any]]) -> list[tuple[int, int]]:
 
 
 def _distance(line: int, start: int, end: int) -> int:
-    if start <= line <= end:
-        return 0
-    if line < start:
-        return start - line
-    return line - end
+    """Distance from ``line`` to an inclusive ``[start, end]`` hunk range.
+
+    Delegates to the single shared primitive in ``daydream.hunk_index`` so the
+    validator distance and the ``pr_review.snap_to_hunk`` posting backstop
+    cannot drift on the two-sided boundary-distance contract (issue #745).
+    """
+    return range_distance(line, start, end)
 
 
 def validate_records(
@@ -124,6 +127,14 @@ def validate_records(
         file = record.get("file")
         line = record.get("line")
         if file is None or not isinstance(line, int):
+            continue
+        # Structural whole-file findings (``lens="structural"``) carry
+        # ``line: 0`` -- a whole-file citation, not a real changed line.
+        # ``_is_evidenced`` exempts the structural lens from the grounded-citation
+        # requirement for exactly this reason, so the snap/demote must not treat
+        # ``line: 0`` as a citation just because the file is in the hunk index
+        # and snap it to a boundary or demote a whole-file finding (issue #745).
+        if record.get("lens") == "structural" and line == 0:
             continue
         check = validate_finding(index, file, line, tolerance=tolerance)
         if check.distance is None or check.nearest_hunk is None:

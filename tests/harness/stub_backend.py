@@ -274,6 +274,57 @@ class StubBackend:
             and stack_name == self.runaway_parse
         )
 
+    def _apply_parse_by_stack_override(
+        self, prompt: str, issue: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """#232: per-stack override keyed off the review-file path the prompt
+        points at (``stack-<name>-review.md``). Lets one stack emit a HIGH
+        finding and another a borderline LOW one at DISTINCT locations, so they
+        stay uncontested and drive the suppression predicate.
+
+        Shared by the per-stack review branch and the parse-feedback branch so
+        the ``parse_by_stack`` knob is honored identically in both (issue #745
+        split them; this hoist re-unifies the duplicated body). Returns the
+        issue list -- the base issue, optionally with an ``extra`` sibling at the
+        same (file, line).
+        """
+        if self.parse_by_stack is None:
+            return [issue]
+        sm = re.search(r"stack-(\S+?)-review\.md", prompt)
+        if sm is None or sm.group(1) not in self.parse_by_stack:
+            return [issue]
+        ov = self.parse_by_stack[sm.group(1)]
+        issue["severity"] = ov["severity"]
+        issue["confidence"] = ov["confidence"]
+        issue["file"] = ov.get("file", issue["file"])
+        issue["line"] = ov.get("line", issue["line"])
+        issue["description"] = ov.get("description", issue["description"])
+        issue["evidence"] = f"{issue['file']}:{issue['line']}"
+        issue["rationale"] = "stub"
+        issues: list[dict[str, Any]] = [issue]
+        # #232: an ``extra`` sibling lets ONE stack emit a second finding at the
+        # SAME (file, line) as its HIGH finding. Single stack -> uncontested, so
+        # only the HIGH one is an arbiter target; the borderline sibling must
+        # still reach suppression, which only holds if exclusion is keyed by
+        # record identity, not by (file, line).
+        extra = ov.get("extra")
+        if extra is not None:
+            ex_file = extra.get("file", issue["file"])
+            ex_line = extra.get("line", issue["line"])
+            issues.append(
+                {
+                    "id": 2,
+                    "description": extra.get("description", "extra finding"),
+                    "file": ex_file,
+                    "line": ex_line,
+                    "severity": extra["severity"],
+                    "confidence": extra["confidence"],
+                    "rationale": "stub",
+                    "evidence": f"{ex_file}:{ex_line}",
+                }
+            )
+        return issues
+
     async def execute(
         self,
         cwd: Path,
@@ -491,34 +542,9 @@ class StubBackend:
                 "rationale": "stub",
                 "evidence": "api.py:1",
             }
-            issues: list[dict[str, Any]] = [issue]
-            if self.parse_by_stack is not None:
-                sm = re.search(r"stack-(\S+?)-review\.md", prompt)
-                if sm is not None and sm.group(1) in self.parse_by_stack:
-                    ov = self.parse_by_stack[sm.group(1)]
-                    issue["severity"] = ov["severity"]
-                    issue["confidence"] = ov["confidence"]
-                    issue["file"] = ov.get("file", issue["file"])
-                    issue["line"] = ov.get("line", issue["line"])
-                    issue["description"] = ov.get("description", issue["description"])
-                    issue["evidence"] = f"{issue['file']}:{issue['line']}"
-                    issue["rationale"] = "stub"
-                    extra = ov.get("extra")
-                    if extra is not None:
-                        ex_file = extra.get("file", issue["file"])
-                        ex_line = extra.get("line", issue["line"])
-                        issues.append(
-                            {
-                                "id": 2,
-                                "description": extra.get("description", "extra finding"),
-                                "file": ex_file,
-                                "line": ex_line,
-                                "severity": extra["severity"],
-                                "confidence": extra["confidence"],
-                                "rationale": "stub",
-                                "evidence": f"{ex_file}:{ex_line}",
-                            }
-                        )
+            issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(
+                prompt, issue
+            )
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output={
@@ -563,40 +589,9 @@ class StubBackend:
             # prompt points at (``stack-<name>-review.md``). Lets one stack emit a
             # HIGH finding and another a borderline LOW one at DISTINCT locations,
             # so they stay uncontested and drive the suppression predicate.
-            parse_issues: list[dict[str, Any]] = [parse_issue]
-            if self.parse_by_stack is not None and "severity" in pl:
-                sm = re.search(r"stack-(\S+?)-review\.md", prompt)
-                if sm is not None and sm.group(1) in self.parse_by_stack:
-                    ov = self.parse_by_stack[sm.group(1)]
-                    parse_issue["severity"] = ov["severity"]
-                    parse_issue["confidence"] = ov["confidence"]
-                    parse_issue["file"] = ov.get("file", parse_issue["file"])
-                    parse_issue["line"] = ov.get("line", parse_issue["line"])
-                    parse_issue["description"] = ov.get("description", parse_issue["description"])
-                    parse_issue["evidence"] = f"{parse_issue['file']}:{parse_issue['line']}"
-                    parse_issue["rationale"] = "stub"
-                    # #232: an ``extra`` sibling lets ONE stack emit a second
-                    # finding at the SAME (file, line) as its HIGH finding. Single
-                    # stack -> uncontested, so only the HIGH one is an arbiter
-                    # target; the borderline sibling must still reach suppression,
-                    # which only holds if exclusion is keyed by record identity, not
-                    # by (file, line).
-                    extra = ov.get("extra")
-                    if extra is not None:
-                        ex_file = extra.get("file", parse_issue["file"])
-                        ex_line = extra.get("line", parse_issue["line"])
-                        parse_issues.append(
-                            {
-                                "id": 2,
-                                "description": extra.get("description", "extra finding"),
-                                "file": ex_file,
-                                "line": ex_line,
-                                "severity": extra["severity"],
-                                "confidence": extra["confidence"],
-                                "rationale": "stub",
-                                "evidence": f"{ex_file}:{ex_line}",
-                            }
-                        )
+            parse_issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(
+                prompt, parse_issue
+            )
             yield TextEvent(text="")
             # Issue #742: PER_STACK_RECORD_SCHEMA requires a ``verdicts``
             # property (Codex strict-mode output schemas list every key in
