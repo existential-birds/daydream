@@ -14,9 +14,13 @@ sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
 fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
 credential-preserving same-origin hops whose targets are re-validated against
 the allowlist, response/reasoning payloads are size-capped (rejected, never
-truncated-and-accepted), and every failure path writes typed bounded (redacted)
-diagnostics to ``reward.json`` / ``reward-details.json`` -- never a bare exit
-and never an unbounded or credential-bearing error.
+truncated-and-accepted), and failures split into two zones: invalid candidate
+output (read/validate/bind failures on the agent's own artifact) is a scored
+zero written to ``reward.json`` / ``reward-details.json``, while every
+infrastructure failure (metadata, gold, judging, credentials, a verifier bug)
+is unscored and writes ONLY ``reward-details.json`` -- never a bare exit and
+never an unbounded or credential-bearing error, and never a numeric zero on an
+infra path.
 """
 
 from __future__ import annotations
@@ -828,6 +832,34 @@ def _error_details(provider: str, model: str, request_counts: dict[str, int], er
     }
 
 
+def _write_scored_zero_artifact(
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+    gold_count: int,
+) -> verifier_core.Reward:
+    """Write the scored-zero artifacts for invalid candidate output.
+
+    Candidate-zone failures -- reading, validating, or binding the agent's own
+    artifact -- are a scored outcome, not infrastructure trouble: both
+    ``reward.json`` (``reward=0, verifier_error=0``) and ``reward-details.json``
+    are written atomically with typed bounded diagnostics, so the trial scores
+    zero rather than being unscored. ``errors`` must already be
+    bounded/redacted before the call.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    scored_zero = verifier_core.Reward(
+        reward=0.0, gold_count=gold_count, verifier_error=0
+    )
+    details = _error_details(provider, model, request_counts, errors)
+    _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(scored_zero))
+    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+    return scored_zero
+
+
 def _write_error_artifact(
     out_dir: str | Path,
     provider: str,
@@ -836,12 +868,14 @@ def _write_error_artifact(
     errors: list[str],
     gold_count: int,
 ) -> verifier_core.Reward:
-    """Write the fail-whole error artifacts and return the error reward.
+    """Write the unscored error artifacts and return the error reward.
 
-    Every failure path -- validation, binding, digest, judging, exhausted
-    retries, a missing client, or an unexpected runtime exception -- funnels
-    through here so ``reward.json``/``reward-details.json`` are always written
-    with typed bounded diagnostics, never a bare exit. ``errors`` must already
+    Every infrastructure failure path -- metadata load, gold read/digest/
+    validate, judging, exhausted retries, a missing client, or an unexpected
+    runtime exception -- funnels through here so ``reward-details.json`` is
+    always written with typed bounded diagnostics, never a bare exit. Only
+    ``reward-details.json`` is written: no ``reward.json`` on an infra path,
+    so the trial is unscored (never a numeric zero). ``errors`` must already
     be bounded/redacted before the call.
     """
     out_dir = Path(out_dir)
@@ -850,7 +884,6 @@ def _write_error_artifact(
         reward=0.0, gold_count=gold_count, verifier_error=1
     )
     details = _error_details(provider, model, request_counts, errors)
-    _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
     _atomic_write(out_dir, "reward-details.json", json.dumps(details))
     return error_reward
 
@@ -870,13 +903,15 @@ def run_verifier(
     the task's immutable ``verifier-metadata.json`` (case id + base/head refs);
     the gold is then read as raw bytes and its sha256 must match the
     compiler-rendered ``gold_sha256`` sentinel before it is parsed and validated
-    (canonical/unique gold ids). Any ``VerifierError`` (validation, binding,
-    digest, parsing, judging, exhausted retries, or a missing client) -- and
-    any unexpected runtime exception -- becomes a typed bounded diagnostic that
-    still writes ``Reward(reward=0, verifier_error=1)`` plus both output files
-    atomically (temp + rename); the task fails whole, never reporting a
-    partial score and never escaping to a bare exit. Error text is redacted and
-    size-bounded before it reaches any artifact. Never emits source or diffs.
+    (canonical/unique gold ids). Failures split into two zones: anything about
+    the agent's own candidate artifact (read, validate, task-bind) is a scored
+    outcome written to ``reward.json`` with ``reward=0, verifier_error=0``
+    (plus bounded ``reward-details.json``); anything about the environment
+    (metadata, gold read/digest/validate, judging, exhausted retries, a missing
+    client, an unexpected runtime exception) is unscored and writes ONLY
+    ``reward-details.json`` -- never a bare exit, never a numeric zero, and
+    never a partial score. Error text is redacted and size-bounded before it
+    reaches any artifact. Never emits source or diffs.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -891,13 +926,32 @@ def run_verifier(
     try:
         if client is None:
             raise VerifierError("no judge client configured (missing DAYDREAM_JUDGE_*)")
-        artifact_raw = _read_artifact_bytes(artifact_path)
-        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
+        try:
+            artifact_raw = _read_artifact_bytes(artifact_path)
+            candidates = verifier_core.validate_candidate_artifact(artifact_raw)
+        except VerifierError as exc:
+            # Candidate zone: reading/validating the agent's own artifact is a
+            # scored outcome -- a scored-zero reward, never an infra error.
+            errors.insert(0, _bounded_error(str(exc)))
+            return _write_scored_zero_artifact(
+                out_dir, provider, model, request_counts, errors, gold_count=0
+            )
 
         metadata = _load_verifier_metadata(Path(gold_path))
-        for field in ("case_id", "base_ref", "head_ref"):
-            if artifact_raw[field] != metadata[field]:
-                raise VerifierError(f"candidate {field} does not match the bound task")
+
+        try:
+            for field in ("case_id", "base_ref", "head_ref"):
+                if artifact_raw[field] != metadata[field]:
+                    raise VerifierError(
+                        f"candidate {field} does not match the bound task"
+                    )
+        except VerifierError as exc:
+            # Binding zone: a candidate pointing at the wrong task is still the
+            # agent's own output -- scored zero, not unscored.
+            errors.insert(0, _bounded_error(str(exc)))
+            return _write_scored_zero_artifact(
+                out_dir, provider, model, request_counts, errors, gold_count=0
+            )
 
         gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])
         gold_parsed = verifier_core.validate_gold_set(
@@ -934,7 +988,8 @@ def run_verifier(
         )
     except Exception as exc:
         # Unexpected runtime failures must not escape to a bare exit: they
-        # become a typed bounded diagnostic that still writes both artifacts.
+        # become a typed bounded diagnostic -- infra zone, written unscored
+        # (reward-details.json only, no numeric reward).
         errors.insert(0, _bounded_error(f"unexpected verifier failure: {exc}"))
         return _write_error_artifact(
             out_dir, provider, model, request_counts, errors, len(gold_parsed)
@@ -1013,8 +1068,8 @@ def main() -> int:
 
     Provider selection is fail-closed: an unsupported ``DAYDREAM_JUDGE_PROVIDER``
     or an out-of-allowlist judge host writes a typed bounded diagnostic artifact
-    (``reward.json``/``reward-details.json``) instead of a barren ``client=None``
-    exit with no provider reason. ``DAYDREAM_JUDGE_ARTIFACT_PATH`` /
+    (``reward-details.json`` only -- infra zone, no numeric reward) instead of a
+    barren ``client=None`` exit with no provider reason. ``DAYDREAM_JUDGE_ARTIFACT_PATH`` /
     ``DAYDREAM_JUDGE_OUT_PATH`` relocate the compiled defaults for isolated
     subprocess runs; the compiled defaults ``/logs/artifacts/review.json`` and
     ``/logs/verifier`` are unchanged.
