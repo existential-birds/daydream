@@ -7,6 +7,7 @@ source, no pydantic, no third-party imports.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 
@@ -181,3 +182,44 @@ def parse_candidate_finding(raw: dict[str, object]) -> CandidateFinding:
         start_line=fields["start_line"],  # type: ignore[arg-type]
         end_line=fields["end_line"],  # type: ignore[arg-type]
     )
+
+
+# ---------------------------------------------------------------------------
+# deterministic candidate-ID derivation
+# ---------------------------------------------------------------------------
+
+
+def _finding_component(finding: object, name: str) -> object:
+    """Read a field from either a dataclass attribute or a dict key."""
+    if isinstance(finding, dict):
+        try:
+            return finding[name]
+        except KeyError as exc:
+            raise VerifierError(f"missing required field {name}") from exc
+    return getattr(finding, name)
+
+
+def derive_candidate_id(
+    case_key: str,
+    finding: CandidateFinding | dict[str, object],
+    ordinal: int,
+) -> str:
+    """Return the deterministic sha256 candidate id for a finding."""
+    title = str(_finding_component(finding, "title") or "")
+    body = str(_finding_component(finding, "body") or "")
+    severity = str(_finding_component(finding, "severity") or "")
+    path = str(_finding_component(finding, "path"))
+    start_line = _component_int(finding, "start_line")
+    end_line = _component_int(finding, "end_line")
+    canonical = _SEP.join(
+        [title, body, severity, path, str(start_line), str(end_line)]
+    )
+    payload = _SEP.join([str(case_key), canonical, str(ordinal)])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _component_int(finding: object, name: str) -> int:
+    value = _finding_component(finding, name)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise VerifierError(f"{name} must be an integer, got {value!r}")
+    return value

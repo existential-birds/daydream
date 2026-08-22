@@ -6,6 +6,7 @@ from daydream.benchmark.harbor.verifier_core import (
     CandidateFinding,
     GoldFinding,
     VerifierError,
+    derive_candidate_id,
     parse_candidate_finding,
     parse_gold_finding,
 )
@@ -104,3 +105,32 @@ def test_harbor_package_imports_stdlib_only():
     assert vc.MAX_ARTIFACT_BYTES == 1_048_576
     assert vc.CONFIDENCE_THRESHOLD == 0.7
     assert issubclass(vc.VerifierError, Exception)
+
+def test_candidate_id_is_64_lower_hex():
+    cid = derive_candidate_id("case-x", _cand(), 0)
+    assert len(cid) == 64 and all(ch in "0123456789abcdef" for ch in cid)
+
+
+def test_candidate_id_scoped_by_case_key():
+    a = derive_candidate_id("case-x", _cand(), 0)
+    b = derive_candidate_id("case-y", _cand(), 0)
+    assert a != b
+
+
+def test_duplicate_content_gets_distinct_ordinals_and_ids():
+    # two byte-identical findings, ordinals 0 and 1 → distinct IDs, both preserved
+    first = derive_candidate_id("case-x", _cand(), 0)
+    second = derive_candidate_id("case-x", _cand(), 1)
+    assert first != second
+
+
+def test_same_content_same_key_same_ordinal_is_stable():
+    assert derive_candidate_id("case-x", _cand(), 0) == derive_candidate_id("case-x", _cand(), 0)
+
+
+def test_null_fields_normalize_to_empty_string():
+    # title/body/severity null → "" — the digest must be stable for a null vs "" field
+    raw = _cand(title=None, body=None, severity=None)
+    cid = derive_candidate_id("case-x", raw, 0)
+    raw2 = _cand(title="", body="", severity=None)
+    assert cid == derive_candidate_id("case-x", raw2, 0)
