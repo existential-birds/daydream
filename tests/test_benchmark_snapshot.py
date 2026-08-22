@@ -123,3 +123,23 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path):
     sn.fetch_pr_refs(tmp_path, "o/r", pr_number=1, base_tip=_SHA_BASE2,
                      explicit_shas=[], origin_url=origin)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
+
+
+# ---------------------------------------------------------------------------
+# Task 2: ancestor-of-PR-head enforcement
+# ---------------------------------------------------------------------------
+
+
+def test_ancestor_of_pr_head_enforced(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE3,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    pr_head = sn.rev_parse(m, "refs/pull/1/head")
+    assert sn.head_reachability(m, _SHA_BASE2, pr_head) == "ok"     # ancestor
+    assert sn.head_reachability(m, _SHA_HEAD, pr_head) == "ok"      # equal
+    assert sn.head_reachability(m, _SHA_BASE3, pr_head) == "head_not_on_pr"
+    assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"

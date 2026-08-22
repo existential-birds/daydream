@@ -102,3 +102,20 @@ def fetch_pr_refs(
         refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
     _git_fetch(m, origin_url, refspecs)
     return m
+
+
+def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
+    """Classify how an explicit *sha* relates to the PR-head ancestry.
+
+    Returns ``"ok"`` when ``sha`` equals the PR head or is an ancestor of it,
+    ``"head_not_on_pr"`` when ``sha`` is in the mirror but on a different
+    ancestry, and ``"head_unreachable"`` when ``sha`` is absent entirely.
+    Never raises for a merely-missing or merely-unrelated SHA.
+    """
+    if sha == pr_head_sha:
+        return "ok"
+    verify = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{commit}}"], retries=0)
+    if verify.returncode != 0:
+        return "head_unreachable"
+    anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
+    return "ok" if anc.returncode == 0 else "head_not_on_pr"
