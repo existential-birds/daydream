@@ -72,8 +72,52 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
     return load_yaml_strict(path)
 
 
+def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
+    """Change stats (files, lines) for a case snapshot's ``base..head`` diff.
+
+    Only a snapshot whose ``status == "ready"`` with a non-blank original base
+    and head SHA is queried: runs ``git diff --numstat <base> <head>`` against
+    the shared bare mirror and sums the per-file added/deleted counts. Returns
+    ``(0, 0)`` for any non-ready snapshot. Raises :class:`CurationError` naming
+    the case when the mirror read fails for a ready snapshot — counts are never
+    fabricated.
+    """
+    if snapshot_doc.get("status") != "ready":
+        return 0, 0
+    base = snapshot_doc.get("original_base_sha") or ""
+    head = snapshot_doc.get("original_head_sha") or ""
+    if not base or not head:
+        return 0, 0
+    mirror = snapshot.mirror(root)
+    try:
+        proc = git_ops._run_git(
+            mirror, ["diff", "--numstat", base, head], retries=0
+        )
+    except git_ops.GitError as exc:
+        raise CurationError(f"case {case_id} mirror read failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise CurationError(f"case {case_id} mirror cannot serve its change diff")
+    files = 0
+    lines = 0
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        try:
+            files += 1
+            lines += int(parts[0]) + int(parts[1])
+        except ValueError:
+            continue
+    return files, lines
+
+
 def list_cases(root: Path) -> list[dict[str, Any]]:
-    """Read-only index of the workspace's cases with derived curation state."""
+    """Read-only index of the workspace's cases with derived curation state.
+
+    Each row adds ``evidence_count``, ``changed_files``, and ``changed_lines``
+    to the existing case_id/pr_number/state/gold_mode/gold_count/snapshot_status/
+    head_prefix keys.
+    """
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
     for case in manifest.get("cases", []):
@@ -86,6 +130,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
         snapshot_doc = doc.get("snapshot") or {}
         snapshot_status = snapshot_doc.get("status", "imported")
         head_sha = snapshot_doc.get("original_head_sha") or ""
+        changed_files, changed_lines = _changed_file_stats(root, case_id, snapshot_doc)
         try:
             gold_mode = schema.derive_gold_mode(_curation_model(curation))
         except ValidationError:
@@ -98,13 +143,61 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
+            "evidence_count": len(doc.get("candidates") or []),
+            "changed_files": changed_files,
+            "changed_lines": changed_lines,
         })
     return out
 
 
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
-    """Read-only view of one case document (its raw case dict)."""
-    return _load_case(root, case_id)
+    """Read-only view of one case document and its per-candidate evidence.
+
+    Returns the raw case dict where each candidate gains an in-memory (never
+    persisted) ``evidence`` sub-dict ``{kind, author, commit_id, resolved,
+    outdated}`` joined by ``source_id`` from the import file the case doc
+    references; a candidate whose ``source_id`` matches no evidence record has
+    no ``evidence`` key (absent, not ``None``). A missing/unreadable import
+    file for a case that references it propagates the storage error.
+    """
+    raw = _load_case(root, case_id)
+    projection = _evidence_projection(root, raw)
+    if projection:
+        for cand in raw.get("candidates") or []:
+            src = cand.get("source_id")
+            if src in projection:
+                cand["evidence"] = projection[src]
+    return raw
+
+
+def _evidence_projection(
+    root: Path, raw: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Read the import evidence once and join records by ``source_id``.
+
+    Maps each evidence record's source_id to a read-only projection sub-dict
+    (never persisted). A case that references an import file that is
+    missing/unreadable raises the storage error — no projection is fabricated.
+    """
+    source = raw.get("source") or {}
+    import_file = source.get("import_file")
+    if not import_file:
+        return {}
+    import_data = storage.load_json_strict(Path(root) / import_file)
+    projection: dict[str, dict[str, Any]] = {}
+    for ev in import_data.get("evidence") or []:
+        author = ev.get("author") or {}
+        projection[ev["source_id"]] = {
+            "kind": ev.get("kind"),
+            "author": {
+                "login": author.get("login"),
+                "type": author.get("type"),
+            },
+            "commit_id": ev.get("commit_id"),
+            "resolved": ev.get("resolved", False),
+            "outdated": ev.get("outdated", False),
+        }
+    return projection
 
 
 # ---------------------------------------------------------------------------
@@ -347,6 +440,40 @@ def add_finding(
     }
     finding["finding_id"] = schema.derive_finding_id(finding)
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="add")
+
+
+def add_findings(
+    root: Path, case_id: str, *, findings: list[dict[str, Any]]
+) -> None:
+    """Atomically add a batch of authored findings in one transaction.
+
+    Unlike a loop of :func:`add_finding` calls, a mid-batch invariant violation
+    stages **nothing** — the whole batch validates (candidate sources checked
+    up front), derives, and stages together, so the TUI's multi-atom ``[n]``
+    add stays all-or-nothing and never leaves earlier atoms persisted on a
+    failure.
+    """
+    raw = _load_case(root, case_id)
+    for fi in findings:
+        _check_candidate_sources(raw, list(fi.get("source_ids") or []), case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
+    for fi in findings:
+        source_ids = list(fi.get("source_ids") or [])
+        finding = {
+            "title": fi["title"],
+            "body": fi["body"],
+            "severity": fi.get("severity"),
+            "location": fi.get("location"),
+            "provenance": {
+                "kind": _derive_provenance_kind(source_ids, authored=True),
+                "source_ids": source_ids,
+            },
+        }
+        finding["finding_id"] = schema.derive_finding_id(finding)
+        curation.setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="add")
 

@@ -64,3 +64,34 @@ def test_cli_curate_without_apply_gold_rejects_on_non_tty(tmp_path, fake_gh, cap
     rc = _handle_benchmark_command(["curate", str(ws), "--case", case_id])
     assert rc == 1
     assert "apply-gold" in capsys.readouterr().err.lower()
+
+
+def test_curate_on_tty_dispatches_to_tui(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark import cli
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    called = {}
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: True)
+    monkeypatch.setattr(
+        "daydream.benchmark.curate_tui.run_curate_tui",
+        lambda root, cid=None, **k: called.update(root=str(root), cid=cid) or 0,
+    )
+    rc = cli._handle_benchmark_command(["curate", str(ws), "--case", case_id])
+    assert rc == 0 and called == {"root": str(ws), "cid": case_id}
+
+
+def test_curate_non_tty_keeps_guidance_and_exit_1(tmp_path, fake_gh, monkeypatch, capsys):
+    from daydream.benchmark import cli
+    ws, case, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    rc = cli._handle_benchmark_command(["curate", str(ws), "--case", case])
+    assert rc == 1 and "apply-gold" in capsys.readouterr().err.lower()
+
+
+def test_is_interactive_tty_detects_stdin_and_stdout(monkeypatch):
+    from daydream.benchmark import cli
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    assert cli._is_interactive_tty() is True
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: False)
+    assert cli._is_interactive_tty() is False

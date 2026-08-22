@@ -14,7 +14,7 @@ import yaml
 
 from daydream import git_ops
 from daydream.benchmark.schema import derive_finding_id
-from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.storage import atomic_write_yaml, load_yaml_strict
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_import_prs.py::_SEED_ENV).
@@ -449,6 +449,60 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
         cu._head_file_line_count(ws, head_sha, "missing.py")
 
 
+def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
+    # numstat + evidence-count claims confirmed by tests/test_spike_issue775_reads.py
+    from daydream.benchmark import curation as cu
+    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+
+    cases = cu.list_cases(ws)
+    assert cases[0]["evidence_count"] == 1          # one seeded candidate
+    assert cases[0]["changed_files"] == 2           # base.py + feature.py
+    assert cases[0]["changed_lines"] == 6           # 2 + 4 (base edit + feature add)
+    # a non-ready snapshot degrades to zero stats without raising
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["snapshot"] = {"status": "imported", "policy": "final_pr_head",
+                       "requested_head": "final"}
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    c2 = cu.list_cases(ws)[0]
+    assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
+
+
+def test_list_cases_ready_mirror_failure_raises(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    import shutil
+    shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
+    with pytest.raises(cu.CurationError):
+        cu.list_cases(ws)
+
+
+def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
+    # evidence-join claim confirmed by tests/test_spike_issue775_reads.py
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+
+    view = cu.get_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
+    ev = cand["evidence"]
+    assert ev["kind"] == "inline_comment"
+    assert ev["author"] == {"login": "alice", "type": "User"}
+    assert ev["commit_id"] == head_sha
+    assert ev["resolved"] is False and ev["outdated"] is False
+    # a candidate with no backing evidence record is tolerated (projection
+    # absent) -- verified through get_case on a genuinely unmatched source_id,
+    # not by hand-constructing a stripped view (which would pass even if the
+    # projection logic silently attached an evidence dict unconditionally).
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    unmatched = {k: v for k, v in cand.items() if k != "evidence"}
+    unmatched["source_id"] = "github:review:999"
+    raw["candidates"].append(unmatched)
+    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    view2 = cu.get_case(ws, case_id)
+    assert "evidence" not in view2["candidates"][-1]   # unmatched source, absent
+    assert "evidence" in view2["candidates"][0]        # matched source, still joined
+
+
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
@@ -491,3 +545,4 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(cu.CurationError):
         cu.validate_case(ws, case_id)
+
