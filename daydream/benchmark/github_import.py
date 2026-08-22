@@ -731,10 +731,15 @@ def project_candidates(
     return cands
 
 
-def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
-    """sha256 over the canonical JSON of the evidence list."""
+def _payload_sha256(pull_request: dict, records: list[schema.EvidenceRecord]) -> str:
+    """sha256 over the canonical JSON of the complete normalized import.
+
+    Spans the PR header (title/body/state/timestamps/head/base) **and** the
+    evidence, so any PR-intent change flips the digest, not just evidence
+    changes.
+    """
     canonical = json.dumps(
-        [r.model_dump(mode="json") for r in records],
+        {"pull_request": pull_request, "evidence": [r.model_dump(mode="json") for r in records]},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1151,7 +1156,7 @@ def fetch_and_normalize(
             "fetch": {
                 "fetched_at": _now_rfc3339(),
                 "etag": None,
-                "payload_sha256": _payload_sha256(records),
+                "payload_sha256": _payload_sha256(pull_request, records),
             },
         }
     )

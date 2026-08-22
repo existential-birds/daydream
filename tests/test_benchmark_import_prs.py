@@ -108,6 +108,27 @@ def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
     assert doc.pull_request.body == ""             # null -> empty string, never "None"
 
 
+def test_payload_digest_spans_header_and_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    def fetch_with(title):
+        ws = tmp_path / "ws"
+        (ws / "imports").mkdir(parents=True, exist_ok=True)
+        header = dict(_PR_HEADER)
+        header["title"] = title
+        header["body"] = "b"
+        fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+        for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+                   "repos/o/r/issues/101/comments"):
+            fake_gh.set_response("GET", ep, [])
+        return gi.fetch_and_normalize(ws, "o/r", 101)
+    a = fetch_with("Fix cache")
+    b = fetch_with("Fix cache EDITED")            # header-only change, same evidence
+    assert a.fetch.payload_sha256 != b.fetch.payload_sha256
+    # a header-only change must flip the digest even with identical evidence
+    assert gi._evidence_signature_from_doc(a) == gi._evidence_signature_from_doc(b)
+
+
 def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
 
