@@ -400,6 +400,118 @@ def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
     assert case["curation"]["findings"]              # prior curated findings preserved
 
 
+def _pr_header(number: int) -> dict:
+    header = dict(_PR_HEADER)
+    header["number"] = number
+    header["url"] = f"https://github.com/o/r/pull/{number}"
+    return header
+
+
+def _seed_identity(fake_gh) -> None:
+    """Seed the preflight identity + repo-access responses (no PR data)."""
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response(
+        "repo-view-full",
+        value={"id": 5, "nameWithOwner": "o/r",
+               "url": "https://github.com/o/r", "visibility": "PRIVATE",
+               "defaultBranchRef": {"name": "main"}},
+    )
+
+
+def _seed_rest(gh, number: int, *, reviews, comments, issue_comments) -> None:
+    """Seed one PR's REST evidence into the fake router."""
+    gh.set_response("GET", f"repos/o/r/pulls/{number}", _pr_header(number))
+    gh.set_response("GET", f"repos/o/r/pulls/{number}/reviews", reviews)
+    gh.set_response("GET", f"repos/o/r/pulls/{number}/comments", comments)
+    gh.set_response("GET", f"repos/o/r/issues/{number}/comments", issue_comments)
+
+
+def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    _seed_identity(fake_gh)
+    _seed_rest(
+        fake_gh, 101,
+        reviews=[
+            {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},
+             "body": "Found a bug.", "state": "COMMENTED", "commit_id": "a" * 40,
+             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},
+            {"id": 2, "node_id": "PRR_2", "user": {"login": "carol", "type": "User"},
+             "body": "Nice work.", "state": "COMMENTED", "commit_id": "a" * 40,
+             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-2"},
+        ],
+        comments=[
+            {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
+             "body": "please fix the cache", "path": "a.py", "line": 4,
+             "subject_type": "line", "side": "RIGHT", "commit_id": "a" * 40,
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
+            {"id": 8, "node_id": "DIFF_8", "user": {"login": "dave", "type": "User"},
+             "body": "Order matters here.", "path": "b.py", "line": 2,
+             "subject_type": "line", "side": "RIGHT", "commit_id": "a" * 40,
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r8"},
+        ],
+        issue_comments=[
+            {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
+             "body": "question", "created_at": "2026-01-01T00:00:00Z",
+             "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#issuecomment-9"},
+        ],
+    )
+    fake_gh._write_threads(
+        [
+            {"id": "thread_1", "isResolved": False, "isOutdated": False,
+             "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
+             "comments": {"nodes": [
+                 {"id": "c1", "databaseId": 10, "body": "root",
+                  "author": {"login": "dave", "type": "User"},
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "url": "https://github.com/o/r/pull/101#discussion_r10"},
+             ]}},
+        ],
+        number=101,
+    )
+    _seed_rest(fake_gh, 102, reviews=[], comments=[], issue_comments=[])
+    rc = _handle_benchmark_command(
+        ["import-prs", str(ws), "--pr", "101", "--pr", "102", "--pr", "https://github.com/o/r/pull/102"]
+    )
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert [p["number"] for p in raw["pull_requests"]] == [101, 102]
+    imp = load_json_strict(ws / "imports/pr-000101.json")
+    kinds = {e["kind"] for e in imp["evidence"]}
+    assert kinds == {"review", "inline_comment", "issue_comment", "thread_comment"}
+    assert any(e["is_bot"] for e in imp["evidence"])      # bot author retained
+    assert any(not e["is_bot"] for e in imp["evidence"])  # human author retained
+    assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
+
+
+def test_e2e_partial_failure_persists_ledger_and_exits_nonzero(tmp_path, fake_gh):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    _seed_identity(fake_gh)
+    _seed_rest(fake_gh, 101, reviews=[], comments=[], issue_comments=[])
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/102", {"__error__": "API rate limit exceeded Retry-After: 1"}
+    )
+    rc = _handle_benchmark_command(["import-prs", str(ws), "--pr", "101", "--pr", "102"])
+    assert rc != 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    by_n = {p["number"]: p for p in raw["pull_requests"]}
+    assert by_n[101]["import_state"] == "fetched"
+    assert by_n[102]["import_state"] == "fetch_failed"
+    assert by_n[102]["error"]["code"] == "rate_limit"
+    assert (ws / "imports/pr-000101.json").exists()
+    assert not (ws / "imports/pr-000102.json").exists()   # failed fetch: no import file
+
+
 def test_benchmark_help_lists_import_prs():
     import subprocess
 

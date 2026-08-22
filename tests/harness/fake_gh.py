@@ -222,15 +222,23 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
             return 0, json.dumps(reply) + "\n", ""
         if "reviewThreads" in query:
-            return 0, json.dumps(responses.get("graphql_threads", _EMPTY_THREADS_RESPONSE)) + "\n", ""
+            variables = (payload or {}).get("variables") or {}
+            pr_num = variables.get("number") if isinstance(variables, dict) else None
+            key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
+            value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
+            return 0, json.dumps(value) + "\n", ""
         return 1, "", "fake gh: unrecognized graphql query\n"
     key = f"{method} {endpoint}"
+    if key in responses and isinstance(responses[key], dict) and "__error__" in responses[key]:
+        return 1, "", str(responses[key]["__error__"]) + "\n"
     if key in responses:
         if responses[key] is None:
             return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[key], jq), ""
     # Query strings select/paginate; the canned response is keyed by path alone.
     bare_key = f"{method} {endpoint.split('?')[0]}"
+    if bare_key in responses and isinstance(responses[bare_key], dict) and "__error__" in responses[bare_key]:
+        return 0, "", str(responses[bare_key]["__error__"]) + "\n"
     if bare_key in responses:
         if responses[bare_key] is None:
             return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
@@ -534,11 +542,13 @@ class FakeGh:
             "comments": {"nodes": [comment]},
         }
 
-    def _write_threads(self, nodes: list[dict[str, Any]]) -> None:
+    def _write_threads(self, nodes: list[dict[str, Any]], number: int | None = None) -> None:
+        """Serve *nodes* as the review-thread inventory for one PR (or globally)."""
         response = json.loads(json.dumps(_EMPTY_THREADS_RESPONSE))
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
         responses = self._read_responses()
-        responses["graphql_threads"] = response
+        key = f"graphql_threads:{number}" if number is not None else "graphql_threads"
+        responses[key] = response
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
 
     def _read_responses(self) -> dict[str, Any]:
