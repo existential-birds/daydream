@@ -96,11 +96,13 @@ def _verify_repo_view(view: dict[str, Any], repo_slug: str) -> tuple[str, Litera
     node id is an opaque string like ``R_kgD...`` and is never cast to int.
     """
     name_with_owner = view.get("nameWithOwner")
-    if name_with_owner != repo_slug:
+    # GitHub OWNER/REPO slugs are case-insensitive, so compare with case
+    # folding: a repo initialized with non-canonical casing is valid.
+    if (name_with_owner or "").lower() != repo_slug.lower():
         raise PreflightError(
             "repo_mismatch", f"repo view returned {name_with_owner!r}, expected {repo_slug!r}"
         )
-    if view.get("url") != f"https://github.com/{repo_slug}":
+    if (view.get("url") or "").lower() != f"https://github.com/{repo_slug}".lower():
         raise PreflightError(
             "repo_mismatch",
             f"repo view url {view.get('url')!r} does not canonicalize to https://github.com/{repo_slug}",
@@ -172,11 +174,10 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     view = _run_repo_view(root, repo_slug)
     repository_id, visibility = _verify_repo_view(view, repo_slug)
 
-    if stored_repository_id is None and stored_visibility == "unresolved":
-        _persist_identity(root, repo_slug, repository_id, visibility)
-    elif (stored_repository_id is None) != (stored_visibility == "unresolved"):
+    needs_persist = stored_repository_id is None and stored_visibility == "unresolved"
+    if (stored_repository_id is None) != (stored_visibility == "unresolved"):
         raise PreflightError("repo_unresolved", "repository identity is in a partial/corrupt state")
-    elif stored_repository_id != repository_id or stored_visibility != visibility:
+    elif not needs_persist and (stored_repository_id != repository_id or stored_visibility != visibility):
         raise PreflightError(
             "repo_mismatch",
             f"repository identity changed (stored {stored_repository_id}/{stored_visibility}, "
@@ -187,6 +188,12 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
         _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
     except git_ops.GitError as exc:
         raise PreflightError("git_preflight_failed", str(exc)) from exc
+
+    # The read-access gate passed, so the fresh identity may now be persisted:
+    # never stage the identity before repository read access is confirmed
+    # (a failed gate must leave benchmark.yaml untouched).
+    if needs_persist:
+        _persist_identity(root, repo_slug, repository_id, visibility)
 
     # Record the successful verification (never on a failed run): a mode-0600
     # ledger so ``status`` can surface whether the last import/refresh actually
