@@ -423,7 +423,6 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
     _with_case_lock(root, case_id, "accept", mutate)
 
 
-
 def _derive_provenance_kind(
     source_ids: list[str], *, authored: bool = False
 ) -> str:
@@ -484,7 +483,6 @@ def add_finding(
     _with_case_lock(root, case_id, "add", mutate)
 
 
-
 def add_findings(
     root: Path, case_id: str, *, findings: list[dict[str, Any]]
 ) -> None:
@@ -519,7 +517,6 @@ def add_findings(
         _derive_content(raw)
 
     _with_case_lock(root, case_id, "add", mutate)
-
 
 
 def _build_replacement(
@@ -568,7 +565,6 @@ def replace_findings(
         _derive_content(raw)
 
     _with_case_lock(root, case_id, "replace", mutate)
-
 
 
 _EVIDENCE_REASONS = frozenset({
@@ -633,7 +629,6 @@ def exclude_evidence(
         _append_evidence_exclusion(curation, source_id, reason, note)
 
     _with_case_lock(root, case_id, "exclude-evidence", mutate)
-
 
 
 def _validate_transition(frm: str | None, to: str) -> None:
@@ -715,7 +710,6 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
     _with_case_lock(root, case_id, "mark-ready", mutate)
 
 
-
 def attest_clean(root: Path, case_id: str) -> None:
     """Attest a case reviewed-clean (only when its gold set is empty).
 
@@ -738,7 +732,6 @@ def attest_clean(root: Path, case_id: str) -> None:
         _set_clean(curation)
 
     _with_case_lock(root, case_id, "attest-clean", mutate)
-
 
 
 _CASE_EXCLUSION_REASONS = frozenset({"unreplayable", "not_suitable", "duplicate_case", "other"})
@@ -780,7 +773,6 @@ def exclude_case(
     _with_case_lock(root, case_id, "exclude-case", mutate)
 
 
-
 def reinclude_case(root: Path, case_id: str) -> None:
     """Re-include an excluded case to the state its snapshot supports.
 
@@ -800,7 +792,6 @@ def reinclude_case(root: Path, case_id: str) -> None:
         curation["case_exclusion"] = None
 
     _with_case_lock(root, case_id, "reinclude-case", mutate)
-
 
 
 def _fragment_provenance(
@@ -884,7 +875,6 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             _derive_content(raw)
 
     _with_case_lock(root, case_id, "apply-gold", mutate)
-
 
 
 def _validate_exclusion_contract(

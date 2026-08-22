@@ -597,12 +597,17 @@ def test_concurrent_excludes_serialize_to_single_row(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
-    procs = [_spawn_worker(["exclude", str(ws), case_id, src]) for _ in range(4)]
+    # Mixed concurrent mutations on one case: 3 idempotent excludes of the same
+    # source must serialize to a single row, AND 3 distinguishable adds must all
+    # land — a lost update (if the workspace lock were removed) would drop one.
+    procs = [_spawn_worker(["exclude", str(ws), case_id, src]) for _ in range(3)]
+    procs += [_spawn_worker(["add", str(ws), case_id, f"mix-{i}"]) for i in range(3)]
     for p in procs:
         out, err = p.communicate(timeout=120)
         assert p.returncode == 0, (out, err)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "duplicate", "note": None}]
+    assert {"mix-0", "mix-1", "mix-2"} <= {f["title"] for f in raw["curation"]["findings"]}
     assert cu.validate_case(ws, case_id) is None                # case not corrupted by interleaving
 
 
@@ -645,28 +650,33 @@ def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path, fake_gh):
 
 
 def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
-    import time
-
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     lock_path = ws / ".benchmark.lock"
+    # A writer holds the flock for a long window (30s) — far longer than any
+    # plausible read-only path — so a differential probe can detect whether the
+    # read-only paths block on the lock without a fragile wall-clock assertion.
     holder = subprocess.Popen(
         [sys.executable, "-c",
          "import fcntl, time, sys\n"
          "fd = open(sys.argv[1], 'w')\n"
          "fcntl.flock(fd, fcntl.LOCK_EX)\n"
          "print('held', flush=True)\n"
-         "time.sleep(3)\n",
+         "time.sleep(30)\n",
          str(lock_path)],
         stdout=subprocess.PIPE, text=True,
     )
     assert holder.stdout.readline().strip() == "held"            # another process now holds the flock
-    t0 = time.monotonic()
-    cu.list_cases(ws)
-    cu.get_case(ws, case_id)
-    cu.validate_case(ws, case_id)
-    assert time.monotonic() - t0 < 2.0                           # read-only did not block on the held lock
-    holder.wait(timeout=10)
+    try:
+        cu.list_cases(ws)
+        cu.get_case(ws, case_id)
+        cu.validate_case(ws, case_id)
+        # The writer must STILL be holding the flock after the reads returned:
+        # had a read-only path blocked on the lock it could not finish until the
+        # writer released (30s later).
+        assert holder.poll() is None
+    finally:
+        holder.wait(timeout=30)
 
 
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fake_gh):

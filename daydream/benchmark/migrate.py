@@ -69,8 +69,20 @@ def migrate_workspace(root: Path, *, dry_run: bool = False) -> UpgradeReport:
     writing changed cases atomically through ``storage.Transaction``. When
     *dry_run* is True the report is computed without writing. Invalid cases are
     recorded in ``report.errors`` and left byte-unchanged.
+
+    The whole migration (read + write) runs under the workspace lock so it
+    serializes against concurrent curators — otherwise a curator mutation and a
+    migration could race on the same case file and lose an update.
     """
     root = Path(root)
+    if dry_run:
+        return _migrate_workspace_unlocked(root, dry_run=True)
+    with storage.WorkspaceLock(root):
+        return _migrate_workspace_unlocked(root, dry_run=False)
+
+
+def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
+    """Run the migration body (caller holds the workspace lock unless dry_run)."""
     manifest = storage.load_yaml_strict(root / "benchmark.yaml")
     report = UpgradeReport()
     writes: dict[str, bytes] = {}
