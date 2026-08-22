@@ -6,8 +6,9 @@ authentication, identity, repository read access + immutable identity); fetch
 and normalize a PR's header, submitted reviews, inline comments and
 conversation comments (REST) plus all review threads/replies (GraphQL);
 deterministically project import-time candidates; and atomically persist one
-import file, one materialized case per requested head, and the ledger through
-a single crash-consistent :class:`storage.Transaction`.
+import file, one frozen case per requested head (a ``ready|unreplayable``
+snapshot dict + its deterministic bundle), and the ledger through a single
+crash-consistent :class:`storage.Transaction`.
 
 Every ``gh``/``git`` call routes through :mod:`daydream.git_ops`, so the
 in-process ``fake_gh`` router intercepts it. Rate-limit retries are bounded
@@ -31,7 +32,7 @@ from typing import Any
 import yaml
 
 from daydream import git_ops
-from daydream.benchmark import schema, storage
+from daydream.benchmark import schema, snapshot, storage
 
 
 def _run_gh_preflight_status(root: Path):
@@ -178,10 +179,16 @@ _PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$")
 
 @dataclass
 class ImportTargets:
-    """The deduplicated PR targets + requested heads for one import run."""
+    """The deduplicated PR targets + requested heads for one import run.
+
+    ``requested_heads`` is the flat union (back-compat consumers); ``pr_heads``
+    maps each requested PR number to its own head list (including ``"final"``)
+    so a ``PR=<40-hex>`` binding is honored only for the PR it names.
+    """
 
     pr_numbers: list[int]
     requested_heads: list[str]
+    pr_heads: dict[int, list[str]]
 
 
 def _parse_pr_token(token: str) -> int:
@@ -206,8 +213,13 @@ def parse_import_targets(
 
     Number/URL/file selections merge CLI-first then file in order and dedupe
     to the first-seen, stable order. ``requested_heads`` always starts with
-    ``"final"`` (the PR's default head) followed by the validated 40-hex
-    ``heads``. An unparseable token or malformed head raises
+    ``"final"`` (the PR's default head). A ``--head`` token is either a bare
+    40-hex SHA (back-compat: applied to every requested PR) or
+    ``<PR_NUMBER>=<40-hex>``, which ties an explicit head to *that* PR (the
+    ``pr_heads`` map) and keeps a distinct import/snapshot target alongside
+    the PR's default head. A bound ``PR`` number must itself be requested
+    (else the binding is silently dropped) and otherwise pushes an
+    :class:`ImportTargetError`. An unparseable token or malformed head raises
     :class:`ImportTargetError` naming the offending value.
     """
     numbers: list[int] = []
@@ -226,12 +238,43 @@ def parse_import_targets(
                 continue
             _add(_parse_pr_token(line))
 
-    validated_heads: list[str] = []
+    per_pr: dict[int, list[str]] = {n: [] for n in numbers}
+    all_valid: list[str] = []
     for head in heads:
-        if re.fullmatch(r"[0-9a-f]{40}", head) is None:
-            raise ImportTargetError(f"invalid head SHA {head!r} (expected 40-hex)")
-        validated_heads.append(head)
-    return ImportTargets(pr_numbers=numbers, requested_heads=["final", *validated_heads])
+        sha = head
+        bound_pr: int | None = None
+        if "=" in head:
+            pr_part, _, rhs = head.partition("=")
+            if not pr_part.isdigit() or not int(pr_part) > 0:
+                raise ImportTargetError(
+                    f"invalid head token {head!r} (expected PR=<40-hex>)"
+                )
+            bound_pr = int(pr_part)
+            sha = rhs
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ImportTargetError(
+                f"invalid head SHA {head!r} (expected bare 40-hex or PR=<40-hex>)"
+            )
+        if bound_pr is not None:
+            if bound_pr not in per_pr:
+                raise ImportTargetError(
+                    f"head {head!r} references PR {bound_pr} which is not among "
+                    f"the requested PR targets"
+                )
+            per_pr[bound_pr].append(sha)
+        else:
+            # Bare 40-hex: back-compat, applied to every requested PR.
+            for number in numbers:
+                per_pr[number].append(sha)
+        all_valid.append(sha)
+    pr_heads: dict[int, list[str]] = {
+        n: ["final", *dict.fromkeys(per_pr[n])] for n in numbers
+    }
+    return ImportTargets(
+        pr_numbers=numbers,
+        requested_heads=["final", *dict.fromkeys(all_valid)],
+        pr_heads=pr_heads,
+    )
 
 
 def _now_rfc3339() -> str:
@@ -669,18 +712,25 @@ def _case_materialize(
     import_file: str,
     import_sha256: str,
     *,
+    root: Path | None = None,
+    repo_slug: str = "",
+    origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
     changed: bool = False,
-) -> list[tuple[str, str, dict[str, Any]]]:
+) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
     """One materialized case document per requested head.
 
-    When *changed* is True and a prior curated case exists, its curation is
-    carried over and flipped to ``stale`` with attestation cleared — findings
-    and exclusions are never overwritten by a refresh.
+    When *root*/origin are provided the case ``snapshot`` is frozen via
+    :func:`daydream.benchmark.snapshot.freeze_one` (a ``ready|unreplayable``
+    dict) and any produced bundle is returned in the second element for the
+    caller to stage atomically. When *changed* is True and a prior curated
+    case exists, its curation is carried over and flipped to ``stale`` with
+    attestation cleared — findings/exclusions are never overwritten by refresh.
     """
     pull_request = doc.pull_request
     base_sha = (pull_request.get("base") or {}).get("sha")
     out: list[tuple[str, str, dict[str, Any]]] = []
+    bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
         head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
@@ -701,31 +751,43 @@ def _case_materialize(
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             curation = dict(prior)
-            # Preserve prior curation whenever a curated case exists (unchanged
-            # re-import / refresh must NOT wipe findings or attestation). Only
-            # demote to stale (and clear attestation) when the evidence actually
-            # drifted (changed=True).
             if changed and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
-        case_doc: dict[str, Any] = {
-            "schema_version": 1,
-            "case_id": case_id,
-            "pull_request": pull_request,
-            "snapshot": {
+        if root is not None and origin_url is not None and base_sha and head_sha:
+            policy = "final_pr_head" if head_token == "final" else "explicit_head"
+            snapshot_doc, bundle_bytes = snapshot.freeze_one(
+                root,
+                repo_slug,
+                number,
+                base_tip=base_sha,
+                head_sha=head_sha,
+                policy=policy,
+                requested_head=head_token,
+                origin_url=origin_url,
+            )
+            if snapshot_doc.get("status") == "ready" and bundle_bytes is not None:
+                bundle_drops.append((snapshot_doc["bundle_file"], bundle_bytes))
+        else:
+            snapshot_doc = {
                 "status": "imported",
-                "policy": "final_pr_head",
+                "policy": "final_pr_head" if head_token == "final" else "explicit_head",
                 "requested_head": head_token,
                 "original_base_sha": base_sha,
                 "original_head_sha": head_sha,
                 "error": None,
-            },
+            }
+        case_doc: dict[str, Any] = {
+            "schema_version": 1,
+            "case_id": case_id,
+            "pull_request": pull_request,
+            "snapshot": snapshot_doc,
             "source": {"import_file": import_file, "import_sha256": import_sha256},
             "curation": curation,
             "candidates": [c.model_dump(mode="json") for c in candidates],
         }
         out.append((case_id, f"cases/{case_id}.yaml", case_doc))
-    return out
+    return out, bundle_drops
 
 
 def _ledger_replace(raw: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -865,6 +927,7 @@ def _import_one_pr(
     requested_heads: list[str],
     *,
     refresh: bool,
+    origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
     prior_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
@@ -873,12 +936,15 @@ def _import_one_pr(
         changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
-        cases = _case_materialize(
+        cases, bundle_rels = _case_materialize(
             doc, number, requested_heads, import_file, import_sha256,
+            root=root, repo_slug=repo, origin_url=origin_url,
             prior_curations=prior_curations, changed=changed,
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
+            for rel, content in bundle_rels:
+                tx.stage(rel, content)
             for _, case_path, case_doc in cases:
                 tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
             _stamp_fetched(
@@ -900,35 +966,62 @@ def _import_one_pr(
         return 1
 
 
+_UNSET_ORIGIN = object()
+
+
 def run_import_prs(
     root: Path,
     pr_numbers: list[int],
     heads: list[str] | None = None,
+    pr_heads: dict[int, list[str]] | None = None,
     refresh: bool = False,
+    origin_url: str | None | object = _UNSET_ORIGIN,
 ) -> int:
     """Import each PR's evidence into one atomic import ledger/case transaction.
 
-    Runs startup recovery then preflight (identity idempotent), then for each PR
-    writes its import file, one case per requested head, and the ledger through
-    one :class:`Transaction` (``benchmark.yaml`` last). A failed fetch stages no
-    import/case file — only a ledger flip to ``fetch_failed`` with an exact
-    error. The overall exit is non-zero when any PR failed.
+    Runs startup recovery then preflight (identity idempotent), then for each
+    PR expects its import file, one case per requested head, and the ledger
+    through one :class:`Transaction` (``benchmark.yaml`` last). *heads* is a
+    flat back-compat list applied to every PR; *pr_heads* (from
+    ``parse_import_targets``) maps each PR to its own requested heads so a
+    ``PR=<40-hex>`` binding is honored for the PR it names only — when it is
+    provided each PR resolves ``"final"`` plus its own explicit heads. When
+    present, *origin_url* drives the snapshot freeze mirror fetch; when it is
+    omitted entirely the origin is derived from the repository
+    (``https://github.com/<repo>.git``). Passing ``origin_url=None``
+    explicitly leaves the import hermetic — no snapshot freeze and no network
+    git fetch. A failed fetch stages no import/case file — only a ledger flip
+    to ``fetch_failed`` with an exact error. The overall exit is non-zero
+    when any PR failed.
     """
     root = Path(root)
-    requested_heads: list[str] = []
+    flat_heads: list[str] = []
     seen_heads: set[str] = set()
     for head in ["final", *(heads or [])]:
         if head not in seen_heads:
             seen_heads.add(head)
-            requested_heads.append(head)
+            flat_heads.append(head)
+    requested_by_pr: dict[int, list[str]] = {}
+    for number in pr_numbers:
+        if pr_heads is not None and pr_heads.get(number):
+            requested_by_pr[number] = pr_heads[number]
+        else:
+            requested_by_pr[number] = list(flat_heads)
     exit_code = 0
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
         preflight(root, len(pr_numbers))
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         repo = raw.get("source", {}).get("repository") or ""
+        if origin_url is _UNSET_ORIGIN:
+            origin_url = f"https://github.com/{repo}.git" if repo else None
+        effective_origin: str | None = (
+            origin_url if isinstance(origin_url, str) or origin_url is None else None
+        )
         for number in pr_numbers:
-            if _import_one_pr(root, raw, repo, number, requested_heads, refresh=refresh):
+            if _import_one_pr(
+                root, raw, repo, number, requested_by_pr[number], refresh=refresh, origin_url=effective_origin
+            ):
                 exit_code = 1
     return exit_code
 

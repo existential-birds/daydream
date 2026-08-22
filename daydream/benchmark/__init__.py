@@ -2,12 +2,13 @@
 
 Scores daydream's deep-review findings against the withmartian
 ``code-review-benchmark`` offline set, and hosts the private PR benchmark
-workspace (`daydream benchmark init|status|validate`) — strict schemas, the
-mode-safe storage/journal layer, and the init/status/validate orchestration.
+workspace (`daydream benchmark init|status|validate|import-prs`) — strict
+schemas, the mode-safe storage/journal layer, and the init/status/validate/
+freeze orchestration.
 
 The pinned evaluable-PR registry and benchmark runner exports are kept; the
-new stable schema + workspace-service types are exported for consumers and
-future issues.
+stable schema + workspace-service + snapshot-freeze types are exported for
+consumers and future issues.
 """
 
 from daydream.benchmark.config import BenchConfig
@@ -28,6 +29,7 @@ from daydream.benchmark.schema import (
     derive_workspace_state,
     normalize_hostname,
 )
+from daydream.benchmark.snapshot import freeze_one
 from daydream.benchmark.workspace import (
     init_workspace,
     validate_workspace,
@@ -49,6 +51,7 @@ __all__ = [
     "SnapshotImported",
     "classify_validation",
     "derive_workspace_state",
+    "freeze_one",
     "init_workspace",
     "load_evaluable_prs",
     "normalize_hostname",

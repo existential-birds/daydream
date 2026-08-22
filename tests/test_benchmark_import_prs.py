@@ -2,11 +2,27 @@
 
 Covers the full import surface through the in-process ``fake_gh`` router:
 target parsing, six-check preflight + immutable identity, REST + GraphQL
-fetch/normalize, candidate projection, bounded rate-limit retry, atomic
-ledger/case transactions, refresh/staleness (curation preservation), and both
-e2e acceptance paths including partial-failure persistence. All ``gh``/``git``
-calls route through :mod:`daydream.git_ops` with ``cwd=<workspace root>``.
+fetch/import, candidate projection, bounded rate-limit retry, atomic
+ledger/case transactions, refresh/staleness (curation preservation), snapshot
+freeze wiring (ready|unreplayable cases + bundle staging), and both e2e
+acceptance paths including partial-failure persistence. All ``gh`` calls route
+through the ``fake_gh`` router; freeze mirror fetches hit a real local bare
+origin (no network).
 """
+
+import os
+import subprocess
+
+# Deterministic seed identity so a local bare origin's commits are stable and
+# reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
+_SEED_ENV = {
+    "GIT_AUTHOR_NAME": "Tester",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "Tester",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
 
 _PR_HEADER = {
     "number": 101,
@@ -195,10 +211,56 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
 
+def test_parse_head_pr_sha_grammar_and_binding(tmp_path):
+    """``--head PR=<40-hex>`` binds the explicit head to that PR only.
+
+    A bare 40-hex stays a back-compat superset; an unparseable RHS raises
+    :class:`ImportTargetError`; a bound PR that is not imported is rejected so
+    the binding can never be silently dropped.
+    """
+    import pytest
+
+    from daydream.benchmark import github_import as gi
+
+    sha = "a" * 40
+    targets = gi.parse_import_targets(["101"], [], [f"101={sha}"])
+    assert targets.requested_heads == ["final", sha]
+    assert targets.pr_heads == {101: ["final", sha]}
+    targets2 = gi.parse_import_targets(["101"], [], [sha])
+    assert targets2.requested_heads == ["final", sha]
+    with pytest.raises(gi.ImportTargetError):
+        gi.parse_import_targets(["101"], [], ["101=nothex"])
+    # a bound PR that is never requested cannot be honored, so it is rejected
+    with pytest.raises(gi.ImportTargetError):
+        gi.parse_import_targets(["100"], [], [f"101={sha}"])
+
+
+def test_parse_heads_bound_per_pr_in_multi_import(tmp_path):
+    """A ``PR=<sha>`` head is honored for that PR only, never spread to others.
+
+    Regression guard for the bug where ``--pr 100 --pr 101 --head 101=<sha>``
+    misapplied ``<sha>`` to PR 100 too (the binding was parsed then dropped).
+    """
+    from daydream.benchmark import github_import as gi
+
+    sha = "a" * 40
+    targets = gi.parse_import_targets(["100", "101"], [], [f"101={sha}"])
+    assert targets.pr_numbers == [100, 101]
+    assert targets.pr_heads == {100: ["final"], 101: ["final", sha]}
+    assert targets.requested_heads == ["final", sha]
+
+
 def _seed_manifest(ws):
-    """Build an initialized private workspace with an unresolved Source (o/r)."""
+    """Build an initialized private workspace with an unresolved Source (o/r).
+
+    Idempotent: a caller may explicitly :func:`init_workspace` first (e.g. the
+    snapshot-freeze test pins reviewer/judge hosts), in which case the manifest
+    already exists and the scaffold is left untouched.
+    """
     from daydream.benchmark.workspace import init_workspace
 
+    if (ws / "benchmark.yaml").exists():
+        return
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
@@ -282,13 +344,142 @@ def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
 
 
+# ---------------------------------------------------------------------------
+# real-git local-origin seed for snapshot-freeze wiring (no network)
+# ---------------------------------------------------------------------------
+
+
+def _seed_git(repo, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
+    """Run git in *repo*, returning stripped stdout."""
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True,
+        env={**os.environ, **env} if env else os.environ.copy(), check=check,
+    )
+    if check and proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _seed_write(repo, name: str, content: str) -> None:
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    _seed_git(repo, "add", name)
+
+
+def _seed_commit(repo, message: str) -> str:
+    _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
+    return _seed_git(repo, "rev-parse", "HEAD")
+
+
+def _seed_local_origin(tmp_path, fake_gh) -> tuple[str, str, str]:
+    """Build a real local bare origin whose base/head are the PR's SHAs.
+
+    Uses the deterministic seed identity (same content/env as the snapshot
+    module's ``_seed_origin``), producing real base2/head commits. The feature
+    head is pushed as ``refs/pull/101/head`` and the canned PR 101 header is
+    re-seeded so its ``base.sha``/``head.sha`` match the origin — the
+    import-time freeze fetches real git objects (no network).
+
+    Returns ``(origin_url, base_sha, head_sha)``.
+    """
+    import shutil as _sh
+
+    repo = tmp_path / "local_wt"
+    if repo.exists():
+        _sh.rmtree(repo)
+    repo.mkdir()
+    _seed_git(repo, "init", "-b", "main")
+    _seed_write(repo, "readme.txt", "base1\n")
+    _seed_commit(repo, "base1")
+    _seed_write(repo, "base.py", "BASE = 2\n")
+    base_sha = _seed_commit(repo, "base2")
+    _seed_write(repo, "beyond.py", "BEYOND = 3\n")
+    _seed_commit(repo, "base3")
+    _seed_git(repo, "checkout", "--detach", base_sha)
+    (repo / "base.py").write_text("BASE = 20\n")
+    _seed_git(repo, "add", "base.py")
+    _seed_write(repo, "feature.py", "FEATURE = 1\n")
+    head_sha = _seed_commit(repo, "feature")
+    bare = tmp_path / "origin_local.git"
+    if bare.exists():
+        _sh.rmtree(bare)
+    bare.mkdir()
+    _seed_git(bare, "init", "--bare")
+    _seed_git(repo, "remote", "add", "origin", str(bare))
+    _seed_git(repo, "push", "origin", "main:main")
+    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    # Re-seed the canned PR header so base.sha/head.sha are the real origin SHAs.
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_sha}
+    header["head"] = {"ref": "feature/cache", "sha": head_sha}
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    return str(bare), base_sha, head_sha
+
+
+def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict, sha256_file
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)                 # identity + canned PR
+    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url)
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetched"
+    case_id = pr["case_ids"][0]
+    case = load_yaml_strict(ws / f"cases/{case_id}.yaml")
+    assert case["snapshot"]["status"] == "ready"
+    assert case["snapshot"]["original_base_sha"] == base_sha
+    assert case["snapshot"]["original_head_sha"] == head_sha
+    bundle = ws / case["snapshot"]["bundle_file"]
+    assert bundle.exists()
+    assert sha256_file(bundle) == case["snapshot"]["bundle_sha256"]
+
+
+def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path, fake_gh):
+    """Same PR via import is idempotent; a distinct explicit head is a new case.
+
+    Also proves one shared ``cache/repository.git`` serves both without ref
+    collision.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import snapshot as sn
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    # default head only first
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    ids1 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    # same PR + same head again -> same idempotent case
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    ids2 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    assert ids1 == ids2
+    # a distinct head (unreachable in this origin) -> a distinct case id
+    alt_head = "cdef" * 10
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[alt_head], origin_url=origin_url) == 0
+    ids3 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    assert len(ids3) == len(ids1) + 1 and ids3[-1].endswith(alt_head[:12])
+    # one shared mirror, no ref collision: the PR-head ref still resolves to head
+    assert (ws / "cache" / "repository.git").exists()
+    assert sn.rev_parse(ws / "cache/repository.git", "refs/pull/101/head") == head_sha
+
+
 def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)  # preflight + rest/graphql canned data for pr 101 (one head)
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
     pr = raw["pull_requests"][0]
@@ -306,7 +497,7 @@ def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh, pull_header=None)  # 404 -> fetch fails
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc != 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
     pr = raw["pull_requests"][0]
@@ -322,7 +513,7 @@ def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh)
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     st = workspace_status(ws)
     assert st.workspace_state != "empty"
@@ -391,12 +582,12 @@ def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
              "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
         ],
     )
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # curation.state=ready, snapshot_attested=True
     # refresh re-fetches; the referenced evidence now disappears
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
     assert rc == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
@@ -527,11 +718,11 @@ def test_reimport_does_not_duplicate_cases_rows(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     raw1 = load_yaml_strict(ws / "benchmark.yaml")
     assert len(raw1["cases"]) == 1
     # re-import same PR, unchanged evidence (responses not changed) — fetched->fetched allowed
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     raw2 = load_yaml_strict(ws / "benchmark.yaml")
     ids = [c["case_id"] for c in raw2["cases"]]
     assert len(raw2["cases"]) == 1, f"cases[] grew to {len(raw2['cases'])}: {ids}"
@@ -545,13 +736,13 @@ def test_reimport_unchanged_evidence_preserves_curation(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)  # state=ready, snapshot_attested=True, findings non-empty
     before = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert before["state"] == "ready" and before["snapshot_attested"] is True and before["findings"]
     # Re-import same PR WITHOUT refresh, unchanged evidence.
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     after = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert after["state"] in ("ready", "stale"), "curation must not reset to draft"
     assert after["findings"], "curated findings must not be wiped"
@@ -565,11 +756,11 @@ def test_refresh_unchanged_signature_preserves_curation(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)
     # refresh with IDENTICAL evidence responses (signature unchanged) -> changed=False
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     after = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert after["findings"], "curated findings must not be wiped on unchanged refresh"
     assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"

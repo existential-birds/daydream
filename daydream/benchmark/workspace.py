@@ -12,7 +12,7 @@ failures map to the documented exit codes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -182,6 +182,7 @@ class WorkspaceStatus:
     repository_identity_resolved: bool
     ledger: Ledger
     cases: list[CaseIndexEntry]
+    case_snapshots: list[dict[str, str]] = field(default_factory=list)
 
 
 def workspace_status(root: Path) -> WorkspaceStatus:
@@ -200,13 +201,16 @@ def workspace_status(root: Path) -> WorkspaceStatus:
             manifest = BenchmarkManifest.model_validate(raw)
         except Exception as exc:
             raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
-        state, resolved = _derived_state(root, manifest)
+        docs = _load_case_docs(root, manifest)
+        state, resolved = _derived_state(root, manifest, docs)
+        case_snapshots = _case_snapshot_summaries(root, manifest, docs)
     return WorkspaceStatus(
         workspace_state=state,
         source=manifest.source,
         repository_identity_resolved=resolved,
         ledger=Ledger(pull_requests=manifest.pull_requests),
         cases=manifest.cases,
+        case_snapshots=case_snapshots,
     )
 
 
@@ -215,8 +219,9 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
     ``0`` ready; ``2`` structurally valid but incomplete (e.g. unresolved
     repository identity); ``1`` corrupt (invalid/missing ``benchmark.yaml``,
-    an orphan/missing indexed file, or a checksum-mismatched import/case).
-    The exit code comes from :func:`classify_validation`, so the documented
+    an orphan/missing indexed file, a checksum-mismatched import/case, or a
+    corrupted/missing/checksum-mismatched ready-snapshot bundle). The exit
+    code comes from :func:`classify_validation`, so the documented
     ``0``/``2``/``1`` classifier has a single source of truth. Expected
     workspace errors map to ``1`` + a label — a raw traceback is the wrong
     surface for a bench validation.
@@ -261,23 +266,82 @@ def validate_workspace(root: Path) -> tuple[int, str]:
     return (classify_validation(ready=ready, incomplete=not ready, corrupt=False), label)
 
 
-def _derived_state(root: Path, manifest: BenchmarkManifest) -> tuple[str, bool]:
+def _derived_state(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> tuple[str, bool]:
     """Shared (workspace state, identity-resolved) derivation for status+validate.
 
     Loading each indexed case document with the strict loader and verifying
-    each fetched import's on-disk sha256 keeps the two read-only call paths on
-    one rule set, so a state/resolution rule can't diverge between them. An
-    unreadable/invalid case or a checksum mismatch surfaces as
-    :class:`WorkspaceCorrupt`.
+    each fetched import's on-disk sha256 plus each ``ready`` snapshot's bundle
+    sha256 keeps the two read-only call paths on one rule set, so a
+    state/resolution rule can't diverge between them. An unreadable/invalid
+    case or a checksum mismatch surfaces as :class:`WorkspaceCorrupt`.
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
         pull_requests=pr_dicts,
-        cases=_case_curation_states(root, manifest),
+        cases=_case_curation_states(root, manifest, docs),
     )
     _verify_import_checksums(root, manifest)
+    _verify_snapshot_checksums(root, manifest, docs)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
+
+
+def _load_case_docs(root: Path, manifest: BenchmarkManifest) -> dict[str, dict]:
+    """Load every indexed case document strictly, once, keyed by ``case_file``.
+
+    ``_derived_state`` / ``_case_curation_states`` / ``_case_snapshot_summaries``
+    all need the same per-case YAML. Loading each file here once and sharing
+    the mapping avoids re-reading every case 2-3x per ``status``/``validate``
+    call. The strict loader is used, so an unreadable/invalid case surfaces as
+    :class:`WorkspaceCorrupt` (storage's invariant: a corrupt file is an error,
+    never defaulted).
+    """
+    docs: dict[str, dict] = {}
+    for case in manifest.cases:
+        docs[case.case_file] = load_yaml_strict(root / case.case_file)
+    return docs
+
+
+def _verify_snapshot_checksums(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> None:
+    """Verify each indexed ``ready`` snapshot's bundle file + sha256 digest.
+
+    A missing ``bundle_file`` or a ``bundle_sha256`` mismatch for a committed
+    ``ready`` case is :class:`WorkspaceCorrupt` — it is corruption surfacing,
+    never curatable staleness, and never mutates the case document or ledger.
+
+    A ``ready`` snapshot with no ``bundle_file``/``bundle_sha256`` is itself
+    structurally invalid and reported corrupt.
+    """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
+    for case in manifest.cases:
+        raw = docs[case.case_file]
+        snapshot = raw.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
+            continue
+        bundle_rel = snapshot.get("bundle_file")
+        expected = snapshot.get("bundle_sha256")
+        if not bundle_rel or not expected:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} ready snapshot missing bundle_file/bundle_sha256"
+            )
+        bundle_path = root / bundle_rel
+        actual = sha256_file(bundle_path) if bundle_path.exists() else ""
+        if not bundle_path.exists():
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot bundle missing: {bundle_rel}"
+            )
+        if actual != expected:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot bundle checksum mismatch "
+                f"(expected {expected}, got {actual})"
+            )
 
 
 def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
@@ -301,7 +365,9 @@ def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
     return {c.case_file for c in manifest.cases}
 
 
-def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[str, str]]:
+def _case_curation_states(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> list[dict[str, str]]:
     """The ``curation.state`` per indexed case, for workspace-state derivation.
 
     ``derive_workspace_state`` needs the real curation states (its ``ready`` /
@@ -315,13 +381,43 @@ def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[
     conservatively as ``draft`` so a workspace cannot claim ``ready`` while any
     case is not verifiably curated.
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     states: list[dict[str, str]] = []
     for case in manifest.cases:
-        raw = load_yaml_strict(root / case.case_file)
+        raw = docs[case.case_file]
         curation = raw.get("curation")
         cs = curation.get("state") if isinstance(curation, dict) else None
         states.append({"curation_state": cs or "draft"})
     return states
+
+
+def _case_snapshot_summaries(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> list[dict[str, str]]:
+    """Per-case snapshot summary for ``status``: snapshot state + frozen head.
+
+    For each indexed case, loads the case strictly and reports its snapshot
+    ``status`` (``ready``/``unreplayable``/``imported``) and the frozen head
+    prefix (``original_head_sha[:12]``) when present. An unreadable/invalid
+    case surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
+    """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
+    summaries: list[dict[str, str]] = []
+    for case in manifest.cases:
+        raw = docs[case.case_file]
+        snapshot = raw.get("snapshot")
+        status = snapshot.get("status") if isinstance(snapshot, dict) else "imported"
+        head = (snapshot or {}).get("original_head_sha") or ""
+        summaries.append(
+            {
+                "case_id": case.case_id,
+                "snapshot_status": status or "imported",
+                "head_prefix": head[:12],
+            }
+        )
+    return summaries
 
 
 def _scan_case_files(root: Path) -> set[Path]:

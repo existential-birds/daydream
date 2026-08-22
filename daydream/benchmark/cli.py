@@ -493,8 +493,11 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         help="file listing PR numbers/URLs, one per line (repeatable)",
     )
     import_prs_p.add_argument(
-        "--head", action="append", default=[], metavar="SHA",
-        help="requested head SHA in addition to the PR default head (repeatable)",
+        "--head", action="append", default=[], metavar="PR=<40-hex>",
+        help=(
+            "explicit head SHA of PR N (PR=<40-hex>, repeatable); a bare 40-hex "
+            "is accepted for back-compat and treated as the sole requested PR"
+        ),
     )
     import_prs_p.add_argument(
         "--refresh", action="store_true",
@@ -522,7 +525,7 @@ def _handle_benchmark_import_prs(args) -> int:
         return gi.run_import_prs(
             args.dir,
             targets.pr_numbers,
-            heads=targets.requested_heads,
+            pr_heads=targets.pr_heads,
             refresh=args.refresh,
         )
     except gi.PreflightError as exc:
@@ -562,6 +565,12 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     print(f"workspace state: {status.workspace_state}")
     print(f"repository identity: {unresolved}")
     print(f"ledger entries: {len(status.ledger.pull_requests)}")
+    for summary in status.case_snapshots:
+        head = summary.get("head_prefix") or "-"
+        print(
+            f"  case {summary.get('case_id', '')}: "
+            f"snapshot {summary.get('snapshot_status', 'imported')} @ {head}"
+        )
     return 0
 
 

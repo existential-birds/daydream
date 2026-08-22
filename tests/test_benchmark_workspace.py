@@ -180,3 +180,90 @@ def test_status_derives_ready_from_curated_cases(tmp_path):
     st = workspace_status(root)
     assert st.workspace_state == "ready"
     assert st.repository_identity_resolved is True
+
+
+def _seed_frozen_case(ws):
+    """Seed one ``ready`` snapshot case + its bundle + the indexed ledger.
+
+    Builds on ``_write_curated_workspace``'s ready case shape, adding the
+    frozen ``snapshot.ready`` block (bundle_file + bundle_sha256) and writing a
+    real ``snapshots/<case>.bundle`` whose sha256 matches. Resolves the source
+    identity so ``validate_workspace`` reaches exit 0.
+    """
+    import hashlib
+
+    import yaml
+
+    raw = yaml.safe_load((ws / "benchmark.yaml").read_text())
+    raw["source"]["repository_id"] = 12345
+    raw["source"]["visibility"] = "private"
+    head_sha = "0123456789ab" + "0" * 28
+    case_id = f"pr-000101-{head_sha[:12]}"
+    case_file = f"cases/{case_id}.yaml"
+    raw["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": case_file}]
+    (ws / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+    bundle_rel = f"snapshots/{case_id}.bundle"
+    bundle_bytes = b"frozen-snapshot-bundle-bytes"
+    bundle_sha = hashlib.sha256(bundle_bytes).hexdigest()
+    (ws / "cases").mkdir(parents=True, exist_ok=True)
+    (ws / "snapshots").mkdir(parents=True, exist_ok=True)
+    (ws / bundle_rel).write_bytes(bundle_bytes)
+    (ws / case_file).write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "case_id": case_id,
+                "curation": {"state": "ready"},
+                "snapshot": {
+                    "status": "ready",
+                    "policy": "final_pr_head",
+                    "requested_head": "final",
+                    "original_base_sha": "b" * 40,
+                    "original_head_sha": head_sha,
+                    "base_tree_sha": "1" * 40,
+                    "head_tree_sha": "2" * 40,
+                    "diff_sha256": "3" * 64,
+                    "bundle_file": bundle_rel,
+                    "bundle_sha256": bundle_sha,
+                    "error": None,
+                },
+            },
+            sort_keys=False,
+        )
+    )
+    return ws
+
+
+def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path):
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_frozen_case(ws)   # one ready case: bundle YAML + snapshots/<case>.bundle
+    code, _ = validate_workspace(ws)
+    assert code == 0
+    # Corrupt the bundle bytes (keeps the case document and ledger intact).
+    case = load_yaml_strict(next((ws / "cases").glob("*.yaml")))
+    (ws / case["snapshot"]["bundle_file"]).write_bytes(b"tampered")
+    code2, label = validate_workspace(ws)
+    assert code2 == 1 and "corrupt" in label
+    # Case state on disk is unchanged.
+    case_after = load_yaml_strict(next((ws / "cases").glob("*.yaml")))
+    assert case_after["snapshot"]["status"] == "ready"
+
+
+def test_status_reports_snapshot_state_per_case(tmp_path, capsys):
+    """``status`` surfaces each case's snapshot state + frozen head prefix."""
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.workspace import init_workspace, workspace_status
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_frozen_case(ws)   # one ready case (from Task 11's helper)
+    st = workspace_status(ws)
+    assert st.workspace_state in ("ready", "curating")
+    rc = _handle_benchmark_command(["status", str(ws)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ready" in out and "pr-000101-0123456789ab" in out and "0123456789ab" in out
