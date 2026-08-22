@@ -104,8 +104,9 @@ def test_manifest_rejects_non_github_hostname():
 
 
 def test_source_repository_id_is_nonblank_opaque_string():
-    from daydream.benchmark.schema import Source
     from pydantic import ValidationError
+
+    from daydream.benchmark.schema import Source
 
     s = Source(provider="github", hostname="github.com", repository="o/r",
                repository_id="R_kgDOABC123")

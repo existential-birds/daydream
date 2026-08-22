@@ -1,5 +1,4 @@
 import os
-import subprocess
 
 from daydream import git_ops
 from tests.harness.fake_gh import install_fake_gh

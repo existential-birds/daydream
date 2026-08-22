@@ -15,8 +15,8 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
     """
     bare = root / "repo.git"
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
-    oid = subprocess.run(["git", "--git-dir", str(bare), "hash-object", "-w", "--stdin"],
-                         check=True, capture_output=True, input=b"x\n").stdout.decode().strip()
+    subprocess.run(["git", "--git-dir", str(bare), "hash-object", "-w", "--stdin"],
+                   check=True, capture_output=True, input=b"x\n")
     tree = subprocess.run(["git", "--git-dir", str(bare), "mktree"],
                           check=True, capture_output=True).stdout.decode().strip()
     commit = subprocess.run(["git", "--git-dir", str(bare), "commit-tree", tree, "-m", "c"],
@@ -27,11 +27,14 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.split("?")[0].rstrip("/") != "/repo.git/info/refs":
-                self.send_response(404); self.end_headers(); return
+                self.send_response(404)
+                self.end_headers()
+                return
             if self.headers.get("Authorization") is None:
                 self.send_response(401)
                 self.send_header("WWW-Authenticate", 'Basic realm="git"')
-                self.end_headers(); return
+                self.end_headers()
+                return
             body = subprocess.run(
                 ["git", "--git-dir", str(bare), "for-each-ref", "--format=%(objectname)\t%(refname)"],
                 check=True, capture_output=True).stdout
@@ -49,7 +52,8 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
 
 
 def test_git_ls_remote_drives_credential_helper_contract(tmp_path, monkeypatch):
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     log = tmp_path / "helper.log"
@@ -72,6 +76,6 @@ def test_git_ls_remote_drives_credential_helper_contract(tmp_path, monkeypatch):
 
     assert "refs/heads/main" in out
     text = log.read_text()
-    assert "ARGV:get" in text                    # Git invoked the helper with operation `get`
+    assert "ARGV:get" in text                     # Git invoked the helper with operation `get`
     assert "protocol=http" in text and "host=" in text   # protocol/host passed on stdin
-    assert not (home / ".gitconfig").exists()    # command-scoped: no global config written
+    assert not (home / ".gitconfig").exists()     # command-scoped: no global config written

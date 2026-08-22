@@ -590,7 +590,8 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
             # ls-remote (the old unauthenticated defect) fails loudly.
             if not any("credential.helper=" in a for a in args):
                 return subprocess.CompletedProcess(
-                    list(args), 1, stdout="", stderr="fake gh: git ls-remote without a command-scoped credential helper\n"
+                    list(args), 1, stdout="",
+                    stderr="fake gh: git ls-remote without a command-scoped credential helper\n",
                 )
             refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
             _record(
