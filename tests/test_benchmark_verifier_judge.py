@@ -464,3 +464,76 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
     assert "tests" in Path(seen["gold"]).parts  # the __file__ sibling (templates/tests/)
     assert seen["artifact"] == "/logs/artifacts/review.json"
     assert seen["out"] == "/logs/verifier"
+
+
+def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(2)))
+
+    oracle = _candidate_artifact(sr, case_id="organic")
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(oracle))
+
+    class MatchClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr.run_verifier(
+        gold_path,
+        artifact_path,
+        out,
+        client=MatchClient(),
+        env={
+            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k",
+            "DAYDREAM_JUDGE_BASE_URL": None,
+        },
+    )
+    assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
+
+    # clean fixture: gold empty, candidates empty -> reward 1, clean_pass 1
+    clean_gold = tmp_path / "cg.json"
+    clean_gold.write_text(json.dumps([]))
+    clean_art = tmp_path / "cr.json"
+    clean_art.write_text(
+        json.dumps({"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h", "findings": []})
+    )
+    clean_out = tmp_path / "cout"
+    clean = sr.run_verifier(
+        clean_gold,
+        clean_art,
+        clean_out,
+        client=MatchClient(),
+        env={
+            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k",
+            "DAYDREAM_JUDGE_BASE_URL": None,
+        },
+    )
+    assert clean.reward == 1.0 and clean.clean_pass == 1 and clean.clean_task == 1
+
+
+def test_generated_asset_tree_is_self_contained(sr_module) -> None:
+    base = Path(sr_module.__file__).parent
+    for rel in (
+        "score_review.py",
+        "verifier_core.py",
+        "judge_prompt.md",
+        "golden-review.json",
+        "test.sh",
+        "Dockerfile",
+    ):
+        assert (base / rel).exists(), rel
+    solution = base.parent / "solution"
+    for rel in ("solve.sh", "golden-review.json"):
+        assert (solution / rel).exists(), f"solution/{rel}"
+    metric = base.parent / "metric.py"
+    assert metric.exists()
+    assert "import daydream" not in (base / "score_review.py").read_text()
+    assert "import daydream" not in metric.read_text()
+    assert "#!/bin/sh" in (base / "test.sh").read_text()
+    assert "FROM" in (base / "Dockerfile").read_text()
