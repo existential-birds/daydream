@@ -57,7 +57,7 @@ def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
         "repo-view-full",
-        value={"id": 5, "nameWithOwner": "o/r",
+        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
                "url": "https://github.com/o/r", "visibility": "PRIVATE",
                "defaultBranchRef": {"name": "main"}},
     )
@@ -130,7 +130,7 @@ def _seed_local_origin(tmp_path, fake_gh, *, lines: int = 3) -> tuple[str, str, 
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
         "repo-view-full",
-        value={"id": 5, "nameWithOwner": "o/r",
+        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
                "url": "https://github.com/o/r", "visibility": "PRIVATE",
                "defaultBranchRef": {"name": "main"}},
     )

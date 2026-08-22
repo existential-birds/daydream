@@ -645,7 +645,7 @@ def _seed_identity(fake_gh) -> None:
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response(
         "repo-view-full",
-        value={"id": 5, "nameWithOwner": "o/r",
+        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
                "url": "https://github.com/o/r", "visibility": "PRIVATE",
                "defaultBranchRef": {"name": "main"}},
     )
