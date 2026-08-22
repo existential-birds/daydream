@@ -20,6 +20,12 @@ CONFIDENCE_THRESHOLD = 0.7
 _SEP = "\x1f"
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
+# Exact, versioned key sets (issue #817): a candidate artifact / finding and a
+# gold finding must carry exactly these keys -- no more, no fewer.
+CANDIDATE_ARTIFACT_KEYS = {"schema_version", "case_id", "base_ref", "head_ref", "findings"}
+CANDIDATE_FINDING_KEYS = {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
+GOLD_FINDING_KEYS = {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
+
 
 class VerifierError(Exception):
     """Raised on any invalid verifier input (mirrors a pydantic error)."""
@@ -144,12 +150,34 @@ class CandidateFinding(_FindingContent):
         super().__post_init__()
 
 
+def validate_exact_keys(raw: object, allowed: set[str], context: str) -> None:
+    """Enforce an exact key set over a dict, naming only keys and context.
+
+    Raises :class:`VerifierError` when *raw* is not a dict, when any allowed
+    key is missing, or when any key present is not in *allowed* -- with a
+    leak-free message naming only the keys and *context*, never values.
+    """
+    if not isinstance(raw, dict):
+        raise VerifierError(f"{context} must be a JSON object")
+    missing = sorted(allowed - set(raw))
+    if missing:
+        raise VerifierError(f"{context} missing required field(s): {', '.join(missing)}")
+    extra = sorted(set(raw) - allowed)
+    if extra:
+        raise VerifierError(f"{context} contains unknown field(s): {', '.join(extra)}")
+
+
 def _finding_kwargs(
     raw: dict[str, object], *, side: str, id_key: str
 ) -> dict[str, object]:
     """Validate a raw finding dict and return its model constructor kwargs."""
     if not isinstance(raw, dict):
         raise VerifierError(f"{side} finding must be a dict")
+    validate_exact_keys(
+        raw,
+        CANDIDATE_FINDING_KEYS if side == "candidate" else GOLD_FINDING_KEYS,
+        f"{side} finding",
+    )
     try:
         ident = _validate_hex64(raw[id_key], id_key)
     except KeyError as exc:
@@ -220,8 +248,7 @@ def _canonical_tuple(finding: object) -> tuple[object, ...]:
 
 def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding]:
     """Validate a §9 candidate artifact and return its parsed findings."""
-    if not isinstance(raw, dict):
-        raise VerifierError("candidate artifact must be a dict")
+    validate_exact_keys(raw, CANDIDATE_ARTIFACT_KEYS, "candidate artifact")
     try:
         schema_version = raw["schema_version"]
         case_id = raw["case_id"]
@@ -259,10 +286,21 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
 
 
 def validate_gold_set(raw: list[dict[str, object]]) -> list[GoldFinding]:
-    """Validate a gold set against the 50-finding cap and field limits."""
+    """Validate a gold set: 50-finding cap, per-member fields, canonical unique ids."""
     if len(raw) > MAX_GOLD_FINDINGS:
         raise VerifierError("gold set exceeds 50 findings")
-    return [parse_gold_finding(f) for f in raw]
+    parsed = [parse_gold_finding(f) for f in raw]
+    seen: set[str] = set()
+    for f in parsed:
+        expected = hashlib.sha256(
+            _SEP.join(str(part) for part in _canonical_tuple(f)).encode("utf-8")
+        ).hexdigest()
+        if f.finding_id != expected:
+            raise VerifierError("gold finding_id is not the canonical digest")
+        if f.finding_id in seen:
+            raise VerifierError("duplicate gold finding_id")
+        seen.add(f.finding_id)
+    return parsed
 
 
 # ---------------------------------------------------------------------------

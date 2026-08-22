@@ -177,8 +177,11 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     ``head_ref`` are the deterministic ``base`` / ``head`` refs. Findings are
     flattened (reusing :func:`_flatten_finding` -- a location-less finding
     raises :class:`CompileError`), ordered by ``finding_id`` ascending, and
-    assigned ordinal 0,1,2,... in that order; each entry's ``candidate_id`` is
-    derived via ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
+    assigned ordinal 0,1,2,... in that order; each entry is exactly
+    candidate-shaped -- ``candidate_id`` plus the flattened content fields
+    (``title``/``body``/``severity``/``path``/``start_line``/``end_line``),
+    never the gold-only ``finding_id`` -- with ``candidate_id`` derived via
+    ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
     """
     from daydream.benchmark.harbor import verifier_core as vc
     if not findings:
@@ -196,7 +199,7 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     # artifact re-derives identical ids under ``validate_candidate_artifact``.
     groups: dict[tuple, int] = {}
     entries = []
-    for flattened, fid in flat:
+    for flattened, _ in flat:
         canon = (
             str(flattened.get("title") or ""),
             str(flattened.get("body") or ""),
@@ -207,7 +210,7 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
         )
         ordinal = groups.get(canon, 0)
         groups[canon] = ordinal + 1
-        entry = {**flattened, "finding_id": fid}
+        entry = dict(flattened)
         entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
         entries.append(entry)
     return {
@@ -405,6 +408,19 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     gold_path.parent.mkdir(parents=True, exist_ok=True)
     gold_path.write_bytes(gold_bytes)
 
+    # Immutable, deterministic per-case verifier metadata beside the gold file
+    # (no timestamps): opaque case id + base/head refs + the hidden-gold sentinel.
+    metadata = {
+        "schema_version": 1,
+        "case_id": key,
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": TEMPLATE_VERSION,
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+    }
+    meta_path = case_stage / "tests" / "verifier-metadata.json"
+    meta_path.write_text(json.dumps(metadata, sort_keys=True))
+
     oracle = build_oracle_artifact(key, findings)
     oracle_bytes = json.dumps(oracle).encode("utf-8")
     oracle_path = case_stage / "solution" / "golden-review.json"
@@ -416,7 +432,8 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     files: dict[str, str] = {}
     for rel in (
         "README.md", "instruction.md", "environment/repository.bundle",
-        "tests/golden-review.json", "solution/golden-review.json",
+        "tests/golden-review.json", "tests/verifier-metadata.json",
+        "solution/golden-review.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
@@ -432,6 +449,10 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
         "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
         "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "verifier_script_sha256": hashlib.sha256(
+            (case_stage / "tests" / "score_review.py").read_bytes()
+            + (case_stage / "tests" / "verifier_core.py").read_bytes()
+        ).hexdigest(),
         "files": files,
     }
 

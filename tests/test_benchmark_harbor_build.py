@@ -421,6 +421,10 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
         groups[canon] = ordinal + 1
         expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
     assert [f["candidate_id"] for f in art["findings"]] == expected_ids
+    # exactly candidate-shaped: gold-only finding_id and provenance are absent
+    for entry in art["findings"]:
+        assert set(entry) == {"candidate_id", "title", "body", "severity",
+                              "path", "start_line", "end_line"}
     # round-trips through the verifier's own validation
     assert vc.validate_candidate_artifact(art)
 
@@ -503,6 +507,20 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
     assert lock["cases"][key]["files"]["tests/verifier_core.py"] == \
         lock["files"][f"{key}/tests/verifier_core.py"]
     assert not any("timestamp" in k or "created_at" in k for k in lock.keys())
+
+    # compiler-rendered immutable verifier metadata beside the gold file
+    meta = _load_json(case / "tests" / "verifier-metadata.json")
+    assert meta["case_id"] == key and meta["base_ref"] == "base" and meta["head_ref"] == "head"
+    assert meta["schema_version"] == 1 and meta["template_version"] == build.TEMPLATE_VERSION
+    assert meta["gold_sha256"] == lock["cases"][key]["gold_sha256"]
+    assert meta["gold_sha256"] == hashlib.sha256((case / "tests" / "golden-review.json").read_bytes()).hexdigest()
+    # hidden digest + rendered verifier-script digest inventoried in the lock
+    assert "verifier_script_sha256" in lock["cases"][key]
+    assert lock["cases"][key]["gold_sha256"]  # the hidden-gold sentinel
+    sr_bytes = (case / "tests" / "score_review.py").read_bytes()
+    vc_bytes = (case / "tests" / "verifier_core.py").read_bytes()
+    assert lock["cases"][key]["verifier_script_sha256"] == hashlib.sha256(sr_bytes + vc_bytes).hexdigest()
+
     for rel, data in _harbor_tree_bytes(ws).items():
         if rel == "benchmark.lock.json":
             continue
@@ -681,3 +699,26 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
         assert False, "expected CompileError for a non-ready case"
     except CompileError as exc:
         assert case_id in str(exc)
+
+
+def test_compiled_findings_oracle_scores_reward_1(sr_module, tmp_path, fake_gh) -> None:
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    key = build.derive_task_key(case_id)
+    build.compile_workspace(ws)
+    case = ws / "harbor" / key
+
+    class MatchClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    gold_path = case / "tests" / "golden-review.json"
+    oracle_path = case / "solution" / "golden-review.json"
+    out = tmp_path / "out"
+    reward = sr_module.run_verifier(
+        gold_path, oracle_path, out,
+        client=MatchClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0
