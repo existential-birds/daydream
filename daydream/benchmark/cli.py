@@ -453,11 +453,11 @@ def _handle_bench_command(argv: list[str]) -> int:
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
-    Sub-verbs: ``init``, ``status``, ``validate``, and ``import-prs``.
+    Sub-verbs: ``init``, ``status``, ``validate``, ``import-prs``, ``curate``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
-        description="Private PR benchmark workspace: init/status/validate/import-prs.",
+        description="Private PR benchmark workspace: init/status/validate/import-prs/curate.",
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -502,6 +502,19 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     import_prs_p.add_argument(
         "--refresh", action="store_true",
         help="re-fetch already-imported PRs",
+    )
+
+    curate_p = sub.add_parser("curate", help="curate a case's golden review")
+    curate_p.add_argument("dir", type=Path, help="workspace directory")
+    curate_p.add_argument(
+        "--case", metavar="CASE-ID", help="case id to curate"
+    )
+    curate_p.add_argument(
+        "--apply-gold",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="apply a reviewed gold YAML draft (derive all forbidden fields, never ready)",
     )
 
     return parser
@@ -583,13 +596,43 @@ def _handle_benchmark_validate(dir_path: Path) -> int:
     return code
 
 
+def _handle_benchmark_curate(args) -> int:
+    """Curate a case: derive everything, never attests to ready.
+
+    The interactive terminal client is issue #5; until it lands, ``curate``
+    requires ``--apply-gold <file>`` (a reviewed gold YAML draft) and routes
+    it through :func:`daydream.benchmark.curation.apply_gold_fragment`. Expected
+    workspace errors print to stderr and return exit ``1`` — never a bare traceback.
+    """
+    from pydantic import ValidationError
+
+    from daydream import git_ops
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+
+    if args.apply_gold is None:
+        print(
+            "curate: interactive curation requires a TTY; pass --apply-gold <file> to apply "
+            "a reviewed gold draft (interactive client is issue #5)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        fragment = load_yaml_strict(args.apply_gold)
+        cu.apply_gold_fragment(args.dir, args.case, fragment)
+    except (cu.CurationError, WorkspaceCorrupt, git_ops.GitError, ValidationError, KeyError, TypeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle ``daydream benchmark init|status|validate|import-prs``.
+    """Handle ``daydream benchmark init|status|validate|import-prs|curate``.
 
     Returns an exit code; ``daydream.cli.main`` translates it to a
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
-    ``ImportTargetError``/``PreflightError``) are printed to stderr and mapped
-    to exit ``1`` — never a bare traceback.
+    ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
+    stderr and mapped to exit ``1`` — never a bare traceback.
     """
 
     parser = _build_benchmark_parser()
@@ -606,5 +649,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_validate(args.dir)
     if sub == "import-prs":
         return _handle_benchmark_import_prs(args)
+    if sub == "curate":
+        return _handle_benchmark_curate(args)
     parser.print_help(file=sys.stderr)
     return 2
