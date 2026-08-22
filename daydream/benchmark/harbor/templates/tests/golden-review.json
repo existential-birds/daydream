@@ -9,7 +9,7 @@
     "end_line": 42
   },
   {
-    "finding_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "finding_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "title": "Response not validated",
     "body": "The response is interpolated without escaping.",
     "severity": "medium",

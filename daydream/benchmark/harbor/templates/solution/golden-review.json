@@ -14,7 +14,7 @@
       "end_line": 42
     },
     {
-      "candidate_id": "b68b8bb05b7f0941b68abe7b1578db958c602179de78e21f356263f2e319f576",
+      "candidate_id": "66506569c28b529ae2175ac307c2a2bc33edae54a68d2420d1bd0bc4dfa1efa7",
       "title": "Response not validated",
       "body": "The response is interpolated without escaping.",
       "severity": "medium",

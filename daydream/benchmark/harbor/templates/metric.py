@@ -18,15 +18,19 @@ import sys
 from pathlib import Path
 
 
+class VerifierError(Exception):
+    """Raised on any invalid input (mirrors verifier_core's error type)."""
+
+
 def _as_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"expected integer, got {value!r}")
+        raise VerifierError(f"expected integer, got {value!r}")
     return value
 
 
 def _as_float(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"expected number, got {value!r}")
+        raise VerifierError(f"expected number, got {value!r}")
     return float(value)
 
 

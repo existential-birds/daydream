@@ -33,7 +33,6 @@ class _AsyncHttpClient(Protocol):
 
 
 VerifierError = verifier_core.VerifierError
-_VERIFIER_THRESHOLD = verifier_core.CONFIDENCE_THRESHOLD
 
 JUDGE_PROMPT_TEMPLATE = (
     Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8")
@@ -503,7 +502,7 @@ def run_verifier(
             raise VerifierError("gold set must be a JSON list")
         gold_parsed = verifier_core.validate_gold_set(gold_raw)
         artifact_raw = _read_json(Path(artifact_path))
-        verifier_core.validate_candidate_artifact(artifact_raw)
+        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
 
         verdicts: list[verifier_core.Verdict] = []
         matches: set[tuple[str, str]] = set()
@@ -523,7 +522,6 @@ def run_verifier(
                 errors.extend(counting.errors)
 
         reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
-        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
         inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
         details = {**inner, **detail_prefix}
         _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(reward))
