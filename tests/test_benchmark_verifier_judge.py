@@ -997,10 +997,10 @@ def test_parse_verdict_rejects_unknown_key(sr_module) -> None:
 def test_url_validation_and_allowlist_helpers(sr_module) -> None:
     sr = sr_module
     # allowlist resolution: explicit env wins; absent -> own-host fail-closed fallback
-    assert sr._effective_allowlist("openai-compatible", "https://api.openai.com/v1",
+    assert sr._effective_allowlist("https://api.openai.com/v1",
                                    {"DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com  judge.example"}) \
         == {"api.anthropic.com", "judge.example"}
-    assert sr._effective_allowlist("anthropic", "https://api.anthropic.com/v1/messages", {}) \
+    assert sr._effective_allowlist("https://api.anthropic.com/v1/messages", {}) \
         == {"api.anthropic.com"}
 
     def rejects(url, allowlist):

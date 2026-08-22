@@ -117,7 +117,9 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
     assert rj["verifier_error"] == 0 and rj["reward"] == 1  # judged orbitally, not an error exit
     artifacts_blob = ((out_dir / "reward.json").read_text() + (out_dir / "reward-details.json").read_text()
                       + proc.stdout + proc.stderr)
-    judge_blob = b"".join(srv.posted_bodies).decode("utf-8", errors="replace")  # judge-bound channel: what the verifier POSTed
+    judge_blob = b"".join(srv.posted_bodies).decode(  # judge-bound channel
+        "utf-8", errors="replace"
+    )  # what the verifier POSTed
     for sentinel in list(_SENTINELS.values()) + ["REVIEWER_SECRET_SENTINEL_5d91", "PRIVATE_SOURCE_SENTINEL_2e4f",
                                                  "AGENT_OUTPUT_SENTINEL_6b3a", _JUDGE_KEY]:
         assert sentinel not in artifacts_blob        # no credential/source/agent/agent-key leakage

@@ -113,7 +113,7 @@ def _normalize_host(host: str | None) -> str:
     return host.strip().lower().rstrip(".")
 
 
-def _effective_allowlist(provider: str, base_url: str, env: dict[str, Any]) -> set[str]:
+def _effective_allowlist(base_url: str, env: dict[str, Any]) -> set[str]:
     """Resolve the judge-host allowlist from env; absent -> own-host fail-closed.
 
     A non-empty ``DAYDREAM_JUDGE_ALLOWED_HOSTS`` (whitespace/comma-separated)
@@ -339,10 +339,19 @@ class _Retryable(Exception):
 
 
 def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
-    """Parse an httpx-like response through the ``content`` extraction callable."""
+    """Parse an httpx-like response through the ``content`` extraction callable.
+
+    The raw body is size-capped (``_RESPONSE_CAP_BYTES``) BEFORE any status
+    handling, so an oversized body is rejected regardless of status code -- a
+    non-2xx (4xx/5xx) judge body must not bypass the cap. An over-cap body is a
+    terminal ``VerifierError`` (rejected, never truncated-and-accepted).
+    """
+    body = _response_bytes(response)
+    if len(body) > _RESPONSE_CAP_BYTES:
+        raise VerifierError("judge response body exceeds 256 KiB")  # terminal, never truncated
     status_code = getattr(response, "status_code", None)
     if status_code is None or not 200 <= int(status_code) < 300:
-        body_text = getattr(response, "text", "")
+        body_text = body.decode("utf-8", errors="replace")
         code = int(status_code) if status_code is not None else -1
         # 429 is retryable (rate limit); all other 4xx are terminal client errors.
         if 400 <= code < 500 and code != 429:
@@ -352,9 +361,6 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
         raise _Retryable(
             f"Judge request failed with HTTP {status_code}: {_bounded_error(body_text)}"
         )
-    body = _response_bytes(response)
-    if len(body) > _RESPONSE_CAP_BYTES:
-        raise VerifierError("judge response body exceeds 256 KiB")  # terminal, never truncated
     try:
         parsed_body = response.json()
     except Exception as exc:
@@ -388,8 +394,8 @@ async def _complete_json_with_http(
       429/5xx retry with exponential backoff (`2 ** attempt`); a terminal 4xx
       (non-429) and a malformed-JSON parse are not retried.
     - 3xx responses: bounded credential-preserving redirects. At most
-      ``_MAX_REDIRECTS`` hops; each next target is resolved against the request
-      URL first (relative ``Location``) and must be inside the judge-host
+      ``_MAX_REDIRECTS`` hops per call; each next target is resolved against the
+      request URL first (relative ``Location``) and must be inside the judge-host
       ``allowlist``. Configured auth headers are preserved across the hop and
       server-provided response headers are never replayed. A redirect-target
       rejection or an exhausted hop count is a terminal ``VerifierError``,
@@ -397,8 +403,8 @@ async def _complete_json_with_http(
     - After 3 failed attempts, raise ``VerifierError`` — never a partial result.
     """
     current_url = url
+    hop = 0
     for attempt in range(_MAX_RETRIES):
-        hop = 0
         while True:
             try:
                 try:
@@ -472,7 +478,7 @@ class AnthropicJudgeClient:
         self, *, user: str, system: str = "", max_tokens: int = 512
     ) -> dict[str, Any]:
         effective = self.allowlist or _effective_allowlist(
-            "anthropic", _ANTHROPIC_MESSAGES_URL, {}
+            _ANTHROPIC_MESSAGES_URL, {}
         )
         # Fail closed before any request: a forced disallowed allowlist must
         # reject the initial URL here, never after a POST has been issued.
@@ -581,7 +587,7 @@ class OpenAIJudgeClient:
     ) -> dict[str, Any]:
         url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
         effective = self.allowlist or _effective_allowlist(
-            "openai-compatible", self.base_url, {}
+            self.base_url, {}
         )
         # Fail closed before any request: a base URL host outside the allowlist
         # is rejected here, never after a POST has been issued.
@@ -936,13 +942,19 @@ def _build_client(env: dict[str, Any]) -> Any:
             f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
         )
     if provider == "anthropic":
+        allowlist = _effective_allowlist(_ANTHROPIC_MESSAGES_URL, env)
+        # Fail-closed at build time, matching the openai-compatible branch: the
+        # initial Messages URL is validated against the effective allowlist
+        # before any request can be issued, so both providers share identical
+        # validation timing.
+        _validate_base_url(_ANTHROPIC_MESSAGES_URL, allowlist)
         return AnthropicJudgeClient(
             api_key,
             model,
-            allowlist=_effective_allowlist("anthropic", _ANTHROPIC_MESSAGES_URL, env),
+            allowlist=allowlist,
         )
     base_url = resolve_base_url(api_key, env.get(_ENV_BASE_URL))
-    allowlist = _effective_allowlist("openai-compatible", base_url, env)
+    allowlist = _effective_allowlist(base_url, env)
     initial_url = base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
     _validate_base_url(initial_url, allowlist)  # fail-closed before any request
     return OpenAIJudgeClient(api_key, model, base_url=base_url, allowlist=allowlist)
@@ -956,6 +968,27 @@ def _env_path(name: str, default: str) -> Path:
     """
     value = os.environ.get(name)
     return Path(value) if value else Path(default)
+
+
+def _emit_reward(reward: verifier_core.Reward) -> int:
+    """Print the reward payload JSON and return the verifier-error exit code.
+
+    Shared by both ``main()`` terminal paths (a fail-closed client build
+    rejection and the completed ``run_verifier``) so the two failure/success
+    emissions cannot drift. ``Reward.to_dict()`` always exists (the compiled
+    verifier_core twin is byte-identical); the fallback dict is a defensive
+    guard that keeps the shape stable even if a duck-typed reward lacks it.
+    """
+    payload = (
+        reward.to_dict()
+        if hasattr(reward, "to_dict")
+        else {
+            "verifier_error": int(getattr(reward, "verifier_error", 0)),
+            "reward": float(getattr(reward, "reward", 0.0)),
+        }
+    )
+    print(json.dumps(payload))
+    return 1 if getattr(reward, "verifier_error", 0) else 0
 
 
 def main() -> int:
@@ -993,30 +1026,12 @@ def main() -> int:
             reward = _write_error_artifact(
                 out_dir, provider, model, {"requests": 0}, [_bounded_error(str(exc))], 0
             )
-            payload = (
-                reward.to_dict()
-                if hasattr(reward, "to_dict")
-                else {
-                    "verifier_error": int(getattr(reward, "verifier_error", 0)),
-                    "reward": float(getattr(reward, "reward", 0.0)),
-                }
-            )
-            print(json.dumps(payload))
-            return 1 if getattr(reward, "verifier_error", 0) else 0
+            return _emit_reward(reward)
         # Missing MODEL/API_KEY keeps the compiled path: run_verifier emits its
         # own "no judge client configured" typed diagnostic.
         client = None
     reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
-    payload = (
-        reward.to_dict()
-        if hasattr(reward, "to_dict")
-        else {
-            "verifier_error": int(getattr(reward, "verifier_error", 0)),
-            "reward": float(getattr(reward, "reward", 0.0)),
-        }
-    )
-    print(json.dumps(payload))
-    return 1 if getattr(reward, "verifier_error", 0) else 0
+    return _emit_reward(reward)
 
 
 if __name__ == "__main__":
