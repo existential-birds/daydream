@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -246,6 +247,122 @@ def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[di
         if after is None:
             raise git_ops.GitError("graphql reviewThreads hasNextPage without an endCursor")
     return all_nodes
+
+
+def _normalize_body(body: str) -> str:
+    """Normalize line endings and strip trailing whitespace at the document end.
+
+    CRLF/CR are converted to LF; internal Markdown whitespace is preserved.
+    """
+    return body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+
+
+_MARKDOWN_PREFIX = re.compile(r"^(#{1,6}\s+|[-*]\s+)")
+
+
+def _derive_title(body: str) -> str:
+    """The bounded title from the first nonblank line of a body."""
+    for line in body.split("\n"):
+        if not line.strip():
+            continue
+        title = " ".join(line.split())
+        return _MARKDOWN_PREFIX.sub("", title, count=1)
+    return ""
+
+
+def _title_ok(title: str) -> bool:
+    """True when *title* is non-empty and within the 500 UTF-8 byte bound."""
+    if not title:
+        return False
+    return 0 < len(title.encode("utf-8")) <= 500
+
+
+def _anchor_location(
+    evidence: schema.EvidenceRecord,
+) -> tuple[schema.Location | None, str | None]:
+    """Project a RIGHT-side inline anchor to a ``Location``, or the block reason.
+
+    Returns ``(location, None)`` on a usable anchor, or ``(None, reason)`` when
+    the anchor is unusable or the comment is not a right-side line anchor.
+    """
+    if evidence.subject_type == "file":
+        return None, None
+    if evidence.side == "LEFT" or evidence.start_side == "LEFT":
+        return None, "side"
+    path = evidence.original_path or evidence.path
+    start = evidence.start_line or evidence.line
+    end = evidence.line or evidence.start_line
+    if not path or start is None or end is None or start < 1 or end < start:
+        return None, "anchor"
+    return schema.Location(path=path, start_line=start, end_line=end), None
+
+
+def _project_one(evidence: schema.EvidenceRecord, head_sha: str) -> schema.Candidate:
+    body = _normalize_body(evidence.body)
+    title = _derive_title(body)
+    title_ok = _title_ok(title)
+
+    location: schema.Location | None = None
+    exact = title_ok
+    reason: str | None = None
+    if evidence.kind == "inline_comment":
+        loc, anchor_reason = _anchor_location(evidence)
+        location = loc
+        if anchor_reason is not None:
+            exact = False
+            reason = anchor_reason
+    # review bodies are file-agnostic: no location, no side constraint
+
+    if not title_ok:
+        exact = False
+        reason = "title"
+    if evidence.commit_id != head_sha:
+        exact = False
+        reason = "commit"
+    if evidence.outdated:
+        exact = False
+        reason = "outdated"
+    if evidence.dismissed:
+        exact = False
+        reason = "dismissed"
+
+    return schema.Candidate(
+        source_id=evidence.source_id,
+        title=title,
+        body=body,
+        severity=None,
+        location=location,
+        exact_acceptable=exact,
+        not_exact_reason=reason if not exact else None,
+    )
+
+
+def project_candidates(
+    doc: schema.ImportDocument, head_sha: str
+) -> list[schema.Candidate]:
+    """The deterministic §5 projection of root comments + non-pure reviews.
+
+    Root inline comments with a non-empty body and ``COMMENTED`` /
+    ``CHANGES_REQUESTED`` review bodies become candidates; pure approvals,
+    replies, and conversation comments are retained as evidence only.
+    Projection never raises — an underivable title, a LEFT-side anchor, an
+    unusable anchor, an off-head commit, an outdated, or a dismissed record all
+    set ``exact_acceptable`` low with a ``not_exact_reason``.
+    """
+    cands: list[schema.Candidate] = []
+    for evidence in doc.evidence:
+        if not evidence.body:
+            continue
+        if evidence.kind == "inline_comment":
+            if evidence.reply_to_id is not None:
+                continue  # replies are evidence, not candidates
+        elif evidence.kind == "review":
+            if evidence.state not in ("COMMENTED", "CHANGES_REQUESTED"):
+                continue
+        else:
+            continue
+        cands.append(_project_one(evidence, head_sha))
+    return cands
 
 
 def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
