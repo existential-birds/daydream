@@ -431,7 +431,7 @@ def _canonical_gold_id(case_id: str, f: dict) -> str:
     payload = "\x1f".join([
         str(case_id or ""), str(f.get("title") or ""), str(f.get("body") or ""),
         str(f.get("severity") or ""), str(f.get("path") or ""),
-        str(f.get("start_line")), str(f.get("end_line")),
+        str(f.get("start_line") or ""), str(f.get("end_line") or ""),
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -450,6 +450,39 @@ def test_gold_set_rejects_duplicate_finding_ids():
             {**_gold(), "finding_id": fid},
             {**_gold(), "finding_id": fid},
         ], case_id="case-x")
+
+
+def test_null_location_normalizes_to_empty_in_canonical_tuple():
+    locless = _cand(path=None, start_line=None, end_line=None)
+    blank = _cand(path="", start_line=None, end_line=None)
+    assert derive_candidate_id("case-x", locless, 0) == derive_candidate_id("case-x", blank, 0)
+
+
+def test_locationless_canonical_digest_matches_schema_derive():
+    from daydream.benchmark import schema
+    raw = _gold(path=None, start_line=None, end_line=None)
+    payload = "\x1f".join([
+        str("case-x" or ""), str(raw["title"] or ""), str(raw["body"] or ""),
+        str(raw["severity"] or ""), str(raw["path"] or ""),
+        str(raw["start_line"] or ""), str(raw["end_line"] or ""),
+    ])
+    verif = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    authoring = schema.derive_finding_id({
+        "title": raw["title"], "body": raw["body"], "severity": raw["severity"],
+        "location": None,}, case_id="case-x")
+    assert verif == authoring
+
+
+def test_duplicate_locationless_get_distinct_occurrence_ids():
+    locless = _cand(path=None, start_line=None, end_line=None)
+    assert derive_candidate_id("case-x", locless, 0) != derive_candidate_id("case-x", locless, 1)
+
+
+def test_locationless_gold_set_accepts_canonical_id():
+    g = _gold(path=None, start_line=None, end_line=None)
+    g["finding_id"] = _canonical_gold_id("case-x", g)
+    gs = validate_gold_set([g], case_id="case-x")
+    assert len(gs) == 1 and gs[0].path is None
 
 
 def test_locationless_candidate_accepted():

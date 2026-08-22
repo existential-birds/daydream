@@ -245,13 +245,6 @@ def derive_candidate_id(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _component_int(finding: object, name: str) -> int:
-    value = _finding_component(finding, name)
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise VerifierError(f"{name} must be an integer, got {value!r}")
-    return value
-
-
 # ---------------------------------------------------------------------------
 # candidate artifact + gold set validation
 # ---------------------------------------------------------------------------
@@ -262,9 +255,9 @@ def _canonical_tuple(finding: object) -> tuple[object, ...]:
         str(_finding_component(finding, "title") or ""),
         str(_finding_component(finding, "body") or ""),
         str(_finding_component(finding, "severity") or ""),
-        str(_finding_component(finding, "path")),
-        _component_int(finding, "start_line"),
-        _component_int(finding, "end_line"),
+        str(_finding_component(finding, "path") or ""),
+        str(_finding_component(finding, "start_line") or ""),
+        str(_finding_component(finding, "end_line") or ""),
     )
 
 
