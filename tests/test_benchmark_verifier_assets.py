@@ -75,9 +75,10 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_
     expected = vc.aggregate_metrics(rows)
 
     result = sr_metric.aggregate_rewards_file(str(lp))
-    assert result == expected  # same aggregation contract on the same rows
-    assert result["failed_task_count"] == 1 and result["task_count"] == 3
-    assert result["mean_task_score"] == (0.8 + 0.0 + 1.0) / 3
+    assert result == expected                          # same aggregation contract
+    assert result["task_count"] == 3 and result["scored_task_count"] == 2
+    assert result["infra_error_task_count"] == 1 and "failed_task_count" not in result
+    assert result["mean_task_score"] == (0.8 + 1.0) / 2
 
 
 def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> None:

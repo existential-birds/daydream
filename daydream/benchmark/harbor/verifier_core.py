@@ -485,7 +485,7 @@ def _finding_id(finding: object) -> str:
 
 
 def _empty_side_error(gold_count: int) -> Reward:
-    return Reward(reward=0.0, gold_count=gold_count, verifier_error=1)
+    return Reward(reward=0.0, gold_count=gold_count, verifier_error=0)
 
 
 def score_review(
@@ -608,32 +608,37 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     """Aggregate per-task reward JSONL rows into pooled corpus micro metrics.
 
     TP/FP/FN are pooled across tasks (never averaged per task). A ``None`` row
-    or a row with ``verifier_error == 1`` is a failed task: it contributes
-    reward 0 to the mean, zero counts, and increments ``failed_task_count``.
-    Zero denominators evaluate to 1.0 throughout.
+    or a row with ``verifier_error == 1`` is an unscored infrastructure
+    failure: it increments ``infra_error_task_count`` and contributes nothing
+    (no reward, no tp/fp/fn, no clean counts). Scored rows (``verifier_error
+    == 0``) pool into ``scored_task_count``/``total_tp/fp/fn`` and the mean,
+    which is over scored rows only (zero scored rows -> 1.0). Zero
+    denominators evaluate to 1.0 throughout.
     """
-    failed = 0
+    infra_errors = 0
     clean_correct = 0
     clean_total = 0
-    rewards: list[float] = []
+    scored_rewards: list[float] = []
     total_tp = total_fp = total_fn = 0
 
     for row in rows:
         if row is None or row.get("verifier_error") == 1:
-            failed += 1
-            rewards.append(0.0)
+            infra_errors += 1
             continue
         total_tp += _as_int(row["tp"])
         total_fp += _as_int(row["fp"])
         total_fn += _as_int(row["fn"])
-        rewards.append(_as_float(row["reward"]))
+        scored_rewards.append(_as_float(row["reward"]))
         if row.get("clean_task") == 1:
             clean_total += 1
             if _as_int(row["fp"]) == 0:
                 clean_correct += 1
 
     task_count = len(rows)
-    mean_task_score = sum(rewards) / task_count if task_count else 1.0
+    scored_task_count = len(scored_rewards)
+    mean_task_score = (
+        sum(scored_rewards) / scored_task_count if scored_task_count else 1.0
+    )
     micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 1.0
     micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else 1.0
     if total_tp == 0 and (total_tp + total_fp > 0 or total_tp + total_fn > 0):
@@ -649,8 +654,9 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
         "mean_task_score": mean_task_score,
         "clean_accuracy": clean_accuracy,
         "task_count": task_count,
+        "scored_task_count": scored_task_count,
+        "infra_error_task_count": infra_errors,
         "clean_task_count": clean_total,
-        "failed_task_count": failed,
         "total_tp": total_tp,
         "total_fp": total_fp,
         "total_fn": total_fn,

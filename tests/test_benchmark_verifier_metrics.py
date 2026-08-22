@@ -42,8 +42,23 @@ def test_mean_task_score_and_counts():
     rows = [_row(1.0, 3, 0, 0), _row(0.5, 1, 1, 1), None, _row(0.0, 0, 0, 0, verifier_error=1)]
     m = aggregate_metrics(rows)
     assert m["task_count"] == 4
-    assert m["failed_task_count"] == 2  # None + verifier_error
-    assert abs(m["mean_task_score"] - (1.0 + 0.5 + 0.0 + 0.0) / 4) < 1e-9
+    assert m["scored_task_count"] == 2
+    assert m["infra_error_task_count"] == 2           # None + verifier_error==1
+    assert "failed_task_count" not in m               # removed
+    assert abs(m["mean_task_score"] - (1.0 + 0.5) / 2) < 1e-9   # mean over scored only
+
+
+def test_unscored_rows_excluded_from_micro_and_mean():
+    rows = [_row(1.0, 3, 0, 0), None, _row(0.0, 0, 5, 5, verifier_error=1)]
+    m = aggregate_metrics(rows)
+    assert (m["total_tp"], m["total_fp"], m["total_fn"]) == (3, 0, 0)  # unscored contribute nothing
+    assert abs(m["mean_task_score"] - 1.0) < 1e-9                     # scored-only mean
+    assert m["scored_task_count"] == 1 and m["infra_error_task_count"] == 2
+
+
+def test_mean_task_score_is_one_when_zero_scored():
+    m = aggregate_metrics([None, None])
+    assert m["mean_task_score"] == 1.0 and m["scored_task_count"] == 0 and m["infra_error_task_count"] == 2
 
 def test_clean_accuracy_counts_only_clean_tasks():
     rows = [
