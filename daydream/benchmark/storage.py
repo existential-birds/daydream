@@ -678,6 +678,8 @@ def _is_transaction_residue(op_dir: Path) -> bool:
         entries = list(op_dir.iterdir())
     except OSError:
         return False
+    if not entries:
+        return False
     for entry in entries:
         if entry.is_symlink() or not entry.is_file():
             return False
@@ -730,15 +732,12 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         if rel in rels:
             raise WorkspaceCorrupt(f"{root}: duplicate target rel in journal: {rel!r}")
         rels.add(rel)
-        for field in ("stage",):
+        for field in ("stage", "backup"):
             val = t.get(field)
+            if val is None and field == "backup":
+                continue
             if not isinstance(val, str) or os.path.basename(val) != val:
                 raise WorkspaceCorrupt(f"{root}: journal target {rel!r} {field} is not a bare filename")
-        backup = t.get("backup")
-        if backup is not None and (
-            not isinstance(backup, str) or os.path.basename(backup) != backup
-        ):
-            raise WorkspaceCorrupt(f"{root}: journal target {rel!r} backup is not a bare filename")
     order = doc.get("replacement_order")
     if not isinstance(order, list):
         raise WorkspaceCorrupt(f"{root}: journal replacement_order is not a list")
@@ -784,7 +783,10 @@ def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
 def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     order = doc.get("replacement_order") or []
     applied = int(doc.get("applied_count") or 0)
-    targets = {t["rel"]: t for t in _targets_from_doc(doc)}
+    # Key by the canonical rel the validator computed (replacement_order holds
+    # canonical rels), so a crafted non-canonical target rel can't silently
+    # evade recovery via a key mismatch (fail-closed all-or-nothing).
+    targets = {_resolve_target(root, t["rel"]): t for t in _targets_from_doc(doc)}
     # Reverse order so benchmark.yaml (last) is restored first.
     prefix = order[: applied if applied else len(order)]
     for rel in reversed(prefix):
@@ -822,13 +824,14 @@ def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
 
 def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     for t in _targets_from_doc(doc):
-        target = root / t["rel"]
+        rel = _resolve_target(root, t["rel"])
+        target = root / rel
         if not target.exists():
-            raise WorkspaceCorrupt(f"{root}: complete journal {t['rel']} missing on disk")
+            raise WorkspaceCorrupt(f"{root}: complete journal {rel} missing on disk")
         actual = sha256_file(target)
         if actual != t["after_digest"]:
             raise WorkspaceCorrupt(
-                f"{root}: complete journal {t['rel']} digest mismatch (expected {t['after_digest']}, got {actual})"
+                f"{root}: complete journal {rel} digest mismatch (expected {t['after_digest']}, got {actual})"
             )
         # Recovery never widens a private target's mode, even if it drifted.
         os.chmod(target, 0o600)

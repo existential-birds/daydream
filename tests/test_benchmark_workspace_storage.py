@@ -513,3 +513,37 @@ def test_complete_restart_recovery_is_idempotent(tmp_path):
     recover_startup(tmp_path)
     recover_startup(tmp_path)   # second pass: complete journal already verified+cleaned
     assert t.read_text() == "new"
+
+
+def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path):
+    """Recovery consumes the canonical rel the validator computed, never the
+    raw journal string -- a crafted non-canonical-but-inside-root target rel
+    must still be rolled back, not silently skipped (all-or-nothing)."""
+    target = tmp_path / "target.yaml"
+    target.write_text("old")
+    with Transaction(tmp_path, op_id="op-noncanon", kind="write") as tx:
+        _stage(tx, target, "new")
+        tx.prepare()
+        tx.begin_commit()   # state=committing, applied_count=1, target -> "new"
+        tx.inject_crash()
+    # Corrupt the journal target rel to a non-canonical form that still
+    # resolves inside root; keep replacement_order canonical (as the
+    # validator's rels set is built from _resolve_target).
+    jf = tmp_path / "transactions" / "op-noncanon" / "journal.json"
+    doc = load_json_strict(jf)
+    doc["targets"][0]["rel"] = "./target.yaml"
+    doc["replacement_order"] = ["target.yaml"]
+    atomic_write_json(jf, doc)
+    assert target.read_text() == "new"
+    recover_startup(tmp_path)
+    assert target.read_text() == "old"  # restored from backup, not skipped
+
+
+def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path):
+    """A genuinely empty dir under transactions/ is not positively-identified
+    residue -- recovery fails closed and never deletes what it can't identify."""
+    op = tmp_path / "transactions" / "op-empty"
+    op.mkdir(parents=True)
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+    assert op.is_dir()  # left untouched
