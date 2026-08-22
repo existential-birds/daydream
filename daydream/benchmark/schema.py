@@ -874,8 +874,6 @@ def derive_gold_mode(curation: Curation) -> str:
         return "authored"
     if "authored" in kinds:
         return "mixed"
-    if kinds == {"edited"}:
-        return "edited"
     return "historical"
 
 

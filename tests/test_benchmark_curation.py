@@ -247,7 +247,7 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     f2 = raw["curation"]["findings"][0]
     assert f2["provenance"]["kind"] == "edited" and f2["finding_id"] != f["finding_id"]
-    assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "edited"
+    assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "historical"
     assert f2["finding_id"] == derive_finding_id(f2, case_id=case_id)
 
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):

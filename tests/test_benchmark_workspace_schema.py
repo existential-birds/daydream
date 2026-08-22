@@ -8,8 +8,11 @@ from pydantic import ValidationError
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
+    Curation,
     EvidenceRecord,
+    Finding,
     ImportDocument,
+    Provenance,
     PullRequestEntry,
     TransitionError,
     case_id_for,
@@ -490,7 +493,29 @@ def test_historical_daydream_marker_cannot_be_gold():
 def test_gold_status_and_mode_derived():
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"
-    assert derive_gold_mode(case.curation) == "edited"
+    assert derive_gold_mode(case.curation) == "historical"
+
+
+@pytest.mark.parametrize("kinds,expected", [
+    ([], "clean"),
+    (["historical"], "historical"),
+    (["edited"], "historical"),              # all-edited historical evidence stays historical
+    (["authored"], "authored"),
+    (["historical", "edited"], "historical"),
+    (["authored", "historical"], "mixed"),
+    (["authored", "edited"], "mixed"),
+])
+def test_gold_mode_truth_table(kinds, expected):
+    findings = [
+        Finding(finding_id="e" * 64, title=f"f{i}", body="b",
+                provenance=Provenance(
+                    kind=k,
+                    source_ids=["github:review_comment:1"] if k in ("historical", "edited") else [],
+                ))
+        for i, k in enumerate(kinds)
+    ]
+    curation = Curation(state="draft", findings=findings)
+    assert derive_gold_mode(curation) == expected
 
 
 @pytest.mark.parametrize(
