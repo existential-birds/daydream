@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 
 # deterministic seed identity + fake_gh fixtures (mirrors
@@ -355,7 +357,7 @@ def test_bounded_pr_context_missing_body_is_empty():
     assert "body: \n" in ctx and "[truncated" not in ctx
 
 
-def test_build_gold_list_is_provenance_free_and_location_required():
+def test_build_gold_list_is_provenance_free():
     from daydream.benchmark.harbor import build
     findings = [
         {"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
@@ -385,18 +387,46 @@ def test_build_gold_list_clean_is_empty():
     assert build.build_gold_list([], key="case-key") == []
 
 
-def test_build_gold_list_rejects_locationless_finding():
+def test_build_gold_list_accepts_locationless_and_emits_nulls():
+    from daydream.benchmark.harbor import build
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    finding = {
+        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+        "location": None, "provenance": {"kind": "authored", "source_ids": []},
+    }
+    gold = build.build_gold_list([finding], key=key)
+    assert len(gold) == 1
+    entry = gold[0]
+    assert set(entry) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
+    assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
+    # compiled gold id is the task-key-scoped canonical digest, nulls -> ""
+    assert entry["finding_id"] == build._gold_finding_ids(key, finding)
+    assert entry["finding_id"] != "a" * 64
+
+
+def test_build_gold_list_rejects_partially_populated_location():
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
-    try:
+    with pytest.raises(CompileError):
         build.build_gold_list([{
-            "finding_id": "a" * 64, "title": "T", "body": "B",
-            "severity": None, "location": None,
+            "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+            "location": {"path": "src/a.py", "start_line": None, "end_line": None},
             "provenance": {"kind": "authored", "source_ids": []},
-        }], key="case-key")
-        assert False, "expected CompileError for a location-less finding"
-    except CompileError as exc:
-        assert "location" in str(exc)
+        }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
+
+
+def test_build_oracle_artifact_locationless_passes_validation():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import verifier_core as vc
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    art = build.build_oracle_artifact(key, [{
+        "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
+        "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
+    }])
+    entry = art["findings"][0]
+    assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
+    assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
+    assert vc.validate_candidate_artifact(art)  # round-trips; candidate_id matches derived
 
 
 def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():

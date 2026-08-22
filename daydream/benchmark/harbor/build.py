@@ -137,14 +137,27 @@ def _flatten_finding(finding: dict) -> dict:
 
     Returns the content fields ``{title, body, severity, path, start_line,
     end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``.
-    A missing or ``None`` location cannot emit validation-passing gold, so it
-    raises :class:`CompileError` naming the finding -- never a silent drop.
+    A missing or ``None`` location (a locationless review finding that names a
+    defect without a file or line) emits explicit null location fields -- a
+    valid, provably locationless gold entry. A partially populated location
+    (at least one of path/start_line/end_line ``None``) can never emit
+    validation-passing gold, so it raises :class:`CompileError` naming the
+    finding -- never a silent drop and never a fabricated path or line.
     """
     location = finding.get("location")
     if not location:
+        return {
+            "title": finding.get("title"),
+            "body": finding.get("body"),
+            "severity": finding.get("severity"),
+            "path": None,
+            "start_line": None,
+            "end_line": None,
+        }
+    if location.get("path") is None or location.get("start_line") is None or location.get("end_line") is None:
         raise CompileError(
-            f"finding {finding.get('finding_id')} has no location; "
-            "cannot emit validation-passing gold"
+            f"finding {finding.get('finding_id')} has a partially populated location; "
+            "location must be all-null or fully populated"
         )
     return {
         "title": finding.get("title"),
@@ -177,8 +190,9 @@ def build_gold_list(findings: list, *, key: str) -> list:
     ``[]`` for empty input; otherwise each entry carries a ``finding_id``
     derived under the opaque compiled task *key* (see
     :func:`_gold_finding_ids`) plus the flattened content fields, sorted by
-    ``finding_id`` ascending. A location-less finding raises
-    :class:`CompileError`.
+    ``finding_id`` ascending. A locationless finding emits explicit nulls for
+    its location fields; a partially populated location raises
+    :class:`CompileError` from :func:`_flatten_finding`.
     """
     if not findings:
         return []
@@ -192,13 +206,18 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
 
     ``schema_version`` 1, ``case_id`` is the opaque task key, ``base_ref`` /
     ``head_ref`` are the deterministic ``base`` / ``head`` refs. Findings are
-    flattened (reusing :func:`_flatten_finding` -- a location-less finding
-    raises :class:`CompileError`), ordered by ``finding_id`` ascending, and
+    flattened (reusing :func:`_flatten_finding` -- a locationless finding
+    emits explicit null locations and a partially populated location raises
+    :class:`CompileError`), ordered by ``finding_id`` ascending, and
     assigned ordinal 0,1,2,... in that order; each entry is exactly
     candidate-shaped -- ``candidate_id`` plus the flattened content fields
     (``title``/``body``/``severity``/``path``/``start_line``/``end_line``),
     never the gold-only ``finding_id`` -- with ``candidate_id`` derived via
     ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
+
+    The ordinal-grouping tuple is normalized with ``or ""`` on all six content
+    components so a locationless compiled artifact groups field-for-field with
+    the verifier's own canonical tuple (``_canonical_tuple``).
     """
     from daydream.benchmark.harbor import verifier_core as vc
     if not findings:
@@ -222,8 +241,8 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
             str(flattened.get("body") or ""),
             str(flattened.get("severity") or ""),
             str(flattened.get("path") or ""),
-            flattened.get("start_line"),
-            flattened.get("end_line"),
+            str(flattened.get("start_line") or ""),
+            str(flattened.get("end_line") or ""),
         )
         ordinal = groups.get(canon, 0)
         groups[canon] = ordinal + 1
