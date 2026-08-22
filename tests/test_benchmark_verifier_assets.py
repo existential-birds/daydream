@@ -32,8 +32,8 @@ def test_verifier_core_template_is_byte_identical_to_source() -> None:
     assert _sha256(copy) == _sha256(source)
 
 
-def test_metric_entry_aggregates_identically_to_verifier_core(sr_metric, tmp_path, monkeypatch) -> None:
-    rows = [
+def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_path, monkeypatch) -> None:
+    rows: list[dict[str, object] | None] = [
         {
             "reward": 0.8,
             "tp": 2,
