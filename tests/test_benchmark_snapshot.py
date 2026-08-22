@@ -233,3 +233,38 @@ def test_offline_clone_validates(tmp_path):
     with pytest.raises(git_ops.GitError):
         sn.validate_offline_clone(bad, _seed_base_tree(), _seed_head_tree(), diff_sha,
                                   workdir=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: freeze_one ready / unreplayable reason matrix
+# ---------------------------------------------------------------------------
+
+
+def test_freeze_one_ready_and_reasons(tmp_path):
+    from daydream.benchmark import snapshot as sn
+    from daydream.benchmark.schema import case_id_for
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    ready = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
+                          policy="final_pr_head", requested_head="final", origin_url=origin)
+    assert ready["status"] == "ready"
+    assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
+    assert ready["base_tree_sha"] == _seed_base_tree() and ready["head_tree_sha"] == _seed_head_tree()
+    assert re.fullmatch(r"[0-9a-f]{64}", ready["diff_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", ready["bundle_sha256"])
+    expect_rel = f"snapshots/{case_id_for(1, _SHA_HEAD)}.bundle"
+    assert ready["bundle_file"] == expect_rel
+    assert (tmp_path / expect_rel).exists()
+    # head_not_on_pr: a base3 head reachable elsewhere is rejected
+    ur = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_BASE3,
+                       policy="explicit_head", requested_head=_SHA_BASE3, origin_url=origin)
+    assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "head_not_on_pr"
+    assert ur["bundle_file"] is None and ur["base_tree_sha"] is None
+    # head_unreachable: a sha absent from the mirror
+    ur2 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha="0" * 40,
+                        policy="explicit_head", requested_head="0" * 40, origin_url=origin)
+    assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
+    assert ur2["bundle_file"] is None

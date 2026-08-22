@@ -287,3 +287,95 @@ def _run_git_cwd(repo: Path, args: list[str], *, capture_bytes: bool = False) ->
     if capture_bytes:
         return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
     return proc.stdout.strip()
+
+
+def freeze_one(
+    root: Path,
+    repo_slug: str,
+    pr_number: int,
+    *,
+    base_tip: str,
+    head_sha: str,
+    policy: str,
+    requested_head: str,
+    origin_url: str | None = None,
+) -> dict:
+    """Freeze one requested head into a ``ready`` or ``unreplayable`` snapshot.
+
+    Runs the full pipeline (mirror ensure -> fetch -> ancestry -> merge-base -> trees
+    -> degenerate -> bundle -> offline validate). Classified git failures return an
+    ``unreplayable`` dict with an exact reason; only unexpected errors propagate.
+    """
+    root = Path(root)
+    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
+    case_id = schema.case_id_for(pr_number, head_sha)
+    bundle_rel = f"snapshots/{case_id}.bundle"
+    bundle_path = root / bundle_rel
+
+    def unreplayable(reason: str, detail: str) -> dict:
+        return {
+            "status": "unreplayable",
+            "policy": policy,
+            "requested_head": requested_head,
+            "original_base_sha": base_tip,
+            "original_head_sha": head_sha,
+            "base_tree_sha": None,
+            "head_tree_sha": None,
+            "diff_sha256": None,
+            "bundle_file": None,
+            "bundle_sha256": None,
+            "error": {"reason": reason, "detail": detail},
+        }
+
+    # 1) mirror ensure + fetch base tip, PR head ref, and the requested head.
+    try:
+        m = ensure_mirror(root, repo_slug, origin_url)
+        fetch_pr_refs(root, repo_slug, pr_number, base_tip, [head_sha], origin_url)
+        pr_head = rev_parse(m, f"refs/pull/{pr_number}/head")
+    except git_ops.GitError as exc:
+        return unreplayable("head_unreachable", f"could not fetch/resolve the PR head: {exc}")
+
+    # 2) the requested head must be the PR head or an ancestor on its ancestry.
+    reach = head_reachability(m, head_sha, pr_head)
+    if reach == "head_unreachable":
+        return unreplayable("head_unreachable", f"requested head {head_sha[:12]} is not in the mirror")
+    if reach != "ok":
+        return unreplayable("head_not_on_pr", f"requested head {head_sha[:12]} is reachable elsewhere but not on the PR head")
+
+    # 3) resolve the merge base and both trees.
+    base = resolve_original_base(m, "refs/heads/base_tip", head_sha)
+    if base is None:
+        return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
+    trees = resolve_trees(m, base, head_sha)
+    if trees == "missing_object":
+        return unreplayable("missing_object", "a source tree object is absent from the mirror")
+    base_tree, head_tree = trees
+
+    # 4) a clean review still requires a real code change.
+    degen = degenerate(m, base_tree, head_tree)
+    if degen is not None:
+        return unreplayable(degen, f"no real code change between base and head ({degen})")
+
+    # 5) canonical diff + deterministic bundle + offline validation.
+    try:
+        diff_sha = canonical_diff_sha256(m, base, head_sha)
+        storage.ensure_private_dir(root / "snapshots")
+        build_bundle(m, base, head_sha, bundle_path, case_id)
+        bundle_sha = storage.sha256_file(bundle_path)
+        validate_offline_clone(bundle_path, base_tree, head_tree, diff_sha, workdir=root / "cache")
+    except git_ops.GitError as exc:
+        return unreplayable("bundle_failure", f"bundle build/validate failed: {exc}")
+
+    return {
+        "status": "ready",
+        "policy": policy,
+        "requested_head": requested_head,
+        "original_base_sha": base_tip,
+        "original_head_sha": head_sha,
+        "base_tree_sha": base_tree,
+        "head_tree_sha": head_tree,
+        "diff_sha256": diff_sha,
+        "bundle_file": bundle_rel,
+        "bundle_sha256": bundle_sha,
+        "error": None,
+    }
