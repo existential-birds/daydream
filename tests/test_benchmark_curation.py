@@ -141,6 +141,9 @@ def _seed_local_origin(tmp_path, fake_gh, *, lines: int = 3) -> tuple[str, str, 
     return str(bare), base_sha, head_sha
 
 
+_SEED_SEQ = {"n": 0}
+
+
 def _seed_ready_case(tmp_path, fake_gh, *, lines: int = 3, candidate: bool = False):
     """Seed a genuine frozen ``ready`` workspace for one imported PR.
 
@@ -153,8 +156,8 @@ def _seed_ready_case(tmp_path, fake_gh, *, lines: int = 3, candidate: bool = Fal
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
-    _seed_ready_case.seq = getattr(_seed_ready_case, "seq", 0) + 1
-    ws = tmp_path / f"ws-{_seed_ready_case.seq}"
+    _SEED_SEQ["n"] += 1
+    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     _seed_preflight(ws, fake_gh)
     origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
