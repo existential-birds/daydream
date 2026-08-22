@@ -272,3 +272,20 @@ def test_case_exclude_other_requires_note(tmp_path, fake_gh, capsys):
     run_curate_tui(ws, case_id, read_line=_scripted("z", "other", "q"))  # no note
     assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_defer_is_ui_local_no_mutation(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    rc = run_curate_tui(ws, case_id, read_line=_scripted("d"))   # defer in a case
+    assert rc == 0
+    assert path.read_bytes() == before                       # nothing persisted
+    assert "deferred" in capsys.readouterr().out
+
+
+def test_quit_ends_and_single_case_defer_ends(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    assert run_curate_tui(ws, read_line=_scripted("q")) == 0
+    assert run_curate_tui(ws, case_id, read_line=_scripted("d")) == 0  # single-case d ends
