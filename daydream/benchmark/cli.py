@@ -453,11 +453,11 @@ def _handle_bench_command(argv: list[str]) -> int:
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
-    Sub-verbs: ``init``, ``status``, ``validate``, ``import-prs``, ``curate``.
+    Sub-verbs: ``init``, ``status``, ``validate``, ``upgrade``, ``import-prs``, ``curate``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
-        description="Private PR benchmark workspace: init/status/validate/import-prs/curate.",
+        description="Private PR benchmark workspace: init/status/validate/upgrade/import-prs/curate.",
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -476,6 +476,12 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
 
     validate_p = sub.add_parser("validate", help="validate the workspace (0/2/1 exit codes)")
     validate_p.add_argument("dir", type=Path, help="workspace directory")
+
+    upgrade_p = sub.add_parser(
+        "upgrade", help="deterministically upgrade legacy case documents (finding_id + schema_version)"
+    )
+    upgrade_p.add_argument("dir", type=Path, help="workspace directory")
+    upgrade_p.add_argument("--dry-run", action="store_true", help="report the upgrade without writing")
 
     import_prs_p = sub.add_parser(
         "import-prs", help="import explicit private GitHub PR evidence into the workspace"
@@ -596,6 +602,28 @@ def _handle_benchmark_validate(dir_path: Path) -> int:
     return code
 
 
+def _handle_benchmark_upgrade(args) -> int:
+    """Deterministically upgrade legacy v1 case documents to v2 in place.
+
+    Prints the per-case report plus any surfaced errors. Returns ``0`` on a
+    successful upgrade (including an idempotent no-op second run) and ``1``
+    when a case errored.
+    """
+    from daydream.benchmark import migrate
+
+    report = migrate.migrate_workspace(args.dir, dry_run=args.dry_run)
+    for c in report.cases:
+        print(
+            f"case {c.case_id}: finding_ids_recomputed={c.finding_ids_recomputed} "
+            f"changed={c.changed}"
+        )
+    for e in report.errors:
+        print(f"error: {e}", file=sys.stderr)
+    if report.errors:
+        return 1
+    return 0
+
+
 def _is_interactive_tty() -> bool:
     """True only when both stdin and stdout are real interactive terminals."""
     return sys.stdin.isatty() and sys.stdout.isatty()
@@ -636,7 +664,7 @@ def _handle_benchmark_curate(args) -> int:
 
 
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle ``daydream benchmark init|status|validate|import-prs|curate``.
+    """Handle ``daydream benchmark init|status|validate|upgrade|import-prs|curate``.
 
     Returns an exit code; ``daydream.cli.main`` translates it to a
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
@@ -656,6 +684,8 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_status(args.dir)
     if sub == "validate":
         return _handle_benchmark_validate(args.dir)
+    if sub == "upgrade":
+        return _handle_benchmark_upgrade(args)
     if sub == "import-prs":
         return _handle_benchmark_import_prs(args)
     if sub == "curate":

@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark.schema import _schema_ready
 from daydream.benchmark.storage import load_yaml_strict
 
 
@@ -216,15 +217,6 @@ def _curation_model(curation: dict[str, Any]) -> schema.Curation:
     return schema.Curation(**{k: v for k, v in curation.items() if k != "gold_mode"})
 
 
-def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
-    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
-    doc = dict(raw)
-    curation = dict(raw.get("curation") or {})
-    curation.pop("gold_mode", None)
-    doc["curation"] = curation
-    return doc
-
-
 def _snapshot_head(raw: dict[str, Any]) -> str | None:
     """The 40-hex head SHA the case's snapshot was frozen at, or None."""
     snapshot_doc = raw.get("snapshot") or {}
@@ -298,11 +290,8 @@ def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
         if ids.count(fid) > 1:
             raise CurationError(f"case {case_id} has duplicate finding {fid}")
 
-    # A ready (final-attested) case must be snapshot-attested; the fixed schema
-    # does not express this, so the curation service enforces it as a rule.
-    if curation.get("state") == "ready" and not curation.get("snapshot_attested"):
-        raise CurationError(f"case {case_id} is ready but not snapshot-attested")
-
+    # ready => snapshot_attested and stale => not-attested are enforced by the
+    # schema Curation._consistent validator.
     candidates = raw.get("candidates") or []
     for finding in findings:
         _validate_location(root, raw, finding)
@@ -380,7 +369,7 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
         "location": candidate.get("location"),
         "provenance": {"kind": "historical", "source_ids": [source_id]},
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="accept")
@@ -438,7 +427,7 @@ def add_finding(
             "source_ids": source_ids,
         },
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="add")
@@ -472,7 +461,7 @@ def add_findings(
                 "source_ids": source_ids,
             },
         }
-        finding["finding_id"] = schema.derive_finding_id(finding)
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
         curation.setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="add")
@@ -494,7 +483,7 @@ def _build_replacement(
             "source_ids": source_ids,
         },
     }
-    finding["finding_id"] = schema.derive_finding_id(finding)
+    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     return finding
 
 
@@ -789,7 +778,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             raw, finding, list(frag.get("source_ids") or []), case_id=case_id
         )
         finding["provenance"] = {"kind": kind, "source_ids": source_ids}
-        finding["finding_id"] = schema.derive_finding_id(finding)
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
         findings.append(finding)
     curation["findings"] = findings
 

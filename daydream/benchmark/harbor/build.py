@@ -18,7 +18,7 @@ import re
 import shutil
 from pathlib import Path
 
-from daydream.benchmark import snapshot, storage
+from daydream.benchmark import schema, snapshot, storage
 
 TEMPLATE_VERSION = "1"
 
@@ -156,16 +156,33 @@ def _flatten_finding(finding: dict) -> dict:
     }
 
 
-def build_gold_list(findings: list) -> list:
+def _gold_finding_ids(key: str, finding: dict) -> str:
+    """Derive the compiled gold id bound to the opaque task *key*.
+
+    Delegates to the canonical ``schema.derive_finding_id`` digest (sha256 over
+    the case-scoped ``(case_id, title, body, severity, path, start_line,
+    end_line)`` tuple, nulls normalized to the empty string) under the opaque
+    compiled task key as ``case_id``. The compiled gold ids are bound to the
+    opaque compiled task key (never the raw workspace authoring id), so the
+    shipped gold bundle carries no ``pr-...`` authoring token across the judge
+    surface. Delegating keeps this digest identical to the canonical workspace
+    derivation instead of a drifting local re-implementation.
+    """
+    return schema.derive_finding_id(finding, case_id=key)
+
+
+def build_gold_list(findings: list, *, key: str) -> list:
     """Return the provenance-free hidden gold list, ordered by ``finding_id``.
 
-    ``[]`` for empty input; otherwise each entry carries ``finding_id`` plus
-    the flattened content fields, sorted by ``finding_id`` ascending. A
-    location-less finding raises :class:`CompileError`.
+    ``[]`` for empty input; otherwise each entry carries a ``finding_id``
+    derived under the opaque compiled task *key* (see
+    :func:`_gold_finding_ids`) plus the flattened content fields, sorted by
+    ``finding_id`` ascending. A location-less finding raises
+    :class:`CompileError`.
     """
     if not findings:
         return []
-    flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
+    flat = [(_flatten_finding(f), _gold_finding_ids(key, f)) for f in findings]
     flat.sort(key=lambda item: item[1])
     return [{"finding_id": fid, **flattened} for flattened, fid in flat]
 
@@ -362,7 +379,9 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
         payload[case_id] = {
             "title": str(pull_request.get("title") or ""),
             "body": str(pull_request.get("body") or ""),
-            "findings": build_gold_list(curation.get("findings") or []),
+            "findings": build_gold_list(
+                curation.get("findings") or [], key=derive_task_key(case_id)
+            ),
             "base": snapshot.get("original_base_sha"),
             "head": snapshot.get("original_head_sha"),
             "bundle_sha256": snapshot.get("bundle_sha256"),
@@ -402,17 +421,22 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         )
     validate_bundle_inventory(bundle_dst)
 
-    gold = build_gold_list(findings)
+    gold = build_gold_list(findings, key=key)
     gold_bytes = json.dumps(gold, sort_keys=False).encode("utf-8")
     gold_path = case_stage / "tests" / "golden-review.json"
     gold_path.parent.mkdir(parents=True, exist_ok=True)
     gold_path.write_bytes(gold_bytes)
 
     # Immutable, deterministic per-case verifier metadata beside the gold file
-    # (no timestamps): opaque case id + base/head refs + the hidden-gold sentinel.
+    # (no timestamps): opaque task key + base/head refs + the hidden-gold sentinel.
+    # ``source_case_id`` is the compiled opaque task key the gold finding ids
+    # are derived with (never the raw workspace authoring id); the opaque
+    # ``case_id`` binds the candidate artifact. This keeps the authoring
+    # identifier out of every shipped surface the leakage scan screens.
     metadata = {
         "schema_version": 1,
         "case_id": key,
+        "source_case_id": key,
         "base_ref": "base",
         "head_ref": "head",
         "template_version": TEMPLATE_VERSION,
@@ -517,6 +541,9 @@ def compile_workspace(root: Path) -> dict:
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
                 control_plane[f"{key}/README.md"] = _CASE_README
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
+                control_plane[f"{key}/tests/verifier-metadata.json"] = (
+                    stage / key / "tests" / "verifier-metadata.json"
+                ).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
             metric_bytes = (_TEMPLATE_DIR / "metric.py").read_bytes()

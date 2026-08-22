@@ -8,8 +8,11 @@ from pydantic import ValidationError
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
+    Curation,
     EvidenceRecord,
+    Finding,
     ImportDocument,
+    Provenance,
     PullRequestEntry,
     TransitionError,
     case_id_for,
@@ -107,6 +110,30 @@ def test_manifest_rejects_empty_host_allowlists():
         BenchmarkManifest.model_validate(base)
 
 
+def test_privacy_classification_and_policies_are_literals():
+    m = _valid_manifest()
+    for key, bad in [("classification", "public"), ("reviewer_data", "everything"),
+                     ("judge_data", "full"), ("archive", "enabled"), ("uploads", "enabled")]:
+        raw = dict(m)
+        raw["privacy"] = dict(m["privacy"])
+        raw["privacy"][key] = bad
+        with pytest.raises(ValidationError):
+            BenchmarkManifest.model_validate(raw)
+
+
+def test_snapshot_policy_is_literal():
+    raw = _valid_case_dict()
+    raw["snapshot"]["policy"] = "some_head"
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_reviewer_judge_hosts_stay_lists():
+    m = BenchmarkManifest.model_validate(_valid_manifest())
+    assert m.privacy.reviewer_allowed_hosts == ["api.anthropic.com"]
+    assert m.privacy.judge_allowed_hosts == ["api.anthropic.com"]
+
+
 def test_manifest_rejects_bad_uuid():
     base = _valid_manifest()
     base["benchmark_id"] = "not-a-uuid"
@@ -171,10 +198,46 @@ def _valid_import_document():
 
 def test_import_document_validates_and_forbids_unknown():
     doc = _valid_import_document()
-    assert ImportDocument.model_validate(doc).pull_request["number"] == 101
+    assert ImportDocument.model_validate(doc).pull_request.number == 101
     doc["bogus"] = True
     with pytest.raises(ValidationError):
         ImportDocument.model_validate(doc)
+
+
+def test_import_pull_request_is_strict_submodel():
+    doc = _valid_import_document()
+    doc["pull_request"]["bogus"] = True
+    with pytest.raises(ValidationError) as ei:
+        ImportDocument.model_validate(doc)
+    assert ei.value.errors()[0]["loc"][0] == "pull_request"
+
+
+def test_case_pull_request_is_strict_submodel():
+    # partial (missing a required field) rejected
+    raw = _valid_case_dict()
+    raw["pull_request"].pop("author")
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert ei.value.errors()[0]["loc"][0] == "pull_request"
+    # unknown nested key rejected
+    raw2 = _valid_case_dict()
+    raw2["pull_request"]["bogus"] = 1
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
+def test_case_source_is_strict_submodel():
+    raw = _valid_case_dict()
+    raw["source"]["bogus"] = 1
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert ei.value.errors()[0]["loc"][0] == "source"
+
+
+def test_import_and_case_pull_request_share_shape():
+    doc = ImportDocument.model_validate(_valid_import_document())
+    pr = doc.pull_request
+    assert pr.number == 101 and pr.author.login == "alice" and pr.head.sha == "h" * 40
 
 
 def test_evidence_requires_canonical_source_id_and_body_hash():
@@ -190,9 +253,19 @@ def test_evidence_requires_canonical_source_id_and_body_hash():
 
 def _valid_case_dict():
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "case_id": "pr-000101-0123456789ab",
-        "pull_request": {"number": 101, "url": "https://github.com/O/R/pull/101", "title": "Fix cache"},
+        "pull_request": {
+            "number": 101,
+            "url": "https://github.com/o/r/pull/101",
+            "title": "Fix cache",
+            "state": "open",
+            "base": {"ref": "main", "sha": "b" * 40},
+            "head": {"ref": "feature/cache", "sha": "h" * 40},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "author": {"login": "alice", "type": "User"},
+        },
         "snapshot": {
             "status": "ready",
             "policy": "final_pr_head",
@@ -208,7 +281,7 @@ def _valid_case_dict():
         },
         "source": {
             "import_file": "imports/pr-101.json",
-            "import_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "import_sha256": "c" * 64,
         },
         "curation": {
             "state": "ready",
@@ -218,8 +291,9 @@ def _valid_case_dict():
             "findings": [
                 {
                     "finding_id": _finding_id_for(
+                        "pr-000101-0123456789ab",
                         "Cache misses", "The cache layers never populate.", "high", "src/cache.py", 2, 2
-                    ) or "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    ),
                     "title": "Cache misses",
                     "body": "The cache layers never populate.",
                     "severity": "high",
@@ -233,14 +307,15 @@ def _valid_case_dict():
     }
 
 
-def _finding_id_for(title, body, severity, path, start_line, end_line):
+def _finding_id_for(case_id, title, body, severity, path, start_line, end_line):
     return derive_finding_id(
         {
             "title": title,
             "body": body,
             "severity": severity,
             "location": {"path": path, "start_line": start_line, "end_line": end_line},
-        }
+        },
+        case_id=case_id,
     )
 
 
@@ -264,6 +339,39 @@ def test_ready_snapshot_rejects_missing_bundle_fields():
     raw["snapshot"].pop("bundle_file")
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+
+
+def test_ready_requires_snapshot_attestation():
+    raw = _valid_case_dict()
+    raw["curation"].update({"state": "ready", "snapshot_attested": False})
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_stale_requires_snapshot_not_attested():
+    raw = _valid_case_dict()
+    raw["curation"].update({"state": "stale", "snapshot_attested": True,
+                            "gold_status": None, "clean_attested": False})
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_unreplayable_curation_requires_unreplayable_snapshot():
+    raw = _valid_case_dict()                       # snapshot.status == ready
+    raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
+                            "clean_attested": False, "gold_status": None, "findings": []})
+    with pytest.raises(ValidationError):           # ready snapshot + unreplayable state
+        CaseDocument.model_validate(raw)
+    # a genuine unreplayable snapshot + unreplayable state loads
+    raw["snapshot"] = {
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
+        "original_base_sha": None, "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
+    }
+    doc = CaseDocument.model_validate(raw)
+    assert doc.curation.state == "unreplayable"
 
 
 def test_unreplayable_snapshot_requires_error_and_null_bundle():
@@ -311,6 +419,25 @@ def test_finding_rejects_nul_in_title():
         CaseDocument.model_validate(raw)
 
 
+def test_title_bound_is_unicode_characters_not_bytes():
+    # "界" is 3 UTF-8 bytes; 500 chars = 1500 bytes. Passes under a char bound.
+    title = "界" * 500
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["title"] = title
+    raw["curation"]["findings"][0]["finding_id"] = derive_finding_id(
+        {"title": title, "body": "The cache layers never populate.", "severity": "high",
+         "location": {"path": "src/cache.py", "start_line": 2, "end_line": 2}},
+        case_id=raw["case_id"],
+    )
+    doc = CaseDocument.model_validate(raw)          # 500 chars passes
+    assert doc.curation.findings[0].title == title
+    # 501 chars fails
+    raw2 = _valid_case_dict()
+    raw2["curation"]["findings"][0]["title"] = "界" * 501
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
 def test_finding_severity_enum():
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["severity"] = "critical"
@@ -331,13 +458,36 @@ def test_finding_location_must_be_relative_and_ordered():
 
 def test_finding_id_sha256_and_duplicate_rejection():
     f = _valid_case().curation.findings[0]
-    expected = derive_finding_id(f)
+    expected = derive_finding_id(f, case_id="pr-000101-0123456789ab")
     assert f.finding_id == expected
     # duplicate canonical finding in one case rejected
     raw = _valid_case_dict()
     raw["curation"]["findings"].append(raw["curation"]["findings"][0])
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+
+
+def test_finding_id_is_case_scoped():
+    f = _valid_case().curation.findings[0]
+    id1 = derive_finding_id(f, case_id="pr-000101-0123456789ab")
+    id2 = derive_finding_id(f, case_id="pr-000102-0123456789ab")
+    assert id1 != id2                      # identical content, different case -> different id
+
+
+def test_v2_case_rejects_noncanonical_finding_id():
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["finding_id"] = "0" * 64   # wrong digest
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert "finding_id" in str(ei.value)
+
+
+def test_v1_legacy_case_loads_without_digest_check():
+    raw = _valid_case_dict()
+    raw["schema_version"] = 1
+    raw["curation"]["findings"][0]["finding_id"] = "e" * 64   # legacy id, not case-scoped
+    doc = CaseDocument.model_validate(raw)                    # must load (digest gated on v2)
+    assert doc.schema_version == 1
 
 
 def test_historical_daydream_marker_cannot_be_gold():
@@ -352,7 +502,8 @@ def test_historical_daydream_marker_cannot_be_gold():
         "location": None,
         "provenance": {"kind": "historical", "source_ids": ["github:review_comment:1"]},
     }
-    finding["finding_id"] = derive_finding_id(finding)  # canonical, so the marker guard is what rejects
+    # canonical, so the marker guard is what rejects
+    finding["finding_id"] = derive_finding_id(finding, case_id=raw["case_id"])
     raw["curation"]["findings"][0] = finding
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
@@ -361,7 +512,29 @@ def test_historical_daydream_marker_cannot_be_gold():
 def test_gold_status_and_mode_derived():
     case = _valid_case()  # ready, 1 finding, clean_attested=False
     assert derive_gold_status(case.curation) == "findings"
-    assert derive_gold_mode(case.curation) == "edited"
+    assert derive_gold_mode(case.curation) == "historical"
+
+
+@pytest.mark.parametrize("kinds,expected", [
+    ([], "clean"),
+    (["historical"], "historical"),
+    (["edited"], "historical"),              # all-edited historical evidence stays historical
+    (["authored"], "authored"),
+    (["historical", "edited"], "historical"),
+    (["authored", "historical"], "mixed"),
+    (["authored", "edited"], "mixed"),
+])
+def test_gold_mode_truth_table(kinds, expected):
+    findings = [
+        Finding(finding_id="e" * 64, title=f"f{i}", body="b",
+                provenance=Provenance(
+                    kind=k,
+                    source_ids=["github:review_comment:1"] if k in ("historical", "edited") else [],
+                ))
+        for i, k in enumerate(kinds)
+    ]
+    curation = Curation(state="draft", findings=findings)
+    assert derive_gold_mode(curation) == expected
 
 
 @pytest.mark.parametrize(

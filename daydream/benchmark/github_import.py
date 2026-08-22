@@ -591,10 +591,10 @@ def _derive_title(body: str) -> str:
 
 
 def _title_ok(title: str) -> bool:
-    """True when *title* is non-empty and within the 500 UTF-8 byte bound."""
+    """True when *title* is non-empty and within the 500-character bound."""
     if not title:
         return False
-    return 0 < len(title.encode("utf-8")) <= 500
+    return 0 < len(title) <= 500
 
 
 def _anchor_location(
@@ -728,12 +728,12 @@ def _case_materialize(
     attestation cleared — findings/exclusions are never overwritten by refresh.
     """
     pull_request = doc.pull_request
-    base_sha = (pull_request.get("base") or {}).get("sha")
+    base_sha = pull_request.base.sha
     out: list[tuple[str, str, dict[str, Any]]] = []
     bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
-        head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
+        head_sha = head_token if head_token != "final" else pull_request.head.sha
         if not head_sha or head_sha in seen:
             continue
         seen.add(head_sha)
@@ -778,9 +778,9 @@ def _case_materialize(
                 "error": None,
             }
         case_doc: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "case_id": case_id,
-            "pull_request": pull_request,
+            "pull_request": pull_request.model_dump(mode="json"),
             "snapshot": snapshot_doc,
             "source": {"import_file": import_file, "import_sha256": import_sha256},
             "curation": curation,

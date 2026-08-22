@@ -340,13 +340,13 @@ class _CountingClient:
         return {"match": True, "confidence": 0.9, "reasoning": "x"}
 
 
-def _gold_list(n: int = 2) -> list[dict]:
+def _gold_list(n: int = 2, *, case_id: str = "case-x") -> list[dict]:
     import hashlib as _h
     out = []
     for i in range(n):
         f = {"title": f"t{i}", "body": "b", "severity": "high",
              "path": "p", "start_line": 1, "end_line": 1}
-        payload = "\x1f".join([str(f["title"]), str(f["body"]), str(f["severity"]),
+        payload = "\x1f".join([str(case_id), str(f["title"]), str(f["body"]), str(f["severity"]),
                                str(f["path"]), str(f["start_line"]), str(f["end_line"])])
         f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
         out.append(f)
@@ -354,11 +354,13 @@ def _gold_list(n: int = 2) -> list[dict]:
 
 
 def _write_metadata(gold_path: Path, *, case_id: str = "case-x",
-                    base_ref: str = "base", head_ref: str = "head") -> None:
+                    base_ref: str = "base", head_ref: str = "head",
+                    source_case_id: str | None = None) -> None:
     import hashlib as _h
     meta = {
         "schema_version": 1,
         "case_id": case_id,
+        "source_case_id": case_id if source_case_id is None else source_case_id,
         "base_ref": base_ref,
         "head_ref": head_ref,
         "template_version": "1",
@@ -425,7 +427,7 @@ def test_run_verifier_writes_reward_and_details_atomically(sr_module, tmp_path, 
 def test_judge_failure_fails_whole_task_not_partial_score(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "g.json"
-    gold_path.write_text(json.dumps(_gold_list(2)))
+    gold_path.write_text(json.dumps(_gold_list(2, case_id="c")))
     _write_metadata(gold_path, case_id="c")
     artifact_path = tmp_path / "r.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c")))
@@ -494,7 +496,7 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
 def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(2)))
+    gold_path.write_text(json.dumps(_gold_list(2, case_id="organic")))
     _write_metadata(gold_path, case_id="organic")
 
     oracle = _candidate_artifact(sr, case_id="organic")
@@ -544,6 +546,62 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_p
     assert clean.reward == 1.0 and clean.clean_pass == 1 and clean.clean_task == 1
 
 
+def test_back_scores_legacy_task_without_source_case_id(sr_module, tmp_path) -> None:
+    # A Harbor task compiled before the case-scoped gold digest carries no
+    # ``source_case_id`` in its verifier metadata and its gold finding ids are
+    # derived content-only. Back-scoring it must not fail on the missing field
+    # or on a digest mismatch: the verifier falls back to the legacy content
+    # digest when ``source_case_id`` is absent.
+    import hashlib as _h
+    sr = sr_module
+    gold = []
+    for title in ("t0", "t1"):
+        f = {"title": title, "body": "b", "severity": "high",
+             "path": "p", "start_line": 1, "end_line": 1}
+        payload = "\x1f".join([str(f["title"]), str(f["body"]), str(f["severity"]),
+                                str(f["path"]), str(f["start_line"]), str(f["end_line"])])
+        f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
+        gold.append(f)
+
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(gold))
+    # deliberately legacy: no ``source_case_id`` key in the metadata
+    import hashlib as _mh
+    meta = {
+        "schema_version": 1,
+        "case_id": "legacy",
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": "1",
+        "gold_sha256": _mh.sha256(gold_path.read_bytes()).hexdigest(),
+    }
+    gold_path.with_name("verifier-metadata.json").write_text(
+        json.dumps(meta, sort_keys=True)
+    )
+
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="legacy")))
+
+    class MatchClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr.run_verifier(
+        gold_path,
+        artifact_path,
+        out,
+        client=MatchClient(),
+        env={
+            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k",
+            "DAYDREAM_JUDGE_BASE_URL": None,
+        },
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0 and reward.tp == 2
+
+
 def test_generated_asset_tree_is_self_contained(sr_module) -> None:
     base = Path(sr_module.__file__).parent
     for rel in (
@@ -585,7 +643,7 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(
     solution_path = base.parent / "solution" / "golden-review.json"
 
     gold_raw = json.loads(gold_path.read_text(encoding="utf-8"))
-    gold = sr.verifier_core.validate_gold_set(gold_raw)
+    gold = sr.verifier_core.validate_gold_set(gold_raw, case_id="case-x")
     assert len(gold) == 2
 
     solution_raw = json.loads(solution_path.read_text(encoding="utf-8"))
@@ -767,7 +825,7 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp
     # past the cap and fail the whole task. A legal pair is judged, never voided.
     gold = [{"title": "t" * 500, "body": _DENSE_BODY,
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
-    payload = "\x1f".join([str(gold[0]["title"]), str(gold[0]["body"]), str(gold[0]["severity"]),
+    payload = "\x1f".join(["c", str(gold[0]["title"]), str(gold[0]["body"]), str(gold[0]["severity"]),
                             str(gold[0]["path"]), str(gold[0]["start_line"]), str(gold[0]["end_line"])])
     import hashlib as _h
     gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
@@ -811,7 +869,7 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module, tmp_path
 def test_run_verifier_rejects_cross_case_replay(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
+    gold_path.write_text(json.dumps(_gold_list(1, case_id="task-A")))
     _write_metadata(gold_path, case_id="task-A")
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))

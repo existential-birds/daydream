@@ -633,7 +633,9 @@ def run_verifier(
                 raise VerifierError(f"candidate {field} does not match the bound task")
 
         gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])
-        gold_parsed = verifier_core.validate_gold_set(gold_raw)
+        gold_parsed = verifier_core.validate_gold_set(
+            gold_raw, case_id=metadata.get("source_case_id")
+        )
 
         verdicts: list[verifier_core.Verdict] = []
         matches: set[tuple[str, str]] = set()

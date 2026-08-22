@@ -224,26 +224,42 @@ def test_artifact_rejects_over_100_findings():
 
 def test_gold_set_accepts_and_returns_models():
     g1 = _gold()
-    g1["finding_id"] = _canonical_gold_id(g1)
+    g1["finding_id"] = _canonical_gold_id("case-x", g1)
     g2 = _gold(title="B")
-    g2["finding_id"] = _canonical_gold_id(g2)
-    gs = validate_gold_set([g1, g2])
+    g2["finding_id"] = _canonical_gold_id("case-x", g2)
+    gs = validate_gold_set([g1, g2], case_id="case-x")
     assert len(gs) == 2 and all(isinstance(g, GoldFinding) for g in gs)
+
+
+def test_gold_finding_id_is_case_scoped():
+    # gold finding_id must equal sha256(case_id, title, body, severity, path, start, end)
+    g = _gold()
+    g["finding_id"] = _canonical_gold_id("case-x", g)
+    validate_gold_set([g], case_id="case-x")                       # case-scoped digest accepted
+    legacy = _gold()
+    legacy["finding_id"] = "f" * 64  # valid 64-hex, case_id-less digest -> rejected
+    with pytest.raises(VerifierError):
+        validate_gold_set([legacy], case_id="case-x")
+    # a case-scoped digest under a different case_id is rejected
+    g2 = _gold()
+    g2["finding_id"] = _canonical_gold_id("case-y", g2)
+    with pytest.raises(VerifierError):
+        validate_gold_set([g2], case_id="case-x")
 
 
 def test_gold_set_rejects_over_50():
     many = []
     for i in range(51):
         f = _gold(title=f"f{i}")
-        f["finding_id"] = _canonical_gold_id(f)
+        f["finding_id"] = _canonical_gold_id("case-x", f)
         many.append(f)
     with pytest.raises(VerifierError):
-        validate_gold_set(many)
+        validate_gold_set(many, case_id="case-x")
 
 
 def test_gold_set_rejects_invalid_member():
     with pytest.raises(VerifierError):
-        validate_gold_set([_gold(severity="nope")])
+        validate_gold_set([_gold(severity="nope")], case_id="case-x")
 
 def test_verdict_parses_and_validates():
     v = Verdict(gold_id="g", candidate_id="c", match=True, confidence=0.9, reasoning="same bug")
@@ -408,12 +424,12 @@ def test_gold_set_rejects_unknown_finding_key():
     g = _gold()
     g["provenance"] = {"kind": "authored", "source_ids": []}
     with pytest.raises(VerifierError):
-        validate_gold_set([g])
+        validate_gold_set([g], case_id="case-x")
 
 
-def _canonical_gold_id(f: dict) -> str:
+def _canonical_gold_id(case_id: str, f: dict) -> str:
     payload = "\x1f".join([
-        str(f.get("title") or ""), str(f.get("body") or ""),
+        str(case_id or ""), str(f.get("title") or ""), str(f.get("body") or ""),
         str(f.get("severity") or ""), str(f.get("path") or ""),
         str(f.get("start_line")), str(f.get("end_line")),
     ])
@@ -424,13 +440,13 @@ def test_gold_set_rejects_non_canonical_finding_id():
     f = _gold()
     f["finding_id"] = "f" * 64  # valid 64-hex but not the canonical digest
     with pytest.raises(VerifierError):
-        validate_gold_set([f])
+        validate_gold_set([f], case_id="case-x")
 
 
 def test_gold_set_rejects_duplicate_finding_ids():
-    fid = _canonical_gold_id(_gold())
+    fid = _canonical_gold_id("case-x", _gold())
     with pytest.raises(VerifierError):
         validate_gold_set([
             {**_gold(), "finding_id": fid},
             {**_gold(), "finding_id": fid},
-        ])
+        ], case_id="case-x")

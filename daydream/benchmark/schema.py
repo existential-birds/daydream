@@ -44,6 +44,8 @@ __all__ = [
     "EvidenceRecord",
     "Candidate",
     "ImportDocument",
+    "PullRequestMeta",
+    "CaseSource",
     "derive_finding_id",
     "derive_gold_status",
     "derive_gold_mode",
@@ -144,13 +146,13 @@ class Privacy(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    classification: str
-    reviewer_data: str
+    classification: Literal["confidential"]
+    reviewer_data: Literal["source_snapshot"]
     reviewer_allowed_hosts: list[str]
-    judge_data: str
+    judge_data: Literal["finding_text_and_location_only"]
     judge_allowed_hosts: list[str]
-    archive: str
-    uploads: str
+    archive: Literal["disabled"]
+    uploads: Literal["disabled"]
 
     @field_validator("reviewer_allowed_hosts")
     @classmethod
@@ -278,14 +280,18 @@ def _field_of(value: "Finding | dict", name: str) -> Any:
     return getattr(value, name, None)
 
 
-def derive_finding_id(finding: "Finding | dict") -> str:
-    """sha256 over the canonical (title, body, severity, path, start/end) tuple.
+def derive_finding_id(finding: "Finding | dict", *, case_id: str) -> str:
+    """sha256 over the case-scoped canonical (case_id, title, body, severity,
+    path, start/end) tuple.
 
     Nulls are normalized to the empty string; ``finding_id`` must equal this
     digest so a case's findings are content-addressable and dedupe-friendly.
+    ``case_id`` is required (keyword-only) so every caller binds findings to a
+    case.
     """
     payload = "\x1f".join(
         [
+            str(case_id or ""),
             str(_field_of(finding, "title") or ""),
             str(_field_of(finding, "body") or ""),
             str(_field_of(finding, "severity") or ""),
@@ -304,15 +310,8 @@ class _SnapshotBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str
-    policy: str
+    policy: Literal["final_pr_head", "explicit_head"]
     requested_head: str
-
-    @field_validator("policy")
-    @classmethod
-    def _policy_nonblank(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("policy must not be blank")
-        return v
 
 
 class SnapshotReady(_SnapshotBase):
@@ -579,6 +578,50 @@ class _FetchInfo(BaseModel):
         return _hex64(v)
 
 
+class _PrRef(BaseModel):
+    """A base/head ref-sha pair of a pull request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha: str
+    ref: str | None = None
+
+
+class PullRequestMeta(BaseModel):
+    """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number: int
+    url: str
+    title: str
+    state: str
+    base: _PrRef
+    head: _PrRef
+    created_at: datetime
+    updated_at: datetime
+    author: _EvidenceAuthor
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def _ts(cls, v: str | datetime) -> datetime:
+        return _rfc3339(v)
+
+
+class CaseSource(BaseModel):
+    """The typed source block of a case document (import provenance)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    import_file: str
+    import_sha256: str
+
+    @field_validator("import_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        return _hex64(v)
+
+
 class ImportDocument(BaseModel):
     """A normalized, verifiable import of one PR's full evidence set."""
 
@@ -586,7 +629,7 @@ class ImportDocument(BaseModel):
 
     schema_version: Literal[1] = 1
     repository: _ImportRepository
-    pull_request: dict
+    pull_request: PullRequestMeta
     evidence: list[EvidenceRecord] = []
     fetch: _FetchInfo
 
@@ -634,8 +677,8 @@ class Finding(BaseModel):
             raise ValueError("title must not be blank")
         if "\x00" in v:
             raise ValueError("title must not contain NUL")
-        if len(v.encode("utf-8")) > 500:
-            raise ValueError("title exceeds 500 UTF-8 bytes")
+        if len(v) > 500:
+            raise ValueError("title exceeds 500 characters")
         return v
 
     @field_validator("body")
@@ -650,9 +693,7 @@ class Finding(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _canonical_id(self) -> "Finding":
-        if self.finding_id != derive_finding_id(self):
-            raise ValueError("finding_id is not the canonical sha256")
+    def _historical_marker(self) -> "Finding":
         if self.provenance.kind == "historical":
             text = f"{self.title}\n{self.body}"
             if FINDING_MARKER_RE.search(text):
@@ -731,6 +772,10 @@ class Curation(BaseModel):
     def _consistent(self) -> "Curation":
         if self.case_exclusion is not None and self.state != "excluded":
             raise ValueError("case_exclusion is only valid when state == 'excluded'")
+        if self.state == "ready" and self.snapshot_attested is not True:
+            raise ValueError("ready curation requires snapshot_attested=True")
+        if self.state == "stale" and self.snapshot_attested is not False:
+            raise ValueError("stale curation requires snapshot_attested=False")
         if self.gold_status == "findings":
             if not self.findings or self.clean_attested:
                 raise ValueError("gold_status 'findings' requires >=1 finding and clean_attested=False")
@@ -743,16 +788,25 @@ class Curation(BaseModel):
         return self
 
 
+def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
+    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
+    doc = dict(raw)
+    curation = dict(raw.get("curation") or {})
+    curation.pop("gold_mode", None)
+    doc["curation"] = curation
+    return doc
+
+
 class CaseDocument(BaseModel):
     """One ``cases/<case-id>.yaml`` document."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     case_id: str
-    pull_request: dict
+    pull_request: PullRequestMeta
     snapshot: Snapshot
-    source: dict
+    source: CaseSource
     curation: Curation
     candidates: list[Candidate] = []
 
@@ -765,7 +819,7 @@ class CaseDocument(BaseModel):
 
     @model_validator(mode="after")
     def _case_id_matches(self) -> "CaseDocument":
-        pr_number = int(self.pull_request["number"])
+        pr_number = self.pull_request.number
         head = snapshot_head_sha(self.snapshot)
         if head is None:
             raise ValueError("snapshot carries no head SHA to derive case_id")
@@ -775,10 +829,32 @@ class CaseDocument(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _canonical_finding_ids(self) -> "CaseDocument":
+        if self.schema_version == 2:
+            for i, f in enumerate(self.curation.findings):
+                if f.finding_id != derive_finding_id(f, case_id=self.case_id):
+                    raise ValueError(
+                        f"finding[{i}] finding_id is not the canonical sha256 for case {self.case_id}"
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _unique_findings(self) -> "CaseDocument":
         ids = [f.finding_id for f in self.curation.findings]
         if len(set(ids)) != len(ids):
             raise ValueError("case contains duplicate canonical findings")
+        return self
+
+    @model_validator(mode="after")
+    def _unreplayable_coupling(self) -> "CaseDocument":
+        if (
+            self.curation.state == "unreplayable"
+            and self.snapshot.status != "unreplayable"
+            and self.curation.case_exclusion is None
+        ):
+            raise ValueError(
+                "unreplayable curation requires an unreplayable snapshot unless case_exclusion is set"
+            )
         return self
 
 
@@ -807,8 +883,6 @@ def derive_gold_mode(curation: Curation) -> str:
         return "authored"
     if "authored" in kinds:
         return "mixed"
-    if kinds == {"edited"}:
-        return "edited"
     return "historical"
 
 

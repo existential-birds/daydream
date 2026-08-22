@@ -214,7 +214,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
 
 
 def _inject_body(ws: Path, case_id: str, body: str) -> None:
-    """Seed a body into the case document's pull_request block (schema-legal raw dict)."""
+    """Seed a body into the case document's raw pull_request block (raw-dict compile path)."""
     from daydream.benchmark import storage
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
@@ -285,9 +285,9 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
 
 
 def test_spike_persisted_pull_request_field_set():
-    """The import persists pull_request as a raw dict; the compiler must tolerate a missing body."""
-    from daydream.benchmark.schema import ImportDocument
-    assert ImportDocument.model_fields["pull_request"].annotation is dict
+    """The import persists pull_request as a typed strict submodel; the compiler must tolerate a missing body."""
+    from daydream.benchmark.schema import ImportDocument, PullRequestMeta
+    assert ImportDocument.model_fields["pull_request"].annotation is PullRequestMeta
     # Field set is pinned by the constructor at github_import.py:1080-1090: it carries
     # number/url/title/state/base/head/created_at/updated_at/author and NO body.
     from daydream.benchmark import github_import as gi
@@ -365,8 +365,16 @@ def test_build_gold_list_is_provenance_free_and_location_required():
          "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
          "provenance": {"kind": "authored", "source_ids": []}},
     ]
-    gold = build.build_gold_list(findings)
-    assert [f["finding_id"] for f in gold] == ["a" * 64, "c" * 64]        # ordered by finding_id
+    gold = build.build_gold_list(findings, key="case-key")
+    # compiled gold ids are the task-key-scoped digests, not the raw workspace ids
+    def _id(f):
+        loc = f["location"]
+        payload = "\x1f".join(["case-key", str(f["title"]), str(f["body"]),
+                                str(f["severity"]), str(loc["path"]),
+                                str(loc["start_line"]), str(loc["end_line"])])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    expected = sorted(_id(f) for f in findings)
+    assert [f["finding_id"] for f in gold] == expected                  # ordered by finding_id
     assert all(set(f) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
                for f in gold)                                             # no provenance/source/gold keys
     assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
@@ -374,7 +382,7 @@ def test_build_gold_list_is_provenance_free_and_location_required():
 
 def test_build_gold_list_clean_is_empty():
     from daydream.benchmark.harbor import build
-    assert build.build_gold_list([]) == []
+    assert build.build_gold_list([], key="case-key") == []
 
 
 def test_build_gold_list_rejects_locationless_finding():
@@ -385,7 +393,7 @@ def test_build_gold_list_rejects_locationless_finding():
             "finding_id": "a" * 64, "title": "T", "body": "B",
             "severity": None, "location": None,
             "provenance": {"kind": "authored", "source_ids": []},
-        }])
+        }], key="case-key")
         assert False, "expected CompileError for a location-less finding"
     except CompileError as exc:
         assert "location" in str(exc)
@@ -478,7 +486,7 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
 
     gold = _load_json(case / "tests" / "golden-review.json")
     oracle = storage.load_json_strict(case / "solution" / "golden-review.json")
-    assert vc.validate_gold_set(gold)                       # gold passes gold-set validation
+    assert vc.validate_gold_set(gold, case_id=key)      # gold passes via the compiled opaque key
     vc.validate_candidate_artifact(oracle)                 # oracle passes candidate validation
     assert [f["finding_id"] for f in gold] == sorted(f["finding_id"] for f in gold)
     # gold↔oracle agreement: same content fields, in the same finding_id order

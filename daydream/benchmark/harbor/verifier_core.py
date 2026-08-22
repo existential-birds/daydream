@@ -47,8 +47,8 @@ def _validate_title(value: object) -> str:
         raise VerifierError(f"title must not be blank, got {value!r}")
     if "\x00" in value:
         raise VerifierError("title must not contain NUL")
-    if len(value.encode("utf-8")) > 500:
-        raise VerifierError("title exceeds 500 UTF-8 bytes")
+    if len(value) > 500:
+        raise VerifierError("title exceeds 500 characters")
     return value
 
 
@@ -285,16 +285,32 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
     return parsed
 
 
-def validate_gold_set(raw: list[dict[str, object]]) -> list[GoldFinding]:
-    """Validate a gold set: 50-finding cap, per-member fields, canonical unique ids."""
+def validate_gold_set(
+    raw: list[dict[str, object]], *, case_id: str | None = None
+) -> list[GoldFinding]:
+    """Validate a gold set: 50-finding cap, per-member fields, canonical unique ids.
+
+    ``case_id`` is the schema-scoped case id the gold finding ids were derived
+    with (``sha256(case_id, title, body, severity, path, start_line, end_line)``);
+    a non-empty gold set requires it unless ``case_id`` is ``None`` (legacy
+    back-scoring of tasks compiled before the case-scoped digest), in which case
+    the finding ids are validated against the prior content-only digest. An
+    empty gold set (pure-clean case) needs no case_id.
+    """
     if len(raw) > MAX_GOLD_FINDINGS:
         raise VerifierError("gold set exceeds 50 findings")
     parsed = [parse_gold_finding(f) for f in raw]
+    if not parsed:
+        return parsed
     seen: set[str] = set()
     for f in parsed:
-        expected = hashlib.sha256(
-            _SEP.join(str(part) for part in _canonical_tuple(f)).encode("utf-8")
-        ).hexdigest()
+        digest_tail = (
+            _canonical_tuple(f)
+            if case_id is None
+            else ((case_id,) + _canonical_tuple(f))
+        )
+        payload = _SEP.join(str(part) for part in digest_tail)
+        expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         if f.finding_id != expected:
             raise VerifierError("gold finding_id is not the canonical digest")
         if f.finding_id in seen:
