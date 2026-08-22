@@ -7,9 +7,6 @@ selection, oracle parity, and end-to-end ``run_verifier`` — all with an
 injected fake HTTP client against ``tmp_path``.
 """
 
-import asyncio
-import json
-from pathlib import Path
 
 import pytest
 

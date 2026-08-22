@@ -297,7 +297,7 @@ def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
     return _OPENAI_DEFAULT_BASE_URL
 
 
-def _openai_text(body: dict[str, Any]) -> str:
+def _openai_content(body: dict[str, Any]) -> str:
     """Extract ``choices[0].message.content`` from an OpenAI-compatible response body."""
     if not isinstance(body, dict):
         raise VerifierError("Judge response body was not an object")
