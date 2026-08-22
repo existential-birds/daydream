@@ -6,6 +6,12 @@ mutates the case YAML/model directly. Rendering is plain-string builders for
 deterministic tests; Rich stays available for live styling.
 """
 
+from pathlib import Path
+from typing import Any, Callable
+
+from daydream.benchmark import curation as cu
+
+
 def parse_indices(spec: str, n: int) -> list[int]:
     """Parse a comma-separated 1-based selector into sorted unique 0-based indices.
 
@@ -52,3 +58,72 @@ def parse_indices(spec: str, n: int) -> list[int]:
                 raise ValueError(f"repeated index {token!r}")
             selected.add(index)
     return sorted(i - 1 for i in selected)
+
+
+_INDEX_COLUMNS = (
+    "case_id",
+    "pr_number",
+    "head_prefix",
+    "changed_files",
+    "changed_lines",
+    "evidence_count",
+    "state",
+    "gold_mode",
+    "gold_count",
+)
+
+
+def render_index_table(cases: list[dict[str, Any]]) -> str:
+    """Render a plain-text index header + one row per case (every value ``str``)."""
+    lines = [" | ".join(_INDEX_COLUMNS)]
+    for case in cases:
+        lines.append(" | ".join(str(case.get(k, "-")) for k in _INDEX_COLUMNS))
+    return "\n".join(lines)
+
+
+def _prompt(read_line: Callable[[str], str], message: str) -> str:
+    """Print *message* to stdout, then read one input line with *read_line*."""
+    print(message, end="", flush=True)
+    return read_line(message)
+
+
+def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
+    """Run one case session; returns ``"quit"`` or ``"done"`` (Task 5 expands)."""
+    return "quit"
+
+
+def run_curate_tui(
+    root: Path,
+    case_id: str | None = None,
+    *,
+    read_line: Callable[[str], str] | None = None,
+) -> int:
+    """Drive the resumable curation terminal client.
+
+    Queue mode (``case_id is None``) lists cases, renders the index, and prompts
+    for a case (id, or 1-based row number) or ``q`` to quit. Single-case mode
+    opens *case_id* once and returns its outcome.
+    """
+    read = read_line or input
+    if case_id is not None:
+        _run_case(root, case_id, read)
+        return 0
+    while True:
+        cases = cu.list_cases(root)
+        print(render_index_table(cases))
+        text = _prompt(read, "case (id or number), or q: ")
+        if text in ("a", "A"):
+            continue
+        stripped = text.strip()
+        if stripped in ("q", "Q"):
+            return 0
+        selected: str = stripped
+        if stripped.isdigit():
+            index = int(stripped) - 1
+            if not (0 <= index < len(cases)):
+                print(f"no case at row {stripped}; try again")
+                continue
+            selected = cases[index]["case_id"]
+        if _run_case(root, selected, read) == "quit":
+            return 0
+

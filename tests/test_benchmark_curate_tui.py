@@ -8,6 +8,14 @@ YAML/state via service reads.
 
 import pytest
 
+from tests.test_benchmark_curation import _seed_ready_case
+
+
+def _scripted(*lines):
+    """A ``read_line`` callable that yields *lines* then raises StopIteration."""
+    it = iter(lines)
+    return lambda _prompt: next(it)
+
 
 def test_parse_indices_accepts_commas_and_ranges():
     from daydream.benchmark.curate_tui import parse_indices
@@ -21,3 +29,20 @@ def test_parse_indices_accepts_commas_and_ranges():
             pass
         else:
             raise AssertionError(f"{bad!r} must raise ValueError")
+
+
+def test_run_curate_tui_queue_renders_index_and_quits(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import render_index_table, run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+
+    table = render_index_table([{"case_id": case_id, "pr_number": 101,
+        "head_prefix": "a" * 12, "state": "draft", "gold_mode": "historical",
+        "gold_count": 0, "evidence_count": 1, "changed_files": 2, "changed_lines": 5}])
+    assert case_id in table and "draft" in table and "historical" in table
+    assert "101" in table and ("2" in table and "5" in table)
+
+    rc = run_curate_tui(ws, read_line=_scripted("q"))       # quit from the queue
+    assert rc == 0
+    # discriminating: the real case_id (from list_cases) must be rendered to stdout,
+    # so a stub that ignores list_cases cannot pass
+    assert case_id in capsys.readouterr().out
