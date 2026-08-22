@@ -121,7 +121,7 @@ def _effective_allowlist(base_url: str, env: dict[str, Any]) -> set[str]:
     host of ``base_url`` so an unconfigured verifier can only ever reach its
     own judge endpoint -- never an arbitrary host.
     """
-    raw = (env or {}).get("DAYDREAM_JUDGE_ALLOWED_HOSTS")
+    raw = (env or {}).get(_ENV_ALLOWED_HOSTS)
     if raw:
         hosts = {
             _normalize_host(host)
@@ -201,6 +201,16 @@ def _bounded_error(text: object) -> str:
         return redacted
     return encoded[:_ERROR_TEXT_CAP_BYTES].decode("utf-8", errors="ignore")
 
+
+def _bounded_repr(value: object) -> str:
+    """Return ``repr(value)`` redacted and bounded like any other error text.
+
+    Composes the module's single redact-and-bound seam (``_bounded_error``)
+    over ``repr`` so the four verdict-field diagnostics (match/confidence/
+    reasoning) never repeat the wrap and stay byte-identical to today's
+    output.
+    """
+    return _bounded_error(repr(value))
 
 
 def _render_filled(
@@ -305,26 +315,28 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
     match = raw["match"]
     if not isinstance(match, bool):
         raise VerifierError(
-            f"verdict 'match' must be a boolean, got {_bounded_error(repr(match))}"
+            f"verdict 'match' must be a boolean, got {_bounded_repr(match)}"
         )
     confidence = raw["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VerifierError(
-            f"verdict 'confidence' must be a number in [0,1], got {_bounded_error(repr(confidence))}"
+            f"verdict 'confidence' must be a number in [0,1], got {_bounded_repr(confidence)}"
         )
     if not 0.0 <= confidence <= 1.0:
         raise VerifierError(
-            f"verdict 'confidence' must be in [0,1], got {_bounded_error(repr(confidence))}"
+            f"verdict 'confidence' must be in [0,1], got {_bounded_repr(confidence)}"
         )
     reasoning = raw["reasoning"]
     if not isinstance(reasoning, str):
         raise VerifierError(
-            f"verdict 'reasoning' must be a string, got {_bounded_error(repr(reasoning))}"
+            f"verdict 'reasoning' must be a string, got {_bounded_repr(reasoning)}"
         )
     # Reasoning is capped at 32 KiB and rejected -- never truncated-and-accepted
     # -- so an oversized/untrusted value can never bloat a diagnostic.
     if len(reasoning.encode("utf-8")) > _REASONING_CAP_BYTES:
-        raise VerifierError("verdict reasoning exceeds 32 KiB")
+        raise VerifierError(
+            f"verdict reasoning exceeds {_REASONING_CAP_BYTES // 1024} KiB"
+        )
     return verifier_core.Verdict(
         gold_id="",
         candidate_id="",
@@ -348,7 +360,9 @@ def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
     """
     body = _response_bytes(response)
     if len(body) > _RESPONSE_CAP_BYTES:
-        raise VerifierError("judge response body exceeds 256 KiB")  # terminal, never truncated
+        raise VerifierError(  # terminal, never truncated
+            f"judge response body exceeds {_RESPONSE_CAP_BYTES // 1024} KiB"
+        )
     status_code = getattr(response, "status_code", None)
     if status_code is None or not 200 <= int(status_code) < 300:
         body_text = body.decode("utf-8", errors="replace")
@@ -431,10 +445,13 @@ async def _complete_json_with_http(
                     continue
                 return _parse_json_response(response, content=content)
             except _Retryable:
-                if attempt == _MAX_RETRIES - 1:
-                    raise VerifierError("Judge request failed after retries")
-                await asyncio.sleep(2**attempt)
+                if attempt < _MAX_RETRIES - 1:
+                    # A retry remains: back off 2 ** attempt seconds, then the
+                    # outer loop issues the next attempt.
+                    await asyncio.sleep(2**attempt)
                 break
+    # Reaching here means the final attempt failed: this single raise is the
+    # retry-exhaustion exit -- never a partial result.
     raise VerifierError("Judge request failed after retries")
 
 
