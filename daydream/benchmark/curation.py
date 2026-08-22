@@ -375,3 +375,43 @@ def replace_findings(
     curation["findings"] = new_findings
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="replace")
+
+
+_EVIDENCE_REASONS = frozenset({
+    "fixed_before_snapshot",
+    "not_actionable",
+    "incorrect",
+    "duplicate",
+    "style_only",
+    "out_of_scope",
+    "other",
+})
+
+
+def exclude_evidence(
+    root: Path, case_id: str, source_id: str, *, reason: str, note: str | None = None
+) -> None:
+    """Exclude one evidence source from gold with the fixed reason/note contract.
+
+    Idempotent last-wins: re-excluding an already-excluded source replaces the
+    existing row (a single entry per source). ``reason == "other"`` requires a
+    non-blank note; a stray note on any other reason is rejected.
+    """
+    raw = _load_case(root, case_id)
+    if reason not in _EVIDENCE_REASONS:
+        raise CurationError(f"invalid evidence exclusion reason {reason!r}")
+    if reason == "other":
+        if not note or not str(note).strip():
+            raise CurationError("evidence exclusion reason 'other' requires a note")
+    elif note is not None:
+        raise CurationError("evidence exclusion note is only valid for reason 'other'")
+
+    candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
+    if source_id not in candidate_ids:
+        raise CurationError(f"source {source_id} is not a candidate of case {case_id}")
+
+    curation = raw.setdefault("curation", {})
+    exclusions = [e for e in curation.get("exclusions", []) if e.get("source_id") != source_id]
+    exclusions.append({"source_id": source_id, "reason": reason, "note": note})
+    curation["exclusions"] = exclusions
+    _stage_case(root, case_id, raw, op="exclude-evidence")

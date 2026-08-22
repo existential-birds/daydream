@@ -246,6 +246,26 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
     assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "edited"
     assert f2["finding_id"] == derive_finding_id(f2)
 
+def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    view = cu.list_case(ws, case_id)
+    src = view["candidates"][0]["source_id"]
+
+    cu.exclude_evidence(ws, case_id, src, reason="fixed_before_snapshot")
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    ex = raw["curation"]["exclusions"][0]
+    assert ex == {"source_id": src, "reason": "fixed_before_snapshot", "note": None}
+
+    with pytest.raises(cu.CurationError):
+        cu.exclude_evidence(ws, case_id, src, reason="other")          # other needs a note
+    with pytest.raises(cu.CurationError):
+        cu.exclude_evidence(ws, case_id, src, reason="not_a_reason")   # literal contract
+    # duplicate exclusion of the same source is a no-op (idempotent), not an error
+    cu.exclude_evidence(ws, case_id, src, reason="incorrect")
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert len(raw["curation"]["exclusions"]) == 1
+
 
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
