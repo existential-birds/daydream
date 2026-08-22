@@ -93,6 +93,21 @@ def test_fetch_persists_complete_pr_header(tmp_path, fake_gh):
     assert pr.number == 101 and pr.author.login == "alice"
 
 
+def test_materialized_case_carries_full_pr_header(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)                  # REST + canned PR for pr 101
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    pr = case["pull_request"]
+    assert pr["head"]["ref"] == "feature/cache"    # head.ref persisted in the case YAML
+    assert pr["body"] == ""                         # _PR_HEADER has no body -> empty
+    assert pr["title_sha256"] and pr["body_sha256"]
+    assert "merged_at" in pr and "closed_at" in pr and "html_url" in pr
+
+
 def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
 
