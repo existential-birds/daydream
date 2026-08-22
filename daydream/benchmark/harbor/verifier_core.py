@@ -381,3 +381,161 @@ def maximum_matching(
             _augment(gold, set())
 
     return {(match_candidate[c], c) for c in match_candidate}
+
+
+# ---------------------------------------------------------------------------
+# reward + score_review
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Reward:
+    """The 12-field §10 per-task reward output."""
+
+    reward: float
+    tp: int
+    fp: int
+    fn: int
+    precision: float
+    recall: float
+    f1: float
+    gold_count: int
+    candidate_count: int
+    clean_task: int
+    clean_pass: int
+    verifier_error: int
+
+    def to_dict(self) -> dict[str, float | int]:
+        """Numeric-only dict with exactly the 12 §10 keys."""
+        return {
+            "reward": self.reward,
+            "tp": self.tp,
+            "fp": self.fp,
+            "fn": self.fn,
+            "precision": self.precision,
+            "recall": self.recall,
+            "f1": self.f1,
+            "gold_count": self.gold_count,
+            "candidate_count": self.candidate_count,
+            "clean_task": self.clean_task,
+            "clean_pass": self.clean_pass,
+            "verifier_error": self.verifier_error,
+        }
+
+
+def _f1(precision: float, recall: float) -> float:
+    if precision + recall == 0:
+        return 1.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def _finding_id(finding: object) -> str:
+    """Read a gold finding's id from either a GoldFinding or a raw dict."""
+    if isinstance(finding, dict):
+        try:
+            return finding["finding_id"]
+        except KeyError as exc:
+            raise VerifierError("missing gold finding_id") from exc
+    return getattr(finding, "finding_id")
+
+
+def _empty_side_error(gold_count: int) -> Reward:
+    return Reward(
+        reward=0.0,
+        tp=0,
+        fp=0,
+        fn=0,
+        precision=0.0,
+        recall=0.0,
+        f1=0.0,
+        gold_count=gold_count,
+        candidate_count=0,
+        clean_task=0,
+        clean_pass=0,
+        verifier_error=1,
+    )
+
+
+def score_review(
+    gold: list[GoldFinding],
+    candidate_artifact: dict[str, object],
+    verdicts: list[Verdict],
+) -> Reward:
+    """Score one review against hidden gold and injected verdicts."""
+    gold_count = len(gold)
+    try:
+        candidates = validate_candidate_artifact(candidate_artifact)
+    except VerifierError:
+        return _empty_side_error(gold_count)
+    candidate_count = len(candidates)
+
+    if gold_count == 0 and candidate_count == 0:
+        return Reward(
+            reward=1.0,
+            tp=0,
+            fp=0,
+            fn=0,
+            precision=1.0,
+            recall=1.0,
+            f1=1.0,
+            gold_count=0,
+            candidate_count=0,
+            clean_task=1,
+            clean_pass=1,
+            verifier_error=0,
+        )
+    if gold_count == 0:
+        return Reward(
+            reward=0.0,
+            tp=0,
+            fp=candidate_count,
+            fn=0,
+            precision=0.0,
+            recall=1.0,
+            f1=0.0,
+            gold_count=0,
+            candidate_count=candidate_count,
+            clean_task=1,
+            clean_pass=0,
+            verifier_error=0,
+        )
+    if candidate_count == 0:
+        return Reward(
+            reward=0.0,
+            tp=0,
+            fp=0,
+            fn=gold_count,
+            precision=1.0,
+            recall=0.0,
+            f1=0.0,
+            gold_count=gold_count,
+            candidate_count=0,
+            clean_task=0,
+            clean_pass=0,
+            verifier_error=0,
+        )
+
+    gold_ids = [_finding_id(g) for g in gold]
+    cand_ids = [c.candidate_id for c in candidates]
+    retained = retained_edges(verdicts, gold_ids, cand_ids)
+    matches = maximum_matching(retained, gold_ids, cand_ids)
+    tp = len(matches)
+    fp = candidate_count - tp
+    fn = gold_count - tp
+    precision = tp / (tp + fp) if (tp + fp) else 1.0
+    recall = tp / (tp + fn) if (tp + fn) else 1.0
+    f1 = _f1(precision, recall)
+    return Reward(
+        reward=f1,
+        tp=tp,
+        fp=fp,
+        fn=fn,
+        precision=precision,
+        recall=recall,
+        f1=f1,
+        gold_count=gold_count,
+        candidate_count=candidate_count,
+        clean_task=0,
+        clean_pass=0,
+        verifier_error=0,
+    )

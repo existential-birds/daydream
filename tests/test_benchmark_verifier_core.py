@@ -12,6 +12,7 @@ from daydream.benchmark.harbor.verifier_core import (
     parse_candidate_finding,
     parse_gold_finding,
     retained_edges,
+    score_review,
     validate_candidate_artifact,
     validate_gold_set,
 )
@@ -278,3 +279,45 @@ def test_matching_is_deterministic_across_runs():
     r1 = maximum_matching(vs, gold, cand)
     r2 = maximum_matching(vs, gold, cand)
     assert r1 == r2 == {("g1", "c1"), ("g2", "c2")}
+
+def test_score_clean_zero_candidates():
+    r = score_review([], _artifact([]), [])
+    d = r.to_dict()
+    assert d["reward"] == 1.0 and d["clean_task"] == 1 and d["clean_pass"] == 1
+    assert (d["tp"], d["fp"], d["fn"]) == (0, 0, 0)
+    assert (d["precision"], d["recall"], d["f1"]) == (1.0, 1.0, 1.0)  # zero-denom → 1.0
+
+
+def test_score_clean_with_candidates():
+    art = _artifact(_valid_findings(2))
+    r = score_review([], art, [])
+    assert (r.reward, r.fp, r.clean_pass) == (0.0, 2, 0)
+    assert r.tp == 0 and r.fn == 0 and r.clean_task == 1
+
+
+def test_score_gold_no_candidates():
+    gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
+    r = score_review(gold, _artifact([]), [])
+    assert (r.reward, r.fn) == (0.0, 2)
+    assert r.fp == 0 and r.clean_task == 0
+
+
+def test_score_f1_example():
+    # 3 gold / 2 candidates, TP=2, FN=1 → precision 1.0, recall 0.6666666667, f1 0.8
+    gold = [_gold(), _gold(finding_id="b" * 64, title="B"), _gold(finding_id="c" * 64, title="C")]
+    cands = _valid_findings(2)
+    art = _artifact(cands)
+    vs = [Verdict("a" * 64, cands[0]["candidate_id"], True, 0.9, "same"),
+          Verdict("b" * 64, cands[1]["candidate_id"], True, 0.8, "same")]
+    r = score_review(gold, art, vs)
+    assert (r.tp, r.fp, r.fn) == (2, 0, 1)
+    assert r.precision == 1.0
+    assert abs(r.recall - 0.6666666667) < 1e-9
+    assert abs(r.f1 - 0.8) < 1e-9 and abs(r.reward - 0.8) < 1e-9
+
+
+def test_score_malformed_artifact_is_verifier_error():
+    art = {"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
+           "findings": [{"candidate_id": "not-hex"}]}
+    r = score_review([], art, [])
+    assert r.reward == 0.0 and r.verifier_error == 1
