@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 from daydream import git_ops
+from daydream.benchmark.schema import derive_finding_id
+from daydream.benchmark.storage import load_yaml_strict
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_import_prs.py::_SEED_ENV).
@@ -182,7 +184,8 @@ def _seed_ready_case(tmp_path, fake_gh, *, lines: int = 3, candidate: bool = Fal
 def test_spike_head_file_line_count_from_mirror(tmp_path, fake_gh):
     """The frozen head tree is readable via ``git cat-file blob <head>:<path>``
     with cwd in the shared bare mirror — the location-vs-head read source."""
-    from daydream.benchmark import github_import as gi, snapshot as sn
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import snapshot as sn
     from daydream.benchmark.workspace import init_workspace
 
     ws = tmp_path / "ws"
@@ -195,6 +198,27 @@ def test_spike_head_file_line_count_from_mirror(tmp_path, fake_gh):
     assert proc.returncode == 0
     assert len(proc.stdout.splitlines()) == 7
     assert base_sha != head_sha  # the seed produced a real base/head divergence
+
+
+def test_accept_candidate_produces_historical_derived_finding(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    view = cu.list_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
+
+    cu.accept_candidate(ws, case_id, cand["source_id"])
+
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert len(raw["curation"]["findings"]) == 1
+    assert f["provenance"]["kind"] == "historical"
+    assert f["provenance"]["source_ids"] == [cand["source_id"]]
+    assert f["title"] == cand["title"] and f["body"] == cand["body"]
+    assert f["location"] == cand["location"]
+    assert f["finding_id"] == derive_finding_id(f)      # derived, content-addressed
+    assert raw["curation"]["gold_status"] == "findings"
+    assert raw["curation"]["gold_mode"] == "historical"
+    assert raw["curation"]["state"] == "draft"           # accept on draft stays draft
 
 
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
@@ -214,9 +238,6 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
 
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
-    from daydream.benchmark.schema import derive_finding_id
-    from daydream.benchmark.storage import load_yaml_strict
-
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     assert cu.validate_case(ws, case_id) is None
 

@@ -25,9 +25,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
-from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+from daydream.benchmark.storage import load_yaml_strict
 
 
 class CurationError(Exception):
@@ -86,7 +88,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             "case_id": case_id,
             "pr_number": case.get("pr_number"),
             "state": curation.get("state"),
-            "gold_mode": schema.derive_gold_mode(schema.Curation(**curation)),
+            "gold_mode": schema.derive_gold_mode(_curation_model(curation)),
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
@@ -99,13 +101,60 @@ def list_case(root: Path, case_id: str) -> dict[str, Any]:
     return _load_case(root, case_id)
 
 
+# ---------------------------------------------------------------------------
+# derivation + validation
+# ---------------------------------------------------------------------------
+
 MAX_GOLD_FINDINGS = 50
+
+
+def _curation_model(curation: dict[str, Any]) -> schema.Curation:
+    """Build the fixed Curation model from a raw dict.
+
+    The persisted ``gold_mode`` audit field is not schema field, so it is
+    dropped here (it is recomputed by ``derive_gold_mode`` when read).
+    """
+    return schema.Curation(**{k: v for k, v in curation.items() if k != "gold_mode"})
+
+
+def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
+    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
+    doc = dict(raw)
+    curation = dict(raw.get("curation") or {})
+    curation.pop("gold_mode", None)
+    doc["curation"] = curation
+    return doc
 
 
 def _snapshot_head(raw: dict[str, Any]) -> str | None:
     """The 40-hex head SHA the case's snapshot was frozen at, or None."""
     snapshot_doc = raw.get("snapshot") or {}
     return snapshot_doc.get("original_head_sha")
+
+
+def _projection_matches(candidate: dict[str, Any], finding: dict[str, Any]) -> bool:
+    """True when a finding is byte-identical to one candidate projection.
+
+    Compares the canonical content projection (title/body/location) — the
+    severity is always ``None`` on a candidate projection.
+    """
+    return (
+        candidate.get("title") == finding.get("title")
+        and candidate.get("body") == finding.get("body")
+        and candidate.get("location") == finding.get("location")
+    )
+
+
+def _derive_content(raw: dict[str, Any]) -> None:
+    """Derive (and persist) ``gold_status`` + ``gold_mode`` from parsed findings.
+
+    Never caller-supplied — derived always from the resulting findings, so an
+    ``--apply-gold`` fragment (or a caller) cannot forge them.
+    """
+    curation = raw["curation"]
+    model = _curation_model(curation)
+    curation["gold_status"] = schema.derive_gold_status(model)
+    curation["gold_mode"] = schema.derive_gold_mode(model)
 
 
 def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any]) -> None:
@@ -129,17 +178,13 @@ def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any])
         )
 
 
-def validate_case(root: Path, case_id: str) -> None:
-    """Re-validate one case through the fixed schema plus curation-service rules.
+def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
+    """Revalidate an in-memory case doc through curation rules + the full schema.
 
-    Runs the curation rules first (raising :class:`CurationError` naming the
-    violated invariant) so a duplicate canonical finding or >50 gold cap is
-    rejected before the fixed-schema construction; then builds the full
-    :class:`schema.CaseDocument` (whose pydantic ``ValidationError``s propagate
-    unchanged as contract failures). Returns ``None`` on success and never
-    writes.
+    Raises :class:`CurationError` naming the first violated curation rule; the
+    fixed-schema :class:`ValidationError` (a contract failure) propagates
+    unchanged. Never writes.
     """
-    raw = _load_case(root, case_id)
     curation = raw.get("curation") or {}
     findings = curation.get("findings") or []
 
@@ -150,17 +195,82 @@ def validate_case(root: Path, case_id: str) -> None:
         if ids.count(fid) > 1:
             raise CurationError(f"case {case_id} has duplicate finding {fid}")
 
-    candidate_ids = {c.get("source_id") for c in raw.get("candidates") or []}
-    # TODO(Task 4): byte-match the historical finding to its candidate projection.
+    candidates = raw.get("candidates") or []
     for finding in findings:
         _validate_location(root, raw, finding)
         provenance = finding.get("provenance") or {}
         if provenance.get("kind") == "historical":
-            for src in provenance.get("source_ids") or []:
-                if src not in candidate_ids:
-                    raise CurationError(
-                        f"historical finding references unknown candidate {src}"
-                    )
+            srcs = provenance.get("source_ids") or []
+            if len(srcs) != 1:
+                raise CurationError(
+                    f"case {case_id} historical finding must reference exactly one source"
+                )
+            src = srcs[0]
+            cand = next((c for c in candidates if c.get("source_id") == src), None)
+            if cand is None:
+                raise CurationError(f"historical finding references unknown candidate {src}")
+            if not _projection_matches(cand, finding):
+                raise CurationError(
+                    f"historical finding source {src} does not byte-match its candidate projection"
+                )
 
-    schema.CaseDocument(**raw)
+    schema.CaseDocument(**_schema_ready(raw))
+
+
+def validate_case(root: Path, case_id: str) -> None:
+    """Re-validate one case through the fixed schema plus curation-service rules.
+
+    Returns ``None`` on success; raises :class:`CurationError` on the first
+    curation-rule violation and lets the fixed-schema
+    :class:`ValidationError` propagate as a contract failure. Never writes.
+    """
+    raw = _load_case(root, case_id)
+    _validate_raw(root, case_id, raw)
     return None
+
+
+def _stage_case(root: Path, case_id: str, raw: dict[str, Any], *, op: str) -> None:
+    """Validate in-memory then atomically rewrite the single case YAML.
+
+    The full validity check (curation rules + :class:`schema.CaseDocument`) runs
+    **before** the :class:`storage.Transaction` opens, so a rejected mutation
+    leaves the on-disk case byte-unchanged. No manifest is staged — curation
+    state lives only in the case YAML.
+    """
+    _validate_raw(root, case_id, raw)
+    with storage.Transaction(root, op_id=f"curate-{case_id}", kind=f"curation:{op}") as tx:
+        tx.stage(
+            f"cases/{case_id}.yaml",
+            yaml.safe_dump(raw, sort_keys=False).encode("utf-8"),
+        )
+        tx.commit()
+
+
+def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
+    """Accept one exact-exceptable candidate as a byte-identical ``historical`` finding.
+
+    The finding's title/body/severity/location are taken straight from the
+    candidate projection, ``provenance.kind`` is ``historical`` (the only path
+    that produces it), and ``finding_id`` is derived from the content.
+    """
+    raw = _load_case(root, case_id)
+    candidate = next(
+        (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_id),
+        None,
+    )
+    if candidate is None:
+        raise CurationError(f"no candidate {source_id} in case {case_id}")
+    if not candidate.get("exact_acceptable"):
+        raise CurationError(f"candidate {source_id} is not exact_acceptable")
+
+    finding = {
+        "title": candidate["title"],
+        "body": candidate["body"],
+        "severity": candidate.get("severity"),
+        "location": candidate.get("location"),
+        "provenance": {"kind": "historical", "source_ids": [source_id]},
+    }
+    finding["finding_id"] = schema.derive_finding_id(finding)
+    raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="accept")
