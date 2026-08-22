@@ -6,7 +6,6 @@ Drives ``run_curate_tui`` over the real service path (``_seed_ready_case`` +
 YAML/state via service reads.
 """
 
-import pytest
 from pathlib import Path
 
 from tests.test_benchmark_curation import _seed_ready_case
@@ -94,6 +93,7 @@ def test_action_accept_invalid_index_mutates_nothing(tmp_path, fake_gh):
 
 def test_action_accept_non_exact_candidate_offers_edit_path(tmp_path, fake_gh, capsys):
     import yaml
+
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -120,7 +120,8 @@ def test_action_new_via_real_editor_persists_authored(tmp_path, fake_gh, monkeyp
                       "  - title: New concern\n    body: fresh wording\n"
                       "    severity: medium\n    location: null\n    source_ids: []\nEOF\n")
     editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setenv("LOG", str(log))
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
@@ -136,9 +137,13 @@ def test_action_new_via_real_editor_persists_authored(tmp_path, fake_gh, monkeyp
 def test_editor_nonzero_exit_leaves_state_unchanged(tmp_path, fake_gh, monkeypatch, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
-    editor = tmp_path / "fail.sh"; editor.write_text("#!/bin/sh\nexit 3\n"); editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    editor = tmp_path / "fail.sh"
+    editor.write_text("#!/bin/sh\nexit 3\n")
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
     assert path.read_bytes() == before                       # unchanged
@@ -148,11 +153,13 @@ def test_editor_nonzero_exit_leaves_state_unchanged(tmp_path, fake_gh, monkeypat
 def test_editor_malformed_buffer_is_discarded(tmp_path, fake_gh, monkeypatch, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
     editor = tmp_path / "bad.sh"
     editor.write_text("#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n")
     editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
     assert path.read_bytes() == before
@@ -160,7 +167,6 @@ def test_editor_malformed_buffer_is_discarded(tmp_path, fake_gh, monkeypatch, ca
 
 
 def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
-    import yaml as _yaml
     from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict
@@ -174,7 +180,8 @@ def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
         f"    source_ids: [{current['source_id']}]\nEOF\n"
     )
     editor.chmod(0o755)
-    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
 
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "e", "1", "q"))
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
@@ -198,7 +205,8 @@ def test_action_exclude_evidence_other_requires_note(tmp_path, fake_gh):
 def test_action_exclude_evidence_rejects_stray_note(tmp_path, fake_gh, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
     run_curate_tui(ws, case_id,
                    read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
     assert path.read_bytes() == before                      # service rejects the note
@@ -231,13 +239,15 @@ def test_mark_ready_requires_yes_and_exact_sha(tmp_path, fake_gh, capsys):
 
 def test_stale_case_shows_marker_and_re_attests(tmp_path, fake_gh, capsys):
     import yaml
+
     from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import render_case, run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
-    raw["curation"]["state"] = "stale"; raw["curation"]["snapshot_attested"] = True
+    raw["curation"]["state"] = "stale"
+    raw["curation"]["snapshot_attested"] = True
     path.write_text(yaml.safe_dump(raw, sort_keys=False))   # force stale + attested
 
     assert "stale" in render_case(cu.get_case(ws, case_id))  # stale marker rendered
@@ -268,7 +278,8 @@ def test_case_exclude_and_reinclude(tmp_path, fake_gh):
 def test_case_exclude_other_requires_note(tmp_path, fake_gh, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
     run_curate_tui(ws, case_id, read_line=_scripted("z", "other", "q"))  # no note
     assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
@@ -277,7 +288,8 @@ def test_case_exclude_other_requires_note(tmp_path, fake_gh, capsys):
 def test_defer_is_ui_local_no_mutation(tmp_path, fake_gh, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
     rc = run_curate_tui(ws, case_id, read_line=_scripted("d"))   # defer in a case
     assert rc == 0
     assert path.read_bytes() == before                       # nothing persisted
@@ -347,3 +359,4 @@ def test_resume_reflects_persisted_state(tmp_path, fake_gh):
     cases = cu.list_cases(ws)
     assert cases[0]["state"] == "ready"
     assert "ready" in render_index_table(cases)
+

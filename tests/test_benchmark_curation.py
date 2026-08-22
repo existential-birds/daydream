@@ -492,7 +492,8 @@ def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
     # a candidate with no backing evidence record is tolerated (projection absent)
     unmatched = {k: v for k, v in cand.items() if k != "evidence"}
     unmatched["source_id"] = "github:review:999"
-    view2 = dict(view); view2["candidates"] = [unmatched]
+    view2 = dict(view)
+    view2["candidates"] = [unmatched]
     assert "evidence" not in view2["candidates"][0]
 
 
@@ -538,3 +539,4 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(cu.CurationError):
         cu.validate_case(ws, case_id)
+
