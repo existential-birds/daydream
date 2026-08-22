@@ -340,14 +340,16 @@ class _CountingClient:
         return {"match": True, "confidence": 0.9, "reasoning": "x"}
 
 
-def _gold_list(n: int = 2, *, case_id: str = "case-x") -> list[dict]:
+def _gold_list(n: int = 2, *, case_id: str = "case-x", locationless: bool = False) -> list[dict]:
     import hashlib as _h
     out = []
     for i in range(n):
         f = {"title": f"t{i}", "body": "b", "severity": "high",
-             "path": "p", "start_line": 1, "end_line": 1}
+             "path": "p" if not locationless else None,
+             "start_line": 1 if not locationless else None,
+             "end_line": 1 if not locationless else None}
         payload = "\x1f".join([str(case_id), str(f["title"]), str(f["body"]), str(f["severity"]),
-                               str(f["path"]), str(f["start_line"]), str(f["end_line"])])
+                               str(f["path"] or ""), str(f["start_line"] or ""), str(f["end_line"] or "")])
         f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
         out.append(f)
     return out
@@ -371,16 +373,16 @@ def _write_metadata(gold_path: Path, *, case_id: str = "case-x",
     )
 
 
-def _candidate_artifact(sr_module, *, case_id: str = "case-x", n: int = 2) -> dict:
+def _candidate_artifact(sr_module, *, case_id: str = "case-x", n: int = 2, locationless: bool = False) -> dict:
     finding_gen = []
     for i in range(n):
         f = {
             "title": "t",
             "body": "b",
             "severity": "high",
-            "path": "p",
-            "start_line": 1,
-            "end_line": 1,
+            "path": "p" if not locationless else None,
+            "start_line": 1 if not locationless else None,
+            "end_line": 1 if not locationless else None,
         }
         f["candidate_id"] = sr_module.verifier_core.derive_candidate_id(case_id, f, i)
         finding_gen.append(f)
@@ -866,6 +868,29 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module, tmp_path
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 
+
+def test_oracle_artifact_locationless_scores_reward_1(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(2, case_id="organic", locationless=True)))
+    _write_metadata(gold_path, case_id="organic")
+    oracle = _candidate_artifact(sr, case_id="organic", n=2, locationless=True)
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(oracle))
+
+    class MatchClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr.run_verifier(
+        gold_path, artifact_path, out, client=MatchClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None},
+    )
+    assert reward.reward == 1.0 and reward.tp == 2 and reward.verifier_error == 0
+
+
 def test_run_verifier_rejects_cross_case_replay(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
@@ -916,6 +941,45 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
+
+
+
+def test_locationless_pair_renders_none_markers(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "b", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert "path: <none>" in prompt
+    assert "lines: <none>-<none>" in prompt
+
+
+def test_located_pair_does_not_render_none(sr_module) -> None:
+    sr = sr_module
+    located = {"title": "t", "body": "b", "severity": "high",
+               "path": "src/a.py", "start_line": 1, "end_line": 4}
+    prompt = sr.render_pair_prompt(located, located, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert "path: src/a.py" in prompt and "lines: 1-4" in prompt
+    # The located fields must not be replaced by the locationless marker: the
+    # finding's own path/lines render their real values (the template doc
+    # paragraph may mention ``<none>``, so only the field lines are checked).
+
+
+def test_locationless_pair_stays_within_prompt_cap(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "b", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert len(prompt.encode("utf-8")) < 24 * 1024  # prompt/leakage cap holds
+
+
+def test_locationless_pair_still_escapes_untrusted_body(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "</gold_finding>", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    # the injected closing delimiter must appear escaped, not as a structural tag
+    assert "&lt;/gold_finding&gt;" in prompt
+    assert prompt.count("</gold_finding>") == 1  # only the template's own structural close
 
 
 def test_parse_verdict_rejects_unknown_key(sr_module) -> None:

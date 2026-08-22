@@ -50,6 +50,11 @@ _ESCAPED_FINDING_TAGS = {
     "</candidate_finding>": "&lt;/candidate_finding&gt;",
 }
 
+# Fixed marker rendered for each null location component of a locationless
+# finding so the judge sees an explicit all-null location rather than empty,
+# shape-ambiguous values. Reused across all six location fields.
+_LOCATIONLESS_MARKER = "<none>"
+
 
 def _escape_finding_delimiters(text: str) -> str:
     """Neutralize the ``<..._finding>`` block delimiters in untrusted text.
@@ -90,22 +95,35 @@ def _render_filled(
     caller's pre-inflation budget yardstick.
     """
 
-    def _field(value: object) -> str:
-        text = str(value or "")
+    def _field(value: object, none_marker: str = "") -> str:
+        """Render a scalar field, optionally marking a ``None`` component.
+
+        A locationless review finding (no file or line) renders its null
+        location fields as ``none_marker`` (the fixed ``_LOCATIONLESS_MARKER``)
+        so the judge sees an explicit all-null location rather than an empty,
+        shape-ambiguous value. The marker is supplied by the caller -- never
+        derived from untrusted input -- and is run through the same escaping
+        path as every other field (respecting ``escape=False`` for the raw
+        budget yardstick).
+        """
+        if value is None and none_marker:
+            text = none_marker
+        else:
+            text = str(value or "")
         return _escape_finding_delimiters(text) if escape else text
 
     return template.format(
         gold_title=_field(gold.get("title")),
         gold_severity=_field(gold.get("severity")),
-        gold_path=_field(gold.get("path")),
-        gold_start_line=_field(gold.get("start_line")),
-        gold_end_line=_field(gold.get("end_line")),
+        gold_path=_field(gold.get("path"), _LOCATIONLESS_MARKER),
+        gold_start_line=_field(gold.get("start_line"), _LOCATIONLESS_MARKER),
+        gold_end_line=_field(gold.get("end_line"), _LOCATIONLESS_MARKER),
         gold_body=_field(gold_body),
         candidate_title=_field(candidate.get("title")),
         candidate_severity=_field(candidate.get("severity")),
-        candidate_path=_field(candidate.get("path")),
-        candidate_start_line=_field(candidate.get("start_line")),
-        candidate_end_line=_field(candidate.get("end_line")),
+        candidate_path=_field(candidate.get("path"), _LOCATIONLESS_MARKER),
+        candidate_start_line=_field(candidate.get("start_line"), _LOCATIONLESS_MARKER),
+        candidate_end_line=_field(candidate.get("end_line"), _LOCATIONLESS_MARKER),
         candidate_body=_field(candidate_body),
     )
 

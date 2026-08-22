@@ -431,7 +431,7 @@ def _canonical_gold_id(case_id: str, f: dict) -> str:
     payload = "\x1f".join([
         str(case_id or ""), str(f.get("title") or ""), str(f.get("body") or ""),
         str(f.get("severity") or ""), str(f.get("path") or ""),
-        str(f.get("start_line")), str(f.get("end_line")),
+        str(f.get("start_line") or ""), str(f.get("end_line") or ""),
     ])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -450,3 +450,80 @@ def test_gold_set_rejects_duplicate_finding_ids():
             {**_gold(), "finding_id": fid},
             {**_gold(), "finding_id": fid},
         ], case_id="case-x")
+
+
+def test_null_location_normalizes_to_empty_in_canonical_tuple():
+    locless = _cand(path=None, start_line=None, end_line=None)
+    blank = _cand(path="", start_line=None, end_line=None)
+    assert derive_candidate_id("case-x", locless, 0) == derive_candidate_id("case-x", blank, 0)
+
+
+def test_locationless_canonical_digest_matches_schema_derive():
+    from daydream.benchmark import schema
+    raw = _gold(path=None, start_line=None, end_line=None)
+    payload = "\x1f".join([
+        str("case-x" or ""), str(raw["title"] or ""), str(raw["body"] or ""),
+        str(raw["severity"] or ""), str(raw["path"] or ""),
+        str(raw["start_line"] or ""), str(raw["end_line"] or ""),
+    ])
+    verif = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    authoring = schema.derive_finding_id({
+        "title": raw["title"], "body": raw["body"], "severity": raw["severity"],
+        "location": None,}, case_id="case-x")
+    assert verif == authoring
+
+
+def test_duplicate_locationless_get_distinct_occurrence_ids():
+    locless = _cand(path=None, start_line=None, end_line=None)
+    assert derive_candidate_id("case-x", locless, 0) != derive_candidate_id("case-x", locless, 1)
+
+
+def test_locationless_gold_set_accepts_canonical_id():
+    g = _gold(path=None, start_line=None, end_line=None)
+    g["finding_id"] = _canonical_gold_id("case-x", g)
+    gs = validate_gold_set([g], case_id="case-x")
+    assert len(gs) == 1 and gs[0].path is None
+
+
+def test_locationless_candidate_accepted():
+    f = parse_candidate_finding(_cand(path=None, start_line=None, end_line=None))
+    assert f.path is None and f.start_line is None and f.end_line is None
+
+
+def test_locationless_gold_accepted():
+    g = parse_gold_finding(_gold(path=None, start_line=None, end_line=None))
+    assert g.path is None and g.start_line is None and g.end_line is None
+
+
+@pytest.mark.parametrize("partial", [
+    {"path": "src/a.py", "start_line": None, "end_line": None},
+    {"path": None, "start_line": 1, "end_line": 1},
+    {"path": "src/a.py", "start_line": 1, "end_line": None},
+])
+def test_partial_location_rejected(partial):
+    with pytest.raises(VerifierError):
+        parse_candidate_finding(_cand(**partial))
+    with pytest.raises(VerifierError):
+        parse_gold_finding(_gold(**partial))
+
+
+def test_mixed_located_locationless_set_matching_is_id_keyed():
+    g_loc = _gold(title="Located", path="src/a.py", start_line=1, end_line=1)
+    g_loc["finding_id"] = _canonical_gold_id("case-x", g_loc)
+    g_non = _gold(title="Locationless", path=None, start_line=None, end_line=None)
+    g_non["finding_id"] = _canonical_gold_id("case-x", g_non)
+    gold = validate_gold_set([g_loc, g_non], case_id="case-x")
+
+    c_loc = _cand(title="Located", path="src/a.py", start_line=1, end_line=1)
+    c_loc["candidate_id"] = derive_candidate_id("case-x", c_loc, 0)
+    c_non = _cand(title="Locationless", path=None, start_line=None, end_line=None)
+    c_non["candidate_id"] = derive_candidate_id("case-x", c_non, 0)
+    art = _artifact([c_loc, c_non])
+
+    vs = [
+        Verdict(g_loc["finding_id"], c_loc["candidate_id"], True, 0.9, "same"),
+        Verdict(g_non["finding_id"], c_non["candidate_id"], True, 0.9, "same"),
+    ]
+    r = score_review(gold, art, vs)
+    assert (r.tp, r.fp, r.fn) == (2, 0, 0)
+    assert r.reward == 1.0 and r.verifier_error == 0
