@@ -144,3 +144,52 @@ def build_gold_list(findings: list) -> list:
     flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
     flat.sort(key=lambda item: item[1])
     return [{"finding_id": fid, **flattened} for flattened, fid in flat]
+
+
+def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
+    """Return the §9 candidate Oracle artifact for one compiled case.
+
+    ``schema_version`` 1, ``case_id`` is the opaque task key, ``base_ref`` /
+    ``head_ref`` are the deterministic ``base`` / ``head`` refs. Findings are
+    flattened (reusing :func:`_flatten_finding` -- a location-less finding
+    raises :class:`CompileError`), ordered by ``finding_id`` ascending, and
+    assigned ordinal 0,1,2,... in that order; each entry's ``candidate_id`` is
+    derived via ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
+    """
+    from daydream.benchmark.harbor import verifier_core as vc
+    if not findings:
+        return {
+            "schema_version": 1,
+            "case_id": opaque_key,
+            "base_ref": "base",
+            "head_ref": "head",
+            "findings": [],
+        }
+    flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
+    flat.sort(key=lambda item: item[1])
+    # Candidate ids are derived from canonical content + an occurrence ordinal
+    # (mirrors the verifier's own per-content dedup ordinal), so the compiled
+    # artifact re-derives identical ids under ``validate_candidate_artifact``.
+    groups: dict[tuple, int] = {}
+    entries = []
+    for flattened, fid in flat:
+        canon = (
+            str(flattened.get("title") or ""),
+            str(flattened.get("body") or ""),
+            str(flattened.get("severity") or ""),
+            str(flattened.get("path") or ""),
+            flattened.get("start_line"),
+            flattened.get("end_line"),
+        )
+        ordinal = groups.get(canon, 0)
+        groups[canon] = ordinal + 1
+        entry = {**flattened, "finding_id": fid}
+        entry["candidate_id"] = vc.derive_candidate_id(opaque_key, entry, ordinal)
+        entries.append(entry)
+    return {
+        "schema_version": 1,
+        "case_id": opaque_key,
+        "base_ref": "base",
+        "head_ref": "head",
+        "findings": entries,
+    }

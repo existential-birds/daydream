@@ -125,3 +125,46 @@ def test_build_gold_list_rejects_locationless_finding():
         assert False, "expected CompileError for a location-less finding"
     except CompileError as exc:
         assert "location" in str(exc)
+
+
+def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import verifier_core as vc
+    findings = [
+        {"finding_id": "b" * 64, "title": "Cache", "body": "collides", "severity": "high",
+         "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
+         "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
+        {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": None,
+         "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
+         "provenance": {"kind": "authored", "source_ids": []}},
+    ]
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    art = build.build_oracle_artifact(key, findings)
+    assert art["schema_version"] == 1 and art["case_id"] == key
+    assert art["base_ref"] == "base" and art["head_ref"] == "head"
+    # findings are ordered by finding_id ascending; ordinal = position in that order
+    flat = [
+        {"title": f["title"], "body": f["body"], "severity": f["severity"],
+         "path": f["location"]["path"], "start_line": f["location"]["start_line"],
+         "end_line": f["location"]["end_line"]}
+        for f in sorted(findings, key=lambda f: f["finding_id"])
+    ]
+    expected_ids = []
+    groups: dict[tuple, int] = {}
+    for f in flat:
+        canon = (f["title"], f["body"], f["severity"] or "", f["path"], f["start_line"], f["end_line"])
+        ordinal = groups.get(canon, 0)
+        groups[canon] = ordinal + 1
+        expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
+    assert [f["candidate_id"] for f in art["findings"]] == expected_ids
+    # round-trips through the verifier's own validation
+    assert vc.validate_candidate_artifact(art)
+
+
+def test_build_oracle_artifact_clean_has_empty_findings():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import verifier_core as vc
+    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
+    art = build.build_oracle_artifact(key, [])
+    assert art["findings"] == []
+    assert vc.validate_candidate_artifact(art) == []
