@@ -263,6 +263,8 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
     if not candidate.get("exact_acceptable"):
         raise CurationError(f"candidate {source_id} is not exact_acceptable")
 
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
     finding = {
         "title": candidate["title"],
         "body": candidate["body"],
@@ -316,6 +318,8 @@ def add_finding(
     source_ids = source_ids or []
     raw = _load_case(root, case_id)
     _check_candidate_sources(raw, source_ids, case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
     finding = {
         "title": title,
         "body": body,
@@ -363,6 +367,7 @@ def replace_findings(
     """
     raw = _load_case(root, case_id)
     curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
     findings = curation.setdefault("findings", [])
     index = next(
         (i for i, f in enumerate(findings) if f.get("finding_id") == finding_id),
@@ -411,7 +416,31 @@ def exclude_evidence(
         raise CurationError(f"source {source_id} is not a candidate of case {case_id}")
 
     curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
     exclusions = [e for e in curation.get("exclusions", []) if e.get("source_id") != source_id]
     exclusions.append({"source_id": source_id, "reason": reason, "note": note})
     curation["exclusions"] = exclusions
     _stage_case(root, case_id, raw, op="exclude-evidence")
+
+
+def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
+    """Apply the plan §7 state discipline to every gold/provenance/evidence mutation.
+
+    - a ``ready`` case first goes ``ready -> draft`` (clearing attestation);
+    - a ``stale`` case stays ``stale`` but clears attestation;
+    - a ``draft`` is already draft;
+    - an ``excluded``/``unreplayable`` case rejects gold mutations (only
+      re/include or case-exclude paths apply there).
+    """
+    state = curation.get("state")
+    if state == "ready":
+        schema.validate_case_transition("ready", "draft")
+        curation["state"] = "draft"
+        curation["snapshot_attested"] = False
+    elif state == "stale":
+        curation["snapshot_attested"] = False
+    elif state in ("excluded", "unreplayable"):
+        raise CurationError(
+            f"gold mutations are rejected on a {state} case (re-include or case-exclude it first)"
+        )
+    return curation

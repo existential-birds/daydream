@@ -267,6 +267,18 @@ def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake
     assert len(raw["curation"]["exclusions"]) == 1
 
 
+def test_reopen_for_mutation_transitions(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    cur.update({"state": "ready", "snapshot_attested": True})
+    reopened = cu._reopen_for_mutation(cur)
+    assert reopened["state"] == "draft" and reopened["snapshot_attested"] is False
+    cur.update({"state": "stale", "snapshot_attested": True})
+    reopened = cu._reopen_for_mutation(cur)
+    assert reopened["state"] == "stale" and reopened["snapshot_attested"] is False
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
