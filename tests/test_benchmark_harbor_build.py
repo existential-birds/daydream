@@ -553,6 +553,25 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path, fake_
     assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
 
 
+def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    build.compile_workspace(ws)                                # successful baseline
+    before = _harbor_tree_bytes(ws)
+    # force a mid-compile failure: drop the snapshot bundle so the case can no longer compile
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    (ws / raw["snapshot"]["bundle_file"]).unlink()
+    try:
+        build.compile_workspace(ws)
+        assert False, "expected CompileError for a missing bundle"
+    except CompileError:
+        pass
+    assert _harbor_tree_bytes(ws) == before                    # prior tree fully intact
+    assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
