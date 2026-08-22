@@ -150,3 +150,29 @@ def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str):
     if ht is None:
         return "missing_object"
     return (bt, ht)
+
+
+def degenerate(mirror_repo: Path, base_tree: str, head_tree: str) -> str | None:
+    """Classify a degenerate (empty) base/head change, or None when real.
+
+    Equal trees return ``"equal_trees"`` (the more specific diagnosis); a
+    non-empty diff returns ``None``. A git diff failure raises ``GitError``.
+    """
+    if base_tree == head_tree:
+        return "equal_trees"
+    proc = git_ops._run_git(mirror_repo, ["diff", "--binary", "--quiet", base_tree, head_tree], retries=0)
+    if proc.returncode != 0:
+        # non-zero means the trees differ (git diff --quiet: 0 = no changes).
+        return None
+    return "empty_diff"
+
+
+def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
+    """sha256 of the canonical binary-safe diff between two commits."""
+    proc = git_ops._run_git(
+        mirror_repo, ["diff", "--binary", base_sha, head_sha], retries=0, capture_bytes=True
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        raise git_ops.GitError(f"git diff --binary {base_sha} {head_sha} failed: {stderr.strip()}")
+    return hashlib.sha256(proc.stdout).hexdigest()

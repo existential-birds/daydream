@@ -163,3 +163,22 @@ def test_resolve_base_and_trees(tmp_path):
     bt, ht = sn.resolve_trees(m, base, _SHA_HEAD)
     assert bt == _seed_base_tree() and ht == _seed_head_tree()
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: degenerate-case detection + canonical diff sha
+# ---------------------------------------------------------------------------
+
+
+def test_degenerate_equal_trees_and_canonical_diff(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    assert sn.degenerate(m, _seed_base_tree(), _seed_base_tree()) == "equal_trees"
+    assert sn.degenerate(m, _seed_base_tree(), _seed_head_tree()) is None   # real change
+    d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+    assert re.fullmatch(r"[0-9a-f]{64}", d)
