@@ -338,8 +338,66 @@ def test_cli_import_prs_drives_command(tmp_path, fake_gh, capsys):
     assert raw["pull_requests"][0]["import_state"] == "fetched"
     out = capsys.readouterr().out
     assert "octocat" in out and "private" in out        # preflight print: identity + visibility
-    assert "1" in out                                       # requested PR count
+    assert "1" in out                                        # requested PR count
     assert str(ws / "imports") in out                      # local destination
+
+
+def _curate_case(ws, case_file):
+    """Mark a materialized case ready + attested with one historical finding."""
+    import yaml
+
+    from daydream.benchmark.schema import derive_finding_id
+    from daydream.benchmark.storage import load_yaml_strict
+
+    path = ws / "cases" / case_file
+    raw = load_yaml_strict(path)
+    finding = {
+        "title": "bot asks to fix the cache",
+        "body": "please fix",
+        "severity": "low",
+        "location": {"path": "a.py", "start_line": 4, "end_line": 4},
+        "provenance": {"kind": "historical", "source_ids": ["github:inline_comment:1"]},
+    }
+    finding["finding_id"] = derive_finding_id(finding)
+    raw["curation"] = {
+        "state": "ready",
+        "snapshot_attested": True,
+        "clean_attested": False,
+        "gold_status": "findings",
+        "findings": [finding],
+        "exclusions": [],
+        "case_exclusion": None,
+    }
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)   # seed REST with one evidence record via the comment fixture below
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    assert rc == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # curation.state=ready, snapshot_attested=True
+    # refresh re-fetches; the referenced evidence now disappears
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True)
+    assert rc == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
+    assert case["curation"]["findings"]              # prior curated findings preserved
 
 
 def test_benchmark_help_lists_import_prs():

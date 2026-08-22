@@ -603,14 +603,32 @@ def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[str, str]]:
+    return frozenset((e.source_id, e.body_sha256) for e in doc.evidence)
+
+
+def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[str, str]]:
+    return frozenset(
+        (str(e.get("source_id")), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
+    )
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
     requested_heads: list[str],
     import_file: str,
     import_sha256: str,
+    *,
+    prior_curations: dict[str, dict[str, Any]] | None = None,
+    changed: bool = False,
 ) -> list[tuple[str, str, dict[str, Any]]]:
-    """One materialized case document per requested head."""
+    """One materialized case document per requested head.
+
+    When *changed* is True and a prior curated case exists, its curation is
+    carried over and flipped to ``stale`` with attestation cleared — findings
+    and exclusions are never overwritten by a refresh.
+    """
     pull_request = doc.pull_request
     base_sha = (pull_request.get("base") or {}).get("sha")
     out: list[tuple[str, str, dict[str, Any]]] = []
@@ -622,6 +640,21 @@ def _case_materialize(
         seen.add(head_sha)
         case_id = schema.case_id_for(number, head_sha)
         candidates = project_candidates(doc, head_sha)
+        curation: dict[str, Any] = {
+            "state": "draft",
+            "snapshot_attested": False,
+            "clean_attested": False,
+            "gold_status": None,
+            "findings": [],
+            "exclusions": [],
+            "case_exclusion": None,
+        }
+        if changed and prior_curations and case_id in prior_curations:
+            prior = prior_curations[case_id]
+            curation = dict(prior)
+            if prior.get("state") in ("ready", "stale"):
+                curation["state"] = "stale"
+                curation["snapshot_attested"] = False
         case_doc: dict[str, Any] = {
             "schema_version": 1,
             "case_id": case_id,
@@ -635,15 +668,7 @@ def _case_materialize(
                 "error": None,
             },
             "source": {"import_file": import_file, "import_sha256": import_sha256},
-            "curation": {
-                "state": "draft",
-                "snapshot_attested": False,
-                "clean_attested": False,
-                "gold_status": None,
-                "findings": [],
-                "exclusions": [],
-                "case_exclusion": None,
-            },
+            "curation": curation,
             "candidates": [c.model_dump(mode="json") for c in candidates],
         }
         out.append((case_id, f"cases/{case_id}.yaml", case_doc))
@@ -711,6 +736,14 @@ def _pending_pr_state(raw: dict[str, Any], number: int) -> str:
     return "pending"
 
 
+def _manifest_entry(raw: dict[str, Any], number: int) -> dict[str, Any] | None:
+    """The ledger entry for *number*, or None when not yet imported."""
+    for entry in raw.get("pull_requests", []):
+        if entry.get("number") == number:
+            return entry
+    return None
+
+
 def _sorted_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def _key(c: dict[str, Any]) -> tuple[int, str, str]:
         return (int(c["pr_number"]), schema.head_sha_from_case_id(c["case_id"]), c["case_id"])
@@ -736,7 +769,6 @@ def run_import_prs(
     import/case file — only a ledger flip to ``fetch_failed`` with an exact
     error. The overall exit is non-zero when any PR failed.
     """
-    del refresh
     root = Path(root)
     requested_heads: list[str] = []
     seen_heads: set[str] = set()
@@ -751,13 +783,31 @@ def run_import_prs(
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         repo = raw.get("source", {}).get("repository") or ""
         for number in pr_numbers:
+            existing = _manifest_entry(raw, number)
+            prior_sig: frozenset[tuple[str, str]] | None = None
+            prior_curations: dict[str, dict[str, Any]] = {}
+            import_file = f"imports/pr-{number:06d}.json"
+            if existing is not None and existing.get("import_state") == "fetched":
+                try:
+                    prior_raw = storage.load_json_strict(root / existing["import_file"])
+                    prior_sig = _evidence_signature_from_raw(prior_raw)
+                except Exception:
+                    prior_sig = None
+                for case_id in existing.get("case_ids", []):
+                    try:
+                        cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
+                        if isinstance(cur, dict):
+                            prior_curations[case_id] = cur
+                    except Exception:
+                        pass
             try:
                 doc = fetch_and_normalize(root, repo, number, heads or ["final"])
-                import_file = f"imports/pr-{number:06d}.json"
+                changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
                 import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
                 import_sha256 = hashlib.sha256(import_bytes).hexdigest()
                 cases = _case_materialize(
-                    doc, number, requested_heads, import_file, import_sha256
+                    doc, number, requested_heads, import_file, import_sha256,
+                    prior_curations=prior_curations, changed=changed,
                 )
                 with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
                     tx.stage(import_file, import_bytes)
