@@ -2,19 +2,34 @@
 
 This module is the issue-#5 browser/terminal seam: the fixed operation set a
 curator (or the future interactive client) drives every gold-curation action
-through. Every mutating operation:
+through. Every mutating operation (``accept_candidate``, ``add_finding``,
+``add_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
+``attest_clean``, ``exclude_case``, ``reinclude_case``, ``apply_gold_fragment``)
+runs its complete read -> validate -> mutate -> commit sequence under the
+workspace lock:
 
-1. loads the target case YAML strictly,
-2. derives ``finding_id`` / ``provenance.kind`` / ``gold_status`` /
-   ``gold_mode`` / ``state`` — never caller-supplied,
-3. enforces state transitions via :meth:`schema.validate_case_transition`,
-4. re-validates the whole resulting :class:`schema.CaseDocument` plus
+1. acquires the blocking :class:`storage.WorkspaceLock` (process-reentrant per
+   root), so concurrent curators/processes serialize and can never silently
+   lose an update,
+2. heals any prior interrupted journal via :func:`storage.recover_startup`
+   under the lock, so a crashed earlier process's leftover ``committing``
+   journal is rolled back before a new write,
+3. loads the target case YAML strictly **after** acquiring the lock — never a
+   stale pre-lock view,
+4. derives ``finding_id`` / ``provenance.kind`` / ``gold_status`` /
+   ``gold_mode`` / ``state`` — never caller-supplied — and enforces state
+   transitions via :meth:`schema.validate_case_transition`,
+5. re-validates the whole resulting :class:`schema.CaseDocument` plus
    curation-service rules (location-vs-head from the shared bare mirror,
    >50 gold cap, duplicate canonical finding, historical byte-match,
    exclusion/re-inclusion contract),
-5. stages the rewritten case through the existing
+6. stages the rewritten case through the existing
    :class:`storage.Transaction` journal, or raises :class:`CurationError`
    naming the violated invariant **before** opening the Transaction.
+
+Read-only paths (``list_cases``, ``get_case``, ``validate_case``, the pager)
+take no lock and never mutate, so status/pager stay safe to run concurrently
+with a writer and no nested-lock deadlock is possible.
 
 The service imports no Rich/input/editor/HTTP code; it depends only on the
 fixed schema, the mode-safe storage/journal layer, the bare mirror, and
