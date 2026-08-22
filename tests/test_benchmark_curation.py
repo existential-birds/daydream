@@ -380,7 +380,7 @@ def test_stable_curation_types_exported():
     assert callable(bm.accept_candidate)
     assert callable(bm.mark_ready)
     assert callable(bm.validate_case)
-    assert bm.CurationError
+    assert issubclass(bm.CurationError, Exception)
 
 
 def test_stale_case_edit_stays_stale_and_re_attests(tmp_path, fake_gh):
