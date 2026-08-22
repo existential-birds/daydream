@@ -779,6 +779,33 @@ def _error_details(provider: str, model: str, request_counts: dict[str, int], er
     }
 
 
+def _write_error_artifact(
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+    gold_count: int,
+) -> verifier_core.Reward:
+    """Write the fail-whole error artifacts and return the error reward.
+
+    Every failure path -- validation, binding, digest, judging, exhausted
+    retries, a missing client, or an unexpected runtime exception -- funnels
+    through here so ``reward.json``/``reward-details.json`` are always written
+    with typed bounded diagnostics, never a bare exit. ``errors`` must already
+    be bounded/redacted before the call.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    error_reward = verifier_core.Reward(
+        reward=0.0, gold_count=gold_count, verifier_error=1
+    )
+    details = _error_details(provider, model, request_counts, errors)
+    _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
+    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+    return error_reward
+
+
 def run_verifier(
     gold_path: str | Path,
     artifact_path: str | Path,
@@ -841,7 +868,7 @@ def run_verifier(
             matches = verifier_core.maximum_matching(retained, gold_ids, cand_ids)
             request_counts["requests"] = counting.requests
             if counting.errors:
-                errors.extend(counting.errors)
+                errors.extend(_bounded_error(str(e)) for e in counting.errors)
 
         reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
         inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
@@ -850,14 +877,17 @@ def run_verifier(
         _atomic_write(out_dir, "reward-details.json", json.dumps(details))
         return reward
     except VerifierError as exc:
-        errors.insert(0, str(exc))
-        error_reward = verifier_core.Reward(
-            reward=0.0, gold_count=len(gold_parsed), verifier_error=1
+        errors.insert(0, _bounded_error(str(exc)))
+        return _write_error_artifact(
+            out_dir, provider, model, request_counts, errors, len(gold_parsed)
         )
-        details = _error_details(provider, model, request_counts, errors)
-        _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
-        _atomic_write(out_dir, "reward-details.json", json.dumps(details))
-        return error_reward
+    except Exception as exc:
+        # Unexpected runtime failures must not escape to a bare exit: they
+        # become a typed bounded diagnostic that still writes both artifacts.
+        errors.insert(0, _bounded_error(f"unexpected verifier failure: {exc}"))
+        return _write_error_artifact(
+            out_dir, provider, model, request_counts, errors, len(gold_parsed)
+        )
 
 
 def _build_client(env: dict[str, Any]) -> Any:

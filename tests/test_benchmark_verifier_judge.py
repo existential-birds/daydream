@@ -1140,3 +1140,27 @@ def test_verdict_reasoning_is_size_capped_and_errors_are_bounded(sr_module) -> N
     with pytest.raises(sr.VerifierError) as e:
         sr.parse_verdict(huge)
     assert len(str(e.value).encode("utf-8")) < 5000  # never echoes the full value
+
+
+def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "g.json"
+    gold_path.write_text(json.dumps(_gold_list(1, case_id="c")))
+    _write_metadata(gold_path, case_id="c")
+    art_path = tmp_path / "r.json"
+    art_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c", n=1)))
+    out = tmp_path / "out"
+    class Exploding:
+        async def complete_json(self, *, user, system, max_tokens):
+            raise RuntimeError("sk-ant-leakme123 boom %s" % ("y" * 1000))
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
+    # unexpected runtime exception no longer escapes to a bare exit
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    details = json.loads((out / "reward-details.json").read_text())
+    blob = json.dumps(details)
+    assert "sk-ant-leakme123" not in blob and "<redacted>" in blob   # no credential, redacted
+    assert len(details["errors"]) >= 1 and any("unexpected" in e for e in details["errors"])
