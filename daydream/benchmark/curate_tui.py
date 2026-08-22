@@ -290,6 +290,55 @@ _EVIDENCE_REASONS = (
 )
 
 
+_CASE_EXCLUSION_REASONS = (
+    "unreplayable",
+    "not_suitable",
+    "duplicate_case",
+    "other",
+)
+
+
+def _action_exclude_case(
+    root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
+) -> str:
+    """The ``[z]`` case-exclusion action (4 fixed reasons + optional note)."""
+    reason = _prompt(
+        read_line, f"reason ({'|'.join(_CASE_EXCLUSION_REASONS)}): "
+    ).strip()
+    if reason not in _CASE_EXCLUSION_REASONS:
+        print(f"invalid case exclusion reason {reason!r}")
+        return "continue"
+    note: str | None = None
+    if reason == "other":
+        value = _prompt(read_line, "note: ").strip()
+        if value in ("q", "Q"):
+            return "quit"
+        if not value:
+            print("case exclusion reason 'other' requires a note")
+            return "continue"
+        note = value
+    try:
+        cu.exclude_case(root, case_id, reason, note=note)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"excluded case {case_id}")
+    return "rerender"
+
+
+def _action_reinclude(
+    root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
+) -> str:
+    """The ``[i]`` re-include action for an excluded case."""
+    try:
+        cu.reinclude_case(root, case_id)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"re-included case {case_id}")
+    return "rerender"
+
+
 def _action_clean(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
 ) -> str:
@@ -405,6 +454,10 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
         return _action_clean(root, case_id, view, read_line)
     if action == "r":
         return _action_ready(root, case_id, view, read_line)
+    if action == "z":
+        return _action_exclude_case(root, case_id, view, read_line)
+    if action == "i":
+        return _action_reinclude(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"

@@ -247,3 +247,28 @@ def test_stale_case_shows_marker_and_re_attests(tmp_path, fake_gh, capsys):
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
     out = capsys.readouterr().out
     assert f"valid against head {head_sha}" in out          # stale re-ran the SHA confirm
+
+
+def test_case_exclude_and_reinclude(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"
+
+    run_curate_tui(ws, case_id, read_line=_scripted("z", "not_suitable", "q"))
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "excluded"
+    assert cur["case_exclusion"] == {"reason": "not_suitable", "note": None}
+
+    run_curate_tui(ws, case_id, read_line=_scripted("i", "q"))     # resume re-include
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "draft" and cur["case_exclusion"] is None
+
+
+def test_case_exclude_other_requires_note(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    run_curate_tui(ws, case_id, read_line=_scripted("z", "other", "q"))  # no note
+    assert path.read_bytes() == before
+    assert "Traceback" not in capsys.readouterr().err
