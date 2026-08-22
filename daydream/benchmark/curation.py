@@ -97,3 +97,70 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 def list_case(root: Path, case_id: str) -> dict[str, Any]:
     """Read-only view of one case document (its raw case dict)."""
     return _load_case(root, case_id)
+
+
+MAX_GOLD_FINDINGS = 50
+
+
+def _snapshot_head(raw: dict[str, Any]) -> str | None:
+    """The 40-hex head SHA the case's snapshot was frozen at, or None."""
+    snapshot_doc = raw.get("snapshot") or {}
+    return snapshot_doc.get("original_head_sha")
+
+
+def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any]) -> None:
+    """Location-vs-head: path present in the head file, ordered positive lines."""
+    location = finding.get("location")
+    if location is None:
+        return
+    head_sha = _snapshot_head(raw)
+    if not head_sha:
+        raise CurationError("finding has a location but the snapshot carries no frozen head")
+    path = location.get("path")
+    start = location.get("start_line")
+    end = location.get("end_line")
+    line_count = _head_file_line_count(root, head_sha, path)
+    if start < 1:
+        raise CurationError(f"finding location start_line {start} must be >= 1")
+    if end > line_count:
+        raise CurationError(
+            f"finding location {path!r} end_line {end} exceeds the head file's "
+            f"line count {line_count}"
+        )
+
+
+def validate_case(root: Path, case_id: str) -> None:
+    """Re-validate one case through the fixed schema plus curation-service rules.
+
+    Runs the curation rules first (raising :class:`CurationError` naming the
+    violated invariant) so a duplicate canonical finding or >50 gold cap is
+    rejected before the fixed-schema construction; then builds the full
+    :class:`schema.CaseDocument` (whose pydantic ``ValidationError``s propagate
+    unchanged as contract failures). Returns ``None`` on success and never
+    writes.
+    """
+    raw = _load_case(root, case_id)
+    curation = raw.get("curation") or {}
+    findings = curation.get("findings") or []
+
+    if len(findings) > MAX_GOLD_FINDINGS:
+        raise CurationError(f"case {case_id} exceeds 50 gold findings")
+    ids = [f.get("finding_id") for f in findings]
+    for fid in set(ids):
+        if ids.count(fid) > 1:
+            raise CurationError(f"case {case_id} has duplicate finding {fid}")
+
+    candidate_ids = {c.get("source_id") for c in raw.get("candidates") or []}
+    # TODO(Task 4): byte-match the historical finding to its candidate projection.
+    for finding in findings:
+        _validate_location(root, raw, finding)
+        provenance = finding.get("provenance") or {}
+        if provenance.get("kind") == "historical":
+            for src in provenance.get("source_ids") or []:
+                if src not in candidate_ids:
+                    raise CurationError(
+                        f"historical finding references unknown candidate {src}"
+                    )
+
+    schema.CaseDocument(**raw)
+    return None

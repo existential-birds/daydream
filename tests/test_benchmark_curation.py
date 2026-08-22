@@ -210,3 +210,34 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     assert cu._head_file_line_count(ws, head_sha, "feature.py") == 4
     with pytest.raises(cu.CurationError):
         cu._head_file_line_count(ws, head_sha, "missing.py")
+
+
+def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.schema import derive_finding_id
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    assert cu.validate_case(ws, case_id) is None
+
+    # inject a duplicate canonical finding directly, then validate -> rejected
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    f1 = {"title": "dup", "body": "b", "severity": "low",
+          "provenance": {"kind": "authored", "source_ids": []}}
+    f1["finding_id"] = derive_finding_id(f1)
+    raw["curation"]["findings"] = [f1, dict(f1)]   # same canonical -> duplicate
+    raw["curation"]["state"] = "draft"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    with pytest.raises(cu.CurationError):
+        cu.validate_case(ws, case_id)
+
+    # >50 gold -> rejected
+    raw["curation"]["findings"] = [
+        {"title": f"f{i}", "body": "b", "severity": "low",
+         "provenance": {"kind": "authored", "source_ids": []}} for i in range(51)]
+    for f in raw["curation"]["findings"]:
+        f["finding_id"] = derive_finding_id(f)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    with pytest.raises(cu.CurationError):
+        cu.validate_case(ws, case_id)
