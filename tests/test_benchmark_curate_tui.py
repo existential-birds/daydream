@@ -180,3 +180,26 @@ def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     f = raw["curation"]["findings"][0]
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
+
+
+def test_action_exclude_evidence_other_requires_note(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = cu.get_case(ws, case_id)["candidates"][0]["source_id"]
+
+    run_curate_tui(ws, case_id,
+                   read_line=_scripted("x", "1", "other", "stale link", "q"))
+    ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"][0]
+    assert ex == {"source_id": src, "reason": "other", "note": "stale link"}
+
+
+def test_action_exclude_evidence_rejects_stray_note(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    run_curate_tui(ws, case_id,
+                   read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
+    assert path.read_bytes() == before                      # service rejects the note
+    assert "Traceback" not in capsys.readouterr().err

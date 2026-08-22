@@ -279,6 +279,50 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
     return "rerender"
 
 
+_EVIDENCE_REASONS = (
+    "fixed_before_snapshot",
+    "not_actionable",
+    "incorrect",
+    "duplicate",
+    "style_only",
+    "out_of_scope",
+    "other",
+)
+
+
+def _action_exclude(
+    root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
+) -> str:
+    """The ``[x]`` evidence-exclusion action (7 fixed reasons + optional note)."""
+    candidates = view.get("candidates") or []
+    text = _prompt(read_line, "evidence (number, 0 to cancel): ").strip()
+    if text == "0":
+        return "continue"
+    try:
+        indices = parse_indices(text, len(candidates))
+    except ValueError as exc:
+        print(str(exc))
+        return "continue"
+    source_id = candidates[indices[0]]["source_id"]
+    reason = _prompt(
+        read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
+    ).strip()
+    if reason not in _EVIDENCE_REASONS:
+        print(f"invalid evidence reason {reason!r}")
+        return "continue"
+    note = _prompt(read_line, "note: ").strip() or None
+    if reason == "other" and not note:
+        print("reason 'other' requires a note")
+        return "continue"
+    try:
+        cu.exclude_evidence(root, case_id, source_id, reason=reason, note=note)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"excluded {source_id}")
+    return "rerender"
+
+
 def _action_accept(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
     """The ``[a]`` accept-candidate action: one exact-acceptable candidate."""
     candidates = view.get("candidates") or []
@@ -312,6 +356,8 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
         return _action_new(root, case_id, view, read_line)
     if action == "e":
         return _action_edit(root, case_id, view, read_line)
+    if action == "x":
+        return _action_exclude(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"
