@@ -618,6 +618,43 @@ def test_concurrent_clean_attestation_serializes(tmp_path, fake_gh):
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
 
 
+def test_concurrent_adds_then_final_readiness_lands(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    procs = [_spawn_worker(["add", str(ws), case_id, f"r-{i}"]) for i in range(3)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, (out, err)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)                 # final readiness on top of the concurrent adds
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    # All three concurrent adds land before readiness (order is lock-acquisition
+    # order, so title order is nondeterministic — assert the set, not the order).
+    assert sorted(f["title"] for f in raw["curation"]["findings"]) == ["r-0", "r-1", "r-2"]
+    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
+
+
+def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
+    import time
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    lock_path = ws / ".benchmark.lock"
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, time, sys\n"
+         "fd = open(sys.argv[1], 'w')\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\n"
+         "time.sleep(3)\n",
+         str(lock_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout.readline().strip() == "held"            # another process now holds the flock
+    t0 = time.monotonic()
+    cu.list_cases(ws); cu.get_case(ws, case_id); cu.validate_case(ws, case_id)
+    assert time.monotonic() - t0 < 2.0                           # read-only did not block on the held lock
+    holder.wait(timeout=10)
+
+
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     from daydream.benchmark.storage import Transaction
