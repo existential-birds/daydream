@@ -118,4 +118,35 @@ def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     if verify.returncode != 0:
         return "head_unreachable"
     anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
+    anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
+
+
+def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -> str | None:
+    """The merge-base of the base tip and head, or None when none exists.
+
+    Soft-failure: returns ``None`` for a documented no-merge-base case (a real
+    broken git invocation propagates as ``GitError``).
+    """
+    proc = git_ops._run_git(mirror_repo, ["merge-base", base_tip_ref, head_sha], retries=0)
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout.strip()
+    return out or None
+
+
+def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str):
+    """Peel ``^{tree}`` for both commits, or return ``"missing_object"``."""
+    def _tree(sha: str) -> str | None:
+        proc = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{tree}}"], retries=0)
+        if proc.returncode != 0:
+            return None
+        return proc.stdout.strip()
+
+    bt = _tree(base_sha)
+    if bt is None:
+        return "missing_object"
+    ht = _tree(head_sha)
+    if ht is None:
+        return "missing_object"
+    return (bt, ht)

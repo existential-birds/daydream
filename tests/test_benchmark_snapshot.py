@@ -143,3 +143,23 @@ def test_ancestor_of_pr_head_enforced(tmp_path):
     assert sn.head_reachability(m, _SHA_HEAD, pr_head) == "ok"      # equal
     assert sn.head_reachability(m, _SHA_BASE3, pr_head) == "head_not_on_pr"
     assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: merge-base resolution + tree reachability
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_base_and_trees(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
+    assert base == _SHA_BASE2
+    bt, ht = sn.resolve_trees(m, base, _SHA_HEAD)
+    assert bt == _seed_base_tree() and ht == _seed_head_tree()
+    assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
