@@ -100,9 +100,10 @@ def bounded_pr_context(
     so a missing key is a legitimate empty body -- the sole allowed default).
     When the normalized ``title:\n<body>`` text exceeds *max_bytes* bytes (or
     the body line's share thereof), it is truncated on a whole UTF-8 char and
-    a ``[truncated; full_body_sha256=<sha256 of the full pre-truncation text>]``
-    marker line is emitted inside the block, before the closing tag. The digest
-    is computed over the full pre-truncation ``title:\n<body>`` text.
+    a ``[truncated; full_body_sha256=<digest>]`` marker line is emitted inside
+    the block, before the closing tag. The digest is the persisted normalized-
+    body digest (``body_sha256``) when present, else a deterministic fallback
+    to ``sha256(stored body)`` -- never re-derived from the escaped surface.
     """
     title = _escape_historical_delimiters(str(pull_request.get("title") or ""))
     body = _escape_historical_delimiters(str(pull_request.get("body") or ""))
@@ -126,7 +127,16 @@ def bounded_pr_context(
         t_title, t_body = truncated_text, ""
         if not t_title.startswith("title: "):
             t_title = "title: " + t_title
-    marker = f"[truncated; full_body_sha256={hashlib.sha256(full.encode('utf-8')).hexdigest()}]"
+    # The marker attests the persisted normalized-body digest (body_sha256 at
+    # import time) verbatim; a predate doc lacking it falls back to the digest
+    # of the stored normalized body. Never re-derived from the escaped surface.
+    persisted = str(pull_request.get("body_sha256") or "")
+    digest = (
+        persisted
+        if persisted
+        else hashlib.sha256(str(pull_request.get("body") or "").encode("utf-8")).hexdigest()
+    )
+    marker = f"[truncated; full_body_sha256={digest}]"
     return (
         f"<historical_pr_context>\n{t_title}\nbody: {t_body}\n{marker}\n"
         "</historical_pr_context>"
@@ -483,10 +493,14 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     for rel, sha in assets:
         files[rel] = sha
 
+    number = pull_request.get("number")
+    if not isinstance(number, int):
+        raise CompileError(f"case {case_id} missing or malformed PR number: {number!r}")
+
     return {
         "key": key,
         "case_id": case_id,
-        "pr_number": int(pull_request.get("number") or 0),
+        "pr_number": number,
         "repository": repo_slug,
         "original_base_sha": snapshot.get("original_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
