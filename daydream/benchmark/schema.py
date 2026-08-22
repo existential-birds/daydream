@@ -5,9 +5,11 @@ schemas plus their invariants:
 
 * ``normalize_hostname`` and the manifest ``source``/``privacy`` blocks.
 * the ``pull_requests[]`` ledger and ``cases[]`` index.
-* the snapshot ``ready | unreplayable`` union, the case/gold/provenance/
+* the snapshot ``ready | unreplayable | imported`` union, the case/gold/provenance/
   exclusion models, ``case_id`` / finding-id derivation, and the Daydream
   self-marker rule.
+* the import models: ``ImportDocument`` and its ``EvidenceRecord``/``Candidate``
+  evidence + candidate records with stable ``github:<kind>:<id>`` source IDs.
 
 Every model uses ``extra="forbid"`` so an unknown field is a schema violation.
 Later tasks add derived workspace state, transitions, and the ``0/2/1``
@@ -38,6 +40,10 @@ __all__ = [
     "Snapshot",
     "SnapshotReady",
     "SnapshotUnreplayable",
+    "SnapshotImported",
+    "EvidenceRecord",
+    "Candidate",
+    "ImportDocument",
     "derive_finding_id",
     "derive_gold_status",
     "derive_gold_mode",
@@ -46,6 +52,25 @@ __all__ = [
 _REPOSITORY_SHAPE = re.compile(r"^[^/]+/[^/]+$")
 _HEX40 = re.compile(r"^[0-9a-f]{40}$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_ID_RE = re.compile(r"^github:(review|inline_comment|thread_comment|issue_comment):\d+$")
+
+
+def _rfc3339(value: str | datetime) -> datetime:
+    """Parse an RFC3339 timestamp (UTC) into a timezone-aware datetime."""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"timestamp must carry a UTC offset, got {value!r}")
+    return parsed.astimezone(timezone.utc)
+
+
+def _hex64(value: str) -> str:
+    """Require a lowercase 64-hex digest."""
+    if not _HEX64.fullmatch(value):
+        raise ValueError(f"digest must be lowercase 64-hex, got {value!r}")
+    return value
 
 
 def normalize_hostname(raw: str) -> str:
@@ -212,6 +237,9 @@ class BenchmarkManifest(BaseModel):
         ordered = sorted(self.cases, key=_cases_key)
         if [c.case_id for c in ordered] != [c.case_id for c in self.cases]:
             raise ValueError("cases[] index must be sorted by (pr_number, head-sha, case_id)")
+        ids = [c.case_id for c in self.cases]
+        if len(set(ids)) != len(ids):
+            raise ValueError("cases[] index must not contain duplicate case_id rows")
         return self
 
 
@@ -351,7 +379,31 @@ class SnapshotUnreplayable(_SnapshotBase):
         return v
 
 
-Snapshot = Annotated[SnapshotReady | SnapshotUnreplayable, Field(discriminator="status")]
+class SnapshotImported(_SnapshotBase):
+    """An import-time snapshot holding only the PR-known base/head SHAs.
+
+    Issue 3 transitions ``imported -> ready|unreplayable`` once snapshot
+    bundles exist; at import the tree/bundle fields are unknowable, so they
+    are deliberately absent.
+    """
+
+    status: Literal["imported"]
+    original_base_sha: str
+    original_head_sha: str
+    error: None = None
+
+    @field_validator("original_base_sha", "original_head_sha")
+    @classmethod
+    def _sha40(cls, v: str) -> str:
+        if not _HEX40.fullmatch(v):
+            raise ValueError(f"SHA must be lowercase 40-hex, got {v!r}")
+        return v
+
+
+Snapshot = Annotated[
+    SnapshotReady | SnapshotUnreplayable | SnapshotImported,
+    Field(discriminator="status"),
+]
 
 # ---------------------------------------------------------------------------
 # location / finding / provenance / exclusions
@@ -387,6 +439,156 @@ class Location(BaseModel):
         if self.start_line > self.end_line:
             raise ValueError("start_line must be <= end_line")
         return self
+
+
+class _EvidenceAuthor(BaseModel):
+    """The author of an evidence record (login + GitHub user/bot type)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    login: str
+    type: str
+
+
+class EvidenceRecord(BaseModel):
+    """One normalized GitHub PR evidence record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    kind: Literal["review", "inline_comment", "thread_comment", "issue_comment"]
+    database_id: int
+    node_id: str
+    author: _EvidenceAuthor
+    body: str
+    body_sha256: str
+    created_at: datetime
+    updated_at: datetime
+    submitted_at: datetime | None = None
+    commit_id: str | None = None
+    original_commit_id: str | None = None
+    path: str | None = None
+    original_path: str | None = None
+    line: int | None = None
+    start_line: int | None = None
+    original_line: int | None = None
+    review_id: str | None = None
+    thread_id: str | None = None
+    reply_to_id: str | None = None
+    subject_type: Literal["line", "file"] | None = None
+    side: Literal["LEFT", "RIGHT"] | None = None
+    start_side: Literal["LEFT", "RIGHT"] | None = None
+    resolved: bool = False
+    outdated: bool = False
+    dismissed: bool = False
+    state: str | None = None
+    is_bot: bool
+    url: str
+
+    @field_validator("source_id")
+    @classmethod
+    def _canonical_source_id(cls, v: str) -> str:
+        if not _SOURCE_ID_RE.fullmatch(v):
+            raise ValueError(f"source_id must be github:<kind>:<database-id>, got {v!r}")
+        return v
+
+    @field_validator("body_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        return _hex64(v)
+
+    @field_validator("created_at", "updated_at", "submitted_at", mode="before")
+    @classmethod
+    def _ts(cls, v: str | datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        return _rfc3339(v)
+
+    @field_validator("commit_id", "original_commit_id")
+    @classmethod
+    def _sha40_nullable(cls, v: str | None) -> str | None:
+        if v is not None and not _HEX40.fullmatch(v):
+            raise ValueError(f"commit SHA must be lowercase 40-hex, got {v!r}")
+        return v
+
+    @field_validator("line", "start_line", "original_line")
+    @classmethod
+    def _positive_line(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("line anchor must be positive when set")
+        return v
+
+    @model_validator(mode="after")
+    def _body_hash(self) -> "EvidenceRecord":
+        if self.body and self.body_sha256 != hashlib.sha256(self.body.encode("utf-8")).hexdigest():
+            raise ValueError("body_sha256 must equal sha256(body)")
+        return self
+
+
+class Candidate(BaseModel):
+    """An import-time deterministic candidate projected from one evidence record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    title: str
+    body: str
+    severity: None = None
+    location: Location | None = None
+    exact_acceptable: bool
+    not_exact_reason: str | None = None
+
+    @field_validator("source_id")
+    @classmethod
+    def _canonical_source_id(cls, v: str) -> str:
+        if not _SOURCE_ID_RE.fullmatch(v):
+            raise ValueError(f"source_id must be github canonical, got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _reason(self) -> "Candidate":
+        if self.exact_acceptable is False and self.not_exact_reason is None:
+            raise ValueError("not_exact_reason is required when exact_acceptable is False")
+        if self.exact_acceptable and self.not_exact_reason is not None:
+            raise ValueError("not_exact_reason must be blank when exact_acceptable is True")
+        return self
+
+
+class _ImportRepository(BaseModel):
+    """The resolved repository identity captured at import time."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    name_with_owner: str
+    visibility: Literal["public", "private"]
+
+
+class _FetchInfo(BaseModel):
+    """The fetch bookkeeping of one import document."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    fetched_at: str
+    etag: str | None = None
+    payload_sha256: str
+
+    @field_validator("payload_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        return _hex64(v)
+
+
+class ImportDocument(BaseModel):
+    """A normalized, verifiable import of one PR's full evidence set."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    repository: _ImportRepository
+    pull_request: dict
+    evidence: list[EvidenceRecord] = []
+    fetch: _FetchInfo
 
 
 class Provenance(BaseModel):
@@ -552,6 +754,14 @@ class CaseDocument(BaseModel):
     snapshot: Snapshot
     source: dict
     curation: Curation
+    candidates: list[Candidate] = []
+
+    @model_validator(mode="after")
+    def _unique_candidates(self) -> "CaseDocument":
+        ids = [c.source_id for c in self.candidates]
+        if len(set(ids)) != len(ids):
+            raise ValueError("case contains duplicate candidate source_ids")
+        return self
 
     @model_validator(mode="after")
     def _case_id_matches(self) -> "CaseDocument":
@@ -572,7 +782,9 @@ class CaseDocument(BaseModel):
         return self
 
 
-def snapshot_head_sha(snapshot: "SnapshotReady | SnapshotUnreplayable") -> str | None:
+def snapshot_head_sha(
+    snapshot: "SnapshotReady | SnapshotUnreplayable | SnapshotImported",
+) -> str | None:
     """The 40-hex head SHA of a snapshot, or None when unknown (unreplayable)."""
     return snapshot.original_head_sha
 
@@ -616,8 +828,8 @@ class TransitionError(Exception):
 
 _PR_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"fetched", "fetch_failed"},
-    "fetch_failed": {"fetched"},
-    "fetched": {"fetched"},
+    "fetch_failed": {"fetched", "fetch_failed"},
+    "fetched": {"fetched", "fetch_failed"},
 }
 
 _CASE_TRANSITIONS: dict[str, set[str]] = {

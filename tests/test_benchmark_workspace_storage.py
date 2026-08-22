@@ -192,3 +192,35 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
             assert not (tmp_path / "transactions").exists() or not list(
                 (tmp_path / "transactions").iterdir()
             )
+
+
+def test_import_crash_transaction_restores_before_or_after(tmp_path):
+    # The import writes {import file, case, benchmark.yaml} as one atomic unit.
+    # Driving crater recovery across that whole set proves a crash at any
+    # boundary leaves the complete before- or after-state, never a mix.
+    for boundary in ("journal", "data", "manifest"):
+        imp = tmp_path / "imports" / "pr-000101.json"
+        case = tmp_path / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
+        manifest = tmp_path / "benchmark.yaml"
+        for f in (imp, case):
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("before")
+        manifest.write_text("ledger-before")
+        with Transaction(tmp_path, op_id=f"imp-{boundary}", kind="import") as tx:
+            tx.stage("imports/pr-000101.json", b"import-after")
+            tx.stage("cases/pr-000101-aaaaaaaaaaaa.yaml", b"case-after")
+            tx.stage("benchmark.yaml", b"ledger-after")
+            tx.inject_crash(boundary)
+        recover_startup(tmp_path)
+        if boundary in ("journal", "data"):
+            assert imp.read_text() == "before"
+            assert case.read_text() == "before"
+            assert manifest.read_text() == "ledger-before"
+        else:  # manifest (complete journal kept)
+            assert imp.read_text() == "import-after"
+            assert case.read_text() == "case-after"
+            assert manifest.read_text() == "ledger-after"
+        if boundary in ("journal", "data", "manifest"):
+            assert not (tmp_path / "transactions").exists() or not list(
+                (tmp_path / "transactions").iterdir()
+            )

@@ -400,6 +400,20 @@ crash-consistent, and safe to build on.
 The legacy `daydream bench` command remains available alongside `benchmark`;
 removal is a separate cutover.
 
+- `daydream benchmark import-prs <dir> --pr N|URL [--pr-file FILE] [--head SHA]
+  [--refresh]` imports explicit private PR evidence into an initialized
+  workspace. A six-step preflight (binaries, `gh` auth to github.com, the
+  authenticated user, repository identity + read access, a credentialed
+  `git ls-remote`, then a summary print) runs before any fetch; the first
+  successful repository resolution fills `repository_id`/`visibility`
+  atomically and immutably. Each PR's import file, one case per requested
+  head, and the ledger are written as one atomic, crash-recoverable unit;
+  a failed fetch leaves no import file and marks that PR `fetch_failed` in
+  the resumable ledger. Rate-limited requests retry three times honoring
+  `Retry-After` (60s cap). `--refresh` re-fetches and marks stale cases
+  without overwriting curation. The command never selects gold and never
+  filters bot authors — bot classification is retained as metadata only.
+
 All workspace writes are atomic and journaled (`prepared | committing |
 complete`) under the workspace lock, so a crash mid-mutation restores either
 the whole before- or after-state — never a checksum-drifted partial.

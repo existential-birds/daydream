@@ -56,6 +56,18 @@ def _argv_opt(argv: list[str], name: str) -> str | None:
             return argv[i + 1]
     return None
 
+_GIT_CREDENTIAL_HELPER = (
+    "protocol=https\n"
+    "host=github.com\n"
+    "username=x\n"
+    "password=<fake>\n"
+)
+
+_LS_REMOTE_DEFAULT = (
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/head\n"
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/base\n"
+)
+
 _EMPTY_THREADS_RESPONSE: dict[str, Any] = {
     "data": {
         "repository": {
@@ -180,6 +192,15 @@ def _handle_pr_list(argv: list[str], state: Path) -> tuple[int, str, str]:
 def _handle_repo_view(argv: list[str], state: Path) -> tuple[int, str, str]:
     _record(state, {"kind": "repo view", "argv": argv, "stdin": ""})
     responses = _read_responses(state)
+    # The import-prs preflight passes a leading OWNER/REPO positional + --json
+    # and expects the full resolved identity object; legacy callers pass
+    # ``--json nameWithOwner -q .nameWithOwner`` (no leading positional) and
+    # get the bare slug.
+    if len(argv) > 2 and not argv[2].startswith("-"):
+        full = responses.get("repo-view-full")
+        if full is None:
+            return 1, "", "fake gh: no repo-view-full response configured\n"
+        return 0, json.dumps(full) + "\n", ""
     value = responses.get("repo-view")
     if value is None:
         if "pr-view" not in responses:
@@ -202,16 +223,32 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
             return 0, json.dumps(reply) + "\n", ""
         if "reviewThreads" in query:
-            return 0, json.dumps(responses.get("graphql_threads", _EMPTY_THREADS_RESPONSE)) + "\n", ""
+            variables = (payload or {}).get("variables") or {}
+            pr_num = variables.get("number") if isinstance(variables, dict) else None
+            key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
+            value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
+            return 0, json.dumps(value) + "\n", ""
         return 1, "", "fake gh: unrecognized graphql query\n"
     key = f"{method} {endpoint}"
+    if key in responses and isinstance(responses[key], dict) and "__error__" in responses[key]:
+        return 1, "", str(responses[key]["__error__"]) + "\n"
     if key in responses:
+        if responses[key] is None:
+            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[key], jq), ""
     # Query strings select/paginate; the canned response is keyed by path alone.
     bare_key = f"{method} {endpoint.split('?')[0]}"
+    if bare_key in responses and isinstance(responses[bare_key], dict) and "__error__" in responses[bare_key]:
+        return 0, "", str(responses[bare_key]["__error__"]) + "\n"
     if bare_key in responses:
+        if responses[bare_key] is None:
+            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[bare_key], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
+        return 0, _emit([], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
+        return 0, _emit([], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/comments", endpoint):
         return 0, _emit([], jq), ""
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}) + "\n", ""
@@ -244,6 +281,12 @@ def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str,
         return _handle_pr_create(argv, state)
     if argv[:2] == ["repo", "view"]:
         return _handle_repo_view(argv, state)
+    if argv[:2] == ["auth", "status"]:
+        _record(state, {"kind": "auth status", "argv": argv, "stdin": ""})
+        return 0, "", ""
+    if argv[:2] == ["auth", "git-credential"]:
+        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": ""})
+        return 0, _GIT_CREDENTIAL_HELPER, ""
     if not argv or argv[0] != "api":
         return 1, "", f"fake gh: unsupported invocation: {argv!r}\n"
     return _handle_api(argv, state)
@@ -257,10 +300,13 @@ class GhCall:
         endpoint: Endpoint with any leading slash stripped (``graphql`` for
             GraphQL calls).
         payload: Parsed ``--input`` JSON payload, or None.
+        argv: The full ``gh api`` argv (after ``gh``) as recorded, so tests
+            can assert flags like ``--paginate`` were passed.
     """
 
     endpoint: str
     payload: Any
+    argv: list[str] | None = None
 
 
 @dataclass
@@ -314,7 +360,13 @@ class FakeGh:
                 continue
             if wanted_endpoint is not None and record["endpoint"] != wanted_endpoint:
                 continue
-            out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"]))
+            out.append(
+                GhCall(
+                    endpoint=record["endpoint"],
+                    payload=record["payload"],
+                    argv=record.get("argv"),
+                )
+            )
         return out
 
     def command_calls(self, kind: str) -> list[GhCommandCall]:
@@ -491,11 +543,13 @@ class FakeGh:
             "comments": {"nodes": [comment]},
         }
 
-    def _write_threads(self, nodes: list[dict[str, Any]]) -> None:
+    def _write_threads(self, nodes: list[dict[str, Any]], number: int | None = None) -> None:
+        """Serve *nodes* as the review-thread inventory for one PR (or globally)."""
         response = json.loads(json.dumps(_EMPTY_THREADS_RESPONSE))
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
         responses = self._read_responses()
-        responses["graphql_threads"] = response
+        key = f"graphql_threads:{number}" if number is not None else "graphql_threads"
+        responses[key] = response
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
 
     def _read_responses(self) -> dict[str, Any]:
@@ -513,6 +567,18 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
         if isinstance(args, (list, tuple)) and args and args[0] == "gh":
             rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
             return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
+        if (
+            isinstance(args, (list, tuple))
+            and args
+            and args[0] == "git"
+            and "ls-remote" in args
+        ):
+            refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
+            _record(
+                state_dir,
+                {"kind": "git ls-remote", "argv": list(args), "env": kwargs.get("env")},
+            )
+            return subprocess.CompletedProcess(list(args), 0, stdout=refs, stderr="")
         return real_run(args, *pargs, **kwargs)
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", router)

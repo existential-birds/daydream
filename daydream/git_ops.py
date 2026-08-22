@@ -324,6 +324,7 @@ def _run_git(
     timeout: int = 5,
     capture_bytes: bool = False,
     retries: int = _GIT_TIMEOUT_RETRIES,
+    env_cmd: Any | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     """Run ``git`` in *repo* with hardened defaults.
 
@@ -335,6 +336,10 @@ def _run_git(
             Mutating wrappers pass ``retries=0`` because re-running a
             non-idempotent git command after a timeout is unsafe; only
             read-only queries inherit the retrying default.
+        env_cmd: Optional environment mapping for the subprocess (default None
+            inherits the parent environment). Preflight read-only helpers pass
+            ``GIT_TERMINAL_PROMPT=0`` here so a credential failure is surfaced
+            rather than prompting on stdin.
 
     Returns:
         The completed process. ``returncode`` is left to the caller to inspect.
@@ -357,6 +362,7 @@ def _run_git(
                 timeout=timeout,
                 shell=False,
                 check=False,
+                env=env_cmd,
             )
         except subprocess.TimeoutExpired as exc:
             last_timeout = exc
@@ -2020,6 +2026,42 @@ def split_owner_repo(slug: str) -> tuple[str, str] | None:
     if not owner or not repo:
         return None
     return owner, repo
+
+
+def gh_auth_git_credential(repo: Path) -> str:
+    """Return the git credential-helper protocol from ``gh auth git-credential``.
+
+    The helper exposes GitHub's stored-auth credentials to ``git`` for one
+    read at a time; the caller scopes it to a single ``git ls-remote`` (it never
+    writes git config or puts a token on the argument vector).
+
+    Raises:
+        GitError: If the ``gh auth git-credential`` call fails.
+    """
+    proc = _run_gh(repo, ["auth", "git-credential"])
+    if proc.returncode != 0:
+        raise GitError(f"gh auth git-credential failed: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def git_ls_remote(repo: Path, url: str) -> str:
+    """Authenticated read of *url*'s refs via ``git ls-remote``.
+
+    Pins ``GIT_TERMINAL_PROMPT=0`` (command-scoped, never a global config
+    change) so a credential failure surfaces as a git error rather than a
+    stuck stdin prompt. The credential itself comes from the ambient
+    ``GH_TOKEN``/gh auth state through ``gh auth git-credential``, never from a
+    URL or argv.
+
+    Raises:
+        GitError: If the ``git ls-remote`` call fails.
+    """
+    gh_auth_git_credential(repo)  # force the credential helper to resolve first
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    proc = _run_git(repo, ["ls-remote", url], env_cmd=env)
+    if proc.returncode != 0:
+        raise GitError(f"git ls-remote {url} failed: {proc.stderr.strip()}")
+    return proc.stdout
 
 
 def gh_repo_view(repo: Path) -> tuple[str, str] | None:
