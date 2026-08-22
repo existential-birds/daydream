@@ -290,11 +290,8 @@ def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
         if ids.count(fid) > 1:
             raise CurationError(f"case {case_id} has duplicate finding {fid}")
 
-    # A ready (final-attested) case must be snapshot-attested; the fixed schema
-    # does not express this, so the curation service enforces it as a rule.
-    if curation.get("state") == "ready" and not curation.get("snapshot_attested"):
-        raise CurationError(f"case {case_id} is ready but not snapshot-attested")
-
+    # ready => snapshot_attested and stale => not-attested are enforced by the
+    # schema Curation._consistent validator.
     candidates = raw.get("candidates") or []
     for finding in findings:
         _validate_location(root, raw, finding)

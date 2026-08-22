@@ -91,9 +91,9 @@ def _seed_v1_workspace(tmp_path: Path):
 def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path):
     ws, case_id, title = _seed_v1_workspace(tmp_path)
     report = migrate.migrate_workspace(ws)
-    assert [c["case_id"] for c in report.cases] == [case_id]
-    assert report.cases[0]["finding_ids_recomputed"] == 1
-    assert report.cases[0]["changed"] is True
+    assert [c.case_id for c in report.cases] == [case_id]
+    assert report.cases[0].finding_ids_recomputed == 1
+    assert report.cases[0].changed is True
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["schema_version"] == 2
     f = raw["curation"]["findings"][0]
@@ -110,7 +110,7 @@ def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path):
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
     migrate.migrate_workspace(ws)
     second = migrate.migrate_workspace(ws)
-    assert all(c["changed"] is False for c in second.cases)   # no-op second run
+    assert all(c.changed is False for c in second.cases)   # no-op second run
 
 
 def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path):
@@ -123,3 +123,38 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path):
     assert report.cases == []                        # no case rewritten
     assert any("duplicate" in e for e in report.errors)
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1  # untouched
+
+def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path, capsys):
+    """The ``upgrade`` verb drives migrate_workspace through the CLI seam (exit 0)."""
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+
+    # --dry-run reports the upgrade (finding recomputed, would change) without writing.
+    rc = _handle_benchmark_command(["upgrade", str(ws), "--dry-run"])
+    assert rc == 0
+    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1
+    out = capsys.readouterr().out
+    assert "changed=True" in out and "finding_ids_recomputed=1" in out
+
+    # A real run rewrites the v1 case and exits 0.
+    rc = _handle_benchmark_command(["upgrade", str(ws)])
+    assert rc == 0
+    assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 2
+
+    # The no-op second run still exits 0.
+    rc = _handle_benchmark_command(["upgrade", str(ws)])
+    assert rc == 0
+
+
+def test_upgrade_cli_error_returns_1(tmp_path, capsys):
+    """An errored case surfaces on stderr and yields exit code 1."""
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    raw["schema_version"] = "bogus"
+    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    rc = _handle_benchmark_command(["upgrade", str(ws)])
+    assert rc == 1
+    assert "error" in capsys.readouterr().err

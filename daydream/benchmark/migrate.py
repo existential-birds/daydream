@@ -30,9 +30,6 @@ class CaseUpgrade:
     finding_ids_recomputed: int
     changed: bool
 
-    def __getitem__(self, key: str) -> object:
-        return getattr(self, key)
-
 
 @dataclass
 class UpgradeReport:
@@ -95,7 +92,9 @@ def migrate_workspace(root: Path, *, dry_run: bool = False) -> UpgradeReport:
             # strip the persisted audit field for validation (curation pattern),
             # but keep it in the written output — authored content is preserved.
             schema.CaseDocument.model_validate(schema._schema_ready(new_raw))
-            changed = recomputed > 0
+            # Every loadable v1 case is staged: the schema_version bump is
+            # unconditional, so a write occurs even when no finding_id changed.
+            changed = True
             upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed,
                                         changed=changed))
             writes[case_file] = yaml.safe_dump(new_raw, sort_keys=False).encode("utf-8")

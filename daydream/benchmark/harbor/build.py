@@ -18,7 +18,7 @@ import re
 import shutil
 from pathlib import Path
 
-from daydream.benchmark import snapshot, storage
+from daydream.benchmark import schema, snapshot, storage
 
 TEMPLATE_VERSION = "1"
 
@@ -159,22 +159,16 @@ def _flatten_finding(finding: dict) -> dict:
 def _gold_finding_ids(key: str, finding: dict) -> str:
     """Derive the compiled gold id bound to the opaque task *key*.
 
-    Mirrors ``verifier_core.validate_gold_set``'s digest: sha256 over
-    ``(key, title, body, severity, path, start_line, end_line)`` joined by the
-    ``\x1f`` separator. The compiled gold ids are bound to the opaque compiled
-    task key (never the raw workspace authoring id), so the shipped gold
-    bundle carries no ``pr-...`` authoring token across the judge surface.
+    Delegates to the canonical ``schema.derive_finding_id`` digest (sha256 over
+    the case-scoped ``(case_id, title, body, severity, path, start_line,
+    end_line)`` tuple, nulls normalized to the empty string) under the opaque
+    compiled task key as ``case_id``. The compiled gold ids are bound to the
+    opaque compiled task key (never the raw workspace authoring id), so the
+    shipped gold bundle carries no ``pr-...`` authoring token across the judge
+    surface. Delegating keeps this digest identical to the canonical workspace
+    derivation instead of a drifting local re-implementation.
     """
-    location = finding.get("location") or {}
-    payload = "\x1f".join([
-        str(key or ""),
-        str(finding.get("title") or ""),
-        str(finding.get("body") or ""),
-        str(finding.get("severity") or ""),
-        str(location.get("path")), str(location.get("start_line")),
-        str(location.get("end_line")),
-    ])
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return schema.derive_finding_id(finding, case_id=key)
 
 
 def build_gold_list(findings: list, *, key: str) -> list:

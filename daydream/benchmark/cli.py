@@ -614,8 +614,8 @@ def _handle_benchmark_upgrade(args) -> int:
     report = migrate.migrate_workspace(args.dir, dry_run=args.dry_run)
     for c in report.cases:
         print(
-            f"case {c['case_id']}: finding_ids_recomputed={c['finding_ids_recomputed']} "
-            f"changed={c['changed']}"
+            f"case {c.case_id}: finding_ids_recomputed={c.finding_ids_recomputed} "
+            f"changed={c.changed}"
         )
     for e in report.errors:
         print(f"error: {e}", file=sys.stderr)

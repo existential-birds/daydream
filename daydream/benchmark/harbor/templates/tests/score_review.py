@@ -552,7 +552,6 @@ def _load_verifier_metadata(gold_path: Path) -> dict[str, Any]:
     for field in (
         "schema_version",
         "case_id",
-        "source_case_id",
         "base_ref",
         "head_ref",
         "template_version",
@@ -635,7 +634,7 @@ def run_verifier(
 
         gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])
         gold_parsed = verifier_core.validate_gold_set(
-            gold_raw, case_id=metadata["source_case_id"]
+            gold_raw, case_id=metadata.get("source_case_id")
         )
 
         verdicts: list[verifier_core.Verdict] = []

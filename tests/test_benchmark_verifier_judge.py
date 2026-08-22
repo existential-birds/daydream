@@ -546,6 +546,62 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_p
     assert clean.reward == 1.0 and clean.clean_pass == 1 and clean.clean_task == 1
 
 
+def test_back_scores_legacy_task_without_source_case_id(sr_module, tmp_path) -> None:
+    # A Harbor task compiled before the case-scoped gold digest carries no
+    # ``source_case_id`` in its verifier metadata and its gold finding ids are
+    # derived content-only. Back-scoring it must not fail on the missing field
+    # or on a digest mismatch: the verifier falls back to the legacy content
+    # digest when ``source_case_id`` is absent.
+    import hashlib as _h
+    sr = sr_module
+    gold = []
+    for title in ("t0", "t1"):
+        f = {"title": title, "body": "b", "severity": "high",
+             "path": "p", "start_line": 1, "end_line": 1}
+        payload = "\x1f".join([str(f["title"]), str(f["body"]), str(f["severity"]),
+                                str(f["path"]), str(f["start_line"]), str(f["end_line"])])
+        f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
+        gold.append(f)
+
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(gold))
+    # deliberately legacy: no ``source_case_id`` key in the metadata
+    import hashlib as _mh
+    meta = {
+        "schema_version": 1,
+        "case_id": "legacy",
+        "base_ref": "base",
+        "head_ref": "head",
+        "template_version": "1",
+        "gold_sha256": _mh.sha256(gold_path.read_bytes()).hexdigest(),
+    }
+    gold_path.with_name("verifier-metadata.json").write_text(
+        json.dumps(meta, sort_keys=True)
+    )
+
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="legacy")))
+
+    class MatchClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 1.0, "reasoning": "identical"}
+
+    out = tmp_path / "out"
+    reward = sr.run_verifier(
+        gold_path,
+        artifact_path,
+        out,
+        client=MatchClient(),
+        env={
+            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k",
+            "DAYDREAM_JUDGE_BASE_URL": None,
+        },
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0 and reward.tp == 2
+
+
 def test_generated_asset_tree_is_self_contained(sr_module) -> None:
     base = Path(sr_module.__file__).parent
     for rel in (
