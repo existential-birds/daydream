@@ -419,6 +419,25 @@ def test_finding_rejects_nul_in_title():
         CaseDocument.model_validate(raw)
 
 
+def test_title_bound_is_unicode_characters_not_bytes():
+    # "界" is 3 UTF-8 bytes; 500 chars = 1500 bytes. Passes under a char bound.
+    title = "界" * 500
+    raw = _valid_case_dict()
+    raw["curation"]["findings"][0]["title"] = title
+    raw["curation"]["findings"][0]["finding_id"] = derive_finding_id(
+        {"title": title, "body": "The cache layers never populate.", "severity": "high",
+         "location": {"path": "src/cache.py", "start_line": 2, "end_line": 2}},
+        case_id=raw["case_id"],
+    )
+    doc = CaseDocument.model_validate(raw)          # 500 chars passes
+    assert doc.curation.findings[0].title == title
+    # 501 chars fails
+    raw2 = _valid_case_dict()
+    raw2["curation"]["findings"][0]["title"] = "界" * 501
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
 def test_finding_severity_enum():
     raw = _valid_case_dict()
     raw["curation"]["findings"][0]["severity"] = "critical"

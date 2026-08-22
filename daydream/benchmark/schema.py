@@ -677,8 +677,8 @@ class Finding(BaseModel):
             raise ValueError("title must not be blank")
         if "\x00" in v:
             raise ValueError("title must not contain NUL")
-        if len(v.encode("utf-8")) > 500:
-            raise ValueError("title exceeds 500 UTF-8 bytes")
+        if len(v) > 500:
+            raise ValueError("title exceeds 500 characters")
         return v
 
     @field_validator("body")
