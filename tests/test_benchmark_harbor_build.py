@@ -515,6 +515,44 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
 
 
+def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock1 = build.compile_workspace(ws)
+    tree1 = _harbor_tree_bytes(ws)
+    lock2 = build.compile_workspace(ws)
+    tree2 = _harbor_tree_bytes(ws)
+    assert tree1 == tree2                                        # byte-identical compiled tree
+    assert lock1 == lock2                                        # identical lock digest/content
+    # no timestamps anywhere in any compiled file or lock
+    lock_text = (ws / "harbor" / "benchmark.lock.json").read_text()
+    assert "created_at" not in lock_text and "timestamp" not in lock_text
+
+
+def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path, fake_gh):
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    _seed_second_ready_case(ws, tmp_path, fake_gh)
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    case_ids = [c["case_id"] for c in manifest["cases"]]
+    assert len(case_ids) == 2
+
+    lock_a = build.compile_workspace(ws)
+    tree_a = _harbor_tree_bytes(ws)
+
+    # reverse the manifest cases[] order - output must not change (canonical ordering)
+    manifest["cases"] = manifest["cases"][::-1]
+    storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
+    build.compile_workspace(ws)
+    tree_b = _harbor_tree_bytes(ws)
+    assert tree_a == tree_b
+
+    dirs = sorted(p.name for p in (ws / "harbor").iterdir() if p.is_dir() and p.name.startswith("case-"))
+    assert dirs == sorted(build.derive_task_key(c) for c in case_ids)
+    assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
