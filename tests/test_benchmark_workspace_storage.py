@@ -268,7 +268,7 @@ def test_stage_rejects_rel_escape(tmp_path):
 
 
 def test_stage_rejects_absolute_outside(tmp_path):
-    outside = tmp_path.parent / "outside" / "evil.bin"
+    outside = tmp_path.parent / f"outside-{tmp_path.name}" / "evil.bin"
     outside.parent.mkdir(parents=True, exist_ok=True)
     with Transaction(tmp_path, op_id="op-abs", kind="write") as tx:
         with pytest.raises(WorkspaceCorrupt):
@@ -277,7 +277,7 @@ def test_stage_rejects_absolute_outside(tmp_path):
 
 
 def test_stage_rejects_symlink_parent_escape(tmp_path):
-    outside = tmp_path.parent / "outside"
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
     outside.mkdir(parents=True, exist_ok=True)
     (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
     with Transaction(tmp_path, op_id="op-sym", kind="write") as tx:

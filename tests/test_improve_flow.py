@@ -3173,7 +3173,7 @@ def test_stamp_finding_rejects_unconfined_missing_and_out_of_range_evidence(
 def test_stamp_finding_rejects_evidence_crossing_a_symlink(
     tmp_path: Path,
 ) -> None:
-    outside = tmp_path.parent / "outside"
+    outside = tmp_path.parent / f"outside-{tmp_path.name}"
     outside.mkdir()
     (outside / "secret.py").write_text("secret\n")
     (tmp_path / "escape").symlink_to(outside, target_is_directory=True)

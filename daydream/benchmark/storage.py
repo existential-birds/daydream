@@ -371,6 +371,21 @@ class Transaction:
         self._write_journal()
         _fsync_file(self._journal_path())
 
+    def _begin_committing(self) -> None:
+        """Transition the journal to ``committing`` with nothing applied.
+
+        A transaction enters ``committing`` by rewriting the journal with
+        ``state == committing`` and ``applied_count == 0`` before any target
+        is replaced. Both ``begin_commit`` and the per-target crash-injection
+        branch collapse to this single sequence, so the ``target-<n>``
+        mid-loop crash state stays byte-identical to a real halt reached via
+        ``begin_commit``.
+        """
+        self._state = "committing"
+        self._applied_count = 0
+        self._write_journal()
+        _fsync_file(self._journal_path())
+
     def begin_commit(self) -> None:
         """Rewrite the journal ``committing``, then apply targets in ordered list.
 
@@ -381,10 +396,7 @@ class Transaction:
         last-replaced file unrecoverable — a checksum-drifted mixed state the
         journal's never-drift contract forbids.
         """
-        self._state = "committing"
-        self._applied_count = 0
-        self._write_journal()
-        _fsync_file(self._journal_path())
+        self._begin_committing()
         self._apply_replacements()
         _fsync_dir(self._root)
 
@@ -480,10 +492,7 @@ class Transaction:
             self.prepare()
             if n == 0:
                 return
-            self._state = "committing"
-            self._applied_count = 0
-            self._write_journal()
-            _fsync_file(self._journal_path())
+            self._begin_committing()
             self._apply_replacements(stop_after=n)
             return
         raise ValueError(f"unknown crash boundary {boundary!r}")
@@ -743,6 +752,14 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     applied = doc.get("applied_count")
     if not isinstance(applied, int) or not (0 <= applied <= len(order)):
         raise WorkspaceCorrupt(f"{root}: journal applied_count is out of bounds")
+    created = doc.get("created_dirs")
+    if created is not None:
+        if not isinstance(created, list):
+            raise WorkspaceCorrupt(f"{root}: journal created_dirs is not a list")
+        for rel in created:
+            if not isinstance(rel, str):
+                raise WorkspaceCorrupt(f"{root}: malformed journal created_dirs entry")
+            _resolve_target(root, rel)
 
 
 def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -798,6 +815,7 @@ def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
     """
     created = doc.get("created_dirs") or []
     for rel in sorted(created, key=len, reverse=True):
+        rel = _resolve_target(root, rel)
         with suppress(OSError):
             (root / rel).rmdir()
 
