@@ -142,7 +142,9 @@ def test_action_new_via_real_editor_persists_authored(tmp_path, fake_gh, monkeyp
     editor = tmp_path / "edit.py"
     editor.write_text(
         "#!/usr/bin/env python3\n"
-        "import os, stat, sys\n"
+        "import os\n"
+        "import stat\n"
+        "import sys\n"
         "buf = sys.argv[1]\n"
         "with open(os.environ['LOG'], 'w') as fh:\n"
         "    fh.write(f'{stat.S_IMODE(os.stat(buf).st_mode):o} {buf}\\n')\n"
