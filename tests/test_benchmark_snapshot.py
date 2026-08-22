@@ -205,9 +205,10 @@ def test_bundle_two_refs_deterministic(tmp_path):
     assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _seed_base_tree()
     assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _seed_head_tree()
     assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
-    # determinism: rebuild and compare bytes
+    # determinism: rebuild and compare bytes against the first build's hash
+    first = sn.sha256_of(bundle)
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
-    assert sn.sha256_of(bundle) == sn.sha256_of(bundle)
+    assert sn.sha256_of(bundle) == first
 
 
 # ---------------------------------------------------------------------------
@@ -248,8 +249,8 @@ def test_freeze_one_ready_and_reasons(tmp_path):
     sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
     sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
-    ready = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
-                          policy="final_pr_head", requested_head="final", origin_url=origin)
+    ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
+                           policy="final_pr_head", requested_head="final", origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
     assert ready["base_tree_sha"] == _seed_base_tree() and ready["head_tree_sha"] == _seed_head_tree()
@@ -257,16 +258,21 @@ def test_freeze_one_ready_and_reasons(tmp_path):
     assert re.fullmatch(r"[0-9a-f]{64}", ready["bundle_sha256"])
     expect_rel = f"snapshots/{case_id_for(1, _SHA_HEAD)}.bundle"
     assert ready["bundle_file"] == expect_rel
-    assert (tmp_path / expect_rel).exists()
+    # freeze returns the bundle bytes to stage through the crash-consistent
+    # transaction; it never writes the final snapshots/<case>.bundle itself.
+    assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
+    assert not (tmp_path / expect_rel).exists()
     # head_not_on_pr: a base3 head reachable elsewhere is rejected
-    ur = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_BASE3,
-                       policy="explicit_head", requested_head=_SHA_BASE3, origin_url=origin)
+    ur, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_BASE3,
+                               policy="explicit_head", requested_head=_SHA_BASE3, origin_url=origin)
     assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "head_not_on_pr"
+    assert bundle is None
     assert ur["bundle_file"] is None and ur["base_tree_sha"] is None
     # head_unreachable: a sha absent from the mirror
-    ur2 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha="0" * 40,
-                        policy="explicit_head", requested_head="0" * 40, origin_url=origin)
+    ur2, bundle2 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha="0" * 40,
+                                 policy="explicit_head", requested_head="0" * 40, origin_url=origin)
     assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
+    assert bundle2 is None
     assert ur2["bundle_file"] is None
 
 

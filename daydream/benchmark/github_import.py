@@ -179,10 +179,16 @@ _PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$")
 
 @dataclass
 class ImportTargets:
-    """The deduplicated PR targets + requested heads for one import run."""
+    """The deduplicated PR targets + requested heads for one import run.
+
+    ``requested_heads`` is the flat union (back-compat consumers); ``pr_heads``
+    maps each requested PR number to its own head list (including ``"final"``)
+    so a ``PR=<40-hex>`` binding is honored only for the PR it names.
+    """
 
     pr_numbers: list[int]
     requested_heads: list[str]
+    pr_heads: dict[int, list[str]]
 
 
 def _parse_pr_token(token: str) -> int:
@@ -208,11 +214,13 @@ def parse_import_targets(
     Number/URL/file selections merge CLI-first then file in order and dedupe
     to the first-seen, stable order. ``requested_heads`` always starts with
     ``"final"`` (the PR's default head). A ``--head`` token is either a bare
-    40-hex SHA (back-compat: treated as ``<PR>=<sha>`` for the sole requested
-    PR) or ``<PR_NUMBER>=<40-hex>``, which ties an explicit head to its PR and
-    keeps a distinct import/snapshot target alongside the PR's default head.
-    An unparseable token or malformed head raises :class:`ImportTargetError`
-    naming the offending value.
+    40-hex SHA (back-compat: applied to every requested PR) or
+    ``<PR_NUMBER>=<40-hex>``, which ties an explicit head to *that* PR (the
+    ``pr_heads`` map) and keeps a distinct import/snapshot target alongside
+    the PR's default head. A bound ``PR`` number must itself be requested
+    (else the binding is silently dropped) and otherwise pushes an
+    :class:`ImportTargetError`. An unparseable token or malformed head raises
+    :class:`ImportTargetError` naming the offending value.
     """
     numbers: list[int] = []
     seen: set[int] = set()
@@ -230,22 +238,43 @@ def parse_import_targets(
                 continue
             _add(_parse_pr_token(line))
 
-    validated_heads: list[str] = []
+    per_pr: dict[int, list[str]] = {n: [] for n in numbers}
+    all_valid: list[str] = []
     for head in heads:
         sha = head
+        bound_pr: int | None = None
         if "=" in head:
             pr_part, _, rhs = head.partition("=")
             if not pr_part.isdigit() or not int(pr_part) > 0:
                 raise ImportTargetError(
                     f"invalid head token {head!r} (expected PR=<40-hex>)"
                 )
+            bound_pr = int(pr_part)
             sha = rhs
         if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
             raise ImportTargetError(
                 f"invalid head SHA {head!r} (expected bare 40-hex or PR=<40-hex>)"
             )
-        validated_heads.append(sha)
-    return ImportTargets(pr_numbers=numbers, requested_heads=["final", *validated_heads])
+        if bound_pr is not None:
+            if bound_pr not in per_pr:
+                raise ImportTargetError(
+                    f"head {head!r} references PR {bound_pr} which is not among "
+                    f"the requested PR targets"
+                )
+            per_pr[bound_pr].append(sha)
+        else:
+            # Bare 40-hex: back-compat, applied to every requested PR.
+            for number in numbers:
+                per_pr[number].append(sha)
+        all_valid.append(sha)
+    pr_heads: dict[int, list[str]] = {
+        n: ["final", *dict.fromkeys(per_pr[n])] for n in numbers
+    }
+    return ImportTargets(
+        pr_numbers=numbers,
+        requested_heads=["final", *dict.fromkeys(all_valid)],
+        pr_heads=pr_heads,
+    )
 
 
 def _now_rfc3339() -> str:
@@ -688,7 +717,7 @@ def _case_materialize(
     origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
     changed: bool = False,
-) -> tuple[list[tuple[str, str, dict[str, Any]]], list[str]]:
+) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
     """One materialized case document per requested head.
 
     When *root*/origin are provided the case ``snapshot`` is frozen via
@@ -701,7 +730,7 @@ def _case_materialize(
     pull_request = doc.pull_request
     base_sha = (pull_request.get("base") or {}).get("sha")
     out: list[tuple[str, str, dict[str, Any]]] = []
-    bundle_drops: list[str] = []
+    bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
         head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
@@ -727,7 +756,7 @@ def _case_materialize(
                 curation["snapshot_attested"] = False
         if root is not None and origin_url is not None and base_sha and head_sha:
             policy = "final_pr_head" if head_token == "final" else "explicit_head"
-            snapshot_doc = snapshot.freeze_one(
+            snapshot_doc, bundle_bytes = snapshot.freeze_one(
                 root,
                 repo_slug,
                 number,
@@ -737,8 +766,8 @@ def _case_materialize(
                 requested_head=head_token,
                 origin_url=origin_url,
             )
-            if snapshot_doc.get("status") == "ready":
-                bundle_drops.append(snapshot_doc["bundle_file"])
+            if snapshot_doc.get("status") == "ready" and bundle_bytes is not None:
+                bundle_drops.append((snapshot_doc["bundle_file"], bundle_bytes))
         else:
             snapshot_doc = {
                 "status": "imported",
@@ -914,8 +943,8 @@ def _import_one_pr(
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
-            for rel in bundle_rels:
-                tx.stage(rel, (root / rel).read_bytes())
+            for rel, content in bundle_rels:
+                tx.stage(rel, content)
             for _, case_path, case_doc in cases:
                 tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
             _stamp_fetched(
@@ -941,6 +970,7 @@ def run_import_prs(
     root: Path,
     pr_numbers: list[int],
     heads: list[str] | None = None,
+    pr_heads: dict[int, list[str]] | None = None,
     refresh: bool = False,
     origin_url: str | None = None,
 ) -> int:
@@ -948,19 +978,29 @@ def run_import_prs(
 
     Runs startup recovery then preflight (identity idempotent), then for each
     PR expects its import file, one case per requested head, and the ledger
-    through one :class:`Transaction` (``benchmark.yaml`` last). When present,
-    *origin_url* drives the snapshot freeze mirror fetch (defaults to the
-    repository's ``https://github.com/<repo>.git``). A failed fetch stages no
-    import/case file — only a ledger flip to ``fetch_failed`` with an exact
+    through one :class:`Transaction` (``benchmark.yaml`` last). *heads* is a
+    flat back-compat list applied to every PR; *pr_heads* (from
+    ``parse_import_targets``) maps each PR to its own requested heads so a
+    ``PR=<40-hex>`` binding is honored for the PR it names only — when it is
+    provided each PR resolves ``"final"`` plus its own explicit heads. When
+    present, *origin_url* drives the snapshot freeze mirror fetch (defaults to
+    the repository's ``https://github.com/<repo>.git``). A failed fetch stages
+    no import/case file — only a ledger flip to ``fetch_failed`` with an exact
     error. The overall exit is non-zero when any PR failed.
     """
     root = Path(root)
-    requested_heads: list[str] = []
+    flat_heads: list[str] = []
     seen_heads: set[str] = set()
     for head in ["final", *(heads or [])]:
         if head not in seen_heads:
             seen_heads.add(head)
-            requested_heads.append(head)
+            flat_heads.append(head)
+    requested_by_pr: dict[int, list[str]] = {}
+    for number in pr_numbers:
+        if pr_heads is not None and pr_heads.get(number):
+            requested_by_pr[number] = pr_heads[number]
+        else:
+            requested_by_pr[number] = list(flat_heads)
     exit_code = 0
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
@@ -970,7 +1010,7 @@ def run_import_prs(
         if origin_url is None and repo:
             origin_url = f"https://github.com/{repo}.git"
         for number in pr_numbers:
-            if _import_one_pr(root, raw, repo, number, requested_heads, refresh=refresh, origin_url=origin_url):
+            if _import_one_pr(root, raw, repo, number, requested_by_pr[number], refresh=refresh, origin_url=origin_url):
                 exit_code = 1
     return exit_code
 

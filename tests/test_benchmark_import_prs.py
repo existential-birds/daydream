@@ -211,23 +211,43 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
 
-def test_parse_head_pr_sha_grammar(tmp_path):
-    """``--head 101=<40-hex>`` (explicit head tied to its PR) parses to the SHA.
+def test_parse_head_pr_sha_grammar_and_binding(tmp_path):
+    """``--head PR=<40-hex>`` binds the explicit head to that PR only.
 
     A bare 40-hex stays a back-compat superset; an unparseable RHS raises
-    :class:`ImportTargetError`.
+    :class:`ImportTargetError`; a bound PR that is not imported is rejected so
+    the binding can never be silently dropped.
     """
     import pytest
 
     from daydream.benchmark import github_import as gi
 
     sha = "a" * 40
-    targets = gi.parse_import_targets([], [], [f"101={sha}"])
+    targets = gi.parse_import_targets(["101"], [], [f"101={sha}"])
     assert targets.requested_heads == ["final", sha]
-    targets2 = gi.parse_import_targets([], [], [sha])
+    assert targets.pr_heads == {101: ["final", sha]}
+    targets2 = gi.parse_import_targets(["101"], [], [sha])
     assert targets2.requested_heads == ["final", sha]
     with pytest.raises(gi.ImportTargetError):
-        gi.parse_import_targets([], [], ["101=nothex"])
+        gi.parse_import_targets(["101"], [], ["101=nothex"])
+    # a bound PR that is never requested cannot be honored, so it is rejected
+    with pytest.raises(gi.ImportTargetError):
+        gi.parse_import_targets(["100"], [], [f"101={sha}"])
+
+
+def test_parse_heads_bound_per_pr_in_multi_import(tmp_path):
+    """A ``PR=<sha>`` head is honored for that PR only, never spread to others.
+
+    Regression guard for the bug where ``--pr 100 --pr 101 --head 101=<sha>``
+    misapplied ``<sha>`` to PR 100 too (the binding was parsed then dropped).
+    """
+    from daydream.benchmark import github_import as gi
+
+    sha = "a" * 40
+    targets = gi.parse_import_targets(["100", "101"], [], [f"101={sha}"])
+    assert targets.pr_numbers == [100, 101]
+    assert targets.pr_heads == {100: ["final"], 101: ["final", sha]}
+    assert targets.requested_heads == ["final", sha]
 
 
 def _seed_manifest(ws):

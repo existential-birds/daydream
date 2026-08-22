@@ -525,7 +525,7 @@ def _handle_benchmark_import_prs(args) -> int:
         return gi.run_import_prs(
             args.dir,
             targets.pr_numbers,
-            heads=targets.requested_heads,
+            pr_heads=targets.pr_heads,
             refresh=args.refresh,
         )
     except gi.PreflightError as exc:

@@ -118,7 +118,6 @@ def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
     if verify.returncode != 0:
         return "head_unreachable"
     anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
-    anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
 
 
@@ -306,21 +305,25 @@ def freeze_one(
     policy: str,
     requested_head: str,
     origin_url: str | None = None,
-) -> dict:
-    """Freeze one requested head into a ``ready`` or ``unreplayable`` snapshot.
+) -> tuple[dict, bytes | None]:
+    """Freeze one requested head into a ``(ready|unreplayable, bundle_bytes)`` pair.
 
     Runs the full pipeline (mirror ensure -> fetch -> ancestry -> merge-base -> trees
     -> degenerate -> bundle -> offline validate). Classified git failures return an
-    ``unreplayable`` dict with an exact reason; only unexpected errors propagate.
+    ``unreplayable`` dict with an exact reason (and ``None`` bytes); only unexpected
+    errors propagate. The produced bundle is written to a private scratch path and
+    returned as *bytes* (never to the final ``snapshots/<case>.bundle``) so the caller
+    stages it through the crash-consistent :class:`storage.Transaction` — the final
+    path is created only by that transaction's commit, and a crash mid-freeze cannot
+    leak an un-journaled private snapshot bundle.
     """
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"
     case_id = schema.case_id_for(pr_number, head_sha)
     bundle_rel = f"snapshots/{case_id}.bundle"
-    bundle_path = root / bundle_rel
 
-    def unreplayable(reason: str, detail: str) -> dict:
-        return {
+    def unreplayable(reason: str, detail: str) -> tuple[dict, None]:
+        return ({
             "status": "unreplayable",
             "policy": policy,
             "requested_head": requested_head,
@@ -332,7 +335,7 @@ def freeze_one(
             "bundle_file": None,
             "bundle_sha256": None,
             "error": {"reason": reason, "detail": detail},
-        }
+        }, None)
 
     # 1) mirror ensure + fetch base tip, PR head ref, and the requested head.
     try:
@@ -367,16 +370,22 @@ def freeze_one(
         return unreplayable(degen, f"no real code change between base and head ({degen})")
 
     # 5) canonical diff + deterministic bundle + offline validation.
+    #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
+    #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
+    #    written only by the caller's journaled Transaction commit.
+    scratch_bundle = root / "cache" / "freeze-scratch" / f"{case_id}.bundle"
     try:
         diff_sha = canonical_diff_sha256(m, base, head_sha)
-        storage.ensure_private_dir(root / "snapshots")
-        build_bundle(m, base, head_sha, bundle_path, case_id)
-        bundle_sha = storage.sha256_file(bundle_path)
-        validate_offline_clone(bundle_path, base_tree, head_tree, diff_sha, workdir=root / "cache")
+        build_bundle(m, base, head_sha, scratch_bundle, case_id)
+        bundle_sha = storage.sha256_file(scratch_bundle)
+        validate_offline_clone(scratch_bundle, base_tree, head_tree, diff_sha, workdir=root / "cache")
+        bundle_bytes = scratch_bundle.read_bytes()
     except git_ops.GitError as exc:
         return unreplayable("bundle_failure", f"bundle build/validate failed: {exc}")
+    finally:
+        scratch_bundle.unlink(missing_ok=True)
 
-    return {
+    ready = {
         "status": "ready",
         "policy": policy,
         "requested_head": requested_head,
@@ -389,3 +398,4 @@ def freeze_one(
         "bundle_sha256": bundle_sha,
         "error": None,
     }
+    return ready, bundle_bytes
