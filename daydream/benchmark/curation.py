@@ -23,7 +23,7 @@ fixed schema, the mode-safe storage/journal layer, the bare mirror, and
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import yaml
 from pydantic import ValidationError
@@ -40,6 +40,16 @@ class CurationError(Exception):
     def __init__(self, message: str):
         super().__init__(message)
         self.message = message
+
+
+class StaleStateError(CurationError):
+    """A curation operation ran against a stale attestation state.
+
+    Raised when a mutation's precondition no longer holds against the freshly
+    read on-disk state (e.g. a :func:`mark_ready` head SHA that no longer
+    matches the snapshot) — the caller's view is stale and nothing was
+    written.
+    """
 
 
 def _head_file_line_count(root: Path, head_sha: str, path: str) -> int:
@@ -71,6 +81,27 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
     if not path.exists():
         raise CurationError(f"unknown case {case_id}")
     return load_yaml_strict(path)
+
+
+def _with_case_lock(
+    root: Path, case_id: str, op: str, mutate: Callable[[dict[str, Any]], None]
+) -> None:
+    """Run one curation mutation's whole read-validate-mutate-commit under the lock.
+
+    Acquires the blocking :class:`storage.WorkspaceLock`, heals any prior
+    interrupted journal via :func:`storage.recover_startup` (so a crashed
+    earlier process's leftover ``committing`` journal is rolled back before a
+    new write), loads the case **after** acquiring the lock (never a stale
+    pre-lock view), runs ``mutate(raw)``, then stages the atomic rewrite
+    through :class:`storage.Transaction`. ``mutate`` is called only with the
+    lock held; its ``CurationError`` propagates and leaves the disk
+    byte-unchanged.
+    """
+    with storage.WorkspaceLock(root):
+        storage.recover_startup(root)
+        raw = _load_case(root, case_id)
+        mutate(raw)
+        _stage_case(root, case_id, raw, op=op)
 
 
 def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
@@ -413,24 +444,27 @@ def add_finding(
 ) -> None:
     """Add an authored (new) finding. provenance is ``authored`` with empty sources."""
     source_ids = source_ids or []
-    raw = _load_case(root, case_id)
-    _check_candidate_sources(raw, source_ids, case_id)
-    curation = raw.setdefault("curation", {})
-    _reopen_for_mutation(curation)
-    finding = {
-        "title": title,
-        "body": body,
-        "severity": severity,
-        "location": location,
-        "provenance": {
-            "kind": _derive_provenance_kind(source_ids, authored=True),
-            "source_ids": source_ids,
-        },
-    }
-    finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-    raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
-    _derive_content(raw)
-    _stage_case(root, case_id, raw, op="add")
+
+    def mutate(raw: dict[str, Any]) -> None:
+        _check_candidate_sources(raw, source_ids, case_id)
+        curation = raw.setdefault("curation", {})
+        _reopen_for_mutation(curation)
+        finding = {
+            "title": title,
+            "body": body,
+            "severity": severity,
+            "location": location,
+            "provenance": {
+                "kind": _derive_provenance_kind(source_ids, authored=True),
+                "source_ids": source_ids,
+            },
+        }
+        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
+        raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
+        _derive_content(raw)
+
+    _with_case_lock(root, case_id, "add", mutate)
+
 
 
 def add_findings(
