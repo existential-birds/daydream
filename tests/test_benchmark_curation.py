@@ -607,7 +607,6 @@ def test_concurrent_excludes_serialize_to_single_row(tmp_path, fake_gh):
 
 
 def test_concurrent_clean_attestation_serializes(tmp_path, fake_gh):
-    from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)   # empty gold
     procs = [_spawn_worker(["clean", str(ws), case_id]) for _ in range(3)]
     for p in procs:
@@ -647,6 +646,7 @@ def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path, fake_gh):
 
 def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
     import time
+
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     lock_path = ws / ".benchmark.lock"
@@ -662,7 +662,9 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
     )
     assert holder.stdout.readline().strip() == "held"            # another process now holds the flock
     t0 = time.monotonic()
-    cu.list_cases(ws); cu.get_case(ws, case_id); cu.validate_case(ws, case_id)
+    cu.list_cases(ws)
+    cu.get_case(ws, case_id)
+    cu.validate_case(ws, case_id)
     assert time.monotonic() - t0 < 2.0                           # read-only did not block on the held lock
     holder.wait(timeout=10)
 
@@ -673,7 +675,8 @@ def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fa
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
-    mutated = dict(raw); mutated["curation"] = dict(raw["curation"])
+    mutated = dict(raw)
+    mutated["curation"] = dict(raw["curation"])
     mutated["curation"]["state"] = "excluded"          # an interrupted mutation left in flight
     with Transaction(ws, op_id=f"curate-{case_id}", kind="curation:exclude-case") as tx:
         tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
