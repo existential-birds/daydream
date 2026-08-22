@@ -94,16 +94,39 @@ def _validate_lines(start_line: object, end_line: object) -> tuple[int, int]:
     return start_line, end_line
 
 
+def _validate_location(
+    path: object, start_line: object, end_line: object
+) -> tuple[str | None, int | None, int | None]:
+    """Validate the exact-one-of location triple shared by gold/candidate findings.
+
+    Either all three components are ``None`` (a locationless review finding that
+    names a defect without a file or line), or all three are present and fully
+    validated via :func:`_validate_path` / :func:`_validate_lines`. A partially
+    populated location (exactly one or two of the three ``None``) is rejected
+    with a :class:`VerifierError` naming the partial-population rule.
+    """
+    if path is None and start_line is None and end_line is None:
+        return (None, None, None)
+    if path is None or start_line is None or end_line is None:
+        raise VerifierError(
+            "location must be all-null or fully populated (path, start_line, end_line)"
+        )
+    return (_validate_path(path), *_validate_lines(start_line, end_line))
+
+
 def _content_fields(raw: dict[str, object]) -> dict[str, object]:
     """Validate the content fields shared by gold and candidate findings."""
     try:
+        path, start_line, end_line = _validate_location(
+            raw["path"], raw["start_line"], raw["end_line"]
+        )
         return {
             "title": _validate_title(raw["title"]),
             "body": _validate_body(raw["body"]),
             "severity": _validate_severity(raw.get("severity")),
-            "path": _validate_path(raw["path"]),
-            "start_line": raw["start_line"],
-            "end_line": raw["end_line"],
+            "path": path,
+            "start_line": start_line,
+            "end_line": end_line,
         }
     except KeyError as exc:
         raise VerifierError(f"missing required field {exc.args[0]}") from exc
@@ -116,16 +139,15 @@ class _FindingContent:
     title: str
     body: str
     severity: str | None
-    path: str
-    start_line: int
-    end_line: int
+    path: str | None
+    start_line: int | None
+    end_line: int | None
 
     def __post_init__(self) -> None:
         _validate_title(self.title)
         _validate_body(self.body)
         _validate_severity(self.severity)
-        _validate_path(self.path)
-        _validate_lines(self.start_line, self.end_line)
+        _validate_location(self.path, self.start_line, self.end_line)
 
 
 @dataclass(frozen=True)

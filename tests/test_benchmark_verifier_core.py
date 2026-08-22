@@ -450,3 +450,25 @@ def test_gold_set_rejects_duplicate_finding_ids():
             {**_gold(), "finding_id": fid},
             {**_gold(), "finding_id": fid},
         ], case_id="case-x")
+
+
+def test_locationless_candidate_accepted():
+    f = parse_candidate_finding(_cand(path=None, start_line=None, end_line=None))
+    assert f.path is None and f.start_line is None and f.end_line is None
+
+
+def test_locationless_gold_accepted():
+    g = parse_gold_finding(_gold(path=None, start_line=None, end_line=None))
+    assert g.path is None and g.start_line is None and g.end_line is None
+
+
+@pytest.mark.parametrize("partial", [
+    {"path": "src/a.py", "start_line": None, "end_line": None},
+    {"path": None, "start_line": 1, "end_line": 1},
+    {"path": "src/a.py", "start_line": 1, "end_line": None},
+])
+def test_partial_location_rejected(partial):
+    with pytest.raises(VerifierError):
+        parse_candidate_finding(_cand(**partial))
+    with pytest.raises(VerifierError):
+        parse_gold_finding(_gold(**partial))
