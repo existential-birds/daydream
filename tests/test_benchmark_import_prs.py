@@ -10,6 +10,7 @@ through the ``fake_gh`` router; freeze mirror fetches hit a real local bare
 origin (no network).
 """
 
+import hashlib
 import os
 import subprocess
 
@@ -29,7 +30,9 @@ _SEED_ENV = {
 _PR_HEADER = {
     "number": 101,
     "url": "https://github.com/o/r/pull/101",
+    "html_url": "https://github.com/o/r/pull/101",
     "title": "Fix cache",
+    "body": "",
     "state": "open",
     "base": {"ref": "main", "sha": "b" * 40},
     "head": {"ref": "feature/cache", "sha": "a" * 40},
@@ -65,6 +68,145 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path, fake_gh
     assert "-c" in ls.argv and any(a.startswith("credential.helper=") for a in ls.argv)
     assert "gh auth git-credential" in joined and "password=" not in joined
     assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
+
+
+def test_fetch_persists_complete_pr_header(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = "fixes the cache\n\nand tests"
+    header["html_url"] = "https://github.com/o/r/pull/101"
+    header["merged_at"] = "2026-01-02T00:00:00Z"
+    header["closed_at"] = "2026-01-02T00:00:00Z"
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    pr = doc.pull_request
+    assert pr.body == "fixes the cache\n\nand tests"
+    assert pr.html_url == "https://github.com/o/r/pull/101"
+    assert pr.title_sha256 == hashlib.sha256(b"Fix cache").hexdigest()
+    assert pr.body_sha256 == hashlib.sha256("fixes the cache\n\nand tests".encode()).hexdigest()
+    assert pr.head.ref == "feature/cache"          # head.ref parity with base.ref
+    assert pr.merged_at is not None and pr.closed_at is not None
+    assert pr.number == 101 and pr.author.login == "alice"
+
+
+def test_materialized_case_carries_full_pr_header(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)                  # REST + canned PR for pr 101
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    pr = case["pull_request"]
+    assert pr["head"]["ref"] == "feature/cache"    # head.ref persisted in the case YAML
+    assert pr["body"] == ""                         # _PR_HEADER has no body -> empty
+    assert pr["title_sha256"] and pr["body_sha256"]
+    assert "merged_at" in pr and "closed_at" in pr and "html_url" in pr
+
+
+def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = None                          # GitHub returns null for empty
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.pull_request.body == ""             # null -> empty string, never "None"
+
+
+@pytest.mark.parametrize("body_field,expected", [
+    (None, ""),                      # null body -> empty
+    ("", ""),                        # empty body
+    ("héllo wörld \u00e9", "héllo wörld \u00e9"),          # Unicode preserved
+    ("line1\nline2\nline3", "line1\nline2\nline3"),        # newlines preserved
+    ("x" * 50000, "x" * 50000),      # over context-limit body (never bounded here; persisted whole)
+])
+def test_import_body_shape_preserved(tmp_path, fake_gh, body_field, expected):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = body_field
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.pull_request.body == expected
+    assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("state,merged_at,closed_at,expect_merged", [
+    ("open", None, None, False),
+    ("closed", None, "2026-01-02T00:00:00Z", False),     # closed-unmerged
+    ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
+])
+def test_import_merged_state_distinction(tmp_path, fake_gh, state, merged_at, closed_at, expect_merged):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["state"] = state
+    header["merged_at"] = merged_at
+    header["closed_at"] = closed_at
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    pr = doc.pull_request
+    assert pr.state == state
+    assert (pr.merged_at is not None) == expect_merged
+    assert (pr.closed_at is not None) == (closed_at is not None)
+
+
+def test_import_no_comments_pr(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = "no comments here"
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.evidence == [] and doc.pull_request.body == "no comments here"
+
+
+def test_payload_digest_spans_header_and_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    def fetch_with(title):
+        ws = tmp_path / "ws"
+        (ws / "imports").mkdir(parents=True, exist_ok=True)
+        header = dict(_PR_HEADER)
+        header["title"] = title
+        header["body"] = "b"
+        fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+        for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+                   "repos/o/r/issues/101/comments"):
+            fake_gh.set_response("GET", ep, [])
+        return gi.fetch_and_normalize(ws, "o/r", 101)
+    a = fetch_with("Fix cache")
+    b = fetch_with("Fix cache EDITED")            # header-only change, same evidence
+    assert a.fetch.payload_sha256 != b.fetch.payload_sha256
+    # a header-only change must flip the digest even with identical evidence
+    assert gi._evidence_signature_from_doc(a) == gi._evidence_signature_from_doc(b)
 
 
 def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
@@ -646,6 +788,89 @@ def _curate_case(ws, case_file):
         "case_exclusion": None,
     }
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_refresh_body_only_change_stales_gold(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # state=ready, attested
+    # body-only change: same evidence, edited PR body (feeds compiled context)
+    hdr = dict(_PR_HEADER)
+    hdr["body"] = "EDITED body that changes compiled context"
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"        # task-input contract changed -> stale
+
+
+def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    before_import_sha = before["source"]["import_sha256"]
+    # metadata-only change: updated_at + html_url, same title/body/base/head (no evidence change)
+    hdr = dict(_PR_HEADER)
+    hdr["updated_at"] = "2026-01-02T00:00:00Z"
+    hdr["html_url"] = "https://github.com/o/r/pull/101"
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"          # NOT staled
+    assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
+    assert case["curation"]["findings"]                  # curated gold preserved
+    # The refreshed header metadata must actually propagate into the case-level
+    # pull_request block; import_sha256 alone cannot prove it, since the digest
+    # re-serializes fetch.fetched_at and flips on any refresh.
+    assert case["pull_request"]["updated_at"] == "2026-01-02T00:00:00Z"
+    assert case["pull_request"]["html_url"] == "https://github.com/o/r/pull/101"
+
+
+def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh):
+    """A predate import file (no body, no head.ref) must not stale gold on the
+    first post-upgrade refresh: its task-input contract cannot be reconstructed,
+    so only an evidence change can stale it until it is re-persisted."""
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    # Rewrite the persisted import in the predate shape: head.ref dropped and the
+    # additive body/digest/html_url/merged/closed fields absent.
+    import_path = ws / "imports" / "pr-000101.json"
+    raw = load_json_strict(import_path)
+    pr = raw["pull_request"]
+    pr.pop("body", None)
+    pr.pop("html_url", None)
+    pr.pop("title_sha256", None)
+    pr.pop("body_sha256", None)
+    pr.pop("merged_at", None)
+    pr.pop("closed_at", None)
+    pr["head"].pop("ref", None)
+    import_path.write_text(json.dumps(raw, indent=2))
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    before_import_sha = before["source"]["import_sha256"]
+    # metadata-only change: same title/body/base/head and evidence as the predate file
+    hdr = dict(_PR_HEADER)
+    hdr["updated_at"] = "2026-01-02T00:00:00Z"
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"          # NOT staled by the metadata-only refresh
+    assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
+    assert case["curation"]["findings"]                  # curated gold preserved
 
 
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):

@@ -731,13 +731,16 @@ def project_candidates(
     return cands
 
 
-def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
-    """sha256 over the canonical JSON of the evidence list."""
-    canonical = json.dumps(
-        [r.model_dump(mode="json") for r in records],
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+def _payload_sha256(import_doc: dict[str, Any]) -> str:
+    """sha256 over the canonical JSON of the complete normalized import.
+
+    Spans every block of the persisted ``ImportDocument`` — ``schema_version``,
+    ``repository``, the PR header (title/body/state/timestamps/head/base) and
+    the evidence — except the self-referential ``fetch`` record that carries
+    this digest itself, so any PR-intent or repository change flips it, not
+    just evidence changes.
+    """
+    canonical = json.dumps(import_doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -749,6 +752,45 @@ def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[str, st
     return frozenset(
         (str(e.get("source_id")), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
     )
+
+
+def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
+    """Deterministic sha256 over the header fields that feed the compiled context.
+
+    Covers ``title``/``body``/``base``/``head`` (sha + ref) — the task-input
+    contract a reviewer is shown — computed at refresh time without a full
+    compile. A body/title/base/head change flips it; metadata-only changes
+    (updated_at, html_url, merged state) do not.
+    """
+    sig = _task_input_signature_from_raw(doc.model_dump(mode="json"))
+    assert sig is not None  # a typed doc always carries body + head.ref
+    return sig
+
+
+def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
+    """The task-input signature computed over a raw import document's dict.
+
+    A predate import file persisted ``head: {sha}`` without ``ref`` and no
+    ``body``, so the task-input contract cannot be reconstructed from what it
+    stored. Returns ``None`` for such files so the task-input arm of ``changed``
+    stays inert until the file is re-persisted with the full header; a fresh
+    file always carries both keys (``body`` may be ``""``, ``head.ref`` may be
+    ``None``) and yields a comparable signature.
+    """
+    pr = raw.get("pull_request") or {}
+    head = pr.get("head") or {}
+    if "body" not in pr or "ref" not in head:
+        return None
+    base = pr.get("base") or {}
+    payload = {
+        "title": str(pr.get("title") or ""),
+        "body": str(pr.get("body") or ""),
+        "base_sha": base.get("sha"),
+        "base_ref": base.get("ref"),
+        "head_sha": head.get("sha"),
+        "head_ref": head.get("ref"),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _case_materialize(
@@ -939,22 +981,31 @@ def _stage_fetch_failure(
 
 def _prior_import_state(
     root: Path, raw: dict[str, Any], number: int
-) -> tuple[frozenset[tuple[str, str]] | None, dict[str, dict[str, Any]], str]:
-    """The prior snapshot signature, prior case curations, and the import file path.
+) -> tuple[
+    frozenset[tuple[str, str]] | None,
+    str | None,
+    dict[str, dict[str, Any]],
+    str,
+]:
+    """The prior evidence signature, task-input signature, curations, and import path.
 
-    A missing/unreadable prior snapshot yields a ``None`` signature (so a
-    refresh cannot compare); an unreadable curation file is skipped, never fatal.
+    A missing/unreadable prior snapshot yields ``None`` for both signatures (so
+    a refresh cannot compare); an unreadable curation file is skipped, never
+    fatal.
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
     prior_sig: frozenset[tuple[str, str]] | None = None
+    prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
         try:
             prior_raw = storage.load_json_strict(root / existing["import_file"])
             prior_sig = _evidence_signature_from_raw(prior_raw)
+            prior_task_sig = _task_input_signature_from_raw(prior_raw)
         except Exception:
             prior_sig = None
+            prior_task_sig = None
         for case_id in existing.get("case_ids", []):
             try:
                 cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
@@ -962,7 +1013,7 @@ def _prior_import_state(
                     prior_curations[case_id] = cur
             except Exception:
                 pass
-    return prior_sig, prior_curations, import_file
+    return prior_sig, prior_task_sig, prior_curations, import_file
 
 
 def _import_one_pr(
@@ -976,10 +1027,23 @@ def _import_one_pr(
     origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
+    prior_sig, prior_task_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
-        changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
+        # stale only on an evidence change OR a task-input-contract change
+        # (the title/body/base/head a reviewer was shown); a metadata-only change
+        # updates checksums without staling gold.
+        changed = (
+            refresh
+            and prior_sig is not None
+            and (
+                prior_sig != _evidence_signature_from_doc(doc)
+                or (
+                    prior_task_sig is not None
+                    and prior_task_sig != _task_input_signature_from_doc(doc)
+                )
+            )
+        )
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
         cases, bundle_rels = _case_materialize(
@@ -1101,10 +1165,15 @@ def fetch_and_normalize(
     """Fetch one PR's full evidence set through REST and normalize it.
 
     Pulls the PR header, then every submitted review, top-level inline comment,
-    and conversation comment in order. Every retrieved record is retained as an
-    :class:`EvidenceRecord` with a stable source ID and body hash; ``is_bot`` is
-    derived from the author type and never filters. Failure of any call raises
-    :class:`GitError` — never a silent default.
+    and conversation comment in order. The normalized ``pull_request`` block
+    carries the complete header: number, url/html_url, title, body, state,
+    merge/close timestamps, created/updated timestamps, author, exact
+    base/head (sha + ref), and the persisted ``title_sha256``/``body_sha256``
+    digests; the fetch ``payload_sha256`` spans the whole normalized import.
+    Every retrieved record is retained as an :class:`EvidenceRecord` with a
+    stable source ID and body hash; ``is_bot`` is derived from the author type
+    and never filters. Failure of any call raises :class:`GitError` — never a
+    silent default.
     """
     header = _fetch_with_retry(root, owner_repo, number)
 
@@ -1121,29 +1190,41 @@ def fetch_and_normalize(
             evidence.append(_evidence_from_thread(thread, comment))
 
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
+    record_dicts = [r.model_dump(mode="json") for r in records]
     base = header.get("base") or {}
     head = header.get("head") or {}
+    title = header.get("title") or ""
+    body = header.get("body") or ""          # null/empty -> "", Unicode/newlines preserved byte-for-byte
     pull_request = {
-        "number": header["number"],
+        "number": header["number"],          # KeyError propagates if absent — fail closed, never 0
         "url": header.get("url") or "",
-        "title": header.get("title") or "",
+        "html_url": header.get("html_url") or "",
+        "title": title,
+        "body": body,
         "state": header.get("state") or "",
+        "title_sha256": hashlib.sha256(title.encode("utf-8")).hexdigest(),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "base": {"sha": base.get("sha"), "ref": base.get("ref")},
-        "head": {"sha": head.get("sha")},
+        "head": {"sha": head.get("sha"), "ref": head.get("ref")},
         "created_at": header.get("created_at"),
         "updated_at": header.get("updated_at"),
+        "merged_at": header.get("merged_at"),
+        "closed_at": header.get("closed_at"),
         "author": _as_author(header),
+    }
+    import_doc = {
+        "schema_version": 1,
+        "repository": _repository_block(root, owner_repo),
+        "pull_request": pull_request,
+        "evidence": record_dicts,
     }
     return schema.ImportDocument.model_validate(
         {
-            "schema_version": 1,
-            "repository": _repository_block(root, owner_repo),
-            "pull_request": pull_request,
-            "evidence": [e.model_dump(mode="json") for e in records],
+            **import_doc,
             "fetch": {
                 "fetched_at": _now_rfc3339(),
                 "etag": None,
-                "payload_sha256": _payload_sha256(records),
+                "payload_sha256": _payload_sha256(import_doc),
             },
         }
     )
