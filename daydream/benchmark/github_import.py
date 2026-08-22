@@ -14,6 +14,8 @@ import hashlib
 import json
 import re
 import shutil
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -245,16 +247,67 @@ def _parse_ndjson(text: str) -> list[Any]:
     return values
 
 
+_RATE_LIMIT_ATTEMPTS = 3
+_RATE_LIMIT_MAX_SLEEP_S = 60.0
+
+
+def _call_with_rate_limit_retry(
+    call: Callable[[], Any],
+) -> Any:
+    """Run *call* up to 3 times, sleeping ``min(retry_after, 60)`` between rate-limit failures.
+
+    A non-rate-limit failure returns immediately. After the third rate-limit
+    attempt the last (failed) result is returned so the orchestrator can mark
+    that PR ``fetch_failed`` — never a silent placeholder.
+    """
+    last = None
+    for attempt in range(_RATE_LIMIT_ATTEMPTS):
+        proc = call()
+        if proc.returncode == 0:
+            return proc
+        error = git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
+        if not isinstance(error, git_ops.RateLimitError):
+            return proc
+        wait = min(error.retry_after if error.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S, _RATE_LIMIT_MAX_SLEEP_S)
+        if attempt < _RATE_LIMIT_ATTEMPTS - 1:
+            time.sleep(wait)
+        last = proc
+    return last
+
+
+def _fetch_with_retry(root: Path, owner_repo: str, number: int):
+    """Fetch ``pulls/<number>`` with the bounded rate-limit retry policy."""
+    endpoint = f"repos/{owner_repo}/pulls/{number}"
+    return _call_with_rate_limit_retry(
+        lambda: git_ops._run_gh(
+            root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"]
+        )
+    )
+
+
+def _is_rate_limit_error(proc) -> bool:
+    """True when a failed call's stderr carries a GitHub rate-limit signal."""
+    return isinstance(git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr), git_ops.RateLimitError)
+
+
 def _rest(root: Path, endpoint: str) -> list[Any]:
     """Fetch one REST resource, paginating fully, returning the parsed NDJSON rows.
 
     ``--paginate`` walks Link headers so every page is retained (the fake serves
     the complete canned list in one NDJSON stream).
     """
-    proc = git_ops._run_gh(root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"])
+    proc = _call_with_rate_limit_retry(
+        lambda: git_ops._run_gh(root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"])
+    )
     if proc.returncode != 0:
+        if _is_rate_limit_error(proc):
+            raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {proc.stderr.strip()}")
         raise git_ops.GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
     return _parse_ndjson(proc.stdout)
+
+
+class _ImportRateLimitError(Exception):
+    """A fetch exhausted its rate-limit retries; the PR becomes ``fetch_failed``."""
 
 
 def _as_author(raw: dict) -> dict:

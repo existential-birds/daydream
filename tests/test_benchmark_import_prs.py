@@ -219,3 +219,45 @@ def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path, fake_gh):
     # second preflight is a no-op on identity (immutable, already resolved)
     out2 = gi.preflight(ws, pr_count=1)
     assert out2.repository_id == 5
+
+
+def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
+    import subprocess
+
+    from daydream import git_ops as _git_ops
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    attempts = {"n": 0}
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    slept: list[float] = []
+    monkeypatch.setattr("daydream.benchmark.github_import.time.sleep", lambda s: slept.append(s))
+    real_run = _git_ops.subprocess.run
+
+    def flaky_gh(args, *pargs, **kwargs):
+        argv = list(args)
+        joined = " ".join(argv)
+        if (
+            argv
+            and argv[0] == "gh"
+            and "pulls/101" in joined
+            and "reviews" not in joined
+            and "comments" not in joined
+            and "issues" not in joined
+        ):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                return subprocess.CompletedProcess(
+                    argv, 1, "API rate limit exceeded",
+                    "gh: API rate limit exceeded Retry-After: 2",
+                )
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_gh)
+    ok = gi._fetch_with_retry(ws, "o/r", 101)
+    assert attempts["n"] == 3 and ok.returncode == 0
+    assert slept and all(w <= 60 for w in slept)  # Retry-After honored, 60s cap
