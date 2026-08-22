@@ -383,6 +383,26 @@ def test_stable_curation_types_exported():
     assert bm.CurationError
 
 
+def test_stale_case_edit_stays_stale_and_re_attests(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.list_case(ws, case_id)["candidates"])
+    # force the case into stale + attested (simulating a refresh that flipped ready->stale)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["curation"].update({"state": "stale", "snapshot_attested": True})
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # stale edit stays stale
+    raw = load_yaml_strict(path)
+    assert raw["curation"]["state"] == "stale"
+    assert raw["curation"]["snapshot_attested"] is False
+
+    cu.mark_ready(ws, case_id, head_sha=head_sha)                # stale -> ready
+    raw = load_yaml_strict(path)
+    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
