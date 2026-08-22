@@ -58,3 +58,37 @@ def test_derive_task_key_is_opaque_and_deterministic():
     assert k != build.derive_task_key("pr-000101-1a2b3c4d5e60")  # distinct case -> distinct key
     assert "pr-" not in k and case_id not in k          # reveals no authoring case id
     assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
+
+
+def test_bounded_pr_context_short_no_truncation():
+    from daydream.benchmark.harbor import build
+    ctx = build.bounded_pr_context({"title": "Fix cache", "body": "narrowly scoped"})
+    assert ctx == (
+        "<historical_pr_context>\ntitle: Fix cache\nbody: narrowly scoped\n"
+        "</historical_pr_context>"
+    )
+    assert "[truncated" not in ctx
+
+
+def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks():
+    from daydream.benchmark.harbor import build
+    emoji = "😀"  # 4 UTF-8 bytes
+    body = "a" * 1000 + emoji * 50 + "Z" * 500            # ends on a 4-byte char
+    full = f"title: T\nbody: {body}"
+    ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=200)
+    assert ctx.endswith("</historical_pr_context>")
+    assert "[truncated; full_body_sha256=" in ctx
+    # the truncated body must end on a whole UTF-8 char (no replacement chars / no split bytes)
+    inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    body_line = inner.splitlines()[-1].removeprefix("body: ")
+    body_line.encode("utf-8")                            # decodes cleanly: boundary is valid
+    assert "[truncated; full_body_sha256=" in body_line
+    digest = body_line.split("full_body_sha256=", 1)[1].rstrip("]")
+    assert digest == hashlib.sha256(full.encode("utf-8")).hexdigest()   # full-text digest
+    assert len(body_line.encode("utf-8")) <= 200
+
+
+def test_bounded_pr_context_missing_body_is_empty():
+    from daydream.benchmark.harbor import build
+    ctx = build.bounded_pr_context({"title": "Fix cache"})          # no body key
+    assert "body: \n" in ctx and "[truncated" not in ctx
