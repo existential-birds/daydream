@@ -48,11 +48,6 @@ def _run_gh_api_user(root: Path) -> dict:
     return json.loads(proc.stdout)
 
 
-def _gh_auth_git_credential(root: Path) -> str:
-    """Run the command-scoped git credential helper and return its protocol text."""
-    return git_ops.gh_auth_git_credential(root)
-
-
 def _git_ls_remote(root: Path, url: str) -> str:
     """Run an authenticated ``git ls-remote <url>`` and return the refs text."""
     return git_ops.git_ls_remote(root, url)

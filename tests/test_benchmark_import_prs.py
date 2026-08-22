@@ -39,20 +39,21 @@ _PR_HEADER = {
 }
 
 
-def test_preflight_gh_and_ls_remote_route_through_fake(tmp_path, fake_gh):
+def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
 
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     ws = tmp_path / "ws"
     ws.mkdir()
-    status = gi._run_gh_preflight_status(ws)       # gh auth status --hostname github.com
-    login = gi._run_gh_api_user(ws)                # gh api user
-    cred = gi._gh_auth_git_credential(ws)          # gh auth git-credential
-    refs = gi._git_ls_remote(ws, "https://github.com/o/r.git")  # git ls-remote
-    assert status.returncode == 0
-    assert login == {"login": "octocat", "type": "User"}
-    assert "password=" in cred
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    assert gi._run_gh_preflight_status(ws).returncode == 0
+    assert gi._run_gh_api_user(ws) == {"login": "octocat", "type": "User"}
+    refs = gi._git_ls_remote(ws, "https://github.com/o/r.git")
     assert "refs/heads/head" in refs
+    ls = fake_gh.command_calls("git ls-remote")[-1]
+    joined = " ".join(ls.argv)
+    assert "-c" in ls.argv and any(a.startswith("credential.helper=") for a in ls.argv)
+    assert "gh auth git-credential" in joined and "password=" not in joined
+    assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
 
 
 def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
