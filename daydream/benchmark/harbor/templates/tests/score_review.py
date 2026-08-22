@@ -98,7 +98,7 @@ def render_pair_prompt(gold: dict, candidate: dict, *, template: str) -> str:
 
 
 def parse_verdict(raw: object) -> verifier_core.Verdict:
-    """Validate a raw judge verdict dict and return a ``Nondeterministic.Verdict``.
+    """Validate a raw judge verdict dict and return a ``verifier_core.Verdict``.
 
     ``gold_id``/``candidate_id`` are placeholders the caller (``judge_pairs``)
     stamps onto the returned verdict. Any violation — wrong type, out-of-range
