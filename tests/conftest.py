@@ -1,6 +1,8 @@
 """Shared pytest fixtures for the daydream test suite."""
 
+import importlib.util
 import os
+import sys
 import tomllib
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -805,6 +807,40 @@ def improve_fixture_service(apps_dir: Path) -> str:
             "'[project]' on pyproject.toml line 1 to anchor host evidence"
         )
     return chosen.name
+
+
+# --- Harbor verifier template-asset loaders (issue #777) -------------------
+#
+# The generated Harbor verifier assets are non-package `.py` files that use a
+# bare `import verifier_core` and must never import daydream. Tests load them
+# via the repo's established importlib pattern (see
+# tests/test_run_demo_python.py._load_script_module) with the sibling template
+# copy on `sys.path`, so the bare import resolves to the same-dir copy —
+# identical to how the compiled task resolves it.
+_TEMPLATES = Path(__file__).resolve().parents[1] / "daydream" / "benchmark" / "harbor" / "templates"
+
+
+def _load_template_asset(path: Path, name: str) -> Any:
+    """Load a non-package template asset so a bare sibling import resolves to it."""
+    sys.path.insert(0, str(path.parent))  # bare `import verifier_core` -> sibling template copy
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="session")
+def sr_module() -> Any:
+    """The loaded ``templates/tests/score_review.py`` verifier entry module."""
+    return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
+
+
+@pytest.fixture(scope="session")
+def sr_metric() -> Any:
+    """The loaded ``templates/metric.py`` corpus aggregation entry module."""
+    return _load_template_asset(_TEMPLATES / "metric.py", "metric")
 
 
 def improve_fixture_test_command_anchor(pyproject: Path) -> int:

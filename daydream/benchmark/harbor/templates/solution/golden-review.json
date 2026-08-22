@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "case_id": "case-x",
+  "base_ref": "base",
+  "head_ref": "head",
+  "findings": [
+    {
+      "candidate_id": "e6adb950b8e5687d062b4b6c51442a117c08caf14ef64907bdfdc73a6cd50178",
+      "title": "Cache key not tenant-scoped",
+      "body": "The cache key collides across tenants.",
+      "severity": "high",
+      "path": "src/cache.py",
+      "start_line": 42,
+      "end_line": 42
+    },
+    {
+      "candidate_id": "66506569c28b529ae2175ac307c2a2bc33edae54a68d2420d1bd0bc4dfa1efa7",
+      "title": "Response not validated",
+      "body": "The response is interpolated without escaping.",
+      "severity": "medium",
+      "path": "src/render.py",
+      "start_line": 10,
+      "end_line": 14
+    }
+  ]
+}

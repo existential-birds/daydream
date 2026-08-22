@@ -1,0 +1,20 @@
+[
+  {
+    "finding_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "Cache key not tenant-scoped",
+    "body": "The cache key collides across tenants.",
+    "severity": "high",
+    "path": "src/cache.py",
+    "start_line": 42,
+    "end_line": 42
+  },
+  {
+    "finding_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "title": "Response not validated",
+    "body": "The response is interpolated without escaping.",
+    "severity": "medium",
+    "path": "src/render.py",
+    "start_line": 10,
+    "end_line": 14
+  }
+]
