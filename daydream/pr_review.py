@@ -510,8 +510,6 @@ def resolve_line(target_dir: Path, head_sha: str, issue: ParsedIssue) -> int | N
 
     return None
 
-
-_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 # Splits a unified diff on each `diff --git` header so we can pick out the
 # block for a single file from a full-PR diff.
 _DIFF_BLOCK_SPLIT = re.compile(r"(?m)^(?=diff --git )")
@@ -606,14 +604,17 @@ def pr_changed_files(target_dir: Path, pr: PRInfo) -> set[str]:
 
 
 def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
-    hunks: list[tuple[int, int]] = []
-    for m in _HUNK_HEADER.finditer(diff_text):
-        start = int(m.group(1))
-        count = int(m.group(2)) if m.group(2) else 1
-        if count == 0:
-            continue
-        hunks.append((start, start + count - 1))
-    return hunks
+    """Head-side inclusive hunk ranges for a (single-file) diff block.
+
+    Delegates to the shared unified-diff parser in ``daydream.hunk_index``
+    (``head_side_ranges(parse_hunks(...))``) so pr_review, quote_scrub and
+    coverage all count from the same source. The contract is unchanged: a
+    ``list[tuple[int, int]]`` of ``(new_start, new_start + count - 1)`` ranges
+    in diff order.
+    """
+    from daydream.hunk_index import head_side_ranges, parse_hunks
+
+    return head_side_ranges(parse_hunks(diff_text))
 
 
 def snap_to_hunk(
@@ -621,22 +622,28 @@ def snap_to_hunk(
 ) -> int | None:
     """Return a valid in-hunk line for a PR comment, or None if too far.
 
+    A no-op-on-valid backstop (issue #745): the pre-report location validator
+    (``daydream.deep.location_validator``) owns pre-report authority; posting
+    keeps this snap against the LIVE branch diff for placement, passing valid
+    lines through unchanged.
+
     If ``line`` falls inside a hunk, return it unchanged. If it is within
     ``tolerance`` lines of a hunk boundary, snap to the nearest boundary
     so the GitHub API receives a line that actually appears in the diff.
     Returns ``None`` when the line is beyond tolerance of every hunk.
     """
+    # Shared two-sided boundary-distance primitive (same as the pre-report
+    # validator) so posting and the validator agree on what ``in hunk`` /
+    # ``near boundary`` means (issue #745).
+    from daydream.hunk_index import range_distance
+
     best: int | None = None
     best_dist = tolerance + 1
     for start, end in hunks:
         if start <= line <= end:
             return line
-        if line < start:
-            dist = start - line
-            candidate = start
-        else:
-            dist = line - end
-            candidate = end
+        dist = range_distance(line, start, end)
+        candidate = start if line < start else end
         if dist <= tolerance and dist < best_dist:
             best = candidate
             best_dist = dist

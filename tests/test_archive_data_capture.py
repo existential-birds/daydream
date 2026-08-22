@@ -426,9 +426,8 @@ class _FixEditingBackend:
         pl = prompt.lower()
         if "beagle-" in pl and "review" in pl:
             yield TextEvent(text="Review complete.")
-            yield ResultEvent(structured_output=None, continuation=None)
-        elif "extract" in pl and "json" in pl:
-            yield TextEvent(text="Parsed.")
+            # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
+            # structured output directly (no separate parse step).
             yield ResultEvent(
                 structured_output={
                     "issues": [
@@ -437,14 +436,12 @@ class _FixEditingBackend:
                             "description": "Add a guard",
                             "file": "main.py",
                             "line": 1,
+                            "severity": "medium",
                             "confidence": "HIGH",
                             "rationale": "guard missing",
                             "evidence": "main.py:1",
                         }
                     ],
-                    # Issue #742: the deep per-stack parse schema requires a
-                    # ``verdicts`` property (Codex strict-mode output), so the
-                    # parse payload must carry it (empty when not exercised).
                     "verdicts": [],
                 },
                 continuation=None,

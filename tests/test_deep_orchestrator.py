@@ -2712,8 +2712,6 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
             order.append("intent")
         elif "you are reviewing the" in pl and "stack" in pl:
             order.append("per-stack")
-        elif "extract only actionable issues" in pl:
-            order.append("parse")
         elif "cross-stack merge agent" in pl:
             order.append("merge")
 
@@ -2721,13 +2719,15 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert first["intent"] < first["alternatives"]
     # Wonder now runs CONCURRENTLY with the per-stack fan-out on a multi-stack
     # run, so it no longer strictly precedes it; the guarantee is that it joins
-    # before parse consumes alternatives.json.
-    assert first["alternatives"] < first["parse"]
-    assert first["per-stack"] < first["parse"]
-    assert first["parse"] < first["merge"]
+    # before merge consumes the per-stack records (issue #745 removed the
+    # parse-<stack> stage -- reviewers emit records directly).
+    assert first["alternatives"] < first["merge"]
+    assert first["per-stack"] < first["merge"]
+    assert "parse" not in {name.lower() for name in order}
 
-    # At minimum: intent + alternatives + 3 per-stack + 3 parse + 1 merge = 9 distinct calls.
-    assert len(stub.calls) >= 9
+    # At minimum: intent + alternatives + per-stack fan-out + merge (the
+    # parse-<stack> calls are gone; issue #745).
+    assert len(stub.calls) >= 6
     # Each stage fires a distinct execute call -- prompts must be unique.
     prompts = [c["prompt"] for c in stub.calls]
     assert len(set(prompts)) == len(prompts)
@@ -2782,10 +2782,11 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     parse_calls = [
         c for c in stub.calls if "extract only actionable issues" in c["prompt"].lower()
     ]
-    per_stack_outputs = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-review.md"))
-    assert len(parse_calls) >= len(per_stack_outputs)
+    assert parse_calls == [], "parse-* stage must be removed (issue #745)"
     records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
-    assert len(records) == len(per_stack_outputs)
+    assert records
+    # One records file per per-stack review, plus the structural meta-stack.
+    assert len(records) >= len(per_stack_prompts)
 
     from daydream.config import REVIEW_OUTPUT_FILE
 
@@ -2797,6 +2798,32 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
     assert "3." in text.split("## Cross-Stack Issues", 1)[1]
     cross_section = text.split("## Cross-Stack Issues", 1)[1]
     assert "[cross-stack]" in cross_section
+
+
+async def test_deep_run_writes_hunk_index_after_diff(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The persisted hunk index is written right after diff materialization.
+
+    Real-path: drive a minimal deep run and assert the index exists alongside
+    ``diff.patch``, is not older than it, and reflects the actual changed files.
+    """
+    from daydream.hunk_index import load_hunk_index
+
+    _silence(monkeypatch)
+    _install_stub_backend(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    idx_path = multi_stack_target / ".daydream" / "hunk-index.json"
+    diff_path = multi_stack_target / ".daydream" / "diff.patch"
+    assert idx_path.is_file() and diff_path.is_file()
+    # Ordering invariant: the index is not older than the patch it derives from.
+    assert idx_path.stat().st_mtime >= diff_path.stat().st_mtime
+    idx = load_hunk_index(multi_stack_target / ".daydream")
+    assert idx, "hunk index must reflect the run's changed files"
+    assert "api.py" in idx or "README.md" in idx
 
 
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
@@ -4101,7 +4128,9 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    expected_phases = {"intent", "wonder", "per_stack_review", "parse", "merge", "fix", "test", "verify"}
+    # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
+    # records directly), so "parse" is no longer a resolved deep phase.
+    expected_phases = {"intent", "wonder", "per_stack_review", "merge", "fix", "test", "verify"}
     captured = set(seen_phases)
     missing = expected_phases - captured
     assert not missing, (
@@ -7934,7 +7963,7 @@ async def test_run_deep_uncovered_sweep_missing_output_not_claimed_as_coverage(
     assert stats["attempted_files"] == ["notes.txt"]
     assert stats["completed_files"] == []  # no actual review output to parse
     assert stats["sweep_finding_count"] == 0
-    assert stats["sweep_failures"] == {"notes.txt": "no review output written"}
+    assert stats["sweep_failures"] == {"notes.txt": "no structured output produced"}
     # No review output, no records artifact on a fresh run.
     assert not (deep / "stack-uncovered-records.json").exists()
 
@@ -8458,3 +8487,48 @@ async def test_clean_verdict_on_unread_file_is_not_reviewed_not_pass(
     assert verdicts_generic["notes.txt"]["verdict"] == "not_reviewed"  # read-gated, never clean
     assert verdicts_generic["notes.txt"]["lines_read"] == 8
     assert verdicts_generic["README.md"]["verdict"] == "clean"  # read, though not declared
+
+
+async def test_per_stack_prompt_points_at_hunk_index(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer prompts source changed-line ranges from the hunk index, not
+    a diff.patch re-read (AC#1)."""
+    _silence(monkeypatch)
+    prompts = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    prompt = next(c["prompt"] for c in prompts if "Relevant diff hunks" in c["prompt"])
+    assert "hunk-index.json" in prompt or "changed line ranges" in prompt.lower()
+    assert "do NOT re-Read diff.patch" in prompt or "diff.patch" not in prompt
+
+
+async def test_no_parse_phase_and_records_from_output_schema(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC4: no parse-<stack> fork exists; records come from output_schema.
+
+    Real-path: drive a deep run and assert (1) no phase_parse_feedback prompt
+    fires and no "parse" backend is constructed, and (2) the per-stack records
+    files hold the reviewer's structured output directly.
+    """
+    _silence(monkeypatch)
+    prompts = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+
+    # (1) No parse-<stack> phase: the phase_parse_feedback prompt never fires.
+    assert not any(
+        "extract only actionable issues" in c["prompt"].lower() for c in prompts
+    ), "a parse phase prompt fired; parse-* stage must be removed"
+    assert not any("parse" in str(c.get("model", "")).lower() for c in prompts)
+
+    # (2) Per-stack records files exist and hold the reviewer's structured
+    # output (the stub's per-stack branch emits "Sample issue").
+    records = list((multi_stack_target / ".daydream" / "deep").glob("stack-*-records.json"))
+    assert records, "expected per-stack records written by the reviewer"
+    loaded = json.loads(records[0].read_text())
+    assert loaded["issues"][0]["description"] == "Sample issue"

@@ -29,10 +29,14 @@ from daydream.deep.prompts import (
 )
 from daydream.eval.analyzer import (
     _agent_label,
-    _files_from_diff,
     _read_paths_for_call,
     _records_issues,
     load_trajectories,
+)
+from daydream.hunk_index import (
+    files_in_index,
+    hunk_index_path,
+    load_hunk_index,
 )
 from daydream.phases import (
     _confidence_and_convention_instructions,
@@ -429,7 +433,15 @@ def compute_uncovered_files(
         no review agent covered.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
-    diff_files = _files_from_diff(daydream_dir / "diff.patch")
+    # The changed-file set comes from the persisted hunk index (written at
+    # gather right after diff materialization) rather than re-reading
+    # ``diff.patch``. Fail-open: ``load_hunk_index`` never raises and degrades
+    # a missing index to no changed files -- but that is NOT evidence of full
+    # coverage. An absent index leaves the changed-file set unenumerated, so
+    # reporting it as ``diff_files == []`` (ratio 1.0, uncovered []) would let
+    # a genuine coverage gap masquerade as a clean pass. Surfaced below instead.
+    hunk_index_missing = not hunk_index_path(daydream_dir).is_file()
+    diff_files = files_in_index(load_hunk_index(daydream_dir))
 
     review_reads: set[str] = set()
     for traj in trajectories["forked"]:
@@ -455,6 +467,13 @@ def compute_uncovered_files(
         "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
         "uncovered_files": uncovered,
     }
+    if hunk_index_missing:
+        # Issue #336: a missing index is NOT a clean empty diff. Fail-open is
+        # preserved (``load_hunk_index`` still never raises); only the
+        # reporting changes so the unenumerated changed-file set is surfaced as
+        # a gap rather than silently rendered as full coverage.
+        stats["coverage_ratio"] = None
+        stats["hunk_index_missing"] = True
     if receipts:
         # Issue #731: per-evidence-type counts surface whenever receipts are
         # provided (written and loaded on every deep run, decoupled from
@@ -480,39 +499,29 @@ def diff_block_for_file(diff: str, file: str) -> str | None:
     return None
 
 
-def hunk_change_line_count(hunks: str) -> int:
-    """Count added/removed lines (``+``/``-``) in a diff block, headers excluded.
-
-    ``+++``/``---`` file headers carry leading plus/minus signs but are not
-    content changes, so they are excluded from the count.
-    """
-    count = 0
-    for line in hunks.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+") or line.startswith("-"):
-            count += 1
-    return count
-
-
 def filter_sweepable_files(
     uncovered_files: list[str],
-    diff: str,
+    index: dict[str, Any],
     *,
     min_hunk_lines: int,
     max_files: int,
 ) -> tuple[list[str], list[str], list[str]]:
     """Budget-filter the uncovered list into the files actually swept.
 
-    A file is sweepable only when its hunks contain at least ``min_hunk_lines``
-    added/removed lines -- a trivially small hunk does not justify a second
-    pass. The sweepable set is capped at ``max_files`` in diff order (the
-    uncovered list arrives sorted); the remainder is reported as
+    ``index`` is the persisted hunk index (as loaded by
+    ``daydream.hunk_index.load_hunk_index``) -- the run-time authority for
+    changed-file hunk sizes. A file is sweepable only when its index entry's
+    ``added_total + removed_total`` is at least ``min_hunk_lines`` -- a
+    trivially small hunk does not justify a second pass. A file absent from
+    the index is treated as too small (``skipped_small``), mirroring today's
+    ``block is None`` behavior. The sweepable set is capped at
+    ``max_files`` in path order (the uncovered list arrives path-sorted from
+    ``compute_uncovered_files``); the remainder is reported as
     skipped-for-capacity rather than silently dropped.
 
     Returns:
         ``(swept_files, skipped_small_hunk_files, skipped_capacity_files)``.
-        The two skip lists name the omitted files in diff order (mirroring
+        The two skip lists name the omitted files in path order (mirroring
         ``swept_files``) so consumers can audit exactly which files the
         hunk-size floor and the capacity cap left out; the integer skip counts
         are ``len(...)`` of these lists.
@@ -520,8 +529,8 @@ def filter_sweepable_files(
     swept: list[str] = []
     skipped_small: list[str] = []
     for file in uncovered_files:
-        block = diff_block_for_file(diff, file)
-        if block is None or hunk_change_line_count(block) < min_hunk_lines:
+        info = index.get(file)
+        if info is None or info["added_total"] + info["removed_total"] < min_hunk_lines:
             skipped_small.append(file)
             continue
         swept.append(file)

@@ -866,7 +866,10 @@ async def test_flow_shallow_routes_to_shallow_helper(
     rc = await runner.run(make_config(multi_stack_target, flow_name="shallow", skill="python"))
 
     assert rc == 0
-    assert backend.parse_calls >= 1  # shallow pipeline ran
+    # Issue #745: the shallow (deep single-stack) flow's per-stack reviewer
+    # emits structured records directly -- no separate parse phase. The review
+    # fired when at least one per-stack review prompt reached the backend.
+    assert backend.review_prompts, "shallow pipeline did not run a per-stack review"
 
 
 def test_ext_dir_renderer_override_reaches_pr_review(

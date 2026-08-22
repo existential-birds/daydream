@@ -259,6 +259,25 @@ def test_parse_hunks() -> None:
     assert _parse_hunks(diff) == [(10, 14), (30, 31)]
 
 
+def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+    import daydream.hunk_index as hunk_index
+
+    calls = {"n": 0}
+    real = hunk_index.parse_hunks
+
+    def spy(diff_text):
+        calls["n"] += 1
+        return real(diff_text)
+
+    monkeypatch.setattr(hunk_index, "parse_hunks", spy)
+    diff = (
+        "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+        "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
+    )
+    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
+    assert calls["n"] == 1, "_parse_hunks must delegate to the shared parser"
+
+
 def test_snap_to_hunk_inside_returns_unchanged() -> None:
     hunks = [(10, 20), (30, 40)]
     assert snap_to_hunk(15, hunks) == 15
@@ -295,6 +314,22 @@ def test_snap_to_hunk_between_two_hunks() -> None:
 
 def test_snap_to_hunk_empty_hunks() -> None:
     assert snap_to_hunk(10, []) is None
+
+
+def test_post_posting_backstop_noop_on_valid() -> None:
+    """Posting-time ``snap_to_hunk`` is a no-op-on-valid backstop (AC).
+
+    The pre-report location validator (``location_validator.py``) owns
+    authority; posting keeps ``snap_to_hunk``/``resolve_line`` as a backstop
+    that passes valid lines through unchanged and still snaps/declines
+    out-of-line ones for the live PR diff.
+    """
+    hunks = [(10, 20), (30, 40)]
+    assert snap_to_hunk(15, hunks) == 15  # in-hunk unchanged
+    assert snap_to_hunk(40, hunks) == 40  # boundary unchanged
+    # Within-tolerance still snaps (existing behavior), beyond still None:
+    assert snap_to_hunk(89, [(90, 105)]) == 90
+    assert snap_to_hunk(86, [(90, 105)]) is None
 
 
 @pytest.fixture

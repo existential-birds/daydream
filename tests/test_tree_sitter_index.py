@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _commit, _git, _make_repo_with_main
+from conftest import _commit, _configure_identity, _git, _make_repo_with_main
 
 from daydream import git_ops
 from daydream.tree_sitter_index import (
     _MAX_IMPORTERS,
-    _is_generic_or_invalid_stem,
     detect_affected_files,
 )
 
@@ -400,19 +399,59 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
 
 
-@pytest.mark.parametrize(
-    "stem",
-    ["", "__init__", "mod", "index", "main", "app", "utils", "config", "tests", "conftest"],
-)
-def test_is_generic_or_invalid_stem_skips_empty_and_generic(stem: str) -> None:
-    assert _is_generic_or_invalid_stem(stem) is True
+# --- Symbol index (definitions + line numbers) ------------------------------
 
 
-@pytest.mark.parametrize("stem", ["a\x00b", "a\rb", "a\nb"])
-def test_is_generic_or_invalid_stem_skips_nul_cr_lf(stem: str) -> None:
-    assert _is_generic_or_invalid_stem(stem) is True
+def test_symbol_index_python_records_file_and_line_range(tmp_path: Path):
+    from daydream.tree_sitter_index import build_symbol_index
+
+    (tmp_path / "widget.py").write_text(
+        "def compute_total(x):\n    return x + 1\n\nclass Box:\n    pass\n"
+    )
+    (tmp_path / "config.py").write_text("SETTINGS = {}\ndef load():\n    return SETTINGS\n")
+    idx = build_symbol_index(tmp_path, ["widget.py", "config.py"])
+    assert idx["compute_total"] == [
+        {"path": "widget.py", "line": 1, "end_line": 2, "kind": "function"}
+    ]
+    assert idx["Box"] == [
+        # tree-sitter's ``class_definition`` node spans the body, so the
+        # definition-range end is line 5 (the ``pass`` line), not the header.
+        {"path": "widget.py", "line": 4, "end_line": 5, "kind": "class"}
+    ]
+    # config.py's generic stem does not matter to the index itself; it is
+    # recorded like any other module that defines symbols.
+    assert idx["load"] == [
+        {"path": "config.py", "line": 2, "end_line": 3, "kind": "function"}
+    ]
 
 
-@pytest.mark.parametrize("stem", ["widget", "gadget", "indexer", "app_store"])
-def test_is_generic_or_invalid_stem_accepts_specific_stems(stem: str) -> None:
-    assert _is_generic_or_invalid_stem(stem) is False
+def test_symbol_index_rust_records_file_and_line_range(tmp_path: Path):
+    from daydream.tree_sitter_index import build_symbol_index
+
+    (tmp_path / "lib.rs").write_text(
+        (Path(__file__).parent / "fixtures" / "symbols" / "lib.rs").read_text()
+    )
+    idx = build_symbol_index(tmp_path, ["lib.rs"])
+    assert idx["total"] == [
+        {"path": "lib.rs", "line": 1, "end_line": 3, "kind": "function"}
+    ]
+    assert idx["Widget"] == [
+        {"path": "lib.rs", "line": 5, "end_line": 7, "kind": "class"}
+    ]
+
+
+def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path):
+    """A generic-stem file that actually defines a symbol must not be skipped
+    by the reverse-import lookup (config.py -> app.py ``imported_by`` edge)."""
+    (tmp_path / "config.py").write_text("def load_config():\n    return {}\n")
+    (tmp_path / "app.py").write_text("import config\n")
+    diff = (
+        "diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n"
+        "@@ -1 +1,2 @@\n x\n+y\n"
+    )
+    _git(tmp_path, "init", "-q")
+    _configure_identity(tmp_path)
+    _git(tmp_path, "add", ".")
+    _commit(tmp_path, "init")
+    results = detect_affected_files(diff, tmp_path, depth=1)
+    assert any(r.path == "app.py" and r.role == "imported_by" for r in results)

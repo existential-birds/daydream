@@ -15,8 +15,8 @@ from daydream.deep.coverage import (
     compute_uncovered_files,
     diff_block_for_file,
     filter_sweepable_files,
-    hunk_change_line_count,
 )
+from daydream.hunk_index import change_line_count, parse_hunks, write_hunk_index
 
 _DIFF = (
     "diff --git a/api.py b/api.py\n"
@@ -192,7 +192,7 @@ def test_compute_uncovered_files_reports_unread_diff_files(tmp_path: Path) -> No
     """Files no ``deep-`` reviewer read land in the uncovered list."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-1"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -212,7 +212,7 @@ def test_compute_uncovered_files_empty_when_everything_read(tmp_path: Path) -> N
     """A fully-covered diff reports no uncovered files."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-2"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -225,6 +225,30 @@ def test_compute_uncovered_files_empty_when_everything_read(tmp_path: Path) -> N
     assert stats["coverage_ratio"] == 1.0
 
 
+def test_compute_uncovered_files_missing_index_surfaces_gap(tmp_path: Path) -> None:
+    """Issue #336: a missing hunk index is surfaced, never a full-coverage pass.
+
+    When ``hunk-index.json`` is absent, ``load_hunk_index`` fails open to
+    ``{}`` and ``files_in_index`` returns ``[]`` -- but that empty diff is NOT
+    evidence full coverage. The stats must surface the unenumerated
+    changed-file set (ratio ``None``, ``hunk_index_missing`` true) so the sweep
+    does not silently render a coverage gap as a clean pass.
+    """
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    run_dir = daydream_dir / "runs" / "sess-missing"
+    run_dir.mkdir(parents=True)
+    _write_main(run_dir)
+    _write_fork(run_dir, "deep-python.json", ["/repo/api.py"])  # reviewers read, but index absent
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-missing")
+
+    assert uncovered == []                     # cannot enumerate without the index
+    assert stats["files_in_diff"] == 0         # index absent -> no changed files
+    assert stats["coverage_ratio"] is None     # NOT a false 1.0 full-coverage pass
+    assert stats["hunk_index_missing"] is True  # gap is surfaced
+
+
 def test_compute_uncovered_files_boundary_ignores_suffix_collisions(tmp_path: Path) -> None:
     """A read of ``notapi.py`` must NOT cover the changed file ``api.py``.
 
@@ -235,7 +259,7 @@ def test_compute_uncovered_files_boundary_ignores_suffix_collisions(tmp_path: Pa
     """
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-3"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -246,7 +270,7 @@ def test_compute_uncovered_files_boundary_ignores_suffix_collisions(tmp_path: Pa
 
     assert "api.py" in uncovered  # /repo/notapi.py must not cover api.py
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt covered
-    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept  # api.py is swept, not silently skipped
 
 
@@ -259,7 +283,7 @@ def test_compute_uncovered_files_requires_completed_reads(tmp_path: Path) -> Non
     """
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-4"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -270,7 +294,7 @@ def test_compute_uncovered_files_requires_completed_reads(tmp_path: Path) -> Non
 
     assert "api.py" in uncovered  # the interrupted read covers nothing
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
-    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept  # the unread file is swept, never skipped
 
 
@@ -284,7 +308,7 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     """
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-5"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -296,14 +320,38 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     # notes.txt) covers nothing: api.py stays uncovered and is swept.
     assert "api.py" in uncovered
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
-    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept
 
 
 def test_hunk_change_line_count_excludes_headers() -> None:
     """+++/--- file headers are not counted as added/removed lines."""
-    assert hunk_change_line_count(diff_block_for_file(_DIFF, "api.py") or "") == 2
-    assert hunk_change_line_count(diff_block_for_file(_DIFF, "notes.txt") or "") == 6
+    parsed = parse_hunks(_DIFF)
+    assert change_line_count(parsed, "api.py") == 2
+    assert change_line_count(parsed, "notes.txt") == 6
+
+
+def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path) -> None:
+    """The sweep budget derives from the persisted index, not ``diff.patch``.
+
+    Materialize a ``.daydream`` dir with ONLY ``hunk-index.json`` (no
+    ``diff.patch``) and confirm the sweep still sizes hunks from the index.
+    """
+    from daydream.hunk_index import load_hunk_index
+
+    dd = tmp_path / ".daydream"
+    dd.mkdir()
+    diff = (
+        "diff --git a/api.py b/api.py\n--- a/api.py\n+++ b/api.py\n"
+        "@@ -1,1 +1,8 @@\n x\n+1\n+2\n+3\n+4\n+5\n+6\n+7\n"
+    )
+    write_hunk_index(dd, diff)
+    idx = load_hunk_index(dd)
+    swept, small, cap = filter_sweepable_files(
+        ["api.py"], idx, min_hunk_lines=5, max_files=10
+    )
+    assert swept == ["api.py"]
+    assert small == [] and cap == []
 
 
 def test_filter_sweepable_files_caps_capacity_and_counts_small_hunks() -> None:
@@ -311,7 +359,7 @@ def test_filter_sweepable_files_caps_capacity_and_counts_small_hunks() -> None:
     uncovered = ["api.py", "notes.txt"]
 
     swept, small_files, capacity_files = filter_sweepable_files(
-        uncovered, _DIFF, min_hunk_lines=5, max_files=10
+        uncovered, parse_hunks(_DIFF), min_hunk_lines=5, max_files=10
     )
 
     assert swept == ["notes.txt"]
@@ -325,7 +373,7 @@ def test_filter_sweepable_files_caps_capacity_and_counts_small_hunks() -> None:
 def test_filter_sweepable_files_skips_nonexistent_diff_files() -> None:
     """An uncovered file absent from the diff is skipped as non-sweepable."""
     swept, small_files, capacity_files = filter_sweepable_files(
-        ["ghost.txt"], _DIFF, min_hunk_lines=1, max_files=10
+        ["ghost.txt"], parse_hunks(_DIFF), min_hunk_lines=1, max_files=10
     )
 
     assert swept == []
@@ -344,7 +392,7 @@ def test_filter_sweepable_files_capacity_cap_keeps_diff_order() -> None:
     )
 
     swept, small_files, capacity_files = filter_sweepable_files(
-        ["notes.txt", "third.txt"], diff, min_hunk_lines=5, max_files=1
+        ["notes.txt", "third.txt"], parse_hunks(diff), min_hunk_lines=5, max_files=1
     )
 
     assert swept == ["notes.txt"]
@@ -356,7 +404,7 @@ def test_filter_sweepable_files_capacity_cap_keeps_diff_order() -> None:
 def test_filter_sweepable_files_zero_max_files_sweeps_nothing() -> None:
     """max_files=0 sweeps nothing; every sweepable file is capacity-skipped."""
     swept, small_files, capacity_files = filter_sweepable_files(
-        ["api.py", "notes.txt"], _DIFF, min_hunk_lines=1, max_files=0
+        ["api.py", "notes.txt"], parse_hunks(_DIFF), min_hunk_lines=1, max_files=0
     )
 
     assert swept == []
@@ -451,7 +499,7 @@ def test_inline_hunk_reviewed_evidence_covers_without_read(tmp_path: Path) -> No
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-a"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -486,7 +534,7 @@ def test_production_records_bare_list_shape(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-e"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -520,7 +568,7 @@ def test_frontier_counted_once_per_type_across_shards(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-f"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -549,7 +597,7 @@ def test_coverage_by_evidence_absent_without_receipts(tmp_path: Path) -> None:
     """
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-g"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -570,7 +618,7 @@ def test_assignment_alone_never_counts(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-b"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -594,7 +642,7 @@ def test_incomplete_shard_receipt_does_not_cover(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-c"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -619,7 +667,7 @@ def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-d"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -643,7 +691,7 @@ def test_compute_uncovered_files_bash_import_only_grep_does_not_cover(tmp_path: 
     """An import-only Bash grep shares the Grep-tool carve-out (issue #739)."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-bashgrep"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -658,7 +706,7 @@ def test_compute_uncovered_files_bash_import_only_grep_does_not_cover(tmp_path: 
 
     assert "api.py" in uncovered  # the import-only Bash grep covers nothing
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
-    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept  # the file is swept, never silently skipped
 
 
@@ -666,7 +714,7 @@ def test_compute_uncovered_files_counts_claude_bash_reads(tmp_path: Path) -> Non
     """A Claude-spelled Bash sed read covers a diff file (AC3)."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-claude"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -685,7 +733,7 @@ def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path)
     """An import-only Grep does not, on its own, mark a file covered (AC2/AC3)."""
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-grep"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -698,7 +746,7 @@ def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path)
 
     assert "api.py" in uncovered  # the import-only grep covers nothing
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
-    swept, _, _ = filter_sweepable_files(uncovered, _DIFF, min_hunk_lines=1, max_files=10)
+    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept  # the file is swept, never silently skipped
 
 
@@ -754,7 +802,7 @@ def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-clean"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -787,7 +835,7 @@ def test_not_reviewed_verdict_never_credits(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-nr"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -828,7 +876,7 @@ def test_frontier_credited_when_lister_shard_lacks_records(tmp_path: Path) -> No
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-fl"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -870,7 +918,7 @@ def test_frontier_not_credited_without_any_sibling_evidence(tmp_path: Path) -> N
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-fn"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)
@@ -915,7 +963,7 @@ def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
 
     daydream_dir = tmp_path / ".daydream"
     daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(_DIFF)
+    write_hunk_index(daydream_dir, _DIFF)
     run_dir = daydream_dir / "runs" / "sess-sc"
     run_dir.mkdir(parents=True)
     _write_main(run_dir)

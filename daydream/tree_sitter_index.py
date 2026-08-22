@@ -119,6 +119,22 @@ RUST_IMPORT_QUERY = """
 (use_declaration argument: (_) @import)
 """
 
+# Definition queries (symbol index). Mirror the import-query style: capture the
+# whole definition node as ``@def`` so we can read its field-named ``name`` node
+# and its 1-based start/end lines.
+PYTHON_DEF_QUERY = """
+(function_definition) @def
+(class_definition) @def
+"""
+
+RUST_DEF_QUERY = """
+(function_item) @def
+(struct_item) @def
+(enum_item) @def
+(trait_item) @def
+(impl_item) @def
+"""
+
 
 def _query_for_language(language_id: str) -> str | None:
     """Return the import query string for the given language id, or None."""
@@ -131,6 +147,58 @@ def _query_for_language(language_id: str) -> str | None:
     if language_id == "rust":
         return RUST_IMPORT_QUERY
     return None
+
+
+def _def_query_for_language(language_id: str) -> str | None:
+    """Return the definition query string for a language, or None."""
+    if language_id == "python":
+        return PYTHON_DEF_QUERY
+    if language_id == "rust":
+        return RUST_DEF_QUERY
+    return None
+
+
+def _definition_kind(node_type: str) -> str:
+    """Map a tree-sitter definition node type to ``function``/``class``."""
+    if node_type in ("function_definition", "function_item"):
+        return "function"
+    return "class"
+
+
+def extract_definitions(
+    parser: Parser, source: bytes, query_string: str
+) -> list[dict[str, object]]:
+    """Parse ``source`` and return captured definition records.
+
+    Returns a list of ``{name, line, end_line, kind}`` dicts where ``line``/``end_line``
+    are 1-based (``start_point[0] + 1`` / ``end_point[0] + 1``). ``kind`` is
+    ``"function"`` or ``"class"``. Returns an empty list on any parse/query
+    failure (graceful degradation per D-06, matching ``extract_imports``).
+    """
+    try:
+        tree = parser.parse(source)
+        language = parser.language
+        if language is None:
+            return []
+        query = Query(language, query_string)
+        cursor = QueryCursor(query)
+        captures = cursor.captures(tree.root_node)
+        result: list[dict[str, object]] = []
+        for node in captures.get("def", []):
+            name_node = node.child_by_field_name("name")
+            if name_node is None or name_node.text is None:
+                continue
+            result.append(
+                {
+                    "name": name_node.text.decode("utf-8", errors="replace"),
+                    "line": node.start_point[0] + 1,
+                    "end_line": node.end_point[0] + 1,
+                    "kind": _definition_kind(node.type),
+                }
+            )
+        return result
+    except Exception:
+        return []
 
 
 def extract_imports(parser: Parser, source: bytes, query_string: str) -> list[str]:
@@ -348,7 +416,9 @@ def _resolve_import(
 # files (e.g. ``app`` matches every file mentioning "app"). The static
 # ``imports`` edges still capture forward dependencies precisely, and the
 # dependency-tracer agent greps call sites itself, so skipping these loses
-# nothing but noise.
+# nothing but noise -- UNLESS the file actually defines a symbol, in which case
+# a reverse lookup is warranted (``_eligible_for_reverse_grep`` rescues
+# generic stems whose path appears in the symbol index; issue #745).
 _GENERIC_STEMS = frozenset(
     {
         "__init__", "mod", "index", "main", "app", "api", "base", "common",
@@ -362,17 +432,21 @@ _GENERIC_STEMS = frozenset(
 # Reverse-edge grep is a best-effort seed, not an exhaustive index. A
 # legitimately widely-imported module can match hundreds of files; cap the
 # seed so no single module can blow the downstream prompt's context window.
-def _is_generic_or_invalid_stem(stem: str) -> bool:
-    """Return True if *stem* should be skipped by the reverse-import lookup.
+def _eligible_for_reverse_grep(path: str, defining_paths: set[str]) -> bool:
+    """Whether a modified path should be part of the reverse-import grep.
 
-    Skips empty stems, stems in :data:`_GENERIC_STEMS`, and stems containing
-    characters (NUL, CR, LF) that cannot be expressed in a grep patterns file.
+    Invalid/empty stems are always skipped (they cannot be grepped). A generic
+    stem (in :data:`_GENERIC_STEMS`) is skipped UNLESS the file actually
+    defines a symbol per the symbol index (``defining_paths``) -- a ``config.py``
+    that defines ``load_config`` deserves a reverse lookup; one that defines
+    nothing stays skipped. Non-generic stems are always eligible.
     """
-    if not stem or stem in _GENERIC_STEMS:
-        return True
-    if "\x00" in stem or "\r" in stem or "\n" in stem:
-        return True
-    return False
+    stem = Path(path).stem
+    if not stem or "\x00" in stem or "\r" in stem or "\n" in stem:
+        return False
+    if stem in _GENERIC_STEMS and path not in defining_paths:
+        return False
+    return True
 
 
 _MAX_IMPORTERS = 40
@@ -382,23 +456,30 @@ _MAX_IMPORTERS = 40
 _CODE_PATHSPECS: tuple[str, ...] = tuple(f"*{suffix}" for suffix in LANGUAGES)
 
 
-def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[str, list[str]]:
+def _build_importer_lookup(
+    repo_root: Path,
+    modified_paths: list[str],
+    defining_paths: set[str] | None = None,
+) -> dict[str, list[str]]:
     """Return one batched reverse-import lookup for all *modified_paths*.
 
     Feeds every changed module stem to a single :func:`git_ops.grep_fixed_matches`
     call, then groups the ``(path, pattern)`` pairs per modified path. Each
     modified path's list excludes that exact path and is capped at
     :data:`_MAX_IMPORTERS`, so paths sharing a stem keep separate, per-path
-    caps. Best-effort: a ``GitError`` (or no usable stems) degrades to empty
-    lists with zero git calls.
+    caps. ``defining_paths`` names the modified paths that define at least one
+    symbol per the symbol index; a generic-stem path in this set is rescued
+    from the generic-stem skip (issue #745). Best-effort: a ``GitError`` (or no
+    usable stems) degrades to empty lists with zero git calls.
     """
+    defining_paths = defining_paths or set()
     lookup: dict[str, list[str]] = {path: [] for path in modified_paths}
     unique_stems: list[str] = []
     seen_stems: set[str] = set()
     for path in modified_paths:
-        stem = Path(path).stem
-        if _is_generic_or_invalid_stem(stem):
+        if not _eligible_for_reverse_grep(path, defining_paths):
             continue
+        stem = Path(path).stem
         if stem in seen_stems:
             continue
         seen_stems.add(stem)
@@ -407,7 +488,9 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
         return lookup
 
     try:
-        pairs = git_ops.grep_fixed_matches(repo_root, unique_stems, word=True, pathspecs=_CODE_PATHSPECS)
+        pairs = git_ops.grep_fixed_matches(
+            repo_root, unique_stems, word=True, pathspecs=_CODE_PATHSPECS
+        )
     except GitError:
         return lookup
 
@@ -419,14 +502,54 @@ def _build_importer_lookup(repo_root: Path, modified_paths: list[str]) -> dict[s
         if path not in bucket:
             bucket.append(path)
     for path in modified_paths:
-        stem = Path(path).stem
-        if _is_generic_or_invalid_stem(stem):
+        if not _eligible_for_reverse_grep(path, defining_paths):
             continue
+        stem = Path(path).stem
         lookup[path] = [p for p in by_stem.get(stem, ()) if p != path][:_MAX_IMPORTERS]
     return lookup
 
 
 # --- Public API --------------------------------------------------------------
+
+
+def build_symbol_index(repo_root: Path, paths: list[str]) -> dict[str, list[dict[str, object]]]:
+    """Build a symbol index of function/class definitions for ``paths``.
+
+    Only Python and Rust sources are indexed (the issue's symbol scope). Each
+    path is resolved relative to ``repo_root``; a file that parses or queries
+    with no definitions simply contributes nothing (graceful degradation per
+    D-06).
+
+    Returns ``{name: [{"path", "line", "end_line", "kind"}]}`` keyed by
+    definition name (a name can be defined in multiple files).
+    """
+    index: dict[str, list[dict[str, object]]] = {}
+    for path in paths:
+        lang_entry = LANGUAGES.get(Path(path).suffix)
+        if lang_entry is None:
+            continue
+        language_id, _factory = lang_entry
+        query_string = _def_query_for_language(language_id)
+        if query_string is None:
+            continue
+        abs_path = repo_root / path
+        try:
+            source = abs_path.read_bytes()
+        except (FileNotFoundError, OSError):
+            continue
+        parser = get_parser(language_id)
+        if parser is None:
+            continue
+        for definition in extract_definitions(parser, source, query_string):
+            index.setdefault(str(definition["name"]), []).append(
+                {
+                    "path": path,
+                    "line": definition["line"],
+                    "end_line": definition["end_line"],
+                    "kind": definition["kind"],
+                }
+            )
+    return index
 
 
 def detect_affected_files(
@@ -469,7 +592,12 @@ def detect_affected_files(
         for entry in entries
         if entry.status != "D" and Path(entry.path).suffix in LANGUAGES
     ]
-    importers_by_path = _build_importer_lookup(repo_root, reverse_paths)
+    # A generic-stem file (e.g. ``config``) is rescued from the reverse-import
+    # skip when it actually defines a symbol (issue #745). The defining set is
+    # derived from the definition queries run in this single forward pass, so
+    # the changed files are read and parsed only once -- no separate
+    # ``build_symbol_index`` pass re-reading and re-parsing the same file set.
+    defining_paths: set[str] = set()
     go_package_index: dict[str, tuple[Path, ...]] | None = None
 
     for entry in entries:
@@ -491,8 +619,17 @@ def detect_affected_files(
             continue
 
         parser = get_parser(language_id)
+        if parser is None:
+            continue
+
+        # A generic-stem path that actually defines a symbol is rescued from the
+        # generic-stem reverse-import skip below (issue #745).
+        def_query = _def_query_for_language(language_id)
+        if def_query is not None and extract_definitions(parser, source, def_query):
+            defining_paths.add(entry.path)
+
         query_string = _query_for_language(language_id)
-        if parser is None or query_string is None:
+        if query_string is None:
             continue
 
         imports = extract_imports(parser, source, query_string)
@@ -507,7 +644,11 @@ def detect_affected_files(
                     continue
                 _add(str(rel), "imports")
 
-        for importer in importers_by_path.get(entry.path, ()):
+    # Reverse edges need the complete defining set, so the batched grep runs
+    # after the forward pass (whose reads already covered every file once).
+    importers_by_path = _build_importer_lookup(repo_root, reverse_paths, defining_paths)
+    for path, importers in importers_by_path.items():
+        for importer in importers:
             _add(importer, "imported_by")
 
     return results

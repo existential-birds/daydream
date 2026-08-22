@@ -52,6 +52,7 @@ from daydream.exploration import ExplorationContext
 from daydream.extensions import ExtensionError, build_registry, get_registry, set_registry
 from daydream.flows import FlowContext, run_flow
 from daydream.git_ops import GitError
+from daydream.hunk_index import write_hunk_index
 from daydream.phases import (
     _detect_default_branch,
     _git_branch,
@@ -1158,6 +1159,9 @@ async def _run_custom_flow(work: WorkContext, config: RunConfig) -> int:
     daydream_dir.mkdir(exist_ok=True)
     diff_path = daydream_dir / "diff.patch"
     diff_path.write_text(diff)
+    # Persist the hunk index alongside diff.patch so custom-flow steps can
+    # source changed-line ranges from the run-time authority.
+    write_hunk_index(daydream_dir, diff)
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=DaydreamRunFlow.CUSTOM,

@@ -366,14 +366,32 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_per_stack_reviews: free-form text; reports written by
-        # _maybe_write_artifact via prompt scan.
+        # phase_per_stack_reviews (issue #745): the reviewer emits
+        # PER_STACK_RECORD_SCHEMA structured output directly (no parse step).
+        # The structural meta-stack returns empty issues; a per-stack reviewer
+        # returns the finding that drives the PR-comment content.
+        if "structural reviewer" in pl:
+            review_issues: list[Any] = []
+        else:
+            review_issues = [
+                {
+                    "id": 1,
+                    "description": "Use a more descriptive function name",
+                    "file": "foo.py",
+                    "line": 1,
+                    "severity": "medium",
+                    "confidence": "MEDIUM",
+                    "rationale": "The current name is ambiguous.",
+                    "evidence": "foo.py:1",
+                }
+            ]
         return [
             FakeAssistantMessage(
                 content=[FakeTextBlock(text="ok, wrote the review")],
                 model=FIXTURE_MODEL_ID,
             ),
             FakeResultMessage(
+                structured_output={"issues": review_issues, "verdicts": []},
                 total_cost_usd=0.20,
                 usage={
                     "input_tokens": 4000,

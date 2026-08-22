@@ -1063,6 +1063,60 @@ def _is_evidenced(item: dict[str, Any]) -> bool:
     return has_file_line or has_citation
 
 
+def _evidence_gate_then_validate(
+    raw_items: list[dict[str, Any]],
+    items_path: Path,
+) -> list[dict[str, Any]]:
+    """Evidence-gate ``raw_items``, then location-validate the survivors, in order.
+
+    The two steps are fused into one call because they encode OPPOSITE meanings
+    for the same confidence token: ``_is_evidenced`` reads ``confidence="LOW"``
+    as "speculative, drop" (legacy LOW-confidence prompt tolerance, issue #227),
+    while ``validate_records`` (``daydream.deep.location_validator``) WRITES
+    ``confidence="LOW"`` to demote-with-annotation a beyond-tolerance citation
+    that must still reach ``merged-items.json`` (issue #745). The two only
+    agree because the gate runs FIRST, on the raw reviewer records (where a LOW
+    confidence is genuinely speculative), and the validator runs only on the
+    already-evidenced survivors. Fusing both in one call makes that order
+    structurally unreachable -- a future refactor cannot hoist the validator
+    above the gate without editing this single function, surfacing the conflict
+    here instead of silently dropping every beyond-tolerance finding.
+
+    Writes the ``dropped-speculative.json`` audit sidecar beside ``items_path``
+    when any item is dropped, then returns the survivors after snap/demote
+    location validation.
+    """
+    from daydream.deep.location_validator import validate_records
+    from daydream.hunk_index import load_hunk_index
+
+    evidenced: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for item in raw_items:
+        (evidenced if _is_evidenced(item) else dropped).append(item)
+
+    if dropped:
+        sidecar_path = items_path.parent / "dropped-speculative.json"
+        dropped_ids = [d.get("id") for d in dropped]
+        sidecar_path.write_text(
+            json.dumps(
+                {
+                    "dropped_count": len(dropped),
+                    "dropped_ids": dropped_ids,
+                    "dropped_items": dropped,
+                },
+                indent=2,
+            )
+        )
+        print_info(
+            console,
+            f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
+            f"(ids: {dropped_ids}), wrote {sidecar_path}",
+        )
+
+    index = load_hunk_index(items_path.parent.parent)
+    return validate_records(index, evidenced)
+
+
 # Canonical severity ordering shared by the deep fix loop and the shallow fix
 # loop. Defined here (next to normalize_items / MERGED_ITEMS_SCHEMA) so both
 # callers can import a single helper rather than duplicate the map.
@@ -3769,7 +3823,7 @@ async def phase_per_stack_reviews(
     """
     from daydream.config import STRUCTURE_STACK_NAME
     from daydream.deep.artifacts import deep_dir as _deep_dir
-    from daydream.deep.artifacts import per_stack_review_path
+    from daydream.deep.artifacts import per_stack_records_path, per_stack_review_path
     from daydream.deep.prompts import _diff_blocks_for_files
 
     deep_dir_path = _deep_dir(work.repo)
@@ -3885,27 +3939,50 @@ async def phase_per_stack_reviews(
                 task_prompt: str = prompt,
                 task_output: Path = output_path,
             ) -> None:
+                structured: Any = None
+                budget_reason: str | None = None
                 async with limiter:
-                    async with maybe_fork(recorder, f"deep-{stack_name}"):
-                        try:
-                            _, _, budget_reason = await run_agent(
+                    try:
+                        async with maybe_fork(recorder, f"deep-{stack_name}"):
+                            # Issue #745 (AC4): the reviewer emits
+                            # PER_STACK_RECORD_SCHEMA structured output directly --
+                            # no separate ``parse-<stack>`` fork. The fork is
+                            # finalized on exit so verdict reconciliation below
+                            # can read its completed reads from disk.
+                            structured, _, budget_reason = await run_agent(
                                 backend,
                                 work.repo,
                                 task_prompt,
                                 phase=DaydreamPhase.DEEP,
+                                output_schema=PER_STACK_RECORD_SCHEMA,
                                 tool_call_budget=DEFAULT_TOOL_CALL_BUDGET,
                                 wall_budget_s=DEFAULT_WALL_BUDGET_S,
                             )
-                            if budget_reason:
-                                # A truncated stack did not really pass: route it
-                                # into failures so merge lists it under
-                                # "Uncovered stacks" instead of silently shipping
-                                # a partial review as a complete one.
-                                failures[stack_name] = f"budget exhausted: {budget_reason}"
-                            else:
-                                results[stack_name] = task_output
-                        except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                            failures[stack_name] = f"{type(e).__name__}: {e}"
+                    except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                        failures[stack_name] = f"{type(e).__name__}: {e}"
+                        return
+                    if budget_reason:
+                        # A truncated stack did not really pass: route it
+                        # into failures so merge lists it under
+                        # "Uncovered stacks" instead of silently shipping
+                        # a partial review as a complete one.
+                        failures[stack_name] = f"budget exhausted: {budget_reason}"
+                        return
+                    if not isinstance(structured, dict):
+                        failures[stack_name] = "no structured output produced"
+                        return
+                    issues = structured.get("issues")
+                    issues = issues if isinstance(issues, list) else []
+                    declared_verdicts = structured.get("verdicts")
+                    declared = declared_verdicts if isinstance(declared_verdicts, list) else []
+                    # Persist the records file with the DECLARED verdicts for
+                    # now; final verdict reconciliation happens in
+                    # ``_step_per_stack_parse`` AFTER the fan-out completes and
+                    # every review fork is finalized on disk (issue #745).
+                    per_stack_records_path(deep_dir_path, stack_name).write_text(
+                        json.dumps({"issues": issues, "verdicts": declared}, indent=2)
+                    )
+                    results[stack_name] = task_output
 
             tg.start_soon(_task)
 
@@ -4282,8 +4359,10 @@ def _append_structural_and_write_merged(
         defaulting to HIGH/high only for unlabeled records -- the structural
         lens remains high-conviction by default and must not be demoted at
         sort time;
-      - normalize the combined list (fresh unique ids) and write the canonical
-        ``merged-items.json``;
+      - validate every finding ``file:line`` against the persisted hunk index
+        (snap-in-tolerance, demote-with-annotation beyond-tolerance; issue
+        #745), THEN normalize the combined list (fresh unique ids) and write
+        the canonical ``merged-items.json``;
       - render ``review-output.md`` from the canonical items and copy it to
         ``canonical_path`` (the deep artifact dir avoids sandbox write
         restrictions on repo-root dotfiles).
@@ -4340,35 +4419,20 @@ def _append_structural_and_write_merged(
             item.setdefault("severity", "high")
             structural_items.append(item)
 
-    # Structural evidence gate (issue #227): drop speculative / evidence-free
-    # findings BEFORE normalization so nothing ungrounded reaches the canonical
-    # merged-items.json (and therefore review-output.md, the fix stage, PR
-    # posting, or the benchmark). This is the single unconditional enforcement
-    # point shared by both merge paths. Dropped items are logged and written to
-    # an audit sidecar -- never silently discarded.
-    evidenced: list[dict[str, Any]] = []
-    dropped: list[dict[str, Any]] = []
-    for item in base_items + structural_items:
-        (evidenced if _is_evidenced(item) else dropped).append(item)
-
-    if dropped:
-        sidecar_path = items_path.parent / "dropped-speculative.json"
-        dropped_ids = [d.get("id") for d in dropped]
-        sidecar_path.write_text(
-            json.dumps(
-                {
-                    "dropped_count": len(dropped),
-                    "dropped_ids": dropped_ids,
-                    "dropped_items": dropped,
-                },
-                indent=2,
-            )
-        )
-        print_info(
-            console,
-            f"Evidence gate: dropped {len(dropped)} speculative finding(s) "
-            f"(ids: {dropped_ids}), wrote {sidecar_path}",
-        )
+    # Evidence gate, then pre-report location validation, in one fixed-order call
+    # (see ``_evidence_gate_then_validate``). The gate's ``LOW``-means-speculative
+    # and the validator's ``LOW``-means-demote agree only because the gate runs
+    # first on the raw records and the validator on the survivors; fusing them
+    # makes that order structurally unreachable (issue #745). The validator
+    # snaps in-tolerance citations to the nearest hunk boundary (aligning the
+    # evidence citation) and demotes-with-annotation beyond-tolerance ones
+    # (severity/confidence lowered, ``location_note`` carried through
+    # normalize_items), so no unverified citation reaches the report at full
+    # severity. Fail-open: a missing index validates nothing (pre-change
+    # behavior); the validator never raises and never rejects.
+    evidenced = _evidence_gate_then_validate(
+        base_items + structural_items, items_path
+    )
 
     items = normalize_items(evidenced)
     items_path.write_text(json.dumps({"items": items}, indent=2))

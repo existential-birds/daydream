@@ -40,7 +40,9 @@ async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo, moc
     )
 
     assert exit_code == 0
-    # One review→parse pass, not a loop: deep shallow mode collapses to the
-    # combined python stack + the structural meta-stack, so exactly two stacks
-    # reach the parse phase in the single pass.
-    assert backend.parse_calls == 2
+    # Issue #745: the per-stack reviewers emit PER_STACK_RECORD_SCHEMA records
+    # directly -- the spine no longer has a parse phase. The single shallow
+    # pass still fires the per-stack reviews for the combined python stack +
+    # the structural meta-stack.
+    assert backend.parse_calls == 0
+    assert len(backend.review_prompts) == 2

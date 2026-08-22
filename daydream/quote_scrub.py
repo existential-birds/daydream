@@ -9,7 +9,6 @@ changed-file driver that rewrites only the lines the fix pass added, in place.
 """
 
 import os
-import re
 import stat
 import tempfile
 from collections.abc import Iterable
@@ -21,9 +20,6 @@ from daydream.git_ops import GitError, diff_worktree_against
 # U+201C LEFT DOUBLE QUOTATION MARK / U+201D RIGHT DOUBLE QUOTATION MARK -> "
 # U+2018 LEFT SINGLE QUOTATION MARK / U+2019 RIGHT SINGLE QUOTATION MARK -> '
 _SMART_QUOTE_TABLE = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'"})
-
-# Unified-diff hunk header: @@ -<old_start>[,<old_count>] +<new_start>[,<new_count>] @@
-_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 # Extended header lines git emits in place of hunks (binary/rename/mode-only
 # diffs). Their presence marks the output as git-structured even without ``+++``
@@ -56,29 +52,6 @@ def normalize_smart_quotes(text: str) -> str:
     reformats or reflows the text.
     """
     return text.translate(_SMART_QUOTE_TABLE)
-
-
-def _header_path(raw: str) -> str | None:
-    """Extract the repo-relative path from a ``+++`` file-header line.
-
-    Handles the plain ``+++ b/rel/path`` form, git's ``core.quotepath`` quoted
-    form (``+++ "b/caf\\303\\251.go"``), and ``diff.noprefix`` output (``+++
-    rel/path`` with no ``b/`` prefix). A trailing tab — git appends one after
-    space-containing paths — is stripped first, or the extracted key would not
-    match the caller's path and the file would silently fall through to the
-    whole-file normalization branch. Returns None for the ``+++ /dev/null``
-    deletion header.
-    """
-    if not raw.startswith("+++ "):
-        return None
-    tail = raw[4:].rstrip("\t")
-    if tail.startswith('"') and tail.endswith('"'):
-        tail = _unquote_git_path(tail)
-    if tail.startswith("b/"):
-        return tail[2:]
-    if tail == "/dev/null":
-        return None
-    return tail
 
 
 def _attribution_unusable(diff_text: str) -> bool:
@@ -116,79 +89,14 @@ def _added_line_numbers(diff_text: str) -> dict[str, set[int]]:
     its ``--- `` counterpart (git always emits the pair adjacently), so an added
     line whose content starts with ``++ b/`` — rendered identically to a header
     — is parsed as content and cannot re-key the current file.
+
+    Delegates to the shared unified-diff parser in ``daydream.hunk_index``
+    (``added_line_numbers(parse_hunks(...))``) so quote_scrub, pr_review and
+    coverage all count from the same source and cannot drift.
     """
-    added: dict[str, set[int]] = {}
-    current: str | None = None
-    new_line = 0
-    prev_old_header = False
-    for raw in diff_text.splitlines():
-        if raw.startswith(("--- ", '--- "')):
-            prev_old_header = True
-            continue
-        if raw.startswith("+++ ") and prev_old_header:
-            prev_old_header = False
-            path = _header_path(raw)
-            if path is not None:
-                current = path
-                added.setdefault(current, set())
-                new_line = 0
-            continue
-        prev_old_header = False
-        if current is None:
-            continue
-        if raw.startswith("@@"):
-            match = _HUNK_HEADER.match(raw)
-            if match:
-                new_line = int(match.group(2))
-        elif raw.startswith("+"):
-            added[current].add(new_line)
-            new_line += 1
-        elif raw.startswith(" "):
-            new_line += 1
-        # "-" deletions and mode/header lines advance no new-file counter.
-    return added
+    from daydream.hunk_index import added_line_numbers, parse_hunks
 
-
-def _unquote_git_path(quoted: str) -> str:
-    """Unquote a ``core.quotepath``-quoted path from ``git diff`` output.
-
-    Git quotes non-ASCII path names as C-style string literals, e.g.
-    ``"b/caf\303\251.go"`` (octal escapes of the raw UTF-8 bytes). Strips the
-    surrounding quotes, decodes the escapes back to bytes, and decodes those as
-    UTF-8. Non-quoted input passes through unchanged.
-    """
-    if not (quoted.startswith('"') and quoted.endswith('"')):
-        return quoted
-    inner = quoted[1:-1]
-    out = bytearray()
-    i = 0
-    while i < len(inner):
-        ch = inner[i]
-        if ch == "\\" and i + 1 < len(inner):
-            nxt = inner[i + 1]
-            if nxt == "\\":
-                out.append(ord("\\"))
-                i += 2
-            elif nxt == '"':
-                out.append(ord('"'))
-                i += 2
-            elif nxt in "01234567":
-                val = 0
-                j = i + 1
-                while j < len(inner) and j < i + 4 and inner[j] in "01234567":
-                    val = val * 8 + int(inner[j])
-                    j += 1
-                out.append(val)
-                i = j
-            else:
-                out.append(ord("\\"))
-                i += 1
-        else:
-            out.extend(ch.encode("utf-8"))
-            i += 1
-    return out.decode("utf-8")
-
-
+    return added_line_numbers(parse_hunks(diff_text))
 def _normalize_added_lines(text: str, added: set[int]) -> str:
     """Normalize smart quotes only on the 1-based new-file lines in *added*.
 
@@ -340,3 +248,4 @@ def scrub_smart_quotes_changed_files(
                 continue
             scrubbed.append(path)
     return scrubbed
+
