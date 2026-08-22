@@ -171,10 +171,46 @@ def _valid_import_document():
 
 def test_import_document_validates_and_forbids_unknown():
     doc = _valid_import_document()
-    assert ImportDocument.model_validate(doc).pull_request["number"] == 101
+    assert ImportDocument.model_validate(doc).pull_request.number == 101
     doc["bogus"] = True
     with pytest.raises(ValidationError):
         ImportDocument.model_validate(doc)
+
+
+def test_import_pull_request_is_strict_submodel():
+    doc = _valid_import_document()
+    doc["pull_request"]["bogus"] = True
+    with pytest.raises(ValidationError) as ei:
+        ImportDocument.model_validate(doc)
+    assert ei.value.errors()[0]["loc"][0] == "pull_request"
+
+
+def test_case_pull_request_is_strict_submodel():
+    # partial (missing a required field) rejected
+    raw = _valid_case_dict()
+    raw["pull_request"].pop("author")
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert ei.value.errors()[0]["loc"][0] == "pull_request"
+    # unknown nested key rejected
+    raw2 = _valid_case_dict()
+    raw2["pull_request"]["bogus"] = 1
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw2)
+
+
+def test_case_source_is_strict_submodel():
+    raw = _valid_case_dict()
+    raw["source"]["bogus"] = 1
+    with pytest.raises(ValidationError) as ei:
+        CaseDocument.model_validate(raw)
+    assert ei.value.errors()[0]["loc"][0] == "source"
+
+
+def test_import_and_case_pull_request_share_shape():
+    doc = ImportDocument.model_validate(_valid_import_document())
+    pr = doc.pull_request
+    assert pr.number == 101 and pr.author.login == "alice" and pr.head.sha == "h" * 40
 
 
 def test_evidence_requires_canonical_source_id_and_body_hash():
@@ -192,7 +228,17 @@ def _valid_case_dict():
     return {
         "schema_version": 1,
         "case_id": "pr-000101-0123456789ab",
-        "pull_request": {"number": 101, "url": "https://github.com/O/R/pull/101", "title": "Fix cache"},
+        "pull_request": {
+            "number": 101,
+            "url": "https://github.com/o/r/pull/101",
+            "title": "Fix cache",
+            "state": "open",
+            "base": {"ref": "main", "sha": "b" * 40},
+            "head": {"ref": "feature/cache", "sha": "h" * 40},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "author": {"login": "alice", "type": "User"},
+        },
         "snapshot": {
             "status": "ready",
             "policy": "final_pr_head",
@@ -208,7 +254,7 @@ def _valid_case_dict():
         },
         "source": {
             "import_file": "imports/pr-101.json",
-            "import_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "import_sha256": "c" * 64,
         },
         "curation": {
             "state": "ready",

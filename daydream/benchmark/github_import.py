@@ -728,12 +728,12 @@ def _case_materialize(
     attestation cleared — findings/exclusions are never overwritten by refresh.
     """
     pull_request = doc.pull_request
-    base_sha = (pull_request.get("base") or {}).get("sha")
+    base_sha = pull_request.base.sha
     out: list[tuple[str, str, dict[str, Any]]] = []
     bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
-        head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
+        head_sha = head_token if head_token != "final" else pull_request.head.sha
         if not head_sha or head_sha in seen:
             continue
         seen.add(head_sha)
@@ -780,7 +780,7 @@ def _case_materialize(
         case_doc: dict[str, Any] = {
             "schema_version": 1,
             "case_id": case_id,
-            "pull_request": pull_request,
+            "pull_request": pull_request.model_dump(mode="json"),
             "snapshot": snapshot_doc,
             "source": {"import_file": import_file, "import_sha256": import_sha256},
             "curation": curation,

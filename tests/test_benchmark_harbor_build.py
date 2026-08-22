@@ -214,7 +214,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
 
 
 def _inject_body(ws: Path, case_id: str, body: str) -> None:
-    """Seed a body into the case document's pull_request block (schema-legal raw dict)."""
+    """Seed a body into the case document's raw pull_request block (raw-dict compile path)."""
     from daydream.benchmark import storage
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
@@ -285,9 +285,9 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
 
 
 def test_spike_persisted_pull_request_field_set():
-    """The import persists pull_request as a raw dict; the compiler must tolerate a missing body."""
-    from daydream.benchmark.schema import ImportDocument
-    assert ImportDocument.model_fields["pull_request"].annotation is dict
+    """The import persists pull_request as a typed strict submodel; the compiler must tolerate a missing body."""
+    from daydream.benchmark.schema import ImportDocument, PullRequestMeta
+    assert ImportDocument.model_fields["pull_request"].annotation is PullRequestMeta
     # Field set is pinned by the constructor at github_import.py:1080-1090: it carries
     # number/url/title/state/base/head/created_at/updated_at/author and NO body.
     from daydream.benchmark import github_import as gi

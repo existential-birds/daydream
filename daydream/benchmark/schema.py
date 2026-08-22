@@ -44,6 +44,8 @@ __all__ = [
     "EvidenceRecord",
     "Candidate",
     "ImportDocument",
+    "PullRequestMeta",
+    "CaseSource",
     "derive_finding_id",
     "derive_gold_status",
     "derive_gold_mode",
@@ -579,6 +581,50 @@ class _FetchInfo(BaseModel):
         return _hex64(v)
 
 
+class _PrRef(BaseModel):
+    """A base/head ref-sha pair of a pull request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sha: str
+    ref: str | None = None
+
+
+class PullRequestMeta(BaseModel):
+    """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    number: int
+    url: str
+    title: str
+    state: str
+    base: _PrRef
+    head: _PrRef
+    created_at: datetime
+    updated_at: datetime
+    author: _EvidenceAuthor
+
+    @field_validator("created_at", "updated_at", mode="before")
+    @classmethod
+    def _ts(cls, v: str | datetime) -> datetime:
+        return _rfc3339(v)
+
+
+class CaseSource(BaseModel):
+    """The typed source block of a case document (import provenance)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    import_file: str
+    import_sha256: str
+
+    @field_validator("import_sha256")
+    @classmethod
+    def _sha64(cls, v: str) -> str:
+        return _hex64(v)
+
+
 class ImportDocument(BaseModel):
     """A normalized, verifiable import of one PR's full evidence set."""
 
@@ -586,7 +632,7 @@ class ImportDocument(BaseModel):
 
     schema_version: Literal[1] = 1
     repository: _ImportRepository
-    pull_request: dict
+    pull_request: PullRequestMeta
     evidence: list[EvidenceRecord] = []
     fetch: _FetchInfo
 
@@ -750,9 +796,9 @@ class CaseDocument(BaseModel):
 
     schema_version: Literal[1] = 1
     case_id: str
-    pull_request: dict
+    pull_request: PullRequestMeta
     snapshot: Snapshot
-    source: dict
+    source: CaseSource
     curation: Curation
     candidates: list[Candidate] = []
 
@@ -765,7 +811,7 @@ class CaseDocument(BaseModel):
 
     @model_validator(mode="after")
     def _case_id_matches(self) -> "CaseDocument":
-        pr_number = int(self.pull_request["number"])
+        pr_number = self.pull_request.number
         head = snapshot_head_sha(self.snapshot)
         if head is None:
             raise ValueError("snapshot carries no head SHA to derive case_id")
