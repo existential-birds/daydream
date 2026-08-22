@@ -151,8 +151,53 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 
 
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
-    """Read-only view of one case document (its raw case dict)."""
-    return _load_case(root, case_id)
+    """Read-only view of one case document and its per-candidate evidence.
+
+    Returns the raw case dict where each candidate gains an in-memory (never
+    persisted) ``evidence`` sub-dict ``{kind, author, commit_id, resolved,
+    outdated}`` joined by ``source_id`` from the import file the case doc
+    references; a candidate whose ``source_id`` matches no evidence record has
+    no ``evidence`` key (absent, not ``None``). A missing/unreadable import
+    file for a case that references it propagates the storage error.
+    """
+    raw = _load_case(root, case_id)
+    projection = _evidence_projection(root, raw)
+    if projection:
+        for cand in raw.get("candidates") or []:
+            src = cand.get("source_id")
+            if src in projection:
+                cand["evidence"] = projection[src]
+    return raw
+
+
+def _evidence_projection(
+    root: Path, raw: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Read the import evidence once and join records by ``source_id``.
+
+    Maps each evidence record's source_id to a read-only projection sub-dict
+    (never persisted). A case that references an import file that is
+    missing/unreadable raises the storage error — no projection is fabricated.
+    """
+    source = raw.get("source") or {}
+    import_file = source.get("import_file")
+    if not import_file:
+        return {}
+    import_data = storage.load_json_strict(Path(root) / import_file)
+    projection: dict[str, dict[str, Any]] = {}
+    for ev in import_data.get("evidence") or []:
+        author = ev.get("author") or {}
+        projection[ev["source_id"]] = {
+            "kind": ev.get("kind"),
+            "author": {
+                "login": author.get("login"),
+                "type": author.get("type"),
+            },
+            "commit_id": ev.get("commit_id"),
+            "resolved": ev.get("resolved", False),
+            "outdated": ev.get("outdated", False),
+        }
+    return projection
 
 
 # ---------------------------------------------------------------------------

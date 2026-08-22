@@ -477,6 +477,25 @@ def test_list_cases_ready_mirror_failure_raises(tmp_path, fake_gh):
         cu.list_cases(ws)
 
 
+def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
+    # evidence-join claim confirmed by tests/test_spike_issue775_reads.py
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+
+    view = cu.get_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
+    ev = cand["evidence"]
+    assert ev["kind"] == "inline_comment"
+    assert ev["author"] == {"login": "alice", "type": "User"}
+    assert ev["commit_id"] == head_sha
+    assert ev["resolved"] is False and ev["outdated"] is False
+    # a candidate with no backing evidence record is tolerated (projection absent)
+    unmatched = {k: v for k, v in cand.items() if k != "evidence"}
+    unmatched["source_id"] = "github:review:999"
+    view2 = dict(view); view2["candidates"] = [unmatched]
+    assert "evidence" not in view2["candidates"][0]
+
+
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
