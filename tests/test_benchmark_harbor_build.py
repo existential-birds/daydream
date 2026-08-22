@@ -619,6 +619,35 @@ def test_leakage_scan_rejects_clean_readme():
         assert "clean_attested" in str(exc)
 
 
+def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path):
+    from daydream.benchmark.harbor import build
+    m, bundle_bytes = _seed_bare_bundle(tmp_path)
+    bp = tmp_path / "b.bundle"
+    bp.write_bytes(bundle_bytes)
+    build.validate_bundle_inventory(bp)
+
+
+def test_validate_bundle_inventory_rejects_extra_ref(tmp_path):
+    import subprocess as _subprocess
+
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    m, _ = _seed_bare_bundle(tmp_path)
+    bp = tmp_path / "bad.bundle"
+    # add an extra ref to the mirror, then rebuild the bundle including it
+    _subprocess.run(["git", "-C", str(m), "update-ref", "refs/heads/extra", "refs/heads/base"], check=True)
+    env = {**os.environ, "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+           "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
+    _subprocess.run(["git", "-C", str(m), "bundle", "create", str(bp),
+                     "refs/heads/base", "refs/heads/head", "refs/heads/extra"],
+                    check=True, env=env, capture_output=True)
+    try:
+        build.validate_bundle_inventory(bp)
+        assert False, "expected to fail for an extra ref"
+    except CompileError as exc:
+        assert "ref" in str(exc)
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
