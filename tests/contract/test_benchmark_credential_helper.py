@@ -19,8 +19,10 @@ def _serve_bare_repo(root: Path) -> tuple[str, str]:
                    check=True, capture_output=True, input=b"x\n")
     tree = subprocess.run(["git", "--git-dir", str(bare), "mktree"],
                           check=True, capture_output=True).stdout.decode().strip()
-    commit = subprocess.run(["git", "--git-dir", str(bare), "commit-tree", tree, "-m", "c"],
-                            check=True, capture_output=True).stdout.decode().strip()
+    commit = subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "--git-dir", str(bare), "commit-tree", tree, "-m", "c"],
+        check=True, capture_output=True).stdout.decode().strip()
     subprocess.run(["git", "--git-dir", str(bare), "update-ref", "refs/heads/main", commit],
                    check=True, capture_output=True)
 
