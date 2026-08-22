@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import _commit, _git, _make_repo_with_main
+from conftest import _commit, _configure_identity, _git, _make_repo_with_main
 
 from daydream import git_ops
 from daydream.tree_sitter_index import (
@@ -450,6 +450,7 @@ def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path):
         "@@ -1 +1,2 @@\n x\n+y\n"
     )
     _git(tmp_path, "init", "-q")
+    _configure_identity(tmp_path)
     _git(tmp_path, "add", ".")
     _commit(tmp_path, "init")
     results = detect_affected_files(diff, tmp_path, depth=1)
