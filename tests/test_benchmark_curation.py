@@ -403,6 +403,36 @@ def test_stale_case_edit_stays_stale_and_re_attests(tmp_path, fake_gh):
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
 
+def test_reject_before_persistence_leaves_file_unchanged(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+
+    # invalid location path (not in head) on an authored finding -> rejected, unchanged
+    with pytest.raises(cu.CurationError):
+        cu.add_finding(ws, case_id, title="x", body="b", severity="low",
+                       location={"path": "missing.py", "start_line": 1, "end_line": 1},
+                       source_ids=[])
+    assert path.read_bytes() == before
+
+    # line beyond the head file's line count -> rejected, unchanged
+    with pytest.raises(cu.CurationError):
+        cu.add_finding(ws, case_id, title="x", body="b", severity="low",
+                       location={"path": "feature.py", "start_line": 99, "end_line": 99},
+                       source_ids=[])
+    assert path.read_bytes() == before
+
+    # forged provenance on the fragment is discarded (not rejected) but never persists state=ready
+    frag = {"findings": [{"title": "x", "body": "b", "severity": "low",
+                          "location": {"path": "feature.py", "start_line": 1, "end_line": 1},
+                          "source_ids": [], "state": "ready"}],
+            "exclusions": [], "case_exclusion": None, "clean": False}
+    cu.apply_gold_fragment(ws, case_id, frag)
+    raw = load_yaml_strict(path)
+    assert raw["curation"]["state"] == "draft"
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
