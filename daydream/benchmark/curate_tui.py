@@ -7,6 +7,7 @@ deterministic tests; Rich stays available for live styling.
 """
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -92,7 +93,7 @@ def render_index_table(cases: list[dict[str, Any]]) -> str:
 def _prompt(read_line: Callable[[str], str], message: str) -> str:
     """Print *message* to stdout, then read one input line with *read_line*."""
     print(message, end="", flush=True)
-    return read_line(message)
+    return read_line("")
 
 
 def render_case(case: dict[str, Any]) -> str:
@@ -165,7 +166,7 @@ def _launch_editor(initial: str) -> str | None:
         with os.fdopen(fd, "w") as handle:
             handle.write(initial)
         try:
-            proc = subprocess.run([editor, path], text=False)
+            proc = subprocess.run([*shlex.split(editor), path], text=False)
         except (subprocess.SubprocessError, OSError):
             return None
         if proc.returncode != 0:
@@ -237,17 +238,10 @@ def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Calla
         print("invalid fragment; nothing written")
         return "continue"
     try:
-        for atom in atoms:
-            cu.add_finding(
-                root, case_id,
-                title=atom["title"], body=atom["body"],
-                severity=atom.get("severity"),
-                location=atom.get("location"),
-                source_ids=atom.get("source_ids") or [],
-            )
+        cu.add_findings(root, case_id, findings=atoms)
     except (cu.CurationError, ValidationError) as exc:
         print(str(exc))
-        return "continue"
+        return "rerender"
     print(f"added {len(atoms)} authored finding(s)")
     return "rerender"
 
@@ -262,6 +256,9 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
         indices = parse_indices(text, len(findings))
     except ValueError as exc:
         print(str(exc))
+        return "continue"
+    if len(indices) != 1:
+        print(f"edit takes exactly one finding (got {len(indices)})")
         return "continue"
     finding = findings[indices[0]]
     frag = _launch_editor(_editor_fragment_edit(finding))
@@ -384,6 +381,9 @@ def _action_exclude(
     except ValueError as exc:
         print(str(exc))
         return "continue"
+    if len(indices) != 1:
+        print(f"exclude takes exactly one evidence source (got {len(indices)})")
+        return "continue"
     source_id = candidates[indices[0]]["source_id"]
     reason = _prompt(
         read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
@@ -414,6 +414,9 @@ def _action_accept(root: Path, case_id: str, view: dict[str, Any], read_line: Ca
         indices = parse_indices(text, len(candidates))
     except ValueError as exc:
         print(str(exc))
+        return "continue"
+    if len(indices) != 1:
+        print(f"accept takes exactly one candidate (got {len(indices)})")
         return "continue"
     cand = candidates[indices[0]]
     src = cand["source_id"]

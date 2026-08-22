@@ -444,6 +444,40 @@ def add_finding(
     _stage_case(root, case_id, raw, op="add")
 
 
+def add_findings(
+    root: Path, case_id: str, *, findings: list[dict[str, Any]]
+) -> None:
+    """Atomically add a batch of authored findings in one transaction.
+
+    Unlike a loop of :func:`add_finding` calls, a mid-batch invariant violation
+    stages **nothing** — the whole batch validates (candidate sources checked
+    up front), derives, and stages together, so the TUI's multi-atom ``[n]``
+    add stays all-or-nothing and never leaves earlier atoms persisted on a
+    failure.
+    """
+    raw = _load_case(root, case_id)
+    for fi in findings:
+        _check_candidate_sources(raw, list(fi.get("source_ids") or []), case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
+    for fi in findings:
+        source_ids = list(fi.get("source_ids") or [])
+        finding = {
+            "title": fi["title"],
+            "body": fi["body"],
+            "severity": fi.get("severity"),
+            "location": fi.get("location"),
+            "provenance": {
+                "kind": _derive_provenance_kind(source_ids, authored=True),
+                "source_ids": source_ids,
+            },
+        }
+        finding["finding_id"] = schema.derive_finding_id(finding)
+        curation.setdefault("findings", []).append(finding)
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="add")
+
+
 def _build_replacement(
     raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
 ) -> dict[str, Any]:
