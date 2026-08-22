@@ -33,6 +33,7 @@ import yaml
 
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark.workspace import _rfc3339_now
 
 
 def _run_gh_preflight_status(root: Path):
@@ -187,6 +188,20 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
         _git_ls_remote(root, f"https://github.com/{repo_slug}.git")
     except git_ops.GitError as exc:
         raise PreflightError("git_preflight_failed", str(exc)) from exc
+
+    # Record the successful verification (never on a failed run): a mode-0600
+    # ledger so ``status`` can surface whether the last import/refresh actually
+    # re-verified repository identity + read access.
+    ledger = schema.PreflightLedger(
+        last_verified_at=_rfc3339_now(),
+        repository=repo_slug,
+        repository_id=repository_id,
+        visibility=visibility,
+        matched=True,
+    )
+    storage.atomic_write_json(
+        root / "runtime" / "preflight.json", ledger.model_dump(), mode=0o600
+    )
 
     print(f"authenticated identity: {login}")
     print(f"repository visibility: {visibility}")

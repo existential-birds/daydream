@@ -912,6 +912,25 @@ class TransitionError(Exception):
         self.to = to
 
 
+class PreflightLedger(BaseModel):
+    """The mode-0600 ``runtime/preflight.json`` repository-verification ledger.
+
+    Written by preflight only after it verifies exact repository identity +
+    read access succeeds (never on a failing :class:`PreflightError`).
+    ``matched`` is True when the freshly verified repository matched the
+    stored identity (or was just resolved).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    last_verified_at: str
+    repository: str
+    repository_id: str | None
+    visibility: str
+    matched: bool
+
+
 _PR_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"fetched", "fetch_failed"},
     "fetch_failed": {"fetched", "fetch_failed"},

@@ -329,6 +329,36 @@ def test_preflight_rejects_numeric_node_id(tmp_path, fake_gh):
     assert ex.value.code == "repo_unresolved"
 
 
+def test_status_reports_last_preflight_verification(tmp_path, fake_gh, capsys):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.cli import _handle_benchmark_status
+    from daydream.benchmark.storage import load_json_strict
+    from daydream.benchmark.workspace import workspace_status
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
+    gi.preflight(ws, pr_count=1)
+
+    st = workspace_status(ws)
+    assert st.last_preflight_verified_at is not None
+    ledger = load_json_strict(ws / "runtime" / "preflight.json")
+    assert ledger["repository_id"] == _REPO_ID and ledger["matched"] is True
+
+    # a pre-fix / never-run workspace reports "not yet run"
+    ws2 = tmp_path / "ws2"
+    _seed_manifest(ws2)
+    assert workspace_status(ws2).last_preflight_verified_at is None
+
+    # the CLI status line surfaces verification ran / not yet run
+    _handle_benchmark_status(ws)
+    assert "repository identity/access verification: ran" in capsys.readouterr().out
+    _handle_benchmark_status(ws2)
+    assert "repository identity/access verification: not yet run" in capsys.readouterr().out
+
+
+
 
 def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
     import subprocess
