@@ -14,8 +14,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-import pytest
-
 _TEMPLATES_TESTS = (
     Path(__file__).resolve().parents[1]
     / "daydream" / "benchmark" / "harbor" / "templates" / "tests"
@@ -83,7 +81,8 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
     }))
     artifact_path = tmp_path / "artifacts" / "review.json"
     artifact_path.parent.mkdir()
-    artifact_path.write_bytes((Path(_TEMPLATES_TESTS / ".." / "solution" / "golden-review.json").resolve()).read_bytes())
+    oracle = Path(_TEMPLATES_TESTS / ".." / "solution" / "golden-review.json").resolve()
+    artifact_path.write_bytes(oracle.read_bytes())
     out_dir = tmp_path / "verifier-out"
 
     srv = _serve()
