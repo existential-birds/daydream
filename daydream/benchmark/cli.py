@@ -596,10 +596,16 @@ def _handle_benchmark_validate(dir_path: Path) -> int:
     return code
 
 
+def _is_interactive_tty() -> bool:
+    """True only when both stdin and stdout are real interactive terminals."""
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _handle_benchmark_curate(args) -> int:
     """Curate a case: derive everything, never attests to ready.
 
-    The interactive terminal client is issue #5; until it lands, ``curate``
+    On an interactive TTY, ``curate`` dispatches into the resumable terminal
+    client (:func:`daydream.benchmark.curate_tui.run_curate_tui`); otherwise it
     requires ``--apply-gold <file>`` (a reviewed gold YAML draft) and routes
     it through :func:`daydream.benchmark.curation.apply_gold_fragment`. Expected
     workspace errors print to stderr and return exit ``1`` — never a bare traceback.
@@ -611,6 +617,9 @@ def _handle_benchmark_curate(args) -> int:
     from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
     if args.apply_gold is None:
+        if _is_interactive_tty():
+            from daydream.benchmark.curate_tui import run_curate_tui
+            return run_curate_tui(args.dir, args.case)
         print(
             "curate: interactive curation requires a TTY; pass --apply-gold <file> to apply "
             "a reviewed gold draft (interactive client is issue #5)",
