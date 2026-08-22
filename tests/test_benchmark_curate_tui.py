@@ -139,11 +139,19 @@ def test_action_new_via_real_editor_persists_authored(tmp_path, fake_gh, monkeyp
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     log = tmp_path / "editor.log"
-    editor = tmp_path / "edit.sh"
-    editor.write_text("#!/bin/sh\nprintf '%s %s\\n' \"$(stat -c '%a' \"$1\")\" \"$1\" > \"$LOG\"\n"
-                      "cat > \"$1\" <<'EOF'\nfindings:\n"
-                      "  - title: New concern\n    body: fresh wording\n"
-                      "    severity: medium\n    location: null\n    source_ids: []\nEOF\n")
+    editor = tmp_path / "edit.py"
+    editor.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import stat\n"
+        "import sys\n"
+        "buf = sys.argv[1]\n"
+        "with open(os.environ['LOG'], 'w') as fh:\n"
+        "    fh.write(f'{stat.S_IMODE(os.stat(buf).st_mode):o} {buf}\\n')\n"
+        "with open(buf, 'w') as fh:\n"
+        "    fh.write('findings:\\n  - title: New concern\\n    body: fresh wording\\n"
+        "    severity: medium\\n    location: null\\n    source_ids: []\\n')\n"
+    )
     editor.chmod(0o755)
     monkeypatch.setenv("VISUAL", str(editor))
     monkeypatch.delenv("EDITOR", raising=False)
