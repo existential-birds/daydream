@@ -287,3 +287,41 @@ def validate_gold_set(raw: list[dict[str, object]]) -> list[GoldFinding]:
     if len(raw) > MAX_GOLD_FINDINGS:
         raise VerifierError("gold set exceeds 50 findings")
     return [parse_gold_finding(f) for f in raw]
+
+
+# ---------------------------------------------------------------------------
+# verdicts + edge retention
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A caller-injected verdict for one gold/candidate pair."""
+
+    gold_id: str
+    candidate_id: str
+    match: bool
+    confidence: float
+    reasoning: str
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence <= 1.0:
+            raise VerifierError(f"confidence must be in [0,1], got {self.confidence!r}")
+
+
+def retained_edges(
+    verdicts: list[Verdict],
+    gold_ids: list[str],
+    candidate_ids: list[str],
+) -> list[Verdict]:
+    """Return verdicts retained as edges: match true and confidence >= 0.7."""
+    gold_set = set(gold_ids)
+    cand_set = set(candidate_ids)
+    return [
+        v
+        for v in verdicts
+        if v.match
+        and v.confidence >= CONFIDENCE_THRESHOLD
+        and v.gold_id in gold_set
+        and v.candidate_id in cand_set
+    ]

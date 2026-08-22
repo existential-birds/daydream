@@ -5,10 +5,12 @@ import pytest
 from daydream.benchmark.harbor.verifier_core import (
     CandidateFinding,
     GoldFinding,
+    Verdict,
     VerifierError,
     derive_candidate_id,
     parse_candidate_finding,
     parse_gold_finding,
+    retained_edges,
     validate_candidate_artifact,
     validate_gold_set,
 )
@@ -226,3 +228,23 @@ def test_gold_set_rejects_over_50():
 def test_gold_set_rejects_invalid_member():
     with pytest.raises(VerifierError):
         validate_gold_set([_gold(severity="nope")])
+
+def test_verdict_parses_and_validates():
+    v = Verdict(gold_id="g", candidate_id="c", match=True, confidence=0.9, reasoning="same bug")
+    assert (v.match, v.confidence) == (True, 0.9)
+
+
+def test_verdict_rejects_out_of_range_confidence():
+    with pytest.raises(VerifierError):
+        Verdict("g", "c", True, 1.5, "")
+
+
+def test_retained_edges_threshold():
+    vs = [
+        Verdict("g1", "c1", True, 0.9, "m"),  # keep
+        Verdict("g2", "c2", True, 0.69, "m"),  # drop: below 0.7
+        Verdict("g3", "c3", False, 0.95, "m"),  # drop: match false
+        Verdict("g4", "c4", True, 0.7, "m"),  # keep: exactly 0.7
+    ]
+    kept = retained_edges(vs, ["g1", "g2", "g3", "g4"], ["c1", "c2", "c3", "c4"])
+    assert {(v.gold_id, v.candidate_id) for v in kept} == {("g1", "c1"), ("g4", "c4")}
