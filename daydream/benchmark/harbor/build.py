@@ -193,3 +193,28 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
         "head_ref": "head",
         "findings": entries,
     }
+
+
+# Verifier/solution template assets copied byte-for-byte into each compiled case.
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
+
+_COPY_ASSETS = ("tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
+                "tests/test.sh", "tests/Dockerfile", "solution/solve.sh")
+
+
+def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
+    """Copy the verifier/solution template assets into *case_stage* byte-for-byte.
+
+    Returns ``[(rel, sha256), ...]`` for inventory. A missing template asset
+    raises :class:`CompileError` -- never a silent skip or fabricated file.
+    """
+    out: list[tuple[str, str]] = []
+    for rel in _COPY_ASSETS:
+        src = _TEMPLATE_DIR / rel
+        if not src.is_file():
+            raise CompileError(f"missing template asset: {rel}")
+        dst = case_stage / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        out.append((rel, hashlib.sha256(src.read_bytes()).hexdigest()))
+    return out

@@ -168,3 +168,20 @@ def test_build_oracle_artifact_clean_has_empty_findings():
     art = build.build_oracle_artifact(key, [])
     assert art["findings"] == []
     assert vc.validate_candidate_artifact(art) == []
+
+
+def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp_path):
+    from daydream.benchmark.harbor import build
+    dst = tmp_path / "case"
+    build._copy_assets(dst)
+    expected = {
+        "tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
+        "tests/test.sh", "tests/Dockerfile", "solution/solve.sh",
+    }
+    assert {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()} == expected
+    src_core = build._TEMPLATE_DIR / "tests" / "verifier_core.py"
+    assert (dst / "tests" / "verifier_core.py").read_bytes() == src_core.read_bytes()
+    assert (dst / "tests" / "verifier_core.py").read_bytes() == (
+        Path(REPO) / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_bytes()
+    assert (dst / "tests" / "score_review.py").read_bytes() == (
+        build._TEMPLATE_DIR / "tests" / "score_review.py").read_bytes()
