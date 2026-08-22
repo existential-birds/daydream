@@ -444,3 +444,47 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
             f"gold mutations are rejected on a {state} case (re-include or case-exclude it first)"
         )
     return curation
+
+
+def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
+    """The final-attest operation: the one path that sets a case ready + attested.
+
+    SHA-specific confirmation: *head_sha* must equal the snapshot's original
+    head SHA, and the current state must move to ``ready`` (draft -> ready or
+    stale -> ready). Sets ``snapshot_attested=True`` and ``state=ready`` after
+    the full case revalidates.
+    """
+    raw = _load_case(root, case_id)
+    snapshot_doc = raw.get("snapshot") or {}
+    original = snapshot_doc.get("original_head_sha")
+    if head_sha != original:
+        raise CurationError(f"attestation SHA mismatch: expected {original} got {head_sha}")
+    curation = raw.setdefault("curation", {})
+    schema.validate_case_transition(curation.get("state"), "ready")
+    curation["state"] = "ready"
+    curation["snapshot_attested"] = True
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="mark-ready")
+
+
+def attest_clean(root: Path, case_id: str) -> None:
+    """Attest a case reviewed-clean (only when its gold set is empty).
+
+    Sets ``clean_attested=True`` and the clean gold status; never sets
+    ``snapshot_attested`` and never marks ready — the final-attest operation
+    remains required.
+    """
+    raw = _load_case(root, case_id)
+    curation = raw.setdefault("curation", {})
+    if curation.get("findings"):
+        raise CurationError(
+            f"case {case_id} has gold findings; clean attestation requires an empty gold set"
+        )
+    # An empty-findings case's clean attestation is deterministic: clean gold
+    # status and clean mode. It never sets snapshot_attested and never changes
+    # ``state`` (stays draft) — the final-attest op remains required.
+    curation["snapshot_attested"] = False
+    curation["clean_attested"] = True
+    curation["gold_status"] = "clean"
+    curation["gold_mode"] = "clean"
+    _stage_case(root, case_id, raw, op="attest-clean")

@@ -153,7 +153,8 @@ def _seed_ready_case(tmp_path, fake_gh, *, lines: int = 3, candidate: bool = Fal
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
-    ws = tmp_path / "ws"
+    _seed_ready_case.seq = getattr(_seed_ready_case, "seq", 0) + 1
+    ws = tmp_path / f"ws-{_seed_ready_case.seq}"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     _seed_preflight(ws, fake_gh)
     origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
@@ -277,6 +278,46 @@ def test_reopen_for_mutation_transitions(tmp_path, fake_gh):
     cur.update({"state": "stale", "snapshot_attested": True})
     reopened = cu._reopen_for_mutation(cur)
     assert reopened["state"] == "stale" and reopened["snapshot_attested"] is False
+
+
+def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id,
+        next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+
+    # wrong SHA is rejected; correct SHA attests
+    with pytest.raises(cu.CurationError):
+        cu.mark_ready(ws, case_id, head_sha="f" * 40)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
+
+    # clean attest on an empty-gold case: sets clean_attested, never ready
+    ws2, case_id2, head_sha2 = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    cu.attest_clean(ws2, case_id2)
+    raw2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")
+    assert raw2["curation"]["clean_attested"] is True
+    assert raw2["curation"]["gold_status"] == "clean"
+    assert raw2["curation"]["state"] == "draft" and raw2["curation"]["snapshot_attested"] is False
+
+
+def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    # put the case in ready + attested with one historical finding
+    cu.accept_candidate(ws, case_id,
+        next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
+
+    # an exclusion (gold/provenance/evidence mutation) on a ready case reopens draft
+    src = next(c["source_id"] for c in raw["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["state"] == "draft"
+    assert raw["curation"]["snapshot_attested"] is False
 
 
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
