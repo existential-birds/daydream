@@ -520,3 +520,99 @@ def test_benchmark_help_lists_import_prs():
 
     r = subprocess.run(["daydream", "benchmark", "--help"], capture_output=True, text=True)
     assert r.returncode == 0 and "import-prs" in r.stdout
+def test_reimport_does_not_duplicate_cases_rows(tmp_path, fake_gh):
+    """Re-importing the same PR (unchanged evidence) must not duplicate cases[] rows."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    raw1 = load_yaml_strict(ws / "benchmark.yaml")
+    assert len(raw1["cases"]) == 1
+    # re-import same PR, unchanged evidence (responses not changed) — fetched->fetched allowed
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    raw2 = load_yaml_strict(ws / "benchmark.yaml")
+    ids = [c["case_id"] for c in raw2["cases"]]
+    assert len(raw2["cases"]) == 1, f"cases[] grew to {len(raw2['cases'])}: {ids}"
+    assert ids[0] == "pr-000101-aaaaaaaaaaaa"
+
+
+def test_reimport_unchanged_evidence_preserves_curation(tmp_path, fake_gh):
+    """Re-import with unchanged evidence must not wipe curated findings/attestation."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    case_file = "pr-000101-aaaaaaaaaaaa.yaml"
+    _curate_case(ws, case_file)  # state=ready, snapshot_attested=True, findings non-empty
+    before = load_yaml_strict(ws / "cases" / case_file)["curation"]
+    assert before["state"] == "ready" and before["snapshot_attested"] is True and before["findings"]
+    # Re-import same PR WITHOUT refresh, unchanged evidence.
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    after = load_yaml_strict(ws / "cases" / case_file)["curation"]
+    assert after["state"] in ("ready", "stale"), "curation must not reset to draft"
+    assert after["findings"], "curated findings must not be wiped"
+    assert after["snapshot_attested"] is True, "unchanged re-import must keep attestation"
+
+
+def test_refresh_unchanged_signature_preserves_curation(tmp_path, fake_gh):
+    """Refresh with an UNCHANGED evidence signature must keep curated findings."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    case_file = "pr-000101-aaaaaaaaaaaa.yaml"
+    _curate_case(ws, case_file)
+    # refresh with IDENTICAL evidence responses (signature unchanged) -> changed=False
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True) == 0
+    after = load_yaml_strict(ws / "cases" / case_file)["curation"]
+    assert after["findings"], "curated findings must not be wiped on unchanged refresh"
+    assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
+
+
+def test_graphql_review_threads_retries_rate_limit_then_fails(tmp_path, fake_gh, monkeypatch):
+    """GraphQL reviewThreads honors the rate-limit retry policy (3x)."""
+    import daydream.benchmark.github_import as gi_mod
+    from daydream.git_ops import RateLimitError
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+
+    calls = {"n": 0}
+
+    def flaky_gh_api(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RateLimitError("graphql rate limited", retry_after=0.0)
+        ok = {"repository": {"pullRequest": {"reviewThreads": {"nodes": [], "pageInfo": {"hasNextPage": False}}}}}
+        return {"data": ok}
+
+    monkeypatch.setattr(gi_mod.git_ops, "gh_api", flaky_gh_api)
+    monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    threads = gi_mod._graphql_review_threads(ws, "o/r", 101)
+    assert threads == []
+    assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
+
+
+def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
+    """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
+    import pytest
+
+    import daydream.benchmark.github_import as gi_mod
+    from daydream.git_ops import RateLimitError
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+
+    def always_limited(*a, **kw):
+        raise RateLimitError("graphql rate limited", retry_after=0.0)
+
+    monkeypatch.setattr(gi_mod.git_ops, "gh_api", always_limited)
+    monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
+    with pytest.raises(gi_mod._ImportRateLimitError):
+        gi_mod._graphql_review_threads(ws, "o/r", 101)

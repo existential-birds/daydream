@@ -237,6 +237,9 @@ class BenchmarkManifest(BaseModel):
         ordered = sorted(self.cases, key=_cases_key)
         if [c.case_id for c in ordered] != [c.case_id for c in self.cases]:
             raise ValueError("cases[] index must be sorted by (pr_number, head-sha, case_id)")
+        ids = [c.case_id for c in self.cases]
+        if len(set(ids)) != len(ids):
+            raise ValueError("cases[] index must not contain duplicate case_id rows")
         return self
 
 

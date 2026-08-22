@@ -463,6 +463,37 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
     return fields
 
 
+def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any]) -> dict[str, Any]:
+    """Call the paginated reviewThreads GraphQL query honoring the rate-limit retry policy.
+
+    REST paths flow through :func:`_call_with_rate_limit_retry` (3 attempts,
+    honoring Retry-After); the GraphQL query must follow the same policy so a
+    transient rate limit is retried and, when exhausted, surfaces as
+    :class:`_ImportRateLimitError` (recorded as ``rate_limit`` in the ledger,
+    not ``fetch``).
+    """
+    last_rate_limit: git_ops.RateLimitError | None = None
+    for attempt in range(_RATE_LIMIT_ATTEMPTS):
+        try:
+            resp = git_ops.gh_api(
+                root,
+                "graphql",
+                method="POST",
+                idempotent=True,
+                input_data={"query": _REVIEW_THREADS_QUERY, "variables": variables},
+            )
+            return resp
+        except git_ops.RateLimitError as exc:
+            last_rate_limit = exc
+            if attempt < _RATE_LIMIT_ATTEMPTS - 1:
+                wait = exc.retry_after if exc.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
+                time.sleep(min(wait, _RATE_LIMIT_MAX_SLEEP_S))
+    assert last_rate_limit is not None
+    raise _ImportRateLimitError(
+        f"gh api graphql reviewThreads rate limited: {last_rate_limit}"
+    ) from last_rate_limit
+
+
 def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[dict[str, Any]]:
     """Paginate every review thread (and reply) for a PR via GraphQL.
 
@@ -476,13 +507,7 @@ def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[di
         variables: dict[str, Any] = {"owner": owner, "name": name, "number": number}
         if after is not None:
             variables["after"] = after
-        resp = git_ops.gh_api(
-            root,
-            "graphql",
-            method="POST",
-            idempotent=True,
-            input_data={"query": _REVIEW_THREADS_QUERY, "variables": variables},
-        )
+        resp = _graphql_with_rate_limit_retry(root, variables)
         if not isinstance(resp, dict):
             raise git_ops.GitError("graphql reviewThreads returned a non-object response")
         if resp.get("errors"):
@@ -673,10 +698,14 @@ def _case_materialize(
             "exclusions": [],
             "case_exclusion": None,
         }
-        if changed and prior_curations and case_id in prior_curations:
+        if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             curation = dict(prior)
-            if prior.get("state") in ("ready", "stale"):
+            # Preserve prior curation whenever a curated case exists (unchanged
+            # re-import / refresh must NOT wipe findings or attestation). Only
+            # demote to stale (and clear attestation) when the evidence actually
+            # drifted (changed=True).
+            if changed and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
         case_doc: dict[str, Any] = {
@@ -731,7 +760,13 @@ def _stamp_fetched(
         },
     )
     for case_id in case_ids:
-        raw.setdefault("cases", []).append(
+        # Replace any prior index row for this case_id so a re-import of the same
+        # PR (incl. the fetched->fetched --refresh path) never leaves duplicate
+        # cases[] rows. Mirrors _ledger_replace's replace-by-key semantics.
+        raw["cases"] = [
+            c for c in raw.get("cases", []) if c.get("case_id") != case_id
+        ]
+        raw["cases"].append(
             {"case_id": case_id, "pr_number": number, "case_file": f"cases/{case_id}.yaml"}
         )
     raw["cases"] = _sorted_cases(raw["cases"])
