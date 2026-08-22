@@ -572,6 +572,53 @@ def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
 
+def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    cases = {
+        "README.md": "A benchmark of historical code reviews.\n",
+        "case-abcdef123456/instruction.md": "assignment\ntitle: Fix cache\nbody: ok\n</historical_pr_context>",
+        "case-abcdef123456/README.md": (
+            "This case references the gold_status and provenance of pr-000101.\n"
+            "see https://github.com/o/r/pull/101 and sha "
+            "1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+            "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWX and https://user:pass@host/x\n"
+            "source github:review:42"
+        ),
+    }
+    try:
+        build.leakage_scan(cases, repository_slug="o/r")
+        assert False, "expected CompileError"
+    except CompileError as exc:
+        msg = str(exc)
+        assert "case-abcdef123456/README.md" in msg           # names the file
+        assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
+
+
+def test_leakage_scan_permits_bounded_block_raw_text():
+    from daydream.benchmark.harbor import build
+    instr = (
+        "assignment text\n"
+        "<historical_pr_context>\n"
+        "title: Handle pull/999 regressions\n"
+        "body: references o/r and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+        "</historical_pr_context>\n"
+    )
+    build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
+
+
+def test_leakage_scan_rejects_clean_readme():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    # clean marker leaks into a README
+    try:
+        build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"},
+                           repository_slug="o/r")
+        assert False, "expected CompileError"
+    except CompileError as exc:
+        assert "clean_attested" in str(exc)
+
+
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build

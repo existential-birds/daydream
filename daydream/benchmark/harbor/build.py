@@ -261,12 +261,15 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     """
     for rel, text in control_plane.items():
         scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
+        hits: list[str] = []
         if repository_slug and repository_slug in scanned:
-            raise CompileError(f"{rel}: leakage token 'repository-slug' matched {repository_slug!r}")
+            hits.append(repository_slug)
         for label, pattern in _LEAK_RULES:
             m = pattern.search(scanned)
             if m is not None:
-                raise CompileError(f"{rel}: leakage token '{label}' matched {m.group(0)!r}")
+                hits.append(m.group(0))
+        if hits:
+            raise CompileError(f"{rel}: leakage tokens matched {hits!r}")
     return None
 
 
