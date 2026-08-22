@@ -771,7 +771,7 @@ def _case_materialize(
         else:
             snapshot_doc = {
                 "status": "imported",
-                "policy": "final_pr_head",
+                "policy": "final_pr_head" if head_token == "final" else "explicit_head",
                 "requested_head": head_token,
                 "original_base_sha": base_sha,
                 "original_head_sha": head_sha,
@@ -966,13 +966,16 @@ def _import_one_pr(
         return 1
 
 
+_UNSET_ORIGIN = object()
+
+
 def run_import_prs(
     root: Path,
     pr_numbers: list[int],
     heads: list[str] | None = None,
     pr_heads: dict[int, list[str]] | None = None,
     refresh: bool = False,
-    origin_url: str | None = None,
+    origin_url: str | None | object = _UNSET_ORIGIN,
 ) -> int:
     """Import each PR's evidence into one atomic import ledger/case transaction.
 
@@ -983,10 +986,13 @@ def run_import_prs(
     ``parse_import_targets``) maps each PR to its own requested heads so a
     ``PR=<40-hex>`` binding is honored for the PR it names only — when it is
     provided each PR resolves ``"final"`` plus its own explicit heads. When
-    present, *origin_url* drives the snapshot freeze mirror fetch (defaults to
-    the repository's ``https://github.com/<repo>.git``). A failed fetch stages
-    no import/case file — only a ledger flip to ``fetch_failed`` with an exact
-    error. The overall exit is non-zero when any PR failed.
+    present, *origin_url* drives the snapshot freeze mirror fetch; when it is
+    omitted entirely the origin is derived from the repository
+    (``https://github.com/<repo>.git``). Passing ``origin_url=None``
+    explicitly leaves the import hermetic — no snapshot freeze and no network
+    git fetch. A failed fetch stages no import/case file — only a ledger flip
+    to ``fetch_failed`` with an exact error. The overall exit is non-zero
+    when any PR failed.
     """
     root = Path(root)
     flat_heads: list[str] = []
@@ -1007,10 +1013,15 @@ def run_import_prs(
         preflight(root, len(pr_numbers))
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         repo = raw.get("source", {}).get("repository") or ""
-        if origin_url is None and repo:
-            origin_url = f"https://github.com/{repo}.git"
+        if origin_url is _UNSET_ORIGIN:
+            origin_url = f"https://github.com/{repo}.git" if repo else None
+        effective_origin: str | None = (
+            origin_url if isinstance(origin_url, str) or origin_url is None else None
+        )
         for number in pr_numbers:
-            if _import_one_pr(root, raw, repo, number, requested_by_pr[number], refresh=refresh, origin_url=origin_url):
+            if _import_one_pr(
+                root, raw, repo, number, requested_by_pr[number], refresh=refresh, origin_url=effective_origin
+            ):
                 exit_code = 1
     return exit_code
 

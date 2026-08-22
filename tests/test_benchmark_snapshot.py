@@ -198,7 +198,7 @@ def test_bundle_two_refs_deterministic(tmp_path):
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
     base_commit = sn.rev_parse(m, "refs/heads/base")
     head_commit = sn.rev_parse(m, "refs/heads/head")
@@ -206,9 +206,9 @@ def test_bundle_two_refs_deterministic(tmp_path):
     assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _seed_head_tree()
     assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
     # determinism: rebuild and compare bytes against the first build's hash
-    first = sn.sha256_of(bundle)
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
-    assert sn.sha256_of(bundle) == first
+    first = sn.storage.sha256_file(bundle)
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
+    assert sn.storage.sha256_file(bundle) == first
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ def test_offline_clone_validates(tmp_path):
                      explicit_shas=[_SHA_HEAD], origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
-    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     sn.validate_offline_clone(bundle, _seed_base_tree(), _seed_head_tree(), diff_sha,
                               workdir=tmp_path)
@@ -379,7 +379,7 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
                      origin_url=origin)
     m = sn.mirror(tmp_path)
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
-    sn.build_bundle(m, base, head, bundle, case_id="pr-000001-000000000000")
+    sn.build_bundle(m, base, head, bundle)
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
     # trees match the origin exactly (modes, symlink targets, binary preserved)
     assert sn.rev_parse(m, "refs/heads/base^{tree}") == base_tree
@@ -388,8 +388,9 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
     diff = sn.canonical_diff_sha256(m, base, head)
     sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
     # repeatable bytes
-    sn.build_bundle(m, base, head, bundle, case_id="pr-000001-000000000000")
-    assert sn.sha256_of(bundle) == sn.sha256_of(bundle)
+    first = sn.storage.sha256_file(bundle)
+    sn.build_bundle(m, base, head, bundle)
+    assert sn.storage.sha256_file(bundle) == first
     # no origin remote and only the two refs in an offline clone
     clone = _clone_offline(bundle, tmp_path)
     try:

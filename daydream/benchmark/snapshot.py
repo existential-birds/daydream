@@ -128,8 +128,14 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
     broken git invocation propagates as ``GitError``).
     """
     proc = git_ops._run_git(mirror_repo, ["merge-base", base_tip_ref, head_sha], retries=0)
-    if proc.returncode != 0:
+    if proc.returncode == 1:
+        # exit code 1 is git's documented signal for "no common ancestor" --
+        # the soft-failure sentinel. Any other non-zero code is a real failure.
         return None
+    if proc.returncode != 0:
+        raise git_ops.GitError(
+            f"git merge-base {base_tip_ref} {head_sha} failed in {mirror_repo}: {proc.stderr.strip()}"
+        )
     out = proc.stdout.strip()
     return out or None
 
@@ -154,16 +160,13 @@ def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str):
 def degenerate(mirror_repo: Path, base_tree: str, head_tree: str) -> str | None:
     """Classify a degenerate (empty) base/head change, or None when real.
 
-    Equal trees return ``"equal_trees"`` (the more specific diagnosis); a
-    non-empty diff returns ``None``. A git diff failure raises ``GitError``.
+    Equal trees return ``"equal_trees"`` -- the only degenerate case, since
+    ``git diff --quiet`` is zero only for identical trees, which the equality
+    check already covers. Distinct trees are therefore always a real change.
     """
     if base_tree == head_tree:
         return "equal_trees"
-    proc = git_ops._run_git(mirror_repo, ["diff", "--binary", "--quiet", base_tree, head_tree], retries=0)
-    if proc.returncode != 0:
-        # non-zero means the trees differ (git diff --quiet: 0 = no changes).
-        return None
-    return "empty_diff"
+    return None
 
 
 def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
@@ -177,17 +180,24 @@ def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> st
     return hashlib.sha256(proc.stdout).hexdigest()
 
 
-def sha256_of(path: Path) -> str:
-    """sha256 file digest of *path*."""
-    return storage.sha256_file(path)
-
-
 def _synthetic_env() -> dict[str, str]:
     return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
 
 
+def _run_git_checked(
+    repo: Path | str, args: list[str], *, env_cmd: dict[str, str] | None = None, timeout: int = 30
+) -> str:
+    """Run git and raise GitError on a non-zero exit (build-bundle helper)."""
+    repo = Path(repo)
+    proc = git_ops._run_git(repo, args, env_cmd=env_cmd, retries=0, timeout=timeout)
+    if proc.returncode != 0:
+        stderr = proc.stderr if isinstance(proc.stderr, str) else proc.stderr.decode("utf-8", errors="replace")
+        raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
+    return proc.stdout.strip()
+
+
 def build_bundle(
-    mirror_repo: Path, base_sha: str, head_sha: str, bundle_path: Path, case_id: str | None = None
+    mirror_repo: Path, base_sha: str, head_sha: str, bundle_path: Path
 ) -> None:
     """Write a deterministic minimal ``refs/heads/base`` + ``refs/heads/head`` bundle.
 
@@ -202,29 +212,20 @@ def build_bundle(
     base_tree = rev_parse(mirror_repo, f"{base_sha}^{{tree}}")
     head_tree = rev_parse(mirror_repo, f"{head_sha}^{{tree}}")
 
-    base_proc = git_ops._run_git(
-        mirror_repo, ["commit-tree", base_tree, "-m", "snapshot base"], env_cmd=env, retries=0, timeout=30
+    base_commit = _run_git_checked(
+        mirror_repo, ["commit-tree", base_tree, "-m", "snapshot base"], env_cmd=env, timeout=30
     )
-    if base_proc.returncode != 0:
-        raise git_ops.GitError(f"snapshot base commit-tree failed: {base_proc.stderr.strip()}")
-    base_commit = base_proc.stdout.strip()
-    head_proc = git_ops._run_git(
+    head_commit = _run_git_checked(
         mirror_repo, ["commit-tree", head_tree, "-p", base_commit, "-m", "snapshot head"],
-        env_cmd=env, retries=0, timeout=30,
+        env_cmd=env, timeout=30,
     )
-    if head_proc.returncode != 0:
-        raise git_ops.GitError(f"snapshot head commit-tree failed: {head_proc.stderr.strip()}")
-    head_commit = head_proc.stdout.strip()
     for ref, sha in (("refs/heads/base", base_commit), ("refs/heads/head", head_commit)):
-        up = git_ops._run_git(mirror_repo, ["update-ref", ref, sha], env_cmd=env, retries=0, timeout=30)
-        if up.returncode != 0:
-            raise git_ops.GitError(f"git update-ref {ref} failed: {up.stderr.strip()}")
-    bundle = git_ops._run_git(
-        mirror_repo, ["bundle", "create", str(bundle_path), "refs/heads/base", "refs/heads/head"],
-        env_cmd=env, retries=0, timeout=120,
+        _run_git_checked(mirror_repo, ["update-ref", ref, sha], env_cmd=env, timeout=30)
+    _run_git_checked(
+        mirror_repo,
+        ["bundle", "create", str(bundle_path), "refs/heads/base", "refs/heads/head"],
+        env_cmd=env, timeout=120,
     )
-    if bundle.returncode != 0:
-        raise git_ops.GitError(f"git bundle create failed: {bundle.stderr.strip()}")
 
 
 def bundle_heads(bundle_path: Path) -> set[str]:
@@ -337,15 +338,30 @@ def freeze_one(
             "error": {"reason": reason, "detail": detail},
         }, None)
 
-    # 1) mirror ensure + fetch base tip, PR head ref, and the requested head.
+    # 1) establish the shared bare mirror (local-only, no network).
     try:
         m = ensure_mirror(root, repo_slug, origin_url)
+    except git_ops.GitError as exc:
+        return unreplayable(
+            "head_unreachable", f"could not establish the shared bare mirror: {exc}"
+        )
+    # 2) fetch the base tip, the PR head ref, and the requested head into the
+    #    mirror (credential/network/timeout or a missing refspec on the remote).
+    try:
         fetch_pr_refs(root, repo_slug, pr_number, base_tip, [head_sha], origin_url)
+    except git_ops.GitError as exc:
+        return unreplayable(
+            "head_unreachable", f"could not fetch the PR head refs from the origin: {exc}"
+        )
+    # 3) the PR head ref must resolve after a successful fetch.
+    try:
         pr_head = rev_parse(m, f"refs/pull/{pr_number}/head")
     except git_ops.GitError as exc:
-        return unreplayable("head_unreachable", f"could not fetch/resolve the PR head: {exc}")
+        return unreplayable(
+            "head_unreachable", f"could not resolve the PR head ref after fetching: {exc}"
+        )
 
-    # 2) the requested head must be the PR head or an ancestor on its ancestry.
+    # 4) the requested head must be the PR head or an ancestor on its ancestry.
     reach = head_reachability(m, head_sha, pr_head)
     if reach == "head_unreachable":
         return unreplayable("head_unreachable", f"requested head {head_sha[:12]} is not in the mirror")
@@ -355,7 +371,7 @@ def freeze_one(
             f"requested head {head_sha[:12]} is reachable elsewhere but not on the PR head",
         )
 
-    # 3) resolve the merge base and both trees.
+    # 5) resolve the merge base and both trees.
     base = resolve_original_base(m, "refs/heads/base_tip", head_sha)
     if base is None:
         return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
@@ -364,23 +380,25 @@ def freeze_one(
         return unreplayable("missing_object", "a source tree object is absent from the mirror")
     base_tree, head_tree = trees
 
-    # 4) a clean review still requires a real code change.
+    # 6) a clean review still requires a real code change.
     degen = degenerate(m, base_tree, head_tree)
     if degen is not None:
         return unreplayable(degen, f"no real code change between base and head ({degen})")
 
-    # 5) canonical diff + deterministic bundle + offline validation.
+    # 7) canonical diff + deterministic bundle + offline validation.
     #    The bundle is built under the private scratch area (never ``snapshots/<case>``)
     #    and cleaned up after its bytes are captured, so the final ``snapshots/`` path is
     #    written only by the caller's journaled Transaction commit.
     scratch_bundle = root / "cache" / "freeze-scratch" / f"{case_id}.bundle"
     try:
         diff_sha = canonical_diff_sha256(m, base, head_sha)
-        build_bundle(m, base, head_sha, scratch_bundle, case_id)
+        build_bundle(m, base, head_sha, scratch_bundle)
         bundle_sha = storage.sha256_file(scratch_bundle)
         validate_offline_clone(scratch_bundle, base_tree, head_tree, diff_sha, workdir=root / "cache")
         bundle_bytes = scratch_bundle.read_bytes()
-    except git_ops.GitError as exc:
+    except (git_ops.GitError, OSError) as exc:
+        # A raw file-I/O error (storage.sha256_file / read_bytes) is likewise a
+        # per-PR bundle failure and must never escape to abort the whole import.
         return unreplayable("bundle_failure", f"bundle build/validate failed: {exc}")
     finally:
         scratch_bundle.unlink(missing_ok=True)

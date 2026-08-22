@@ -201,8 +201,9 @@ def workspace_status(root: Path) -> WorkspaceStatus:
             manifest = BenchmarkManifest.model_validate(raw)
         except Exception as exc:
             raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
-        state, resolved = _derived_state(root, manifest)
-        case_snapshots = _case_snapshot_summaries(root, manifest)
+        docs = _load_case_docs(root, manifest)
+        state, resolved = _derived_state(root, manifest, docs)
+        case_snapshots = _case_snapshot_summaries(root, manifest, docs)
     return WorkspaceStatus(
         workspace_state=state,
         source=manifest.source,
@@ -265,7 +266,9 @@ def validate_workspace(root: Path) -> tuple[int, str]:
     return (classify_validation(ready=ready, incomplete=not ready, corrupt=False), label)
 
 
-def _derived_state(root: Path, manifest: BenchmarkManifest) -> tuple[str, bool]:
+def _derived_state(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> tuple[str, bool]:
     """Shared (workspace state, identity-resolved) derivation for status+validate.
 
     Loading each indexed case document with the strict loader and verifying
@@ -274,18 +277,38 @@ def _derived_state(root: Path, manifest: BenchmarkManifest) -> tuple[str, bool]:
     state/resolution rule can't diverge between them. An unreadable/invalid
     case or a checksum mismatch surfaces as :class:`WorkspaceCorrupt`.
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
         pull_requests=pr_dicts,
-        cases=_case_curation_states(root, manifest),
+        cases=_case_curation_states(root, manifest, docs),
     )
     _verify_import_checksums(root, manifest)
-    _verify_snapshot_checksums(root, manifest)
+    _verify_snapshot_checksums(root, manifest, docs)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
 
 
-def _verify_snapshot_checksums(root: Path, manifest: BenchmarkManifest) -> None:
+def _load_case_docs(root: Path, manifest: BenchmarkManifest) -> dict[str, dict]:
+    """Load every indexed case document strictly, once, keyed by ``case_file``.
+
+    ``_derived_state`` / ``_case_curation_states`` / ``_case_snapshot_summaries``
+    all need the same per-case YAML. Loading each file here once and sharing
+    the mapping avoids re-reading every case 2-3x per ``status``/``validate``
+    call. The strict loader is used, so an unreadable/invalid case surfaces as
+    :class:`WorkspaceCorrupt` (storage's invariant: a corrupt file is an error,
+    never defaulted).
+    """
+    docs: dict[str, dict] = {}
+    for case in manifest.cases:
+        docs[case.case_file] = load_yaml_strict(root / case.case_file)
+    return docs
+
+
+def _verify_snapshot_checksums(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> None:
     """Verify each indexed ``ready`` snapshot's bundle file + sha256 digest.
 
     A missing ``bundle_file`` or a ``bundle_sha256`` mismatch for a committed
@@ -295,8 +318,10 @@ def _verify_snapshot_checksums(root: Path, manifest: BenchmarkManifest) -> None:
     A ``ready`` snapshot with no ``bundle_file``/``bundle_sha256`` is itself
     structurally invalid and reported corrupt.
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     for case in manifest.cases:
-        raw = load_yaml_strict(root / case.case_file)
+        raw = docs[case.case_file]
         snapshot = raw.get("snapshot")
         if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
             continue
@@ -340,7 +365,9 @@ def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
     return {c.case_file for c in manifest.cases}
 
 
-def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[str, str]]:
+def _case_curation_states(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> list[dict[str, str]]:
     """The ``curation.state`` per indexed case, for workspace-state derivation.
 
     ``derive_workspace_state`` needs the real curation states (its ``ready`` /
@@ -354,16 +381,20 @@ def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[
     conservatively as ``draft`` so a workspace cannot claim ``ready`` while any
     case is not verifiably curated.
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     states: list[dict[str, str]] = []
     for case in manifest.cases:
-        raw = load_yaml_strict(root / case.case_file)
+        raw = docs[case.case_file]
         curation = raw.get("curation")
         cs = curation.get("state") if isinstance(curation, dict) else None
         states.append({"curation_state": cs or "draft"})
     return states
 
 
-def _case_snapshot_summaries(root: Path, manifest: BenchmarkManifest) -> list[dict[str, str]]:
+def _case_snapshot_summaries(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+) -> list[dict[str, str]]:
     """Per-case snapshot summary for ``status``: snapshot state + frozen head.
 
     For each indexed case, loads the case strictly and reports its snapshot
@@ -371,9 +402,11 @@ def _case_snapshot_summaries(root: Path, manifest: BenchmarkManifest) -> list[di
     prefix (``original_head_sha[:12]``) when present. An unreadable/invalid
     case surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
     """
+    if docs is None:
+        docs = _load_case_docs(root, manifest)
     summaries: list[dict[str, str]] = []
     for case in manifest.cases:
-        raw = load_yaml_strict(root / case.case_file)
+        raw = docs[case.case_file]
         snapshot = raw.get("snapshot")
         status = snapshot.get("status") if isinstance(snapshot, dict) else "imported"
         head = (snapshot or {}).get("original_head_sha") or ""

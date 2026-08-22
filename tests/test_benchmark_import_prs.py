@@ -479,7 +479,7 @@ def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)  # preflight + rest/graphql canned data for pr 101 (one head)
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
     pr = raw["pull_requests"][0]
@@ -497,7 +497,7 @@ def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh, pull_header=None)  # 404 -> fetch fails
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc != 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
     pr = raw["pull_requests"][0]
@@ -513,7 +513,7 @@ def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh)
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     st = workspace_status(ws)
     assert st.workspace_state != "empty"
@@ -582,12 +582,12 @@ def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
              "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
         ],
     )
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # curation.state=ready, snapshot_attested=True
     # refresh re-fetches; the referenced evidence now disappears
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
-    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
     assert rc == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
@@ -718,11 +718,11 @@ def test_reimport_does_not_duplicate_cases_rows(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     raw1 = load_yaml_strict(ws / "benchmark.yaml")
     assert len(raw1["cases"]) == 1
     # re-import same PR, unchanged evidence (responses not changed) — fetched->fetched allowed
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     raw2 = load_yaml_strict(ws / "benchmark.yaml")
     ids = [c["case_id"] for c in raw2["cases"]]
     assert len(raw2["cases"]) == 1, f"cases[] grew to {len(raw2['cases'])}: {ids}"
@@ -736,13 +736,13 @@ def test_reimport_unchanged_evidence_preserves_curation(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)  # state=ready, snapshot_attested=True, findings non-empty
     before = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert before["state"] == "ready" and before["snapshot_attested"] is True and before["findings"]
     # Re-import same PR WITHOUT refresh, unchanged evidence.
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     after = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert after["state"] in ("ready", "stale"), "curation must not reset to draft"
     assert after["findings"], "curated findings must not be wiped"
@@ -756,11 +756,11 @@ def test_refresh_unchanged_signature_preserves_curation(tmp_path, fake_gh):
 
     ws = tmp_path / "ws"
     _seed_preflight(ws, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"]) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)
     # refresh with IDENTICAL evidence responses (signature unchanged) -> changed=False
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True) == 0
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     after = load_yaml_strict(ws / "cases" / case_file)["curation"]
     assert after["findings"], "curated findings must not be wiped on unchanged refresh"
     assert after["state"] != "draft", "curation must not reset to draft on unchanged refresh"
