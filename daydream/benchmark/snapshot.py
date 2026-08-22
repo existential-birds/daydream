@@ -69,11 +69,15 @@ def ensure_mirror(root: Path, repo_slug: str, origin_url: str | None = None) -> 
 
 
 def _git_fetch(mirror_repo: Path, url: str, refspecs: list[str]) -> None:
-    """Fetch refspecs into the mirror. An unresolved refspec raises ``GitError``."""
+    """Fetch refspecs into the mirror. An unresolved refspec raises ``GitError``.
+
+    Carries the command-scoped ``gh auth git-credential`` helper fragment so
+    HTTPS fetches from GitHub authenticate through Git's normal helper contract
+    (``GIT_TERMINAL_PROMPT=0`` in :func:`_fetch_env`). Local/file origins never
+    invoke the helper, so local-origin tests are unaffected.
+    """
     url = str(url)
-    args = ["fetch", url, *refspecs]
-    if url.startswith("https://"):
-        args = ["-c", "credential.helper=!gh auth git-credential", *args]
+    args = [*git_ops._credential_helper_args(), "fetch", url, *refspecs]
     proc = git_ops._run_git(mirror_repo, args, env_cmd=_fetch_env(), retries=0, timeout=300)
     if proc.returncode != 0:
         raise git_ops.GitError(

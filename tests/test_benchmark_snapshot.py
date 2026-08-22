@@ -216,6 +216,28 @@ def test_bundle_two_refs_deterministic(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_git_fetch_wires_command_scoped_credential_helper(tmp_path, monkeypatch):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    mirror = tmp_path / "mirror.git"
+    git_ops._run_git(tmp_path, ["init", "--bare", str(mirror)], retries=0)
+    captured: dict[str, list[str]] = {}
+
+    real_run = git_ops.subprocess.run
+
+    def spy(args, *pargs, **kwargs):
+        grg = list(args)
+        if grg[:1] == ["git"] and "fetch" in grg:
+            captured["argv"] = grg
+        return real_run(args, *pargs, **kwargs)
+
+    monkeypatch.setattr("daydream.git_ops.subprocess.run", spy)
+    sn._git_fetch(mirror, origin, ["refs/heads/main"])
+    argv = captured["argv"]
+    assert "-c" in argv and any(a.startswith("credential.helper=!gh auth git-credential") for a in argv)
+
+
 def test_offline_clone_validates(tmp_path):
     from daydream.benchmark import snapshot as sn
 
