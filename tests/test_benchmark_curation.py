@@ -220,6 +220,32 @@ def test_accept_candidate_produces_historical_derived_finding(tmp_path, fake_gh)
     assert raw["curation"]["gold_mode"] == "historical"
     assert raw["curation"]["state"] == "draft"           # accept on draft stays draft
 
+def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+
+    cu.add_finding(ws, case_id, title="New concern", body="fresh wording",
+                   severity="high", location={"path": "feature.py",
+                                              "start_line": 1, "end_line": 1},
+                   source_ids=[])
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert f["provenance"]["kind"] == "authored" and f["provenance"]["source_ids"] == []
+    assert raw["curation"]["gold_mode"] == "authored"
+
+    # now replace it with a rewritten (edited) finding referencing one source
+    cu.replace_findings(ws, case_id, f["finding_id"],
+                        replacements=[{"title": "New concern (v2)", "body": "rewritten",
+                                       "severity": "medium",
+                                       "location": {"path": "feature.py",
+                                                    "start_line": 2, "end_line": 2},
+                                       "source_ids": ["github:inline_comment:1"]}])
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f2 = raw["curation"]["findings"][0]
+    assert f2["provenance"]["kind"] == "edited" and f2["finding_id"] != f["finding_id"]
+    assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "edited"
+    assert f2["finding_id"] == derive_finding_id(f2)
+
 
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu

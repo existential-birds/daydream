@@ -274,3 +274,104 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
     raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
     _derive_content(raw)
     _stage_case(root, case_id, raw, op="accept")
+
+
+def _derive_provenance_kind(
+    source_ids: list[str], *, authored: bool = False
+) -> str:
+    """Derive the provenance kind from source IDs + authoring intent.
+
+    ``historical`` is produced ONLY by :func:`accept_candidate` and never here:
+    additions/replacements are ``authored`` (no source, or explicit authoring)
+    or ``edited`` (rewrites of one or more sources).
+    """
+    if authored:
+        return "authored"
+    if not source_ids:
+        return "authored"
+    return "edited"
+
+
+def _check_candidate_sources(raw: dict[str, Any], source_ids: list[str], case_id: str) -> None:
+    """Reject a caller-supplied source reference that no candidate backs."""
+    if not source_ids:
+        return
+    candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
+    for src in source_ids:
+        if src not in candidate_ids:
+            raise CurationError(f"source {src} is not a candidate of case {case_id}")
+
+
+def add_finding(
+    root: Path,
+    case_id: str,
+    *,
+    title: str,
+    body: str,
+    severity: str | None = None,
+    location: dict[str, Any] | None = None,
+    source_ids: list[str] | None = None,
+) -> None:
+    """Add an authored (new) finding. provenance is ``authored`` with empty sources."""
+    source_ids = source_ids or []
+    raw = _load_case(root, case_id)
+    _check_candidate_sources(raw, source_ids, case_id)
+    finding = {
+        "title": title,
+        "body": body,
+        "severity": severity,
+        "location": location,
+        "provenance": {
+            "kind": _derive_provenance_kind(source_ids, authored=True),
+            "source_ids": source_ids,
+        },
+    }
+    finding["finding_id"] = schema.derive_finding_id(finding)
+    raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="add")
+
+
+def _build_replacement(
+    raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
+) -> dict[str, Any]:
+    """Build one edited finding from a replacement atom (owner supply the content)."""
+    source_ids = list(replacement.get("source_ids") or [])
+    _check_candidate_sources(raw, source_ids, case_id)
+    finding = {
+        "title": replacement["title"],
+        "body": replacement["body"],
+        "severity": replacement.get("severity"),
+        "location": replacement.get("location"),
+        "provenance": {
+            "kind": _derive_provenance_kind(source_ids, authored=False),
+            "source_ids": source_ids,
+        },
+    }
+    finding["finding_id"] = schema.derive_finding_id(finding)
+    return finding
+
+
+def replace_findings(
+    root: Path, case_id: str, finding_id: str, *, replacements: list[dict[str, Any]]
+) -> None:
+    """Replace one finding with an atomic set of re-written (edited) findings.
+
+    Supports split (N replacements expand one finding) and merge (each
+    replacement concatenates its own sources); the replacements are the atomic
+    toehold set and are revalidated with the whole case.
+    """
+    raw = _load_case(root, case_id)
+    curation = raw.setdefault("curation", {})
+    findings = curation.setdefault("findings", [])
+    index = next(
+        (i for i, f in enumerate(findings) if f.get("finding_id") == finding_id),
+        None,
+    )
+    if index is None:
+        raise CurationError(f"no finding {finding_id}")
+    built = [_build_replacement(raw, case_id, r) for r in replacements]
+    new_findings = list(findings[:index]) + built + list(findings[index + 1:])
+    curation["findings"] = new_findings
+    _derive_content(raw)
+    _stage_case(root, case_id, raw, op="replace")
