@@ -126,7 +126,7 @@ def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     raw = yaml.safe_load((root / "benchmark.yaml").read_text())
     if resolved:
-        raw["source"]["repository_id"] = 12345
+        raw["source"]["repository_id"] = "R_kgDOABC123"
         raw["source"]["visibility"] = "private"
     case_id = "pr-000101-0123456789ab"
     case_file = f"cases/{case_id}.yaml"
@@ -195,7 +195,7 @@ def _seed_frozen_case(ws):
     import yaml
 
     raw = yaml.safe_load((ws / "benchmark.yaml").read_text())
-    raw["source"]["repository_id"] = 12345
+    raw["source"]["repository_id"] = "R_kgDOABC123"
     raw["source"]["visibility"] = "private"
     head_sha = "0123456789ab" + "0" * 28
     case_id = f"pr-000101-{head_sha[:12]}"

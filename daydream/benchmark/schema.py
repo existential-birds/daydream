@@ -123,7 +123,7 @@ class Source(BaseModel):
     provider: Literal["github"]
     hostname: str
     repository: str
-    repository_id: int | None = None
+    repository_id: str | None = None
     visibility: Literal["unresolved", "public", "private"] = "unresolved"
 
     @field_validator("hostname")
@@ -139,6 +139,18 @@ class Source(BaseModel):
         if not v or not _REPOSITORY_SHAPE.match(v):
             raise ValueError(f"repository must be OWNER/REPO, got {v!r}")
         return v
+
+    @field_validator("repository_id")
+    @classmethod
+    def _repository_id_nonblank_opaque(cls, v: str | None) -> str | None:
+        # None is the unresolved sentinel (unchanged); blank and numeric-only
+        # strings are never valid GitHub node ids (e.g. R_kgD...).
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped or stripped.isdigit():
+            raise ValueError(f"repository_id must be a nonblank opaque string, got {v!r}")
+        return stripped
 
 
 class Privacy(BaseModel):
@@ -558,7 +570,7 @@ class _ImportRepository(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: int
+    id: str
     name_with_owner: str
     visibility: Literal["public", "private"]
 
