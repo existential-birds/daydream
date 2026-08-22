@@ -255,10 +255,10 @@ def validate_offline_clone(
     bundle_path = Path(bundle_path)
     import tempfile
 
-    clone_dir = tempfile.mkdtemp(prefix="clone-", dir=str(workdir))
+    clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))
     try:
         proc = git_ops._run_git(
-            Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), clone_dir],
+            Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
             retries=0, timeout=120,
         )
         if proc.returncode != 0:
@@ -268,9 +268,15 @@ def validate_offline_clone(
             ("refs/remotes/origin/head", head_tree),
         ):
             got = _run_git_cwd(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
+            assert isinstance(got, str)
             if got != expected:
                 raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
-        diff = _run_git_cwd(clone_dir, ["diff", "--binary", "refs/remotes/origin/base", "refs/remotes/origin/head"], capture_bytes=True)
+        diff = _run_git_cwd(
+            clone_dir,
+            ["diff", "--binary", "refs/remotes/origin/base", "refs/remotes/origin/head"],
+            capture_bytes=True,
+        )
+        assert isinstance(diff, bytes)
         if hashlib.sha256(diff).hexdigest() != diff_sha256:
             raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
     finally:
@@ -278,8 +284,9 @@ def validate_offline_clone(
     return None
 
 
-def _run_git_cwd(repo: Path, args: list[str], *, capture_bytes: bool = False) -> str | bytes:
+def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: bool = False) -> str | bytes:
     """Run git and raise GitError on non-zero exit (offline-clone helper)."""
+    repo = Path(repo)
     proc = git_ops._run_git(repo, args, retries=0, capture_bytes=capture_bytes, timeout=30)
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
@@ -340,7 +347,10 @@ def freeze_one(
     if reach == "head_unreachable":
         return unreplayable("head_unreachable", f"requested head {head_sha[:12]} is not in the mirror")
     if reach != "ok":
-        return unreplayable("head_not_on_pr", f"requested head {head_sha[:12]} is reachable elsewhere but not on the PR head")
+        return unreplayable(
+            "head_not_on_pr",
+            f"requested head {head_sha[:12]} is reachable elsewhere but not on the PR head",
+        )
 
     # 3) resolve the merge base and both trees.
     base = resolve_original_base(m, "refs/heads/base_tip", head_sha)

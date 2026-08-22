@@ -427,7 +427,8 @@ def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path
     Also proves one shared ``cache/repository.git`` serves both without ref
     collision.
     """
-    from daydream.benchmark import github_import as gi, snapshot as sn
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark import snapshot as sn
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 

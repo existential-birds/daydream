@@ -191,6 +191,7 @@ def _seed_frozen_case(ws):
     identity so ``validate_workspace`` reaches exit 0.
     """
     import hashlib
+
     import yaml
 
     raw = yaml.safe_load((ws / "benchmark.yaml").read_text())

@@ -19,7 +19,6 @@ import pytest
 
 from daydream import git_ops
 
-
 # ---------------------------------------------------------------------------
 # real-git seed helpers (deterministic commit SHAs)
 # ---------------------------------------------------------------------------
@@ -393,7 +392,7 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
         # fully offline-replayable with no GitHub/HTTPS network dependency
         assert url and not url.startswith(("https://", "http://", "git://", "ssh://"))
         refs = _git(Path(clone), "for-each-ref", "--format=%(refname)", "refs/remotes")
-        assert {l for l in refs.splitlines() if l} == {
+        assert {line for line in refs.splitlines() if line} == {
             "refs/remotes/origin/base",
             "refs/remotes/origin/head",
         }
