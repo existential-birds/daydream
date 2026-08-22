@@ -1057,9 +1057,10 @@ async def test_clients_validate_initial_url_before_request(sr_module) -> None:
     calls = []
     class F:
         async def post(self, url, *, headers, json, timeout):
-            calls.append(url);  # would be reached only if validation passed
+            calls.append(url)  # would be reached only if validation passed
+            verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
             return type("R", (), {"status_code": 200, "text": "ok",
-                "json": lambda self: {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "x"}'}]}})()
+                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
     # anthropic validates the hardcoded constant -> ok when allowlist matches
     c = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F())
     assert await c.complete_json(user="u") is not None and len(calls) == 1
@@ -1080,9 +1081,12 @@ async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module) 
             seen.append((url, dict(headers)))
             loc = self.hops.pop(0) if self.hops else None
             if loc is not None:
-                return type("R", (), {"status_code": 302, "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"}, "text": ""})()
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": loc, "x-server-token": "SHOULD-NOT-REPLAY"},
+                    "text": ""})()
+            verdict = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
             return type("R", (), {"status_code": 200, "text": "ok",
-                "json": lambda self: {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "x"}'}]}})()
+                "json": lambda self: {"content": [{"type": "text", "text": verdict}]}})()
     allow = {"api.anthropic.com"}
     client = Redirecting(["/v1/next"])  # relative Location, same host
     raw = await sr._complete_json_with_http(
@@ -1183,3 +1187,44 @@ def test_main_fail_closed_on_bad_provider_and_reads_path_overrides(sr_module, tm
     details = json.loads((out / "reward-details.json").read_text())
     assert any("unsupported" in e or "expected anthropic or openai-compatible" in e
                for e in details["errors"])  # typed diagnostic surfaced, not a barren client=None exit
+
+
+@pytest.mark.asyncio
+async def test_both_providers_share_identical_hardened_error_and_redirect_policy(sr_module) -> None:
+    sr = sr_module
+    allow = {"api.anthropic.com"}
+    anthropic = sr.AnthropicJudgeClient("k", "m", allowlist=allow)
+    openai = sr.OpenAIJudgeClient("k", "m", base_url="https://api.anthropic.com/v1", allowlist=allow)
+    for client in (anthropic, openai):
+        # identical redirect-hop bound: a forever-redirecting judge exhausts
+        # _MAX_REDIRECTS on both providers before the same VerifierError
+        seen = []
+        class RedirectRule:
+            async def post(self, url, *, headers, json, timeout):
+                seen.append(1)
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": "/v1/next", "x-srv": "NO-REPLAY"}, "text": ""})()
+        client.http = RedirectRule()
+        with pytest.raises(sr.VerifierError):
+            await client.complete_json(user="u")
+        assert len(seen) == (sr._MAX_REDIRECTS + 1)       # identical hop bound on both
+
+        # identical oversized-response diagnostic on both providers
+        class Oversize:
+            async def post(self, url, *, headers, json, timeout):
+                return type("R", (), {"status_code": 200, "text": "",
+                    "content": b"x" * (sr._RESPONSE_CAP_BYTES + 1), "json": lambda self: {}})()
+        client.http = Oversize()
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "256 KiB" in str(e.value)
+
+        # identical out-of-allowlist redirect rejection on both providers
+        class BadRedirect:
+            async def post(self, url, *, headers, json, timeout):
+                return type("R", (), {"status_code": 302,
+                    "headers": {"location": "https://evil.example/x"}, "text": ""})()
+        client.http = BadRedirect()
+        with pytest.raises(sr.VerifierError) as e:
+            await client.complete_json(user="u")
+        assert "allowlist" in str(e.value)
