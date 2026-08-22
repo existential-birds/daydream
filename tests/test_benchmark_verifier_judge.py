@@ -353,6 +353,22 @@ def _gold_list(n: int = 2) -> list[dict]:
     return out
 
 
+def _write_metadata(gold_path: Path, *, case_id: str = "case-x",
+                    base_ref: str = "base", head_ref: str = "head") -> None:
+    import hashlib as _h
+    meta = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "template_version": "1",
+        "gold_sha256": _h.sha256(Path(gold_path).read_bytes()).hexdigest(),
+    }
+    Path(gold_path).with_name("verifier-metadata.json").write_text(
+        json.dumps(meta, sort_keys=True)
+    )
+
+
 def _candidate_artifact(sr_module, *, case_id: str = "case-x", n: int = 2) -> dict:
     finding_gen = []
     for i in range(n):
@@ -379,6 +395,7 @@ def test_run_verifier_writes_reward_and_details_atomically(sr_module, tmp_path, 
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
     gold_path.write_text(json.dumps(_gold_list(2)))
+    _write_metadata(gold_path)
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr)))
     out_dir = tmp_path / "out"
@@ -409,6 +426,7 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module, tmp_path) -
     sr = sr_module
     gold_path = tmp_path / "g.json"
     gold_path.write_text(json.dumps(_gold_list(2)))
+    _write_metadata(gold_path, case_id="c")
     artifact_path = tmp_path / "r.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c")))
     out_dir = tmp_path / "out"
@@ -477,6 +495,7 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_p
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"
     gold_path.write_text(json.dumps(_gold_list(2)))
+    _write_metadata(gold_path, case_id="organic")
 
     oracle = _candidate_artifact(sr, case_id="organic")
     artifact_path = tmp_path / "review.json"
@@ -504,6 +523,7 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module, tmp_p
     # clean fixture: gold empty, candidates empty -> reward 1, clean_pass 1
     clean_gold = tmp_path / "cg.json"
     clean_gold.write_text(json.dumps([]))
+    _write_metadata(clean_gold, case_id="c", base_ref="b", head_ref="h")
     clean_art = tmp_path / "cr.json"
     clean_art.write_text(
         json.dumps({"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h", "findings": []})
@@ -575,14 +595,22 @@ def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(
     candidates = sr.verifier_core.validate_candidate_artifact(solution_raw)
     assert len(candidates) == 2
 
+    # Run against temp copies (beside the shipped fixtures would pollute the
+    # checked-in template dir) with the matching task-bound metadata.
+    run_gold = tmp_path / "golden-review.json"
+    run_gold.write_bytes(gold_path.read_bytes())
+    run_solution = tmp_path / "solution-golden-review.json"
+    run_solution.write_bytes(solution_path.read_bytes())
+    _write_metadata(run_gold, case_id="case-x")
+
     class MatchClient:
         async def complete_json(self, *, user, system, max_tokens):
             return {"match": True, "confidence": 1.0, "reasoning": "identical"}
 
     out = tmp_path / "oracle-out"
     reward = sr.run_verifier(
-        gold_path,
-        solution_path,
+        run_gold,
+        run_solution,
         out,
         client=MatchClient(),
         env={
@@ -708,6 +736,7 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module, tmp_path)
     gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": oversized_body,
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
     gold_path.write_text(json.dumps(gold))
+    _write_metadata(gold_path, case_id="c", base_ref="b", head_ref="h")
     cand = {"title": "t" * 500, "body": oversized_body, "severity": "high",
             "path": "p" * 200, "start_line": 1, "end_line": 1}
     cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
@@ -743,6 +772,7 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp
     import hashlib as _h
     gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
     gold_path.write_text(json.dumps(gold))
+    _write_metadata(gold_path, case_id="c", base_ref="b", head_ref="h")
     cand = {"title": "t" * 500, "body": _DENSE_BODY, "severity": "high",
             "path": "p" * 200, "start_line": 1, "end_line": 1}
     cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
@@ -759,3 +789,66 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp
     assert client.requests == 1         # not failed whole
     details = json.loads((out / "reward-details.json").read_text())
     assert _DENSE_BODY not in json.dumps(details)  # never leaks finding content
+
+
+def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    artifact_path = tmp_path / "review.json"
+    compact = json.dumps(_candidate_artifact(sr, n=1)).encode("utf-8")
+    # pad ABOVE the 1 MiB cap so the raw byte size is the only signal
+    artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+
+
+def test_run_verifier_rejects_cross_case_replay(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path, case_id="task-A")
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+
+
+def test_run_verifier_rejects_ref_mismatch(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path, head_ref="head")
+    artifact_path = tmp_path / "review.json"
+    art = _candidate_artifact(sr, n=1)
+    art["head_ref"] = "feature/x"  # not the bound head ref
+    artifact_path.write_text(json.dumps(art))
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+
+
+def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold = json.dumps(_gold_list(1))
+    gold_path.write_text(gold)
+    _write_metadata(gold_path)  # sentinel over the uncorrupted bytes
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    # corrupt one byte of the gold bytes after the sentinel was captured
+    corrupted = bytearray(gold.encode("utf-8"))
+    corrupted[-1] ^= 1
+    gold_path.write_bytes(bytes(corrupted))
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=None, env={})
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+
+
+def test_parse_verdict_rejects_unknown_key(sr_module) -> None:
+    sr = sr_module
+    with pytest.raises(sr.VerifierError):
+        sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "ok", "extra": 1})

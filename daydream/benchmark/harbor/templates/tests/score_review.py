@@ -12,6 +12,7 @@ atomically.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -152,11 +153,10 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
 
     ``gold_id``/``candidate_id`` are placeholders the caller (``judge_pairs``)
     stamps onto the returned verdict. Any violation — wrong type, out-of-range
-    confidence, missing key, non-dict input — raises ``VerifierError``; never
-    silently coerces a fallback value.
+    confidence, missing key, unknown key, non-dict input — raises
+    ``VerifierError``; never silently coerces a fallback value.
     """
-    if not isinstance(raw, dict):
-        raise VerifierError("verdict must be a JSON object")
+    verifier_core.validate_exact_keys(raw, {"match", "confidence", "reasoning"}, "verdict")
     if "match" not in raw:
         raise VerifierError("verdict missing required field 'match'")
     match = raw["match"]
@@ -490,6 +490,40 @@ def _read_json(path: Path) -> Any:
         raise VerifierError(f"could not read {path}: {exc}") from exc
 
 
+def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
+    """Read the candidate artifact as raw bytes, size-checked and parsed in one step.
+
+    The raw byte size is checked against ``verifier_core.MAX_ARTIFACT_BYTES``
+    BEFORE any parse -- a whitespace-inflated payload over the cap fails on its
+    raw size alone, never reaching the judge. A ``JSONDecodeError`` becomes a
+    ``VerifierError`` naming only the path (never content).
+    """
+    raw = Path(path).read_bytes()
+    if len(raw) > verifier_core.MAX_ARTIFACT_BYTES:
+        raise VerifierError("candidate artifact exceeds 1 MiB (raw bytes)")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise VerifierError(f"candidate artifact is not valid JSON: {Path(path)}") from None
+    return parsed
+
+
+def _load_verifier_metadata(gold_path: Path) -> dict[str, Any]:
+    """Load the sibling immutable task-bound verifier metadata beside the gold file.
+
+    Requires the ``{schema_version, case_id, base_ref, head_ref,
+    template_version, gold_sha256}`` object the compiler renders per case; a
+    missing/dict-violating field raises ``VerifierError``.
+    """
+    meta = _read_json(gold_path.parent / "verifier-metadata.json")
+    if not isinstance(meta, dict):
+        raise VerifierError("verifier metadata must be a JSON object")
+    for field in ("case_id", "base_ref", "head_ref", "gold_sha256"):
+        if field not in meta:
+            raise VerifierError(f"verifier metadata missing required field {field}")
+    return meta
+
+
 def _atomic_write(out_dir: Path, filename: str, payload: str) -> None:
     """Write a file atomically via temp + rename so a crash never leaves a partial file."""
     tmp = out_dir / f".{filename}.{os.getpid()}.tmp"
@@ -520,10 +554,16 @@ def run_verifier(
 ) -> verifier_core.Reward:
     """Validate gold + the candidate artifact, judge all pairs, score, and write atomically.
 
-    Any ``VerifierError`` (validation, judging, parsing, exhausted retries, or a
-    missing client) becomes a ``Reward(reward=0, verifier_error=1)`` — the task
-    fails whole, never reporting a partial score. Both output files are written
-    atomically (temp + rename). Never emits source or diffs.
+    Validation order (issue #817): the candidate artifact is read as raw bytes
+    (size-checked before parse), validated to its exact schema, then bound to
+    the task's immutable ``verifier-metadata.json`` (case id + base/head refs);
+    the gold is then read as raw bytes and its sha256 must match the
+    compiler-rendered ``gold_sha256`` sentinel before it is parsed and validated
+    (canonical/unique gold ids). Any ``VerifierError`` (validation, binding,
+    digest, parsing, judging, exhausted retries, or a missing client) becomes a
+    ``Reward(reward=0, verifier_error=1)`` — the task fails whole, never
+    reporting a partial score. Both output files are written atomically (temp +
+    rename). Never emits source or diffs.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -538,12 +578,27 @@ def run_verifier(
     try:
         if client is None:
             raise VerifierError("no judge client configured (missing DAYDREAM_JUDGE_*)")
-        gold_raw = _read_json(Path(gold_path))
+        artifact_raw = _read_artifact_bytes(artifact_path)
+        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
+
+        metadata = _load_verifier_metadata(Path(gold_path))
+        if artifact_raw["case_id"] != metadata["case_id"]:
+            raise VerifierError("candidate case_id does not match the bound task")
+        if artifact_raw["base_ref"] != metadata["base_ref"]:
+            raise VerifierError("candidate base_ref does not match the bound task")
+        if artifact_raw["head_ref"] != metadata["head_ref"]:
+            raise VerifierError("candidate head_ref does not match the bound task")
+
+        gold_bytes = Path(gold_path).read_bytes()
+        if hashlib.sha256(gold_bytes).hexdigest() != metadata["gold_sha256"]:
+            raise VerifierError("gold digest mismatch")
+        try:
+            gold_raw = json.loads(gold_bytes)
+        except json.JSONDecodeError:
+            raise VerifierError(f"gold set is not valid JSON: {Path(gold_path)}") from None
         if not isinstance(gold_raw, list):
             raise VerifierError("gold set must be a JSON list")
         gold_parsed = verifier_core.validate_gold_set(gold_raw)
-        artifact_raw = _read_json(Path(artifact_path))
-        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
 
         verdicts: list[verifier_core.Verdict] = []
         matches: set[tuple[str, str]] = set()
