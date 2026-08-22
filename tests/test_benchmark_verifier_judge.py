@@ -65,3 +65,31 @@ def test_parse_verdict_accepts_valid_and_rejects_malformed(sr_module) -> None:
     ):
         with pytest.raises(sr.VerifierError):
             sr.parse_verdict(bad)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_posts_messages_and_returns_verdict(sr_module) -> None:
+    sr = sr_module
+    calls = []
+
+    class FakeClient:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append((url, headers, json, timeout))
+            return type(
+                "R",
+                (),
+                {
+                    "status_code": 200,
+                    "text": "ok",
+                    "json": lambda self: {
+                        "content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}]
+                    },
+                },
+            )()
+
+    client = sr.AnthropicJudgeClient(api_key="sk-ant-x", model="claude-x", http=FakeClient())
+    raw = await client.complete_json(user="<prompt>")
+    assert raw == {"match": True, "confidence": 0.9, "reasoning": "same"}
+    assert calls[0][0] == "https://api.anthropic.com/v1/messages"
+    assert calls[0][1]["x-api-key"] == "sk-ant-x"
+    assert calls[0][2]["model"] == "claude-x"
