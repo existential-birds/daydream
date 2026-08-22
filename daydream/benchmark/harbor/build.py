@@ -101,7 +101,46 @@ def bounded_pr_context(
         if not t_title.startswith("title: "):
             t_title = "title: " + t_title
     marker = f"[truncated; full_body_sha256={hashlib.sha256(full.encode('utf-8')).hexdigest()}]"
+    marker = f"[truncated; full_body_sha256={hashlib.sha256(full.encode('utf-8')).hexdigest()}]"
     return (
         f"<historical_pr_context>\n{t_title}\nbody: {t_body}\n{marker}\n"
         "</historical_pr_context>"
     )
+
+
+def _flatten_finding(finding: dict) -> dict:
+    """Map a curated finding to its provenance-free gold/artifact shape.
+
+    Returns the content fields ``{title, body, severity, path, start_line,
+    end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``.
+    A missing or ``None`` location cannot emit validation-passing gold, so it
+    raises :class:`CompileError` naming the finding -- never a silent drop.
+    """
+    location = finding.get("location")
+    if not location:
+        raise CompileError(
+            f"finding {finding.get('finding_id')} has no location; "
+            "cannot emit validation-passing gold"
+        )
+    return {
+        "title": finding.get("title"),
+        "body": finding.get("body"),
+        "severity": finding.get("severity"),
+        "path": location.get("path"),
+        "start_line": location.get("start_line"),
+        "end_line": location.get("end_line"),
+    }
+
+
+def build_gold_list(findings: list) -> list:
+    """Return the provenance-free hidden gold list, ordered by ``finding_id``.
+
+    ``[]`` for empty input; otherwise each entry carries ``finding_id`` plus
+    the flattened content fields, sorted by ``finding_id`` ascending. A
+    location-less finding raises :class:`CompileError`.
+    """
+    if not findings:
+        return []
+    flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
+    flat.sort(key=lambda item: item[1])
+    return [{"finding_id": fid, **flattened} for flattened, fid in flat]

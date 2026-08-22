@@ -92,3 +92,36 @@ def test_bounded_pr_context_missing_body_is_empty():
     from daydream.benchmark.harbor import build
     ctx = build.bounded_pr_context({"title": "Fix cache"})          # no body key
     assert "body: \n" in ctx and "[truncated" not in ctx
+
+
+def test_build_gold_list_is_provenance_free_and_location_required():
+    from daydream.benchmark.harbor import build
+    findings = [
+        {"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
+         "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
+         "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
+        {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": "medium",
+         "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
+         "provenance": {"kind": "authored", "source_ids": []}},
+    ]
+    gold = build.build_gold_list(findings)
+    assert [f["finding_id"] for f in gold] == ["a" * 64, "c" * 64]        # ordered by finding_id
+    assert all(set(f) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
+               for f in gold)                                             # no provenance/source/gold keys
+    assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
+
+
+def test_build_gold_list_clean_is_empty():
+    from daydream.benchmark.harbor import build
+    assert build.build_gold_list([]) == []
+
+
+def test_build_gold_list_rejects_locationless_finding():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    try:
+        build.build_gold_list([{"finding_id": "a" * 64, "title": "T", "body": "B",
+                                "severity": None, "location": None, "provenance": {"kind": "authored", "source_ids": []}}])
+        assert False, "expected CompileError for a location-less finding"
+    except CompileError as exc:
+        assert "location" in str(exc)
