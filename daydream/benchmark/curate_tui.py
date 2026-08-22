@@ -87,9 +87,77 @@ def _prompt(read_line: Callable[[str], str], message: str) -> str:
     return read_line(message)
 
 
+def render_case(case: dict[str, Any]) -> str:
+    """Render a plain-text snapshot header + numbered evidence list.
+
+    Each evidence entry shows its number, kind, author login (+ ``[bot]`` for a
+    bot), commit prefix, ``path:line`` anchor, resolved/outdated markers, the
+    candidate title, and a body preview (first ~120 chars). Candidates without
+    an ``evidence`` projection render those fields as ``-``.
+    """
+    snapshot = case.get("snapshot") or {}
+    curation = case.get("curation") or {}
+    head = snapshot.get("original_head_sha") or "-"
+    policy = snapshot.get("policy") or "-"
+    state = curation.get("state") or "-"
+    lines = [
+        f"case {case.get('case_id')}: state={state} policy={policy} head={head}",
+    ]
+    for i, cand in enumerate(case.get("candidates") or [], start=1):
+        ev = cand.get("evidence") or {}
+        author = ev.get("author") or {}
+        login = author.get("login") or "-"
+        if author.get("type") == "Bot":
+            login = f"{login}[bot]"
+        kind = ev.get("kind") or "-"
+        commit = (ev.get("commit_id") or "")[:12] or "-"
+        location = cand.get("location") or {}
+        loc_path = location.get("path") or "-"
+        start = location.get("start_line")
+        anchor = f"{loc_path}:{start}" if loc_path != "-" and start else loc_path
+        markers = ""
+        if ev.get("resolved"):
+            markers += " [resolved]"
+        if ev.get("outdated"):
+            markers += " [outdated]"
+        preview = (cand.get("body") or "").replace("\n", " ")[:120]
+        line_parts = [
+            f"  {i}. [{kind}] {login} {commit} {anchor}{markers}",
+            f"      {cand.get('title') or '-'}",
+            f"      {preview or '-'}",
+        ]
+        lines.append("\n".join(line_parts))
+    return "\n".join(lines)
+
+
+_ACTIONS = frozenset("aenxcrdziq")
+_ACTION_PROMPT = "action [a/e/n/x/c/r/d/z/i/q]: "
+
+
+def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
+    """Dispatch one recognized action; returns the next action-loop outcome."""
+    if action == "q":
+        print("saving; run curate again to resume")
+        return "quit"
+    if action == "d":
+        print(f"case {case_id} deferred \u2014 nothing persisted")
+        return "done"
+    print(f"action [{action}]: not yet wired")
+    return "continue"
+
+
 def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
-    """Run one case session; returns ``"quit"`` or ``"done"`` (Task 5 expands)."""
-    return "quit"
+    """Run one case session; returns ``"quit"`` or ``"done"``."""
+    print(render_case(cu.get_case(root, case_id)))
+    while True:
+        action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
+        if action not in _ACTIONS:
+            print(f"unknown action: {action}")
+            continue
+        outcome = _run_action(action, root, case_id, cu.get_case(root, case_id), read_line)
+        if outcome in ("quit", "done"):
+            return outcome
+
 
 
 def run_curate_tui(

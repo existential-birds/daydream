@@ -46,3 +46,22 @@ def test_run_curate_tui_queue_renders_index_and_quits(tmp_path, fake_gh, capsys)
     # discriminating: the real case_id (from list_cases) must be rendered to stdout,
     # so a stub that ignores list_cases cannot pass
     assert case_id in capsys.readouterr().out
+
+def test_render_case_shows_header_and_numbered_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import render_case
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    view = cu.get_case(ws, case_id)
+    out = render_case(view)
+    assert case_id in out and "draft" in out
+    assert "alice" in out and "inline_comment" in out          # evidence projection
+    assert "feature.py:2" in out                                # path/line anchor
+    assert "please fix" in out                                  # body preview
+
+
+def test_run_curate_tui_unknown_action_reprompts(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
+    assert rc == 0
+    assert "unknown" in capsys.readouterr().out
