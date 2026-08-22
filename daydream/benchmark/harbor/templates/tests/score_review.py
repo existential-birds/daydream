@@ -554,7 +554,7 @@ def _build_client(env: dict[str, Any]) -> Any:
     )
 
 
-def main() -> None:
+def main() -> int:
     """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON."""
     gold_path = Path(__file__).with_name("golden-review.json")
     artifact_path = Path("/logs/artifacts/review.json")
@@ -580,7 +580,11 @@ def main() -> None:
         }
     )
     print(json.dumps(payload))
-    sys.exit(1 if getattr(reward, "verifier_error", 0) else 0)
+    return 1 if getattr(reward, "verifier_error", 0) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 
 
 if __name__ == "__main__":

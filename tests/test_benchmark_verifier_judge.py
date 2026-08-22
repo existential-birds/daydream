@@ -10,6 +10,7 @@ injected fake HTTP client against ``tmp_path``.
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -395,3 +396,71 @@ def test_run_verifier_writes_reward_and_details_atomically(sr_module, tmp_path, 
     assert details["provider"] == "anthropic" and details["model"] == "m"
     assert "request_counts" in details and "errors" in details
     assert "src/" not in json.dumps(details)  # never source/diffs
+
+
+def test_judge_failure_fails_whole_task_not_partial_score(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "g.json"
+    gold_path.write_text(json.dumps(_gold_list(2)))
+    artifact_path = tmp_path / "r.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c")))
+    out_dir = tmp_path / "out"
+
+    class BrokenClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            raise sr.VerifierError("judge exhausted")
+
+    reward = sr.run_verifier(
+        gold_path,
+        artifact_path,
+        out_dir,
+        client=BrokenClient(),
+        env={
+            "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+            "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k",
+            "DAYDREAM_JUDGE_BASE_URL": None,
+        },
+    )
+    assert reward.verifier_error == 1 and reward.reward == 0.0
+    rj = json.loads((out_dir / "reward.json").read_text())
+    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+
+
+def test_provider_selection_builds_expected_client(sr_module, monkeypatch) -> None:
+    sr = sr_module
+
+    def make(provider, base_url, model="m", api_key="k"):
+        return sr._build_client(
+            {
+                "DAYDREAM_JUDGE_PROVIDER": provider,
+                "DAYDREAM_JUDGE_MODEL": model,
+                "DAYDREAM_JUDGE_API_KEY": api_key,
+                "DAYDREAM_JUDGE_BASE_URL": base_url,
+            }
+        )
+
+    assert isinstance(make("anthropic", None), sr.AnthropicJudgeClient)
+    assert isinstance(make("openai", "https://openrouter.ai/api/v1"), sr.OpenAIJudgeClient)
+    with pytest.raises(sr.VerifierError):
+        make("anthropic", None, model=None)  # missing MODEL -> verifier error
+    with pytest.raises(sr.VerifierError):
+        make("anthropic", None, api_key=None)  # missing API_KEY -> verifier error
+
+
+def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monkeypatch) -> None:
+    sr = sr_module
+    seen = {}
+
+    def fake_run_verifier(gold_path, artifact_path, out_dir, *, client, env):
+        seen["gold"] = str(gold_path)
+        seen["artifact"] = str(artifact_path)
+        seen["out"] = str(out_dir)
+        return type("R", (), {"verifier_error": 0, "reward": 1.0})()
+
+    monkeypatch.setattr(sr, "run_verifier", fake_run_verifier)
+    sr.main()  # must not require real /tests or /logs — it only passes the paths through
+    assert seen["gold"].endswith("golden-review.json")
+    assert "tests" in Path(seen["gold"]).parts  # the __file__ sibling (templates/tests/)
+    assert seen["artifact"] == "/logs/artifacts/review.json"
+    assert seen["out"] == "/logs/verifier"
