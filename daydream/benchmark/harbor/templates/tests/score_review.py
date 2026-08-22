@@ -7,6 +7,16 @@ Messages + OpenAI-compatible) behind one ``complete_json`` seam, strict verdict
 parsing, a shared retry/redirect/timeout policy, a concurrency-10 runner, and
 ``run_verifier`` which writes ``reward.json`` / ``reward-details.json``
 atomically.
+
+The external judge surface is fail-closed and bounded: exactly
+``anthropic | openai-compatible`` providers are accepted, the judge host must
+sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
+fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
+credential-preserving same-origin hops whose targets are re-validated against
+the allowlist, response/reasoning payloads are size-capped (rejected, never
+truncated-and-accepted), and every failure path writes typed bounded (redacted)
+diagnostics to ``reward.json`` / ``reward-details.json`` -- never a bare exit
+and never an unbounded or credential-bearing error.
 """
 
 from __future__ import annotations
@@ -438,7 +448,12 @@ def _anthropic_text(body: dict[str, Any]) -> str:
 
 
 class AnthropicJudgeClient:
-    """Small Anthropic Messages API client returning strict parsed JSON verdicts."""
+    """Small Anthropic Messages API client returning strict parsed JSON verdicts.
+
+    Validates the initial Messages URL against the effective judge-host
+    allowlist before any request (fail-closed); redirects are bounded and
+    allowlist-checked inside the shared ``_complete_json_with_http`` policy.
+    """
 
     def __init__(
         self,
@@ -504,7 +519,10 @@ def resolve_base_url(api_key: str, base_url_env: str | None) -> str:
     """Resolve the Chat Completions base URL from the environment.
 
     An explicit base URL always wins; an ``sk-or-`` OpenRouter key with no pin
-    routes to OpenRouter; anything else defaults to OpenAI direct.
+    routes to OpenRouter; anything else defaults to OpenAI direct. The resolved
+    URL is only a candidate: it is validated against the effective judge-host
+    allowlist (scheme/host/form) at the client build and initial-request sites
+    before any judge call.
     """
     if base_url_env:
         return base_url_env
@@ -536,7 +554,13 @@ def _openai_content(body: dict[str, Any]) -> str:
 
 
 class OpenAIJudgeClient:
-    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts."""
+    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts.
+
+    Validates the initial Chat Completions URL against the effective
+    judge-host allowlist before any request (fail-closed); redirects are
+    bounded and allowlist-checked inside the shared ``_complete_json_with_http``
+    policy -- identical to the Anthropic client.
+    """
     def __init__(
         self,
         api_key: str,
@@ -824,10 +848,12 @@ def run_verifier(
     the gold is then read as raw bytes and its sha256 must match the
     compiler-rendered ``gold_sha256`` sentinel before it is parsed and validated
     (canonical/unique gold ids). Any ``VerifierError`` (validation, binding,
-    digest, parsing, judging, exhausted retries, or a missing client) becomes a
-    ``Reward(reward=0, verifier_error=1)`` — the task fails whole, never
-    reporting a partial score. Both output files are written atomically (temp +
-    rename). Never emits source or diffs.
+    digest, parsing, judging, exhausted retries, or a missing client) -- and
+    any unexpected runtime exception -- becomes a typed bounded diagnostic that
+    still writes ``Reward(reward=0, verifier_error=1)`` plus both output files
+    atomically (temp + rename); the task fails whole, never reporting a
+    partial score and never escaping to a bare exit. Error text is redacted and
+    size-bounded before it reaches any artifact. Never emits source or diffs.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
