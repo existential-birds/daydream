@@ -788,6 +788,15 @@ class Curation(BaseModel):
         return self
 
 
+def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
+    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
+    doc = dict(raw)
+    curation = dict(raw.get("curation") or {})
+    curation.pop("gold_mode", None)
+    doc["curation"] = curation
+    return doc
+
+
 class CaseDocument(BaseModel):
     """One ``cases/<case-id>.yaml`` document."""
 

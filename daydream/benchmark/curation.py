@@ -30,6 +30,7 @@ from pydantic import ValidationError
 
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark.schema import _schema_ready
 from daydream.benchmark.storage import load_yaml_strict
 
 
@@ -214,15 +215,6 @@ def _curation_model(curation: dict[str, Any]) -> schema.Curation:
     dropped here (it is recomputed by ``derive_gold_mode`` when read).
     """
     return schema.Curation(**{k: v for k, v in curation.items() if k != "gold_mode"})
-
-
-def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
-    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
-    doc = dict(raw)
-    curation = dict(raw.get("curation") or {})
-    curation.pop("gold_mode", None)
-    doc["curation"] = curation
-    return doc
 
 
 def _snapshot_head(raw: dict[str, Any]) -> str | None:

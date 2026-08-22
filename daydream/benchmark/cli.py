@@ -606,7 +606,8 @@ def _handle_benchmark_upgrade(args) -> int:
     """Deterministically upgrade legacy v1 case documents to v2 in place.
 
     Prints the per-case report plus any surfaced errors. Returns ``0`` on a
-    successful upgrade, ``1`` when a case errored or nothing changed.
+    successful upgrade (including an idempotent no-op second run) and ``1``
+    when a case errored.
     """
     from daydream.benchmark import migrate
 
@@ -618,7 +619,7 @@ def _handle_benchmark_upgrade(args) -> int:
         )
     for e in report.errors:
         print(f"error: {e}", file=sys.stderr)
-    if report.errors or not report.cases:
+    if report.errors:
         return 1
     return 0
 

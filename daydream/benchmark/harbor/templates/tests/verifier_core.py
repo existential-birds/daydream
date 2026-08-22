@@ -47,8 +47,8 @@ def _validate_title(value: object) -> str:
         raise VerifierError(f"title must not be blank, got {value!r}")
     if "\x00" in value:
         raise VerifierError("title must not contain NUL")
-    if len(value.encode("utf-8")) > 500:
-        raise VerifierError("title exceeds 500 UTF-8 bytes")
+    if len(value) > 500:
+        raise VerifierError("title exceeds 500 characters")
     return value
 
 

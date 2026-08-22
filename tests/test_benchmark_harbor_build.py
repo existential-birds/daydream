@@ -365,8 +365,16 @@ def test_build_gold_list_is_provenance_free_and_location_required():
          "location": {"path": "src/render.py", "start_line": 10, "end_line": 14},
          "provenance": {"kind": "authored", "source_ids": []}},
     ]
-    gold = build.build_gold_list(findings)
-    assert [f["finding_id"] for f in gold] == ["a" * 64, "c" * 64]        # ordered by finding_id
+    gold = build.build_gold_list(findings, key="case-key")
+    # compiled gold ids are the task-key-scoped digests, not the raw workspace ids
+    def _id(f):
+        loc = f["location"]
+        payload = "\x1f".join(["case-key", str(f["title"]), str(f["body"]),
+                                str(f["severity"]), str(loc["path"]),
+                                str(loc["start_line"]), str(loc["end_line"])])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    expected = sorted(_id(f) for f in findings)
+    assert [f["finding_id"] for f in gold] == expected                  # ordered by finding_id
     assert all(set(f) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
                for f in gold)                                             # no provenance/source/gold keys
     assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
@@ -374,7 +382,7 @@ def test_build_gold_list_is_provenance_free_and_location_required():
 
 def test_build_gold_list_clean_is_empty():
     from daydream.benchmark.harbor import build
-    assert build.build_gold_list([]) == []
+    assert build.build_gold_list([], key="case-key") == []
 
 
 def test_build_gold_list_rejects_locationless_finding():
@@ -385,7 +393,7 @@ def test_build_gold_list_rejects_locationless_finding():
             "finding_id": "a" * 64, "title": "T", "body": "B",
             "severity": None, "location": None,
             "provenance": {"kind": "authored", "source_ids": []},
-        }])
+        }], key="case-key")
         assert False, "expected CompileError for a location-less finding"
     except CompileError as exc:
         assert "location" in str(exc)
@@ -478,7 +486,7 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
 
     gold = _load_json(case / "tests" / "golden-review.json")
     oracle = storage.load_json_strict(case / "solution" / "golden-review.json")
-    assert vc.validate_gold_set(gold, case_id=case_id)      # gold passes gold-set validation
+    assert vc.validate_gold_set(gold, case_id=key)      # gold passes via the compiled opaque key
     vc.validate_candidate_artifact(oracle)                 # oracle passes candidate validation
     assert [f["finding_id"] for f in gold] == sorted(f["finding_id"] for f in gold)
     # gold↔oracle agreement: same content fields, in the same finding_id order

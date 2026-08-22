@@ -20,7 +20,6 @@ from pathlib import Path
 import yaml
 
 from daydream.benchmark import schema, storage
-from daydream.benchmark.curation import _schema_ready
 
 
 @dataclass
@@ -95,18 +94,18 @@ def migrate_workspace(root: Path, *, dry_run: bool = False) -> UpgradeReport:
             new_raw, recomputed = _upgrade_case(raw, case_id)
             # strip the persisted audit field for validation (curation pattern),
             # but keep it in the written output — authored content is preserved.
-            schema.CaseDocument.model_validate(_schema_ready(new_raw))
-            changed = new_raw.get("schema_version") != raw.get("schema_version") or recomputed > 0
+            schema.CaseDocument.model_validate(schema._schema_ready(new_raw))
+            changed = recomputed > 0
             upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed,
                                         changed=changed))
-            writes[case_id] = yaml.safe_dump(new_raw, sort_keys=False).encode("utf-8")
+            writes[case_file] = yaml.safe_dump(new_raw, sort_keys=False).encode("utf-8")
         except Exception as exc:  # never silently rewrite a case
             report.errors.append(f"{case_id}: {exc}")
 
     if not dry_run:
-        for case_id, content in writes.items():
-            with storage.Transaction(root, op_id=f"migrate-{case_id}", kind="migrate") as tx:
-                tx.stage(f"cases/{case_id}.yaml", content)
+        for case_path, content in writes.items():
+            with storage.Transaction(root, op_id=f"migrate-{case_path}", kind="migrate") as tx:
+                tx.stage(case_path, content)
                 tx.commit()
 
     report.cases.extend(upgrades)
