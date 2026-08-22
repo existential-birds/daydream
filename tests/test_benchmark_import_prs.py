@@ -1,9 +1,11 @@
 """Tests for ``daydream benchmark import-prs``.
 
-Task 0 spike: the load-bearing claim that the importer's ``gh``/``git``
-calls, made through :mod:`daydream.git_ops` with ``cwd=<workspace root>``,
-are intercepted by the in-process ``fake_gh`` router. Subsequent
-collection/normalization/projection/orchestration tasks build on this seam.
+Covers the full import surface through the in-process ``fake_gh`` router:
+target parsing, six-check preflight + immutable identity, REST + GraphQL
+fetch/normalize, candidate projection, bounded rate-limit retry, atomic
+ledger/case transactions, refresh/staleness (curation preservation), and both
+e2e acceptance paths including partial-failure persistence. All ``gh``/``git``
+calls route through :mod:`daydream.git_ops` with ``cwd=<workspace root>``.
 """
 
 _PR_HEADER = {
@@ -72,14 +74,19 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
              "html_url": "https://github.com/o/r/pull/101#issuecomment-9"},
         ],
     )
-    doc = gi.fetch_and_normalize(ws, "o/r", 101, heads=["final"])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
     kinds = {e.kind for e in doc.evidence}
     assert kinds == {"review", "inline_comment", "issue_comment"}
     assert doc.evidence[0].source_id == "github:review:1"
     assert doc.evidence[0].is_bot is False
     assert doc.evidence[1].is_bot is True      # bot classification retained, not dropped
     assert doc.evidence[1].subject_type == "line" and doc.evidence[1].side == "RIGHT"
-    assert all("--paginate" in (c.argv or []) for c in fake_gh.calls("GET"))
+    get_calls = fake_gh.calls("GET")
+    header_args = [c.argv for c in get_calls if c.endpoint == "repos/o/r/pulls/101"]
+    collection_args = [c.argv for c in get_calls if c.endpoint != "repos/o/r/pulls/101"]
+    # list endpoints paginate; the singular header is fetched as one object, not array-flattened
+    assert header_args and "@json" in (header_args[0] or []) and "--paginate" not in (header_args[0] or [])
+    assert all("--paginate" in (a or []) for a in collection_args)
 
 
 def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
@@ -107,7 +114,7 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
               "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/o/r/pull/101#discussion_r11"},
          ]}},
     ])
-    doc = gi.fetch_and_normalize(ws, "o/r", 101, heads=["final"])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
     kinds = {e.kind for e in doc.evidence}
     assert "thread_comment" in kinds
     root = next(e for e in doc.evidence if e.database_id == 10)
@@ -159,7 +166,7 @@ def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
     )
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([])
-    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101, heads=["final"])
+    doc_gi = gi.fetch_and_normalize(ws, "o/r", 101)
     cands = gi.project_candidates(doc_gi, head_sha="a" * 40)
     by_src = {c.source_id: c for c in cands}
     right = by_src["github:inline_comment:1"]
@@ -255,7 +262,7 @@ def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_gh)
     ok = gi._fetch_with_retry(ws, "o/r", 101)
-    assert attempts["n"] == 3 and ok.returncode == 0
+    assert attempts["n"] == 3 and ok["number"] == 101
     assert slept and all(w <= 60 for w in slept)  # Retry-After honored, 60s cap
 
 

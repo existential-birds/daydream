@@ -1,11 +1,18 @@
 """Import normalized evidence from explicit private GitHub PRs.
 
-Task 0 spike: prove the importer's ``gh``/``git`` calls route through
-:mod:`daydream.git_ops` (so the in-process ``fake_gh`` router intercepts
-them) before any collection logic is written. The functions here are the
-thin preflight call sites; later tasks build the full
-:func:`fetch_and_normalize` / :func:`preflight` / :func:`run_import_prs`
-surface on top of them.
+This module delivers the full import surface: parse ``--pr``/``--pr-file``/
+``--head`` targets; run six ordered preflight checks (binaries, ``gh``
+authentication, identity, repository read access + immutable identity); fetch
+and normalize a PR's header, submitted reviews, inline comments and
+conversation comments (REST) plus all review threads/replies (GraphQL);
+deterministically project import-time candidates; and atomically persist one
+import file, one materialized case per requested head, and the ledger through
+a single crash-consistent :class:`storage.Transaction`.
+
+Every ``gh``/``git`` call routes through :mod:`daydream.git_ops`, so the
+in-process ``fake_gh`` router intercepts it. Rate-limit retries are bounded
+(``Retry-After`` honored, 60s cap); a fetch that exhausts them marks that PR
+``fetch_failed`` in the ledger rather than silently dropping evidence.
 """
 
 from __future__ import annotations
@@ -255,43 +262,54 @@ _RATE_LIMIT_MAX_SLEEP_S = 60.0
 
 def _call_with_rate_limit_retry(
     call: Callable[[], Any],
-) -> Any:
+) -> tuple[Any, git_ops.RateLimitError | None]:
     """Run *call* up to 3 times, sleeping ``min(retry_after, 60)`` between rate-limit failures.
 
-    A non-rate-limit failure returns immediately. After the third rate-limit
-    attempt the last (failed) result is returned so the orchestrator can mark
-    that PR ``fetch_failed`` — never a silent placeholder.
+    A non-rate-limit failure returns immediately. Returns ``(result, error)``
+    where *error* is the classified :class:`git_ops.RateLimitError` when the
+    last result is a rate-limited failure and ``None`` otherwise. After the
+    third rate-limit attempt the last (failed) result is returned so the
+    orchestrator can mark that PR ``fetch_failed`` — never a silent placeholder.
     """
     last = None
+    last_rate_limit: git_ops.RateLimitError | None = None
     for attempt in range(_RATE_LIMIT_ATTEMPTS):
         proc = call()
         if proc.returncode == 0:
-            return proc
+            return proc, None
         error = git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
         if not isinstance(error, git_ops.RateLimitError):
-            return proc
+            return proc, None
         retry_after = error.retry_after if error.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
         wait = min(retry_after, _RATE_LIMIT_MAX_SLEEP_S)
         if attempt < _RATE_LIMIT_ATTEMPTS - 1:
             time.sleep(wait)
         last = proc
-    return last
+        last_rate_limit = error
+    return last, last_rate_limit
 
 
-def _fetch_with_retry(root: Path, owner_repo: str, number: int):
-    """Fetch ``pulls/<number>`` with the bounded rate-limit retry policy."""
+def _fetch_with_retry(root: Path, owner_repo: str, number: int) -> dict[str, Any]:
+    """Fetch the singular ``pulls/<number>`` object with the bounded retry policy.
+
+    The singular pulls endpoint returns one object, so it is fetched with the
+    ``@json`` filter (not the array-flattening ``.[]``) and parsed as a
+    single JSON value. A failed call raises :class:`git_ops.GitError`; a
+    rate-limit that exhausts the retry budget raises
+    :class:`_ImportRateLimitError`.
+    """
     endpoint = f"repos/{owner_repo}/pulls/{number}"
-    return _call_with_rate_limit_retry(
-        lambda: git_ops._run_gh(
-            root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"]
-        )
+    proc, rate_limit = _call_with_rate_limit_retry(
+        lambda: git_ops._run_gh(root, ["api", endpoint, "--jq", "@json"])
     )
-
-
-def _is_rate_limit_error(proc) -> bool:
-    """True when a failed call's stderr carries a GitHub rate-limit signal."""
-    error = git_ops._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
-    return isinstance(error, git_ops.RateLimitError)
+    if proc.returncode != 0:
+        if rate_limit is not None:
+            raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {proc.stderr.strip()}")
+        raise git_ops.GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
+    header = json.loads(proc.stdout)
+    if not isinstance(header, dict):
+        raise git_ops.GitError(f"gh gives no PR header for {owner_repo}#{number}")
+    return header
 
 
 def _rest(root: Path, endpoint: str) -> list[Any]:
@@ -300,11 +318,11 @@ def _rest(root: Path, endpoint: str) -> list[Any]:
     ``--paginate`` walks Link headers so every page is retained (the fake serves
     the complete canned list in one NDJSON stream).
     """
-    proc = _call_with_rate_limit_retry(
+    proc, rate_limit = _call_with_rate_limit_retry(
         lambda: git_ops._run_gh(root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"])
     )
     if proc.returncode != 0:
-        if _is_rate_limit_error(proc):
+        if rate_limit is not None:
             raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {proc.stderr.strip()}")
         raise git_ops.GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
     return _parse_ndjson(proc.stdout)
@@ -319,27 +337,35 @@ def _as_author(raw: dict) -> dict:
     return {"login": author.get("login", ""), "type": author.get("type", "User")}
 
 
+def _record_common(author: dict, body: str) -> dict[str, Any]:
+    """The author + body-hash + bot block shared by every evidence record builder."""
+    return {
+        "author": {"login": author.get("login", ""), "type": author.get("type", "User")},
+        "body": body,
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "is_bot": author.get("type") == "Bot",
+    }
+
+
 def _evidence_from_review(raw: dict[str, Any]) -> dict[str, Any]:
     db_id = int(raw["id"])
     submitted = raw.get("submitted_at")
     body = raw.get("body") or ""
-    return {
+    fields = {
         "source_id": f"github:review:{db_id}",
         "kind": "review",
         "database_id": db_id,
         "node_id": raw.get("node_id") or f"PRR_{db_id}",
-        "author": _as_author(raw),
-        "body": body,
-        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "created_at": raw.get("created_at") or submitted,
         "updated_at": raw.get("updated_at") or submitted,
         "submitted_at": submitted,
         "commit_id": raw.get("commit_id"),
         "original_commit_id": raw.get("original_commit_id"),
         "state": raw.get("state"),
-        "is_bot": (raw.get("user") or {}).get("type") == "Bot",
         "url": raw.get("html_url") or "",
     }
+    fields.update(_record_common(raw.get("user") or {}, body))
+    return fields
 
 
 def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
@@ -348,14 +374,11 @@ def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
     subject_type = raw.get("subject_type")
     if subject_type is None:
         subject_type = "file" if raw.get("path") is None else "line"
-    return {
+    fields = {
         "source_id": f"github:inline_comment:{db_id}",
         "kind": "inline_comment",
         "database_id": db_id,
         "node_id": raw.get("node_id") or f"DIFF_{db_id}",
-        "author": _as_author(raw),
-        "body": body,
-        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "created_at": raw.get("created_at"),
         "updated_at": raw.get("updated_at"),
         "commit_id": raw.get("commit_id"),
@@ -370,27 +393,26 @@ def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
         "subject_type": subject_type,
         "side": raw.get("side"),
         "start_side": raw.get("start_side"),
-        "is_bot": bool((raw.get("user") or {}).get("type") == "Bot"),
         "url": raw.get("html_url") or "",
     }
+    fields.update(_record_common(raw.get("user") or {}, body))
+    return fields
 
 
 def _evidence_from_issue(raw: dict[str, Any]) -> dict[str, Any]:
     db_id = int(raw["id"])
     body = raw.get("body") or ""
-    return {
+    fields = {
         "source_id": f"github:issue_comment:{db_id}",
         "kind": "issue_comment",
         "database_id": db_id,
         "node_id": raw.get("node_id") or f"IC_{db_id}",
-        "author": _as_author(raw),
-        "body": body,
-        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "created_at": raw.get("created_at"),
         "updated_at": raw.get("updated_at"),
-        "is_bot": bool((raw.get("user") or {}).get("type") == "Bot"),
         "url": raw.get("html_url") or "",
     }
+    fields.update(_record_common(raw.get("user") or {}, body))
+    return fields
 
 
 _REVIEW_THREADS_QUERY = """
@@ -418,14 +440,11 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
     author = comment.get("author") or {}
     subject = str(thread.get("subjectType") or "").lower()
     subject_type = subject if subject in ("line", "file") else None
-    return {
+    fields = {
         "source_id": f"github:thread_comment:{db_id}",
         "kind": "thread_comment",
         "database_id": db_id,
         "node_id": comment.get("id") or f"TH_{db_id}",
-        "author": {"login": author.get("login", ""), "type": author.get("type", "User")},
-        "body": body,
-        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "created_at": comment.get("createdAt"),
         "updated_at": comment.get("updatedAt") or comment.get("createdAt"),
         "subject_type": subject_type,
@@ -438,9 +457,10 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
         "outdated": bool(thread.get("isOutdated", False)),
         "thread_id": thread.get("id"),
         "reply_to_id": (comment.get("replyTo") or {}).get("id"),
-        "is_bot": bool(author.get("type") == "Bot"),
         "url": comment.get("url") or "",
     }
+    fields.update(_record_common(author, body))
+    return fields
 
 
 def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[dict[str, Any]]:
@@ -759,6 +779,92 @@ def _manifest_bytes(raw: dict[str, Any]) -> bytes:
     return yaml.safe_dump(raw, sort_keys=False).encode("utf-8")
 
 
+def _stage_fetch_failure(
+    root: Path, raw: dict[str, Any], number: int, code: str, message: str
+) -> None:
+    """Atomically flip a PR's ledger entry to ``fetch_failed``.
+
+    Stages only ``benchmark.yaml`` through one :class:`Transaction`; a failed
+    fetch materializes no import/case file (the whole before/after ledger state
+    is atomic).
+    """
+    _stages_failed(raw, number, code, message)
+    with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+        tx.stage("benchmark.yaml", _manifest_bytes(raw))
+        tx.commit()
+
+
+def _prior_import_state(
+    root: Path, raw: dict[str, Any], number: int
+) -> tuple[frozenset[tuple[str, str]] | None, dict[str, dict[str, Any]], str]:
+    """The prior snapshot signature, prior case curations, and the import file path.
+
+    A missing/unreadable prior snapshot yields a ``None`` signature (so a
+    refresh cannot compare); an unreadable curation file is skipped, never fatal.
+    """
+    import_file = f"imports/pr-{number:06d}.json"
+    existing = _manifest_entry(raw, number)
+    prior_sig: frozenset[tuple[str, str]] | None = None
+    prior_curations: dict[str, dict[str, Any]] = {}
+    if existing is not None and existing.get("import_state") == "fetched":
+        try:
+            prior_raw = storage.load_json_strict(root / existing["import_file"])
+            prior_sig = _evidence_signature_from_raw(prior_raw)
+        except Exception:
+            prior_sig = None
+        for case_id in existing.get("case_ids", []):
+            try:
+                cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
+                if isinstance(cur, dict):
+                    prior_curations[case_id] = cur
+            except Exception:
+                pass
+    return prior_sig, prior_curations, import_file
+
+
+def _import_one_pr(
+    root: Path,
+    raw: dict[str, Any],
+    repo: str,
+    number: int,
+    requested_heads: list[str],
+    *,
+    refresh: bool,
+) -> int:
+    """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
+    prior_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
+    try:
+        doc = fetch_and_normalize(root, repo, number)
+        changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
+        import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
+        import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+        cases = _case_materialize(
+            doc, number, requested_heads, import_file, import_sha256,
+            prior_curations=prior_curations, changed=changed,
+        )
+        with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+            tx.stage(import_file, import_bytes)
+            for _, case_path, case_doc in cases:
+                tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
+            _stamp_fetched(
+                raw,
+                number,
+                import_file,
+                import_sha256,
+                requested_heads,
+                [c[0] for c in cases],
+            )
+            tx.stage("benchmark.yaml", _manifest_bytes(raw))
+            tx.commit()
+        return 0
+    except _ImportRateLimitError as exc:
+        _stage_fetch_failure(root, raw, number, "rate_limit", str(exc))
+        return 1
+    except (git_ops.GitError, schema.TransitionError, storage.WorkspaceError, PreflightError) as exc:
+        _stage_fetch_failure(root, raw, number, "fetch", str(exc))
+        return 1
+
+
 def run_import_prs(
     root: Path,
     pr_numbers: list[int],
@@ -787,57 +893,7 @@ def run_import_prs(
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         repo = raw.get("source", {}).get("repository") or ""
         for number in pr_numbers:
-            existing = _manifest_entry(raw, number)
-            prior_sig: frozenset[tuple[str, str]] | None = None
-            prior_curations: dict[str, dict[str, Any]] = {}
-            import_file = f"imports/pr-{number:06d}.json"
-            if existing is not None and existing.get("import_state") == "fetched":
-                try:
-                    prior_raw = storage.load_json_strict(root / existing["import_file"])
-                    prior_sig = _evidence_signature_from_raw(prior_raw)
-                except Exception:
-                    prior_sig = None
-                for case_id in existing.get("case_ids", []):
-                    try:
-                        cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
-                        if isinstance(cur, dict):
-                            prior_curations[case_id] = cur
-                    except Exception:
-                        pass
-            try:
-                doc = fetch_and_normalize(root, repo, number, heads or ["final"])
-                changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
-                import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
-                import_sha256 = hashlib.sha256(import_bytes).hexdigest()
-                cases = _case_materialize(
-                    doc, number, requested_heads, import_file, import_sha256,
-                    prior_curations=prior_curations, changed=changed,
-                )
-                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
-                    tx.stage(import_file, import_bytes)
-                    for _, case_path, case_doc in cases:
-                        tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
-                    _stamp_fetched(
-                        raw,
-                        number,
-                        import_file,
-                        import_sha256,
-                        requested_heads,
-                        [c[0] for c in cases],
-                    )
-                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
-                    tx.commit()
-            except _ImportRateLimitError as exc:
-                _stages_failed(raw, number, "rate_limit", str(exc))
-                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
-                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
-                    tx.commit()
-                exit_code = 1
-            except (git_ops.GitError, schema.TransitionError, storage.WorkspaceError, PreflightError) as exc:
-                _stages_failed(raw, number, "fetch", str(exc))
-                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
-                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
-                    tx.commit()
+            if _import_one_pr(root, raw, repo, number, requested_heads, refresh=refresh):
                 exit_code = 1
     return exit_code
 
@@ -867,7 +923,6 @@ def fetch_and_normalize(
     root: Path,
     owner_repo: str,
     number: int,
-    heads: list[str],
 ) -> schema.ImportDocument:
     """Fetch one PR's full evidence set through REST and normalize it.
 
@@ -877,11 +932,7 @@ def fetch_and_normalize(
     derived from the author type and never filters. Failure of any call raises
     :class:`GitError` — never a silent default.
     """
-    del heads  # requested heads are consumed by the orchestrator, not the fetch
-    header_rows = _rest(root, f"repos/{owner_repo}/pulls/{number}")
-    if not header_rows:
-        raise git_ops.GitError(f"gh gives no PR header for {owner_repo}#{number}")
-    header = header_rows[0]
+    header = _fetch_with_retry(root, owner_repo, number)
 
     evidence: list[dict[str, Any]] = []
     for raw in _rest(root, f"repos/{owner_repo}/pulls/{number}/reviews"):
