@@ -12,7 +12,7 @@ failures map to the documented exit codes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -182,6 +182,7 @@ class WorkspaceStatus:
     repository_identity_resolved: bool
     ledger: Ledger
     cases: list[CaseIndexEntry]
+    case_snapshots: list[dict[str, str]] = field(default_factory=list)
 
 
 def workspace_status(root: Path) -> WorkspaceStatus:
@@ -201,12 +202,14 @@ def workspace_status(root: Path) -> WorkspaceStatus:
         except Exception as exc:
             raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
         state, resolved = _derived_state(root, manifest)
+        case_snapshots = _case_snapshot_summaries(root, manifest)
     return WorkspaceStatus(
         workspace_state=state,
         source=manifest.source,
         repository_identity_resolved=resolved,
         ledger=Ledger(pull_requests=manifest.pull_requests),
         cases=manifest.cases,
+        case_snapshots=case_snapshots,
     )
 
 
@@ -358,6 +361,30 @@ def _case_curation_states(root: Path, manifest: BenchmarkManifest) -> list[dict[
         cs = curation.get("state") if isinstance(curation, dict) else None
         states.append({"curation_state": cs or "draft"})
     return states
+
+
+def _case_snapshot_summaries(root: Path, manifest: BenchmarkManifest) -> list[dict[str, str]]:
+    """Per-case snapshot summary for ``status``: snapshot state + frozen head.
+
+    For each indexed case, loads the case strictly and reports its snapshot
+    ``status`` (``ready``/``unreplayable``/``imported``) and the frozen head
+    prefix (``original_head_sha[:12]``) when present. An unreadable/invalid
+    case surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
+    """
+    summaries: list[dict[str, str]] = []
+    for case in manifest.cases:
+        raw = load_yaml_strict(root / case.case_file)
+        snapshot = raw.get("snapshot")
+        status = snapshot.get("status") if isinstance(snapshot, dict) else "imported"
+        head = (snapshot or {}).get("original_head_sha") or ""
+        summaries.append(
+            {
+                "case_id": case.case_id,
+                "snapshot_status": status or "imported",
+                "head_prefix": head[:12],
+            }
+        )
+    return summaries
 
 
 def _scan_case_files(root: Path) -> set[Path]:

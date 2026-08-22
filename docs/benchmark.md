@@ -391,18 +391,26 @@ crash-consistent, and safe to build on.
 - `daydream benchmark status <dir>` reads the derived workspace state
   (`empty` / `collecting` / `ready` / …), whether the repository identity is
   **unresolved**, and the PR ledger — read-only, safe to run concurrently
-  with another read-only command.
+  with another read-only command. It also reports, per indexed case, the
+  snapshot state (`ready` / `unreplayable` / `imported`) and the frozen head
+  prefix each case was caught at.
 - `daydream benchmark validate <dir>` returns a numeric **exit**: `0` ready,
   `2` structurally valid but incomplete (for example an unresolved
   repository identity on a fresh workspace), `1` corrupt (invalid or missing
-  `benchmark.yaml`, or an orphan or missing indexed file).
+  `benchmark.yaml`, an orphan or missing indexed file, or a corrupted /
+  missing / checksum-mismatched ready-snapshot bundle).
 
 The legacy `daydream bench` command remains available alongside `benchmark`;
 removal is a separate cutover.
 
-- `daydream benchmark import-prs <dir> --pr N|URL [--pr-file FILE] [--head SHA]
-  [--refresh]` imports explicit private PR evidence into an initialized
-  workspace. A six-step preflight (binaries, `gh` auth to github.com, the
+- `daydream benchmark import-prs <dir> --pr N|URL [--pr-file FILE]
+  [--head PR=<40-hex>] [--refresh]` imports explicit private PR evidence into
+  an isolated workspace. Each requested head is **frozen** into a deterministic, offline-
+  replayable ``base → head`` source snapshot bundle under `snapshots/`, and
+  the case is written with a `ready|unreplayable` snapshot instead of
+  `imported` (a classified git failure yields a schema-valid `unreplayable`
+  case, never a silent failure). `--head <PR_NUMBER>=<40-hex>` ties an
+  explicit head to its PR (a bare 40-hex is accepted for back-compat). A six-step preflight (binaries, `gh` auth to github.com, the
   authenticated user, repository identity + read access, a credentialed
   `git ls-remote`, then a summary print) runs before any fetch; the first
   successful repository resolution fills `repository_id`/`visibility`

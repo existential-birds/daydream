@@ -565,6 +565,12 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     print(f"workspace state: {status.workspace_state}")
     print(f"repository identity: {unresolved}")
     print(f"ledger entries: {len(status.ledger.pull_requests)}")
+    for summary in status.case_snapshots:
+        head = summary.get("head_prefix") or "-"
+        print(
+            f"  case {summary.get('case_id', '')}: "
+            f"snapshot {summary.get('snapshot_status', 'imported')} @ {head}"
+        )
     return 0
 
 
