@@ -285,7 +285,18 @@ def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str,
         _record(state, {"kind": "auth status", "argv": argv, "stdin": ""})
         return 0, "", ""
     if argv[:2] == ["auth", "git-credential"]:
-        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": ""})
+        # Enforce the real CLI contract: git drives the helper with an
+        # operation (get/store/erase) and protocol/host on stdin. Reject
+        # invalid invocations so tests cannot hide the production wiring bugs
+        # this fix replaces.
+        op = argv[2] if len(argv) > 2 else None
+        if op not in ("get", "store", "erase"):
+            _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
+            return 1, "", "fake gh: git-credential requires an operation and protocol/host on stdin\n"
+        if op in ("get", "store") and not ("protocol=" in stdin_text and "host=" in stdin_text):
+            _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
+            return 1, "", "fake gh: git-credential requires an operation and protocol/host on stdin\n"
+        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": stdin_text})
         return 0, _GIT_CREDENTIAL_HELPER, ""
     if not argv or argv[0] != "api":
         return 1, "", f"fake gh: unsupported invocation: {argv!r}\n"
@@ -315,6 +326,7 @@ class GhCommandCall:
 
     kind: str
     argv: list[str]
+    env: dict | None = None
 
 
 @dataclass
@@ -377,7 +389,7 @@ class FakeGh:
         for line in self._calls_path.read_text(encoding="utf-8").splitlines():
             record = json.loads(line)
             if record.get("kind") == kind:
-                out.append(GhCommandCall(kind=kind, argv=record["argv"]))
+                out.append(GhCommandCall(kind=kind, argv=record["argv"], env=record.get("env")))
         return out
 
     def pr_view_calls(self) -> list[GhCommandCall]:
@@ -573,6 +585,14 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
             and args[0] == "git"
             and "ls-remote" in args
         ):
+            # The only production git ls-remote is git_ls_remote, which must
+            # carry the command-scoped credential helper fragment; a bare
+            # ls-remote (the old unauthenticated defect) fails loudly.
+            if not any("credential.helper=" in a for a in args):
+                return subprocess.CompletedProcess(
+                    list(args), 1, stdout="",
+                    stderr="fake gh: git ls-remote without a command-scoped credential helper\n",
+                )
             refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
             _record(
                 state_dir,

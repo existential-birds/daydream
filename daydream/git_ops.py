@@ -252,6 +252,14 @@ class WrongBranchError(GitError):
 # 5s `git rev-parse`/`diff` would time out and exit the run 1 (see #120).
 _GIT_TIMEOUT_RETRIES = 2
 
+# Command-scoped git credential helper backed by ambient ``gh`` auth. Git calls
+# this as a shell helper with the operation (get/store/erase) and
+# ``protocol``/``host`` on stdin; ``gh auth git-credential`` resolves stored
+# auth internally so no token ever lands on argv, in a URL, in a file, or in
+# global/local git config. Read at call time (see :func:`_credential_helper_args`)
+# so a test harness can substitute a recording wrapper.
+GH_CREDENTIAL_HELPER = "!gh auth git-credential"
+
 # `gh` calls time out under the same host CPU starvation as git (see #120), so
 # read-only `gh` invocations retry too. Mutations must NOT inherit this: `gh`
 # cannot tell an idempotent GraphQL *query* from a *mutation* by HTTP method
@@ -2028,20 +2036,16 @@ def split_owner_repo(slug: str) -> tuple[str, str] | None:
     return owner, repo
 
 
-def gh_auth_git_credential(repo: Path) -> str:
-    """Return the git credential-helper protocol from ``gh auth git-credential``.
+def _credential_helper_args(helper: str | None = None) -> list[str]:
+    """Return the ``-c credential.helper=...`` fragment for one git command.
 
-    The helper exposes GitHub's stored-auth credentials to ``git`` for one
-    read at a time; the caller scopes it to a single ``git ls-remote`` (it never
-    writes git config or puts a token on the argument vector).
-
-    Raises:
-        GitError: If the ``gh auth git-credential`` call fails.
+    Git calls the shell ``!``-form helper itself, driving ``get``/``store``/
+    ``erase`` with ``protocol``/``host`` on stdin — the credential is scoped to
+    this single command, never written to global or local config. ``GH_CREDENTIAL_HELPER``
+    is read at call time so a subprocess contract test can monkeypatch it to a
+    recording wrapper.
     """
-    proc = _run_gh(repo, ["auth", "git-credential"])
-    if proc.returncode != 0:
-        raise GitError(f"gh auth git-credential failed: {proc.stderr.strip()}")
-    return proc.stdout
+    return ["-c", f"credential.helper={helper or GH_CREDENTIAL_HELPER}"]
 
 
 def git_ls_remote(repo: Path, url: str) -> str:
@@ -2049,16 +2053,13 @@ def git_ls_remote(repo: Path, url: str) -> str:
 
     Pins ``GIT_TERMINAL_PROMPT=0`` (command-scoped, never a global config
     change) so a credential failure surfaces as a git error rather than a
-    stuck stdin prompt. The credential itself comes from the ambient
-    ``GH_TOKEN``/gh auth state through ``gh auth git-credential``, never from a
-    URL or argv.
-
-    Raises:
-        GitError: If the ``git ls-remote`` call fails.
+    stuck stdin prompt. Git itself drives the command-scoped credential helper
+    (``gh auth git-credential``); the credential never appears in a URL or on
+    argv. Raises :class:`GitError` on failure.
     """
-    gh_auth_git_credential(repo)  # force the credential helper to resolve first
+    args = [*_credential_helper_args(), "ls-remote", url]
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    proc = _run_git(repo, ["ls-remote", url], env_cmd=env)
+    proc = _run_git(repo, args, env_cmd=env)
     if proc.returncode != 0:
         raise GitError(f"git ls-remote {url} failed: {proc.stderr.strip()}")
     return proc.stdout

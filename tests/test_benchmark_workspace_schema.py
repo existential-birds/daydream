@@ -103,6 +103,39 @@ def test_manifest_rejects_non_github_hostname():
         BenchmarkManifest.model_validate(base)
 
 
+def test_source_repository_id_is_nonblank_opaque_string():
+    from pydantic import ValidationError
+
+    from daydream.benchmark.schema import Source
+
+    s = Source(provider="github", hostname="github.com", repository="o/r",
+               repository_id="R_kgDOABC123")
+    assert s.repository_id == "R_kgDOABC123"
+    # None sentinel (unresolved) unchanged
+    assert Source(provider="github", hostname="github.com",
+                  repository="o/r").repository_id is None
+    # numeric-only and blank node ids are rejected as invalid
+    for bad in ("5", "   ", "123456"):
+        with pytest.raises(ValidationError):
+            Source(provider="github", hostname="github.com",
+                   repository="o/r", repository_id=bad)
+
+
+def test_import_repository_id_is_opaque_string():
+    from daydream.benchmark.schema import _ImportRepository
+
+    r = _ImportRepository(id="R_kgDOABC123", name_with_owner="o/r", visibility="private")
+    assert r.id == "R_kgDOABC123"
+    # numeric-only ids (Pydantic would otherwise coerce int->str) must not model;
+    # blank "" is the deliberate unresolved sentinel from _repository_block.
+    with pytest.raises(ValidationError):
+        _ImportRepository(id="5", name_with_owner="o/r", visibility="private")
+    with pytest.raises(ValidationError):
+        _ImportRepository(id=123456, name_with_owner="o/r", visibility="private")
+    assert _ImportRepository(id="", name_with_owner="o/r", visibility="private").id == ""
+
+
+
 def test_manifest_rejects_empty_host_allowlists():
     base = _valid_manifest()
     base["privacy"]["reviewer_allowed_hosts"] = []
@@ -179,7 +212,7 @@ def _evidence(kind, db_id, **kw):
 def _valid_import_document():
     return {
         "schema_version": 1,
-        "repository": {"id": 5, "name_with_owner": "o/r", "visibility": "private"},
+        "repository": {"id": "R_kgDOABC123", "name_with_owner": "o/r", "visibility": "private"},
         "pull_request": {
             "number": 101,
             "url": "https://github.com/o/r/pull/101",

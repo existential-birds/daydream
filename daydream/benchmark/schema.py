@@ -123,7 +123,7 @@ class Source(BaseModel):
     provider: Literal["github"]
     hostname: str
     repository: str
-    repository_id: int | None = None
+    repository_id: str | None = None
     visibility: Literal["unresolved", "public", "private"] = "unresolved"
 
     @field_validator("hostname")
@@ -139,6 +139,18 @@ class Source(BaseModel):
         if not v or not _REPOSITORY_SHAPE.match(v):
             raise ValueError(f"repository must be OWNER/REPO, got {v!r}")
         return v
+
+    @field_validator("repository_id")
+    @classmethod
+    def _repository_id_nonblank_opaque(cls, v: str | None) -> str | None:
+        # None is the unresolved sentinel (unchanged); blank and numeric-only
+        # strings are never valid GitHub node ids (e.g. R_kgD...).
+        if v is None:
+            return v
+        stripped = v.strip()
+        if not stripped or stripped.isdigit():
+            raise ValueError(f"repository_id must be a nonblank opaque string, got {v!r}")
+        return stripped
 
 
 class Privacy(BaseModel):
@@ -558,9 +570,16 @@ class _ImportRepository(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: int
+    id: str
     name_with_owner: str
     visibility: Literal["public", "private"]
+
+    @field_validator("id")
+    @classmethod
+    def _id_is_opaque_string(cls, value: str) -> str:
+        if value.strip().isdigit():
+            raise ValueError("repository id must be an opaque string, not numeric")
+        return value
 
 
 class _FetchInfo(BaseModel):
@@ -898,6 +917,25 @@ class TransitionError(Exception):
         super().__init__(f"invalid transition {frm!r} -> {to!r}")
         self.frm = frm
         self.to = to
+
+
+class PreflightLedger(BaseModel):
+    """The mode-0600 ``runtime/preflight.json`` repository-verification ledger.
+
+    Written by preflight only after it verifies exact repository identity +
+    read access succeeds (never on a failing :class:`PreflightError`).
+    ``matched`` is True when the freshly verified repository matched the
+    stored identity (or was just resolved).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    last_verified_at: str
+    repository: str
+    repository_id: str | None
+    visibility: Literal["public", "private"]
+    matched: bool
 
 
 _PR_TRANSITIONS: dict[str, set[str]] = {

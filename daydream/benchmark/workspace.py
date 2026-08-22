@@ -22,6 +22,7 @@ import yaml
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseIndexEntry,
+    PreflightLedger,
     Privacy,
     PullRequestEntry,
     Source,
@@ -33,6 +34,7 @@ from daydream.benchmark.storage import (
     Transaction,
     WorkspaceCorrupt,
     WorkspaceLock,
+    load_json_strict,
     load_yaml_strict,
     recover_startup,
     sha256_file,
@@ -183,6 +185,7 @@ class WorkspaceStatus:
     ledger: Ledger
     cases: list[CaseIndexEntry]
     case_snapshots: list[dict[str, str]] = field(default_factory=list)
+    last_preflight_verified_at: str | None = None
 
 
 def workspace_status(root: Path) -> WorkspaceStatus:
@@ -208,10 +211,30 @@ def workspace_status(root: Path) -> WorkspaceStatus:
         workspace_state=state,
         source=manifest.source,
         repository_identity_resolved=resolved,
+        last_preflight_verified_at=_last_preflight_verified_at(root),
         ledger=Ledger(pull_requests=manifest.pull_requests),
         cases=manifest.cases,
         case_snapshots=case_snapshots,
     )
+
+
+def _last_preflight_verified_at(root: Path) -> str | None:
+    """Return the ledger timestamp of the last successful repository verification, or None.
+
+    A missing or malformed ledger reads as absent (status is read-only and must
+    never fail the workspace over the mode-0600 ``runtime/preflight.json``).
+    """
+    path = root / "runtime" / "preflight.json"
+    if not path.exists():
+        return None
+    try:
+        raw = load_json_strict(path)
+        ledger = PreflightLedger.model_validate(raw)
+        if not ledger.matched:
+            return None
+        return ledger.last_verified_at
+    except Exception:
+        return None
 
 
 def validate_workspace(root: Path) -> tuple[int, str]:

@@ -583,6 +583,10 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     unresolved = "unresolved" if not status.repository_identity_resolved else "resolved"
     print(f"workspace state: {status.workspace_state}")
     print(f"repository identity: {unresolved}")
+    if status.last_preflight_verified_at:
+        print(f"repository identity/access verification: ran ({status.last_preflight_verified_at})")
+    else:
+        print("repository identity/access verification: not yet run")
     print(f"ledger entries: {len(status.ledger.pull_requests)}")
     for summary in status.case_snapshots:
         head = summary.get("head_prefix") or "-"
