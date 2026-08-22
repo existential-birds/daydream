@@ -215,8 +215,9 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
     ``0`` ready; ``2`` structurally valid but incomplete (e.g. unresolved
     repository identity); ``1`` corrupt (invalid/missing ``benchmark.yaml``,
-    an orphan/missing indexed file, or a checksum-mismatched import/case).
-    The exit code comes from :func:`classify_validation`, so the documented
+    an orphan/missing indexed file, a checksum-mismatched import/case, or a
+    corrupted/missing/checksum-mismatched ready-snapshot bundle). The exit
+    code comes from :func:`classify_validation`, so the documented
     ``0``/``2``/``1`` classifier has a single source of truth. Expected
     workspace errors map to ``1`` + a label — a raw traceback is the wrong
     surface for a bench validation.
@@ -265,10 +266,10 @@ def _derived_state(root: Path, manifest: BenchmarkManifest) -> tuple[str, bool]:
     """Shared (workspace state, identity-resolved) derivation for status+validate.
 
     Loading each indexed case document with the strict loader and verifying
-    each fetched import's on-disk sha256 keeps the two read-only call paths on
-    one rule set, so a state/resolution rule can't diverge between them. An
-    unreadable/invalid case or a checksum mismatch surfaces as
-    :class:`WorkspaceCorrupt`.
+    each fetched import's on-disk sha256 plus each ``ready`` snapshot's bundle
+    sha256 keeps the two read-only call paths on one rule set, so a
+    state/resolution rule can't diverge between them. An unreadable/invalid
+    case or a checksum mismatch surfaces as :class:`WorkspaceCorrupt`.
     """
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
@@ -276,8 +277,43 @@ def _derived_state(root: Path, manifest: BenchmarkManifest) -> tuple[str, bool]:
         cases=_case_curation_states(root, manifest),
     )
     _verify_import_checksums(root, manifest)
+    _verify_snapshot_checksums(root, manifest)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
+
+
+def _verify_snapshot_checksums(root: Path, manifest: BenchmarkManifest) -> None:
+    """Verify each indexed ``ready`` snapshot's bundle file + sha256 digest.
+
+    A missing ``bundle_file`` or a ``bundle_sha256`` mismatch for a committed
+    ``ready`` case is :class:`WorkspaceCorrupt` — it is corruption surfacing,
+    never curatable staleness, and never mutates the case document or ledger.
+
+    A ``ready`` snapshot with no ``bundle_file``/``bundle_sha256`` is itself
+    structurally invalid and reported corrupt.
+    """
+    for case in manifest.cases:
+        raw = load_yaml_strict(root / case.case_file)
+        snapshot = raw.get("snapshot")
+        if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
+            continue
+        bundle_rel = snapshot.get("bundle_file")
+        expected = snapshot.get("bundle_sha256")
+        if not bundle_rel or not expected:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} ready snapshot missing bundle_file/bundle_sha256"
+            )
+        bundle_path = root / bundle_rel
+        actual = sha256_file(bundle_path) if bundle_path.exists() else ""
+        if not bundle_path.exists():
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot bundle missing: {bundle_rel}"
+            )
+        if actual != expected:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot bundle checksum mismatch "
+                f"(expected {expected}, got {actual})"
+            )
 
 
 def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
