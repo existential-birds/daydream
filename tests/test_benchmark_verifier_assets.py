@@ -101,3 +101,28 @@ def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> 
     result = json.loads(out.read_text())
     assert result["task_count"] == 3  # attempted = all rows (stable across old/new aggregation)
     assert not (out.parent / ".metric.json.tmp").exists()  # atomic write leaves no temp leftover
+
+
+def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path) -> None:
+    from daydream.benchmark.harbor import build
+
+    metric_path = tmp_path / "metric.py"
+    metric_path.write_bytes(build.render_metric())
+    inp = tmp_path / "rewards.jsonl"
+    inp.write_text(
+        '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'
+        'null\n'
+        '{"reward":1.0,"tp":0,"fp":0,"fn":0,"clean_task":1}\n'
+        '{"reward":0.0,"tp":0,"fp":5,"fn":5,"verifier_error":1}\n')
+    out = tmp_path / "metric.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(metric_path), "-i", str(inp), "-o", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    m = json.loads(out.read_text())
+    assert m["task_count"] == 4
+    assert m["scored_task_count"] == 2 and m["infra_error_task_count"] == 2
+    assert (m["total_tp"], m["total_fp"], m["total_fn"]) == (2, 0, 1)  # unscored rows contribute nothing
+    assert abs(m["mean_task_score"] - 0.9) < 1e-9                       # (0.8+1.0)/2, never over 4
+    assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
