@@ -827,6 +827,11 @@ def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path
     assert case["curation"]["state"] == "ready"          # NOT staled
     assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
     assert case["curation"]["findings"]                  # curated gold preserved
+    # The refreshed header metadata must actually propagate into the case-level
+    # pull_request block; import_sha256 alone cannot prove it, since the digest
+    # re-serializes fetch.fetched_at and flips on any refresh.
+    assert case["pull_request"]["updated_at"] == "2026-01-02T00:00:00Z"
+    assert case["pull_request"]["html_url"] == "https://github.com/o/r/pull/101"
 
 
 def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh):

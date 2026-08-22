@@ -91,6 +91,13 @@ def _escape_historical_delimiters(text: str) -> str:
     )
 
 
+# A persisted ``body_sha256`` is interpolated into the truncation marker only
+# when it has the schema's own digest shape (_hex64: lowercase 64-hex). The
+# compile path reads raw case docs with no model_validate, so any other value
+# is unvalidated input and falls back to the deterministic stored-body digest.
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
 def bounded_pr_context(
     pull_request: dict, *, max_bytes: int = MAX_PR_CONTEXT_BYTES
 ) -> str:
@@ -102,8 +109,11 @@ def bounded_pr_context(
     the body line's share thereof), it is truncated on a whole UTF-8 char and
     a ``[truncated; full_body_sha256=<digest>]`` marker line is emitted inside
     the block, before the closing tag. The digest is the persisted normalized-
-    body digest (``body_sha256``) when present, else a deterministic fallback
-    to ``sha256(stored body)`` -- never re-derived from the escaped surface.
+    body digest (``body_sha256``) only when it verifies against the stored
+    body (lowercase 64-hex equal to ``sha256(stored body)``, mirroring the
+    schema's ``_body_hash_consistency``), else a deterministic fallback to
+    ``sha256(stored body)`` -- never re-derived from the escaped surface and
+    never interpolated from an unvalidated doc value.
     """
     title = _escape_historical_delimiters(str(pull_request.get("title") or ""))
     body = _escape_historical_delimiters(str(pull_request.get("body") or ""))
@@ -128,13 +138,21 @@ def bounded_pr_context(
         if not t_title.startswith("title: "):
             t_title = "title: " + t_title
     # The marker attests the persisted normalized-body digest (body_sha256 at
-    # import time) verbatim; a predate doc lacking it falls back to the digest
-    # of the stored normalized body. Never re-derived from the escaped surface.
+    # import time) verbatim -- but only when it satisfies the schema's own
+    # _body_hash_consistency contract (lowercase 64-hex equal to sha256 of the
+    # stored normalized body). The compile path reads raw case docs with no
+    # model_validate, so a hand-edited body_sha256 could otherwise inject
+    # content past the marker line or attest a digest that no longer matches
+    # the compiled body; any value outside that contract falls back to the
+    # deterministic stored-body digest (the same fallback as a missing key).
+    # Never re-derived from the escaped surface.
+    stored_body = str(pull_request.get("body") or "")
+    stored_digest = hashlib.sha256(stored_body.encode("utf-8")).hexdigest()
     persisted = str(pull_request.get("body_sha256") or "")
     digest = (
         persisted
-        if persisted
-        else hashlib.sha256(str(pull_request.get("body") or "").encode("utf-8")).hexdigest()
+        if _SHA256_HEX.fullmatch(persisted) and persisted == stored_digest
+        else stored_digest
     )
     marker = f"[truncated; full_body_sha256={digest}]"
     return (

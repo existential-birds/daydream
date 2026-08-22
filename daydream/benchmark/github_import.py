@@ -731,18 +731,16 @@ def project_candidates(
     return cands
 
 
-def _payload_sha256(pull_request: dict, records: list[schema.EvidenceRecord]) -> str:
+def _payload_sha256(import_doc: dict[str, Any]) -> str:
     """sha256 over the canonical JSON of the complete normalized import.
 
-    Spans the PR header (title/body/state/timestamps/head/base) **and** the
-    evidence, so any PR-intent change flips the digest, not just evidence
-    changes.
+    Spans every block of the persisted ``ImportDocument`` — ``schema_version``,
+    ``repository``, the PR header (title/body/state/timestamps/head/base) and
+    the evidence — except the self-referential ``fetch`` record that carries
+    this digest itself, so any PR-intent or repository change flips it, not
+    just evidence changes.
     """
-    canonical = json.dumps(
-        {"pull_request": pull_request, "evidence": [r.model_dump(mode="json") for r in records]},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    canonical = json.dumps(import_doc, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -764,16 +762,9 @@ def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
     compile. A body/title/base/head change flips it; metadata-only changes
     (updated_at, html_url, merged state) do not.
     """
-    pr = doc.pull_request
-    payload = {
-        "title": str(pr.title or ""),
-        "body": str(pr.body or ""),
-        "base_sha": pr.base.sha,
-        "base_ref": pr.base.ref,
-        "head_sha": pr.head.sha,
-        "head_ref": pr.head.ref,
-    }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    sig = _task_input_signature_from_raw(doc.model_dump(mode="json"))
+    assert sig is not None  # a typed doc always carries body + head.ref
+    return sig
 
 
 def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
@@ -1199,6 +1190,7 @@ def fetch_and_normalize(
             evidence.append(_evidence_from_thread(thread, comment))
 
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
+    record_dicts = [r.model_dump(mode="json") for r in records]
     base = header.get("base") or {}
     head = header.get("head") or {}
     title = header.get("title") or ""
@@ -1220,16 +1212,19 @@ def fetch_and_normalize(
         "closed_at": header.get("closed_at"),
         "author": _as_author(header),
     }
+    import_doc = {
+        "schema_version": 1,
+        "repository": _repository_block(root, owner_repo),
+        "pull_request": pull_request,
+        "evidence": record_dicts,
+    }
     return schema.ImportDocument.model_validate(
         {
-            "schema_version": 1,
-            "repository": _repository_block(root, owner_repo),
-            "pull_request": pull_request,
-            "evidence": [e.model_dump(mode="json") for e in records],
+            **import_doc,
             "fetch": {
                 "fetched_at": _now_rfc3339(),
                 "etag": None,
-                "payload_sha256": _payload_sha256(pull_request, records),
+                "payload_sha256": _payload_sha256(import_doc),
             },
         }
     )
