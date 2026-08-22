@@ -23,9 +23,10 @@ fixed schema, the mode-safe storage/journal layer, the bare mirror, and
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
+from pydantic import ValidationError
 
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
@@ -79,16 +80,21 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
         case_id = case.get("case_id")
         case_file = case.get("case_file")
         doc = load_yaml_strict(Path(root) / case_file) if case_file else {}
-        curation = doc.get("curation") or {}
+        raw_curation = doc.get("curation")
+        curation = raw_curation if isinstance(raw_curation, dict) else {}
         findings = curation.get("findings") or []
         snapshot_doc = doc.get("snapshot") or {}
         snapshot_status = snapshot_doc.get("status", "imported")
         head_sha = snapshot_doc.get("original_head_sha") or ""
+        try:
+            gold_mode = schema.derive_gold_mode(_curation_model(curation))
+        except ValidationError:
+            gold_mode = None
         out.append({
             "case_id": case_id,
             "pr_number": case.get("pr_number"),
             "state": curation.get("state"),
-            "gold_mode": schema.derive_gold_mode(_curation_model(curation)),
+            "gold_mode": gold_mode,
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
@@ -168,6 +174,10 @@ def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any])
     path = location.get("path")
     start = location.get("start_line")
     end = location.get("end_line")
+    if start is None or end is None:
+        raise CurationError(
+            f"finding location {path!r} is missing start_line and/or end_line"
+        )
     line_count = _head_file_line_count(root, head_sha, path)
     if start < 1:
         raise CurationError(f"finding location start_line {start} must be >= 1")
@@ -393,6 +403,21 @@ _EVIDENCE_REASONS = frozenset({
 })
 
 
+def _append_evidence_exclusion(
+    curation: dict[str, Any], source_id: str, reason: str, note: str | None
+) -> None:
+    """Append (or replace) one evidence-exclusion row (last-wins per source).
+
+    Shared by :func:`exclude_evidence` and :func:`apply_gold_fragment` so the
+    single-row insertion stays in one place.
+    """
+    exclusions = [
+        e for e in curation.get("exclusions") or [] if e.get("source_id") != source_id
+    ]
+    exclusions.append({"source_id": source_id, "reason": reason, "note": note})
+    curation["exclusions"] = exclusions
+
+
 def exclude_evidence(
     root: Path, case_id: str, source_id: str, *, reason: str, note: str | None = None
 ) -> None:
@@ -411,10 +436,37 @@ def exclude_evidence(
 
     curation = raw.setdefault("curation", {})
     _reopen_for_mutation(curation)
-    exclusions = [e for e in curation.get("exclusions", []) if e.get("source_id") != source_id]
-    exclusions.append({"source_id": source_id, "reason": reason, "note": note})
-    curation["exclusions"] = exclusions
+    _append_evidence_exclusion(curation, source_id, reason, note)
     _stage_case(root, case_id, raw, op="exclude-evidence")
+
+
+def _validate_transition(frm: str | None, to: str) -> None:
+    """Enforce one case state transition, exposing :class:`CurationError`.
+
+    The schema helper raises :class:`schema.TransitionError`, but the service
+    contract promises :class:`CurationError`; translate the message so library
+    and CLI callers see a single exception family.
+    """
+    try:
+        schema.validate_case_transition(cast("str", frm), to)
+    except schema.TransitionError as exc:
+        raise CurationError(str(exc)) from exc
+
+
+def _demote_ready(curation: dict[str, Any]) -> str | None:
+    """Demote a ``ready`` case to ``draft``, clearing attestation.
+
+    Returns the resulting state (``draft`` after a demotion, else the current
+    state untouched) so callers that route onward to another terminal state
+    (case-exclude, apply-gold) can drive the next transition.
+    """
+    state = curation.get("state")
+    if state == "ready":
+        _validate_transition("ready", "draft")
+        curation["state"] = "draft"
+        curation["snapshot_attested"] = False
+        return "draft"
+    return state
 
 
 def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
@@ -428,9 +480,7 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
     """
     state = curation.get("state")
     if state == "ready":
-        schema.validate_case_transition("ready", "draft")
-        curation["state"] = "draft"
-        curation["snapshot_attested"] = False
+        _demote_ready(curation)
     elif state == "stale":
         curation["snapshot_attested"] = False
     elif state in ("excluded", "unreplayable"):
@@ -454,7 +504,7 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
     if head_sha != original:
         raise CurationError(f"attestation SHA mismatch: expected {original} got {head_sha}")
     curation = raw.setdefault("curation", {})
-    schema.validate_case_transition(curation.get("state"), "ready")
+    _validate_transition(curation.get("state"), "ready")
     curation["state"] = "ready"
     curation["snapshot_attested"] = True
     _derive_content(raw)
@@ -487,6 +537,23 @@ def attest_clean(root: Path, case_id: str) -> None:
 _CASE_EXCLUSION_REASONS = frozenset({"unreplayable", "not_suitable", "duplicate_case", "other"})
 
 
+def _apply_case_exclusion(
+    curation: dict[str, Any], *, reason: str, note: str | None
+) -> None:
+    """Route any case to ``excluded`` under the case reason/note contract.
+
+    Demotes a ``ready`` case (``ready -> draft``, clearing attestation) then
+    routes the resulting state to ``excluded``. Shared by both
+    :func:`exclude_case` and :func:`apply_gold_fragment` so the transition
+    block lives in one place.
+    """
+    _validate_case_exclusion_contract(reason, note)
+    state = _demote_ready(curation)
+    _validate_transition(state, "excluded")
+    curation["state"] = "excluded"
+    curation["case_exclusion"] = {"reason": reason, "note": note}
+
+
 def exclude_case(
     root: Path, case_id: str, reason: str, *, note: str | None = None
 ) -> None:
@@ -498,18 +565,8 @@ def exclude_case(
     ``ready -> draft`` step).
     """
     raw = _load_case(root, case_id)
-    _validate_case_exclusion_contract(reason, note)
-
     curation = raw.setdefault("curation", {})
-    state = curation.get("state")
-    if state == "ready":
-        schema.validate_case_transition("ready", "draft")
-        curation["state"] = "draft"
-        curation["snapshot_attested"] = False
-        state = "draft"
-    schema.validate_case_transition(state, "excluded")
-    curation["state"] = "excluded"
-    curation["case_exclusion"] = {"reason": reason, "note": note}
+    _apply_case_exclusion(curation, reason=reason, note=note)
     _stage_case(root, case_id, raw, op="exclude-case")
 
 
@@ -525,14 +582,18 @@ def reinclude_case(root: Path, case_id: str) -> None:
         raise CurationError(f"case {case_id} is not excluded")
     snapshot_doc = raw.get("snapshot") or {}
     destination = "draft" if snapshot_doc.get("status") == "ready" else "unreplayable"
-    schema.validate_case_transition("excluded", destination)
+    _validate_transition("excluded", destination)
     curation["state"] = destination
     curation["case_exclusion"] = None
     _stage_case(root, case_id, raw, op="reinclude-case")
 
 
 def _fragment_provenance(
-    raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str]
+    raw: dict[str, Any],
+    finding: dict[str, Any],
+    source_ids: list[str],
+    *,
+    case_id: str,
 ) -> tuple[str, list[str]]:
     """Derive provenance kind from a fragment finding's source IDs + match.
 
@@ -540,7 +601,7 @@ def _fragment_provenance(
     the finding; else ``edited`` (>=1 source) or ``authored`` (no source). The
     fragment's own kind is never trusted.
     """
-    _check_candidate_sources(raw, source_ids, "case")
+    _check_candidate_sources(raw, source_ids, case_id)
     if len(source_ids) == 1:
         cand = next(
             (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
@@ -573,13 +634,14 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             "severity": frag.get("severity"),
             "location": frag.get("location"),
         }
-        kind, source_ids = _fragment_provenance(raw, finding, list(frag.get("source_ids") or []))
+        kind, source_ids = _fragment_provenance(
+            raw, finding, list(frag.get("source_ids") or []), case_id=case_id
+        )
         finding["provenance"] = {"kind": kind, "source_ids": source_ids}
         finding["finding_id"] = schema.derive_finding_id(finding)
         findings.append(finding)
     curation["findings"] = findings
 
-    exclusions = list(curation.get("exclusions") or [])
     for exc in fragment.get("exclusions") or []:
         src = exc["source_id"]
         reason = exc["reason"]
@@ -588,24 +650,14 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
         candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
         if src not in candidate_ids:
             raise CurationError(f"source {src} is not a candidate of case {case_id}")
-        exclusions = [e for e in exclusions if e.get("source_id") != src]
-        exclusions.append({"source_id": src, "reason": reason, "note": note})
-    curation["exclusions"] = exclusions
+        _append_evidence_exclusion(curation, src, reason, note)
+    curation["exclusions"] = curation.get("exclusions") or []
 
     case_exclusion = fragment.get("case_exclusion")
     if case_exclusion is not None:
-        reason = case_exclusion["reason"]
-        note = case_exclusion.get("note")
-        _validate_case_exclusion_contract(reason, note)
-        state = curation.get("state")
-        if state == "ready":
-            schema.validate_case_transition("ready", "draft")
-            curation["state"] = "draft"
-            curation["snapshot_attested"] = False
-            state = "draft"
-        schema.validate_case_transition(state, "excluded")
-        curation["state"] = "excluded"
-        curation["case_exclusion"] = {"reason": reason, "note": note}
+        _apply_case_exclusion(
+            curation, reason=case_exclusion["reason"], note=case_exclusion.get("note")
+        )
 
     clean = bool(fragment.get("clean"))
     if clean:
@@ -621,22 +673,24 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
     _stage_case(root, case_id, raw, op="apply-gold")
 
 
-def _validate_evidence_exclusion_contract(reason: str, note: str | None) -> None:
-    """Evidence-level reason/note contract (shared by exclude and fragment)."""
-    if reason not in _EVIDENCE_REASONS:
-        raise CurationError(f"invalid evidence exclusion reason {reason!r}")
+def _validate_exclusion_contract(
+    reason: str, note: str | None, *, valid_reasons: frozenset[str], noun: str
+) -> None:
+    """Reason/note contract shared by the evidence- and case-exclusion paths."""
+    if reason not in valid_reasons:
+        raise CurationError(f"invalid {noun} exclusion reason {reason!r}")
     if reason == "other":
         if not note or not str(note).strip():
-            raise CurationError("evidence exclusion reason 'other' requires a note")
+            raise CurationError(f"{noun} exclusion reason 'other' requires a note")
     elif note is not None:
-        raise CurationError("evidence exclusion note is only valid for reason 'other'")
+        raise CurationError(f"{noun} exclusion note is only valid for reason 'other'")
+
+
+def _validate_evidence_exclusion_contract(reason: str, note: str | None) -> None:
+    """Evidence-level reason/note contract (shared by exclude and fragment)."""
+    _validate_exclusion_contract(reason, note, valid_reasons=_EVIDENCE_REASONS, noun="evidence")
 
 
 def _validate_case_exclusion_contract(reason: str, note: str | None) -> None:
-    if reason not in _CASE_EXCLUSION_REASONS:
-        raise CurationError(f"invalid case exclusion reason {reason!r}")
-    if reason == "other":
-        if not note or not str(note).strip():
-            raise CurationError("case exclusion reason 'other' requires a note")
-    elif note is not None:
-        raise CurationError("case exclusion note is only valid for reason 'other'")
+    """Case-level reason/note contract (shared by exclude and apply-gold)."""
+    _validate_exclusion_contract(reason, note, valid_reasons=_CASE_EXCLUSION_REASONS, noun="case")

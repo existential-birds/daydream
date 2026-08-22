@@ -453,13 +453,29 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     assert cu.validate_case(ws, case_id) is None
 
-    # inject a duplicate canonical finding directly, then validate -> rejected
+    # a malformed curation block must not abort the whole read-only index
     path = ws / "cases" / f"{case_id}.yaml"
+    pristine_yaml = path.read_bytes()
+    raw = load_yaml_strict(path)
+    raw["curation"] = dict(raw["curation"])
+    raw["curation"]["state"] = "bogus"
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    cases = cu.list_cases(ws)
+    assert cases[0]["state"] == "bogus" and cases[0]["gold_mode"] is None
+
+    # a non-dict curation block must not abort the read-only index either
+    path.write_text(yaml.safe_dump({**raw, "curation": "bogus"}, sort_keys=False))
+    cases = cu.list_cases(ws)
+    assert cases[0]["state"] is None and cases[0]["gold_mode"] is None
+
+    # restore the pristine doc, then exercise a duplicate canonical finding, and
+    # validate -> rejected
+    path.write_bytes(pristine_yaml)
     raw = load_yaml_strict(path)
     f1 = {"title": "dup", "body": "b", "severity": "low",
           "provenance": {"kind": "authored", "source_ids": []}}
     f1["finding_id"] = derive_finding_id(f1)
-    raw["curation"]["findings"] = [f1, dict(f1)]   # same canonical -> duplicate
+    raw["curation"]["findings"] = [f1, dict(f1)]   # same canonical -> duplicates
     raw["curation"]["state"] = "draft"
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(cu.CurationError):
