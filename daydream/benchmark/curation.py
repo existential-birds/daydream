@@ -403,13 +403,7 @@ def exclude_evidence(
     non-blank note; a stray note on any other reason is rejected.
     """
     raw = _load_case(root, case_id)
-    if reason not in _EVIDENCE_REASONS:
-        raise CurationError(f"invalid evidence exclusion reason {reason!r}")
-    if reason == "other":
-        if not note or not str(note).strip():
-            raise CurationError("evidence exclusion reason 'other' requires a note")
-    elif note is not None:
-        raise CurationError("evidence exclusion note is only valid for reason 'other'")
+    _validate_evidence_exclusion_contract(reason, note)
 
     candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
     if source_id not in candidate_ids:
@@ -504,13 +498,7 @@ def exclude_case(
     ``ready -> draft`` step).
     """
     raw = _load_case(root, case_id)
-    if reason not in _CASE_EXCLUSION_REASONS:
-        raise CurationError(f"invalid case exclusion reason {reason!r}")
-    if reason == "other":
-        if not note or not str(note).strip():
-            raise CurationError("case exclusion reason 'other' requires a note")
-    elif note is not None:
-        raise CurationError("case exclusion note is only valid for reason 'other'")
+    _validate_case_exclusion_contract(reason, note)
 
     curation = raw.setdefault("curation", {})
     state = curation.get("state")
@@ -541,3 +529,114 @@ def reinclude_case(root: Path, case_id: str) -> None:
     curation["state"] = destination
     curation["case_exclusion"] = None
     _stage_case(root, case_id, raw, op="reinclude-case")
+
+
+def _fragment_provenance(
+    raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str]
+) -> tuple[str, list[str]]:
+    """Derive provenance kind from a fragment finding's source IDs + match.
+
+    ``historical`` only when exactly one source whose projection byte-matches
+    the finding; else ``edited`` (>=1 source) or ``authored`` (no source). The
+    fragment's own kind is never trusted.
+    """
+    _check_candidate_sources(raw, source_ids, "case")
+    if len(source_ids) == 1:
+        cand = next(
+            (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
+            None,
+        )
+        if cand is not None and _projection_matches(cand, finding):
+            return "historical", source_ids
+    return _derive_provenance_kind(source_ids, authored=False), source_ids
+
+
+def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> None:
+    """Apply a reviewed gold YAML fragment through the service derivation path.
+
+    Strips the caller-supplied ``finding_id`` / ``provenance`` / ``state`` /
+    ``gold_status`` / ``gold_mode`` from every finding before derivation, so a
+    forged value in any of them is discarded and recomputed. Reuses the
+    exclusion and case-exclusion reason/note contracts. Always leaves a
+    ready-snapshot case ``draft`` and never sets ``snapshot_attested`` — it
+    can never produce ready gold.
+    """
+    raw = _load_case(root, case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
+
+    findings: list[dict[str, Any]] = []
+    for frag in fragment.get("findings") or []:
+        finding = {
+            "title": frag["title"],
+            "body": frag["body"],
+            "severity": frag.get("severity"),
+            "location": frag.get("location"),
+        }
+        kind, source_ids = _fragment_provenance(raw, finding, list(frag.get("source_ids") or []))
+        finding["provenance"] = {"kind": kind, "source_ids": source_ids}
+        finding["finding_id"] = schema.derive_finding_id(finding)
+        findings.append(finding)
+    curation["findings"] = findings
+
+    exclusions = list(curation.get("exclusions") or [])
+    for exc in fragment.get("exclusions") or []:
+        src = exc["source_id"]
+        reason = exc["reason"]
+        note = exc.get("note")
+        _validate_evidence_exclusion_contract(reason, note)
+        candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
+        if src not in candidate_ids:
+            raise CurationError(f"source {src} is not a candidate of case {case_id}")
+        exclusions = [e for e in exclusions if e.get("source_id") != src]
+        exclusions.append({"source_id": src, "reason": reason, "note": note})
+    curation["exclusions"] = exclusions
+
+    case_exclusion = fragment.get("case_exclusion")
+    if case_exclusion is not None:
+        reason = case_exclusion["reason"]
+        note = case_exclusion.get("note")
+        _validate_case_exclusion_contract(reason, note)
+        state = curation.get("state")
+        if state == "ready":
+            schema.validate_case_transition("ready", "draft")
+            curation["state"] = "draft"
+            curation["snapshot_attested"] = False
+            state = "draft"
+        schema.validate_case_transition(state, "excluded")
+        curation["state"] = "excluded"
+        curation["case_exclusion"] = {"reason": reason, "note": note}
+
+    clean = bool(fragment.get("clean"))
+    if clean:
+        if findings:
+            raise CurationError(
+                f"case {case_id} clean fragment requires an empty gold findings set"
+            )
+        curation["clean_attested"] = True
+        curation["gold_status"] = "clean"
+        curation["gold_mode"] = "clean"
+    else:
+        _derive_content(raw)
+    _stage_case(root, case_id, raw, op="apply-gold")
+
+
+def _validate_evidence_exclusion_contract(reason: str, note: str | None) -> None:
+    """Evidence-level reason/note contract (shared by exclude and fragment)."""
+    if reason not in _EVIDENCE_REASONS:
+        raise CurationError(f"invalid evidence exclusion reason {reason!r}")
+    if reason == "other":
+        if not note or not str(note).strip():
+            raise CurationError("evidence exclusion reason 'other' requires a note")
+    elif note is not None:
+        raise CurationError("evidence exclusion note is only valid for reason 'other'")
+
+
+def _validate_case_exclusion_contract(reason: str, note: str | None) -> None:
+    if reason not in _CASE_EXCLUSION_REASONS:
+        raise CurationError(f"invalid case exclusion reason {reason!r}")
+    if reason == "other":
+        if not note or not str(note).strip():
+            raise CurationError("case exclusion reason 'other' requires a note")
+    elif note is not None:
+        raise CurationError("case exclusion note is only valid for reason 'other'")

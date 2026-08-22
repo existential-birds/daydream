@@ -345,6 +345,32 @@ def test_exclude_and_reinclude_case_transitions(tmp_path, fake_gh):
         cu.exclude_case(ws, case_id, reason="nope")
 
 
+def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    cand = next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    src = cand["source_id"]
+
+    fragment = {
+        "findings": [{
+            # forged fields must be discarded and re-derived
+            "finding_id": "f" * 64, "provenance": {"kind": "historical", "source_ids": [src]},
+            "state": "ready", "gold_status": "findings", "gold_mode": "historical",
+            "title": cand["title"], "body": cand["body"], "severity": None,
+            "location": cand["location"], "source_ids": [src],
+        }],
+        "exclusions": [], "case_exclusion": None, "clean": False,
+    }
+    cu.apply_gold_fragment(ws, case_id, fragment)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert f["finding_id"] == derive_finding_id(f)          # forged id discarded
+    assert f["provenance"]["kind"] == "historical"          # derived from candidate match
+    assert raw["curation"]["state"] == "draft"              # never ready
+    assert raw["curation"]["snapshot_attested"] is False
+    assert raw["curation"]["gold_status"] == "findings"
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
