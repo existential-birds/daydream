@@ -478,6 +478,7 @@ class EvidenceRecord(BaseModel):
     resolved: bool = False
     outdated: bool = False
     dismissed: bool = False
+    state: str | None = None
     is_bot: bool
     url: str
 

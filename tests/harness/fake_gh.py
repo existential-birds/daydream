@@ -225,6 +225,10 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         return 0, _emit(responses[bare_key], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, _emit([], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
+        return 0, _emit([], jq), ""
+    if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/issues/\d+/comments", endpoint):
+        return 0, _emit([], jq), ""
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, json.dumps({"html_url": "https://github.test/fake/pull/7#pullrequestreview-1"}) + "\n", ""
     if method == "POST" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/comments", endpoint):
@@ -275,10 +279,13 @@ class GhCall:
         endpoint: Endpoint with any leading slash stripped (``graphql`` for
             GraphQL calls).
         payload: Parsed ``--input`` JSON payload, or None.
+        argv: The full ``gh api`` argv (after ``gh``) as recorded, so tests
+            can assert flags like ``--paginate`` were passed.
     """
 
     endpoint: str
     payload: Any
+    argv: list[str] | None = None
 
 
 @dataclass
@@ -332,7 +339,13 @@ class FakeGh:
                 continue
             if wanted_endpoint is not None and record["endpoint"] != wanted_endpoint:
                 continue
-            out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"]))
+            out.append(
+                GhCall(
+                    endpoint=record["endpoint"],
+                    payload=record["payload"],
+                    argv=record.get("argv"),
+                )
+            )
         return out
 
     def command_calls(self, kind: str) -> list[GhCommandCall]:
