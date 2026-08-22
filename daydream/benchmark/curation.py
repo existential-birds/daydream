@@ -488,3 +488,56 @@ def attest_clean(root: Path, case_id: str) -> None:
     curation["gold_status"] = "clean"
     curation["gold_mode"] = "clean"
     _stage_case(root, case_id, raw, op="attest-clean")
+
+
+_CASE_EXCLUSION_REASONS = frozenset({"unreplayable", "not_suitable", "duplicate_case", "other"})
+
+
+def exclude_case(
+    root: Path, case_id: str, reason: str, *, note: str | None = None
+) -> None:
+    """Exclude an entire case from the dataset with the case reason/note contract.
+
+    Routes through the fixed transition table: from ``draft``/``stale``/
+    ``unreplayable`` directly to ``excluded``; from ``ready`` via the
+    ``ready -> draft -> excluded`` double edge (clearing attestation on the
+    ``ready -> draft`` step).
+    """
+    raw = _load_case(root, case_id)
+    if reason not in _CASE_EXCLUSION_REASONS:
+        raise CurationError(f"invalid case exclusion reason {reason!r}")
+    if reason == "other":
+        if not note or not str(note).strip():
+            raise CurationError("case exclusion reason 'other' requires a note")
+    elif note is not None:
+        raise CurationError("case exclusion note is only valid for reason 'other'")
+
+    curation = raw.setdefault("curation", {})
+    state = curation.get("state")
+    if state == "ready":
+        schema.validate_case_transition("ready", "draft")
+        curation["state"] = "draft"
+        curation["snapshot_attested"] = False
+        state = "draft"
+    schema.validate_case_transition(state, "excluded")
+    curation["state"] = "excluded"
+    curation["case_exclusion"] = {"reason": reason, "note": note}
+    _stage_case(root, case_id, raw, op="exclude-case")
+
+
+def reinclude_case(root: Path, case_id: str) -> None:
+    """Re-include an excluded case to the state its snapshot supports.
+
+    A ready-snapshot case re-includes to ``draft``; an unreplayable-snapshot
+    case to ``unreplayable``. Requires the case be currently ``excluded``.
+    """
+    raw = _load_case(root, case_id)
+    curation = raw.setdefault("curation", {})
+    if curation.get("state") != "excluded":
+        raise CurationError(f"case {case_id} is not excluded")
+    snapshot_doc = raw.get("snapshot") or {}
+    destination = "draft" if snapshot_doc.get("status") == "ready" else "unreplayable"
+    schema.validate_case_transition("excluded", destination)
+    curation["state"] = destination
+    curation["case_exclusion"] = None
+    _stage_case(root, case_id, raw, op="reinclude-case")

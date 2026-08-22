@@ -320,6 +320,31 @@ def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
     assert raw["curation"]["snapshot_attested"] is False
 
 
+def test_exclude_and_reinclude_case_transitions(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    snap_status = cu.list_case(ws, case_id)["snapshot"]["status"]  # "ready"
+    assert snap_status == "ready"
+
+    cu.exclude_case(ws, case_id, reason="not_suitable")
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["state"] == "excluded"
+    assert raw["curation"]["case_exclusion"] == {"reason": "not_suitable", "note": None}
+
+    # a ready snapshot re-includes to draft (not back to ready)
+    cu.reinclude_case(ws, case_id)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["state"] == "draft"
+    assert raw["curation"]["case_exclusion"] is None
+
+    # other reason requires a note
+    with pytest.raises(cu.CurationError):
+        cu.exclude_case(ws, case_id, reason="other")
+    # invalid literal rejected
+    with pytest.raises(cu.CurationError):
+        cu.exclude_case(ws, case_id, reason="nope")
+
+
 def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4)
