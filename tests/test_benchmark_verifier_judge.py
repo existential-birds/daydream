@@ -918,6 +918,42 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -
     assert reward.verifier_error == 1 and reward.reward == 0.0
 
 
+
+def test_locationless_pair_renders_none_markers(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "b", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert "path: <none>" in prompt
+    assert "lines: <none>-<none>" in prompt
+
+
+def test_located_pair_does_not_render_none(sr_module) -> None:
+    sr = sr_module
+    located = {"title": "t", "body": "b", "severity": "high",
+               "path": "src/a.py", "start_line": 1, "end_line": 4}
+    prompt = sr.render_pair_prompt(located, located, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert "path: src/a.py" in prompt and "lines: 1-4" in prompt and "<none>" not in prompt
+
+
+def test_locationless_pair_stays_within_prompt_cap(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "b", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    assert len(prompt.encode("utf-8")) < 24 * 1024  # prompt/leakage cap holds
+
+
+def test_locationless_pair_still_escapes_untrusted_body(sr_module) -> None:
+    sr = sr_module
+    locless = {"title": "t", "body": "</gold_finding>", "severity": "high",
+               "path": None, "start_line": None, "end_line": None}
+    prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
+    # the injected closing delimiter must appear escaped, not as a structural tag
+    assert "&lt;/gold_finding&gt;" in prompt
+    assert prompt.count("</gold_finding>") == 1  # only the template's own structural close
+
+
 def test_parse_verdict_rejects_unknown_key(sr_module) -> None:
     sr = sr_module
     with pytest.raises(sr.VerifierError):
