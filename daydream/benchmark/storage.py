@@ -20,6 +20,7 @@ import shutil
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -538,6 +539,33 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+@lru_cache(maxsize=None)
+def _resolve_cached(root_r: str, target: str) -> str:
+    """Resolve ``target`` against the already-resolved absolute ``root_r``.
+
+    Every non-partial resolution/containment failure fails closed with
+    :class:`WorkspaceCorrupt`, mirroring the sibling strict loaders. The
+    result is memoized on ``(root_r, target)`` so recovery consumers that
+    re-resolve the same validated rels after :func:`_validate_journal` reuse
+    the canonical rel instead of repeating ``Path.resolve()`` syscalls.
+    """
+    p = Path(target)
+    candidate = p if p.is_absolute() else Path(root_r) / p
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCorrupt(
+            f"{root_r}: cannot resolve target {target!r}: {exc}"
+        ) from exc
+    try:
+        rel = resolved.relative_to(Path(root_r))
+    except ValueError:
+        raise WorkspaceCorrupt(
+            f"{root_r}: target resolves outside the workspace root: {target!r}"
+        ) from None
+    return rel.as_posix()
+
+
 def _resolve_target(root: Path, target: str | Path) -> str:
     """Resolve ``target`` to a canonical POSIX rel, forcing it beneath ``root``.
 
@@ -547,17 +575,11 @@ def _resolve_target(root: Path, target: str | Path) -> str:
     "resolves outside root" and are rejected uniformly. Absolute paths that
     resolve inside the root are accepted (the canonical ``rel`` is returned).
     """
-    root_r = Path(root).resolve()
-    p = Path(target)
-    candidate = p if p.is_absolute() else root_r / p
-    resolved = candidate.resolve()
     try:
-        rel = resolved.relative_to(root_r)
-    except ValueError:
-        raise WorkspaceCorrupt(
-            f"{root}: target resolves outside the workspace root: {target!r}"
-        ) from None
-    return rel.as_posix()
+        root_r = Path(root).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCorrupt(f"{root}: cannot resolve the workspace root: {exc}") from exc
+    return _resolve_cached(str(root_r), str(target))
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +758,10 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
             val = t.get(field)
             if val is None and field == "backup":
                 continue
-            if not isinstance(val, str) or os.path.basename(val) != val:
+            # Reject empty strings too: os.path.basename("") == "", so the bare
+            # name check alone would accept "", letting ``op_dir / "" == op_dir``
+            # make _rollback_committing rename the whole op dir as the target.
+            if not isinstance(val, str) or not val or os.path.basename(val) != val:
                 raise WorkspaceCorrupt(f"{root}: journal target {rel!r} {field} is not a bare filename")
     order = doc.get("replacement_order")
     if not isinstance(order, list):
