@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.parse
 from pathlib import Path
@@ -42,6 +43,15 @@ JUDGE_PROMPT_TEMPLATE = (
 _PROMPT_CAP_BYTES = 24 * 1024
 _MAX_RETRIES = 3
 _REQUEST_TIMEOUT = 60.0
+
+# Hardening caps: response/reasoning payloads are rejected -- never truncated
+# and accepted -- above these sizes; redirects are bounded; diagnostics are
+# bounded and redacted before they reach any artifact or log.
+_RESPONSE_CAP_BYTES = 256 * 1024
+_REASONING_CAP_BYTES = 32 * 1024
+_MAX_REDIRECTS = 3
+_ERROR_TEXT_CAP_BYTES = 4096
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _ESCAPED_FINDING_TAGS = {
     "<gold_finding>": "&lt;gold_finding&gt;",
@@ -75,6 +85,111 @@ def _escape_finding_delimiters(text: str) -> str:
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
+
+_REDACTION_PATTERNS = (
+    re.compile(r"sk-ant-[A-Za-z0-9]+"),
+    re.compile(r"sk-or-[A-Za-z0-9]+"),
+    re.compile(r"Bearer [A-Za-z0-9._~+/=-]+"),
+    re.compile(r"x-api-key:?\s*\S+"),
+    re.compile(r"[0-9a-fA-F]{32,}"),
+    re.compile(r"[A-Za-z0-9+/]{40,}={0,2}"),
+)
+
+
+def _normalize_host(host: str | None) -> str:
+    """Lowercase ``host`` and strip a trailing dot; never raises."""
+    if host is None:
+        return ""
+    return host.strip().lower().rstrip(".")
+
+
+def _effective_allowlist(provider: str, base_url: str, env: dict[str, Any]) -> set[str]:
+    """Resolve the judge-host allowlist from env; absent -> own-host fail-closed.
+
+    A non-empty ``DAYDREAM_JUDGE_ALLOWED_HOSTS`` (whitespace/comma-separated)
+    wins; otherwise the effective allowlist is exactly the resolved judge
+    host of ``base_url`` so an unconfigured verifier can only ever reach its
+    own judge endpoint -- never an arbitrary host.
+    """
+    raw = (env or {}).get("DAYDREAM_JUDGE_ALLOWED_HOSTS")
+    if raw:
+        hosts = {
+            _normalize_host(host)
+            for host in re.split(r"[\s,]+", str(raw))
+            if host.strip()
+        }
+        if hosts:
+            return hosts
+    return {_normalize_host(urllib.parse.urlsplit(base_url).hostname)}
+
+
+def _validate_base_url(url: str, allowlist: set[str]) -> str:
+    """Validate ``url`` against the hardened judge-request contract.
+
+    Rejects userinfo, any query string or fragment, non-HTTPS remote schemes
+    (``http`` is permitted only to a loopback host), and any host outside
+    ``allowlist``. Returns ``url`` unchanged; every rejection is a bounded
+    ``VerifierError`` naming only the rejected form -- never URL content.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.username is not None or parsed.password is not None:
+        raise VerifierError("judge URL must not contain userinfo")
+    if parsed.query:
+        raise VerifierError("judge URL must not contain a query string")
+    if parsed.fragment:
+        raise VerifierError("judge URL must not contain a fragment")
+    host = _normalize_host(parsed.hostname)
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and host in _LOOPBACK_HOSTS
+    ):
+        raise VerifierError("judge URL must use https (loopback http allowed)")
+    if not host or host not in allowlist:
+        raise VerifierError("judge host is not in the verifier allowlist")
+    return url
+
+
+def _resolve_redirect(request_url: str, location: str, allowlist: set[str]) -> str:
+    """Resolve a redirect ``location`` against ``request_url`` and host-check it.
+
+    A relative ``Location`` is resolved against the request URL first, then the
+    resolved target is validated against ``allowlist`` exactly like an initial
+    base URL -- a cross-host, out-of-allowlist, or malformed target is a
+    terminal bounded ``VerifierError``.
+    """
+    resolved = urllib.parse.urljoin(request_url, location)
+    return _validate_base_url(resolved, allowlist)
+
+
+def _response_bytes(response: Any) -> bytes:
+    """Return the response payload as bytes, preferring ``.content``."""
+    content = getattr(response, "content", None)
+    if content is not None:
+        return bytes(content)
+    text = getattr(response, "text", "")
+    return str(text).encode("utf-8")
+
+
+def _redact_text(text: str) -> str:
+    """Replace credential-like content with ``<redacted>``."""
+    for pattern in _REDACTION_PATTERNS:
+        text = pattern.sub("<redacted>", text)
+    return text
+
+
+def _bounded_error(text: object) -> str:
+    """Redact ``text`` and bound it to ``_ERROR_TEXT_CAP_BYTES`` UTF-8 bytes.
+
+    Redaction runs before the truncation so a credential in the first bytes can
+    never survive a cut; truncation lands on a UTF-8 byte boundary. Empty input
+    returns ``""``; any non-empty input stays non-empty.
+    """
+    if not text:
+        return ""
+    redacted = _redact_text(str(text))
+    encoded = redacted.encode("utf-8")
+    if len(encoded) <= _ERROR_TEXT_CAP_BYTES:
+        return redacted
+    return encoded[:_ERROR_TEXT_CAP_BYTES].decode("utf-8", errors="ignore")
 
 
 

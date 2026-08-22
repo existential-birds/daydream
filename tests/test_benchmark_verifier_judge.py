@@ -986,3 +986,43 @@ def test_parse_verdict_rejects_unknown_key(sr_module) -> None:
     sr = sr_module
     with pytest.raises(sr.VerifierError):
         sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "ok", "extra": 1})
+
+
+def test_url_validation_and_allowlist_helpers(sr_module) -> None:
+    sr = sr_module
+    # allowlist resolution: explicit env wins; absent -> own-host fail-closed fallback
+    assert sr._effective_allowlist("openai-compatible", "https://api.openai.com/v1",
+                                   {"DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com  judge.example"}) \
+        == {"api.anthropic.com", "judge.example"}
+    assert sr._effective_allowlist("anthropic", "https://api.anthropic.com/v1/messages", {}) \
+        == {"api.anthropic.com"}
+
+    def rejects(url, allowlist):
+        with pytest.raises(sr.VerifierError):
+            sr._validate_base_url(url, allowlist)
+
+    allow = {"api.anthropic.com"}
+    sr._validate_base_url("https://api.anthropic.com/v1/messages", allow)               # ok
+    sr._validate_base_url("https://sub.api.anthropic.com/x", {"sub.api.anthropic.com"}) # sub in allowlist
+    rejects("https://user:pass@api.anthropic.com/v1", allow)       # userinfo
+    rejects("https://api.anthropic.com/v1?q=1", allow)             # query
+    rejects("https://api.anthropic.com/v1#frag", allow)            # fragment
+    rejects("http://api.anthropic.com/v1", allow)                  # non-HTTPS remote
+    rejects("https://evil.example/v1", allow)                      # host outside allowlist
+    sr._validate_base_url("http://127.0.0.1:8000/v1", {"127.0.0.1"})  # loopback http allowed
+
+    # redirect resolution: relative Location resolved against request URL, then host-checked
+    assert sr._resolve_redirect("https://api.anthropic.com/v1/messages",
+                                "/v1/next", {"api.anthropic.com"}) == "https://api.anthropic.com/v1/next"
+    with pytest.raises(sr.VerifierError):
+        sr._resolve_redirect("https://api.anthropic.com/v1/messages",
+                             "https://evil.example/x", {"api.anthropic.com"})
+
+
+def test_error_bounding_and_redaction(sr_module) -> None:
+    sr = sr_module
+    assert "sk-ant-abcdef1234567890" not in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
+    assert "<redacted>" in sr._bounded_error("key=sk-ant-abcdef1234567890 end")
+    assert "Bearer sk-or-longtokenvalue123" not in sr._bounded_error("Authorization: Bearer sk-or-longtokenvalue123")
+    long = "x" * 5000
+    assert len(sr._bounded_error(long).encode("utf-8")) <= sr._ERROR_TEXT_CAP_BYTES
