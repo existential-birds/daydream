@@ -825,8 +825,8 @@ class TransitionError(Exception):
 
 _PR_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"fetched", "fetch_failed"},
-    "fetch_failed": {"fetched"},
-    "fetched": {"fetched"},
+    "fetch_failed": {"fetched", "fetch_failed"},
+    "fetched": {"fetched", "fetch_failed"},
 }
 
 _CASE_TRANSITIONS: dict[str, set[str]] = {

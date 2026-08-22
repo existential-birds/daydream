@@ -366,7 +366,14 @@ def test_gold_status_and_mode_derived():
 
 @pytest.mark.parametrize(
     "frm,to",
-    [("pending", "fetched"), ("pending", "fetch_failed"), ("fetch_failed", "fetched"), ("fetched", "fetched")],
+    [
+        ("pending", "fetched"),
+        ("pending", "fetch_failed"),
+        ("fetch_failed", "fetched"),
+        ("fetch_failed", "fetch_failed"),
+        ("fetched", "fetched"),
+        ("fetched", "fetch_failed"),
+    ],
 )
 def test_valid_pr_transitions(frm, to):
     validate_pr_transition(frm, to)  # must not raise
