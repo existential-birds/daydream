@@ -18,6 +18,8 @@ import re
 import shutil
 from pathlib import Path
 
+from daydream.benchmark import snapshot, storage
+
 TEMPLATE_VERSION = "1"
 
 
@@ -218,3 +220,278 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
         shutil.copyfile(src, dst)
         out.append((rel, hashlib.sha256(src.read_bytes()).hexdigest()))
     return out
+
+
+# ---------------------------------------------------------------------------
+# control-plane leakage scan (issue #778)
+# ---------------------------------------------------------------------------
+
+_LEAK_RULES = [
+    ("original-git-sha", re.compile(r"\b[0-9a-f]{40}\b")),
+    ("authoring-case-id", re.compile(r"\bpr-\d{6}-[0-9a-f]{12}\b")),
+    ("source-comment-id",
+     re.compile(r"github:(review|inline_comment|thread_comment|issue_comment):\d+")),
+    ("provenance", re.compile(r"\bprovenance\b")),
+    ("exclusions", re.compile(r"\bexclusion\w*\b")),
+    ("gold-count-status-mode", re.compile(r"\bgold_(status|mode|count)\b")),
+    ("clean-marker", re.compile(r"\bclean_attested\b")),
+    ("curation", re.compile(r"\bcuration\b")),
+    ("credential",
+     re.compile(r"(?i)\b(sk-[a-z0-9]{16,}|ghp_[a-z0-9]{20,}|gho_[a-z0-9]{20,}|"
+                r"github_pat_[a-z0-9_]{20,}|AKIA[0-9A-Z]{16})\b")),
+    ("authenticated-url", re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@")),
+    ("pull-number", re.compile(r"\bpull/[0-9]+\b")),
+]
+
+_BLOCK_PATTERN = re.compile(r"<historical_pr_context>.*?</historical_pr_context>", re.DOTALL)
+
+
+def _bounded_block_strip(text: str) -> str:
+    """Remove the exact emitted bounded block (instruction.md scan exemption)."""
+    return _BLOCK_PATTERN.sub("", text)
+
+
+def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None:
+    """Fail-fast control-plane leak scan over compiler-generated text only.
+
+    Each ``instruction.md`` is scanned with its bounded block stripped; every
+    other file as-is. Also scans for the literal *repository_slug*. On the first
+    match of any rule raises :class:`CompileError` naming the file and matched
+    token. Returns ``None`` when clean.
+    """
+    for rel, text in control_plane.items():
+        scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
+        if repository_slug and repository_slug in scanned:
+            raise CompileError(f"{rel}: leakage token 'repository-slug' matched {repository_slug!r}")
+        for label, pattern in _LEAK_RULES:
+            m = pattern.search(scanned)
+            if m is not None:
+                raise CompileError(f"{rel}: leakage token '{label}' matched {m.group(0)!r}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# bundle archive-inventory check
+# ---------------------------------------------------------------------------
+
+
+def validate_bundle_inventory(bundle_path: Path) -> None:
+    """Structurally validate a compiled bundle: exactly base/head, no credential URL."""
+    heads = snapshot.bundle_heads(bundle_path)
+    if heads != {"refs/heads/base", "refs/heads/head"}:
+        raise CompileError(
+            f"bundle {bundle_path} exposes refs {sorted(heads)}; "
+            "expected exactly refs/heads/base and refs/heads/head"
+        )
+    raw = bundle_path.read_bytes().decode("utf-8", errors="replace")
+    m = re.search(r"[a-z][a-z0-9+.-]*://[^/\s:@]+@", raw)
+    if m is not None:
+        raise CompileError(f"bundle {bundle_path} contains a credential-bearing URL")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# case compilation + lock + atomic swap
+# ---------------------------------------------------------------------------
+
+_CASE_README = (
+    "# Daydream Harbor task\n\n"
+    "This is a single curated code review task. Review the bundled base to "
+    "head change on its own, and produce a focused set of concrete findings.\n"
+    "The private gold answer is not part of this task surface and must not be "
+    "exposed.\n"
+)
+
+_ROOT_README = (
+    "# Daydream Harbor private benchmark\n\n"
+    "This tree holds compiled historical code review tasks from a private PR "
+    "benchmark. Each task is self-contained under an opaque case directory.\n"
+    "The tasks and their graded gold are confidential.\n"
+)
+
+
+def _is_compilable(curation: dict) -> bool:
+    """Assumption 1: ready-with-findings or clean-attested."""
+    return bool(
+        (curation.get("state") == "ready"
+         and curation.get("snapshot_attested")
+         and bool(curation.get("findings")))
+        or (curation.get("clean_attested") and not curation.get("findings"))
+    )
+
+
+def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
+    """Deterministic sha256 over the authoring inputs (no timestamps)."""
+    payload: dict = {}
+    for _case in manifest.get("cases") or []:
+        case_id = _case.get("case_id")
+        if not case_id or case_id not in case_docs:
+            continue
+        raw = case_docs[case_id]
+        pull_request = raw.get("pull_request") or {}
+        curation = raw.get("curation") or {}
+        snapshot = raw.get("snapshot") or {}
+        payload[case_id] = {
+            "title": str(pull_request.get("title") or ""),
+            "body": str(pull_request.get("body") or ""),
+            "findings": build_gold_list(curation.get("findings") or []),
+            "base": snapshot.get("original_base_sha"),
+            "head": snapshot.get("original_head_sha"),
+            "bundle_sha256": snapshot.get("bundle_sha256"),
+        }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict:
+    """Compile one case tree into ``stage/<key>/`` and return its lock row."""
+    case_id = case_doc["case_id"]
+    key = derive_task_key(case_id)
+    case_stage = stage / key
+    case_stage.mkdir(parents=True, exist_ok=True)
+    pull_request = case_doc.get("pull_request") or {}
+    snapshot = case_doc.get("snapshot") or {}
+    curation = case_doc.get("curation") or {}
+    findings = curation.get("findings") or []
+
+    instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
+    (case_stage / "instruction.md").write_text(instruction)
+    (case_stage / "README.md").write_text(_CASE_README)
+
+    bundle_rel = snapshot.get("bundle_file")
+    expected = snapshot.get("bundle_sha256")
+    if not bundle_rel or not expected:
+        raise CompileError(f"case {case_id} ready snapshot missing bundle_file/bundle_sha256")
+    bundle_src = ws / bundle_rel
+    if not bundle_src.is_file():
+        raise CompileError(f"case {case_id} missing bundle {bundle_rel}")
+    bundle_dst = case_stage / "environment" / "repository.bundle"
+    bundle_dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(bundle_src, bundle_dst)
+    actual = hashlib.sha256(bundle_dst.read_bytes()).hexdigest()
+    if actual != expected:
+        raise CompileError(
+            f"case {case_id} bundle sha mismatch (wanted {expected}, got {actual})"
+        )
+    validate_bundle_inventory(bundle_dst)
+
+    gold = build_gold_list(findings)
+    gold_bytes = json.dumps(gold, sort_keys=False).encode("utf-8")
+    gold_path = case_stage / "tests" / "golden-review.json"
+    gold_path.parent.mkdir(parents=True, exist_ok=True)
+    gold_path.write_bytes(gold_bytes)
+
+    oracle = build_oracle_artifact(key, findings)
+    oracle_bytes = json.dumps(oracle).encode("utf-8")
+    oracle_path = case_stage / "solution" / "golden-review.json"
+    oracle_path.parent.mkdir(parents=True, exist_ok=True)
+    oracle_path.write_bytes(oracle_bytes)
+
+    assets = _copy_assets(case_stage)
+
+    files: dict[str, str] = {}
+    for rel in (
+        "README.md", "instruction.md", "environment/repository.bundle",
+        "tests/golden-review.json", "solution/golden-review.json",
+    ):
+        files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
+    for rel, sha in assets:
+        files[rel] = sha
+
+    return {
+        "key": key,
+        "case_id": case_id,
+        "pr_number": int(pull_request["number"]),
+        "repository": repo_slug,
+        "original_base_sha": snapshot.get("original_base_sha"),
+        "original_head_sha": snapshot.get("original_head_sha"),
+        "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
+        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+        "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "files": files,
+    }
+
+
+def _build_lock(case_rows: list[dict], authoring_digest: str, all_files: dict[str, str]) -> dict:
+    """Assemble the deterministic private lock (no timestamps anywhere)."""
+    lock: dict = {
+        "schema_version": 1,
+        "authoring_input_digest": authoring_digest,
+        "template_version": TEMPLATE_VERSION,
+        "cases": {},
+        "files": dict(sorted(all_files.items())),
+    }
+    for row in sorted(case_rows, key=lambda r: r["key"]):
+        entry = dict(row)
+        entry.pop("key", None)
+        lock["cases"][row["key"]] = entry
+    return lock
+
+
+def compile_workspace(root: Path) -> dict:
+    """Compile the whole workspace into ``root/harbor/`` atomically.
+
+    Builds into ``root/cache/harbor-build-stage``, validates every indexed case,
+    writes the lock + root control-plane, runs the leakage scan, then swaps the
+    stage in place only on full success. On any rejection the exception
+    re-raises and the prior ``harbor/`` is left untouched.
+    """
+    root = Path(root)
+    with storage.WorkspaceLock(root):
+        storage.recover_startup(root)
+        manifest = storage.load_yaml_strict(root / "benchmark.yaml")
+        repo_slug = manifest.get("source", {}).get("repository") or ""
+
+        case_docs: dict[str, dict] = {}
+        for _case in manifest.get("cases") or []:
+            case_id = _case.get("case_id")
+            doc = storage.load_yaml_strict(root / _case["case_file"])
+            if not _is_compilable(doc.get("curation") or {}):
+                curation = doc.get("curation") or {}
+                raise CompileError(
+                    f"case {case_id} is not compilable (state {curation.get('state')}, "
+                    f"findings {len(curation.get('findings') or [])}, "
+                    f"clean_attested {bool(curation.get('clean_attested'))})"
+                )
+            case_docs[case_id] = doc
+
+        stage = root / "cache" / "harbor-build-stage"
+        if stage.exists():
+            shutil.rmtree(stage)
+        stage.mkdir(parents=True)
+
+        try:
+            all_files: dict[str, str] = {}
+            case_rows: list[dict] = []
+            control_plane: dict[str, str] = {"README.md": _ROOT_README}
+            for _case in manifest.get("cases") or []:
+                case_id = _case.get("case_id")
+                row = _compile_case(stage, root, case_docs[case_id], repo_slug)
+                case_rows.append(row)
+                key = row["key"]
+                all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
+                control_plane[f"{key}/README.md"] = _CASE_README
+                control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
+
+            (stage / "README.md").write_text(_ROOT_README)
+            metric_bytes = (_TEMPLATE_DIR / "metric.py").read_bytes()
+            (stage / "metric.py").write_bytes(metric_bytes)
+            (stage / "jobs").mkdir(exist_ok=True)
+
+            all_files["README.md"] = hashlib.sha256(_ROOT_README.encode("utf-8")).hexdigest()
+            all_files["metric.py"] = hashlib.sha256(metric_bytes).hexdigest()
+
+            lock = _build_lock(case_rows, _authoring_input_digest(case_docs, manifest), all_files)
+            lock_bytes = json.dumps(lock, sort_keys=True, indent=2).encode("utf-8")
+            (stage / "benchmark.lock.json").write_bytes(lock_bytes)
+
+            leakage_scan(control_plane, repository_slug=repo_slug)
+
+            harbor = root / "harbor"
+            if harbor.exists():
+                shutil.rmtree(harbor)
+            os.replace(stage, harbor)
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+
+    return json.loads(lock_bytes.decode("utf-8"))
