@@ -470,7 +470,7 @@ def test_provider_selection_builds_expected_client(sr_module, monkeypatch) -> No
         )
 
     assert isinstance(make("anthropic", None), sr.AnthropicJudgeClient)
-    assert isinstance(make("openai", "https://openrouter.ai/api/v1"), sr.OpenAIJudgeClient)
+    assert isinstance(make("openai-compatible", "https://openrouter.ai/api/v1"), sr.OpenAIJudgeClient)
     with pytest.raises(sr.VerifierError):
         make("anthropic", None, model=None)  # missing MODEL -> verifier error
     with pytest.raises(sr.VerifierError):
@@ -1026,3 +1026,43 @@ def test_error_bounding_and_redaction(sr_module) -> None:
     assert "Bearer sk-or-longtokenvalue123" not in sr._bounded_error("Authorization: Bearer sk-or-longtokenvalue123")
     long = "x" * 5000
     assert len(sr._bounded_error(long).encode("utf-8")) <= sr._ERROR_TEXT_CAP_BYTES
+
+
+def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module) -> None:
+    sr = sr_module
+    # absent provider defaults to anthropic (unchanged)
+    assert isinstance(sr._build_client(
+        {"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
+         "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}),
+        sr.AnthropicJudgeClient)
+    # exactly anthropic | openai-compatible accepted
+    cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}
+    assert isinstance(sr._build_client(cert), sr.OpenAIJudgeClient)
+    # anything else fails closed BEFORE any request
+    for bad in ("martian", "garbage", "Anthropic"):
+        with pytest.raises(sr.VerifierError) as e:
+            sr._build_client({**cert, "DAYDREAM_JUDGE_PROVIDER": bad})
+        assert "expected anthropic or openai-compatible" in str(e.value)
+    # a base URL host outside the allowlist fails closed at build time
+    with pytest.raises(sr.VerifierError):
+        sr._build_client({**cert, "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})
+
+
+@pytest.mark.asyncio
+async def test_clients_validate_initial_url_before_request(sr_module) -> None:
+    sr = sr_module
+    calls = []
+    class F:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append(url);  # would be reached only if validation passed
+            return type("R", (), {"status_code": 200, "text": "ok",
+                "json": lambda self: {"content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "x"}'}]}})()
+    # anthropic validates the hardcoded constant -> ok when allowlist matches
+    c = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F())
+    assert await c.complete_json(user="u") is not None and len(calls) == 1
+    # a disallowed initial host fails closed before post is hit
+    c2 = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F(), allowlist={"evil.example"})
+    with pytest.raises(sr.VerifierError):
+        await c2.complete_json(user="u")
+    assert len(calls) == 1  # no new request issued

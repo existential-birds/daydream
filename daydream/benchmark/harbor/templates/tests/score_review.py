@@ -349,6 +349,7 @@ async def _complete_json_with_http(
     payload: dict[str, Any],
     headers: dict[str, str],
     content: Any,
+    allowlist: set[str] | None = None,
 ) -> dict[str, Any]:
     """Single retry/redirect/timeout policy shared by both judge clients.
 
@@ -410,15 +411,27 @@ class AnthropicJudgeClient:
     """Small Anthropic Messages API client returning strict parsed JSON verdicts."""
 
     def __init__(
-        self, api_key: str, model: str, *, http: _AsyncHttpClient | None = None
+        self,
+        api_key: str,
+        model: str,
+        *,
+        http: _AsyncHttpClient | None = None,
+        allowlist: set[str] | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.http = http
+        self.allowlist = allowlist
 
     async def complete_json(
         self, *, user: str, system: str = "", max_tokens: int = 512
     ) -> dict[str, Any]:
+        effective = self.allowlist or _effective_allowlist(
+            "anthropic", _ANTHROPIC_MESSAGES_URL, {}
+        )
+        # Fail closed before any request: a forced disallowed allowlist must
+        # reject the initial URL here, never after a POST has been issued.
+        _validate_base_url(_ANTHROPIC_MESSAGES_URL, effective)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -438,6 +451,7 @@ class AnthropicJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_anthropic_text,
+                allowlist=effective,
             )
         async with httpx.AsyncClient() as http:
             return await _complete_json_with_http(
@@ -446,6 +460,7 @@ class AnthropicJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_anthropic_text,
+                allowlist=effective,
             )
 
 
@@ -499,15 +514,24 @@ class OpenAIJudgeClient:
         *,
         base_url: str,
         http: _AsyncHttpClient | None = None,
+        allowlist: set[str] | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.http = http
+        self.allowlist = allowlist
 
     async def complete_json(
         self, *, user: str, system: str = "", max_tokens: int = 512
     ) -> dict[str, Any]:
+        url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
+        effective = self.allowlist or _effective_allowlist(
+            "openai-compatible", self.base_url, {}
+        )
+        # Fail closed before any request: a base URL host outside the allowlist
+        # is rejected here, never after a POST has been issued.
+        _validate_base_url(url, effective)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens,
@@ -521,7 +545,6 @@ class OpenAIJudgeClient:
             "Authorization": f"Bearer {self.api_key}",
             "content-type": "application/json",
         }
-        url = self.base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
         if self.http is not None:
             return await _complete_json_with_http(
                 self.http,
@@ -529,6 +552,7 @@ class OpenAIJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_openai_content,
+                allowlist=effective,
             )
         async with httpx.AsyncClient() as http:
             return await _complete_json_with_http(
@@ -537,6 +561,7 @@ class OpenAIJudgeClient:
                 payload=payload,
                 headers=headers,
                 content=_openai_content,
+                allowlist=effective,
             )
 
 
@@ -590,6 +615,7 @@ _ENV_PROVIDER = "DAYDREAM_JUDGE_PROVIDER"
 _ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
 _ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
 _ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
+_ENV_ALLOWED_HOSTS = "DAYDREAM_JUDGE_ALLOWED_HOSTS"
 _DEFAULT_PROVIDER = "anthropic"
 
 
@@ -805,17 +831,33 @@ def run_verifier(
 
 
 def _build_client(env: dict[str, Any]) -> Any:
-    """Build the judge client from the DAYDREAM_JUDGE_* env surface."""
+    """Build the judge client from the DAYDREAM_JUDGE_* env surface.
+
+    Provider is fail-closed: exactly ``anthropic`` | ``openai-compatible`` is
+    accepted (absent -> default ``anthropic``); anything else raises before any
+    request. The provider's base URL is resolved and the initial request URL is
+    validated against the effective judge-host allowlist at build time.
+    """
     provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
     model = env.get(_ENV_MODEL)
     api_key = env.get(_ENV_API_KEY)
     if not model or not api_key:
         raise VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
+    if provider not in {"anthropic", "openai-compatible"}:
+        raise VerifierError(
+            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
+        )
     if provider == "anthropic":
-        return AnthropicJudgeClient(api_key, model)
-    return OpenAIJudgeClient(
-        api_key, model, base_url=resolve_base_url(api_key, env.get(_ENV_BASE_URL))
-    )
+        return AnthropicJudgeClient(
+            api_key,
+            model,
+            allowlist=_effective_allowlist("anthropic", _ANTHROPIC_MESSAGES_URL, env),
+        )
+    base_url = resolve_base_url(api_key, env.get(_ENV_BASE_URL))
+    allowlist = _effective_allowlist("openai-compatible", base_url, env)
+    initial_url = base_url.rstrip("/") + _CHAT_COMPLETIONS_PATH
+    _validate_base_url(initial_url, allowlist)  # fail-closed before any request
+    return OpenAIJudgeClient(api_key, model, base_url=base_url, allowlist=allowlist)
 
 
 def main() -> int:
