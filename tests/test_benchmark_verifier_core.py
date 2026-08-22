@@ -10,6 +10,7 @@ from daydream.benchmark.harbor.verifier_core import (
     parse_candidate_finding,
     parse_gold_finding,
     validate_candidate_artifact,
+    validate_gold_set,
 )
 
 
@@ -210,3 +211,18 @@ def test_artifact_rejects_over_one_mib():
 def test_artifact_rejects_over_100_findings():
     with pytest.raises(VerifierError):
         validate_candidate_artifact(_artifact(_valid_findings(101)))
+
+def test_gold_set_accepts_and_returns_models():
+    gs = validate_gold_set([_gold(), _gold(finding_id="b" * 64, title="B")])
+    assert len(gs) == 2 and all(isinstance(g, GoldFinding) for g in gs)
+
+
+def test_gold_set_rejects_over_50():
+    many = [_gold(finding_id=(hex(i)[2:].zfill(64)), title=f"f{i}") for i in range(51)]
+    with pytest.raises(VerifierError):
+        validate_gold_set(many)
+
+
+def test_gold_set_rejects_invalid_member():
+    with pytest.raises(VerifierError):
+        validate_gold_set([_gold(severity="nope")])

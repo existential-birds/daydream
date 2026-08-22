@@ -280,3 +280,10 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
             raise VerifierError("duplicate candidate_id in artifact")
         ids.add(finding.candidate_id)
     return parsed
+
+
+def validate_gold_set(raw: list[dict[str, object]]) -> list[GoldFinding]:
+    """Validate a gold set against the 50-finding cap and field limits."""
+    if len(raw) > MAX_GOLD_FINDINGS:
+        raise VerifierError("gold set exceeds 50 findings")
+    return [parse_gold_finding(f) for f in raw]
