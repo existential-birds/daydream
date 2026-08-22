@@ -175,7 +175,7 @@ def _finding_kwargs(
         raise VerifierError(f"{side} finding must be a dict")
     validate_exact_keys(
         raw,
-        {id_key, "title", "body", "severity", "path", "start_line", "end_line"},
+        CANDIDATE_FINDING_KEYS if side == "candidate" else GOLD_FINDING_KEYS,
         f"{side} finding",
     )
     try:

@@ -509,19 +509,64 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
     return parsed
 
 
+def _read_gold_bytes(gold_path: Path, expected_sha256: str) -> list[Any]:
+    """Read the gold set as raw bytes, digest-checked, parsed, and list-validated.
+
+    Symmetric to ``_read_artifact_bytes`` for the trusted gold half: read the
+    raw bytes, verify the sha256 against the compiler-rendered sentinel, parse
+    the JSON, and assert the payload is a list. No raw-size cap applies -- gold
+    is shipped, read-only task data while the candidate artifact is the
+    attacker-controlled surface.
+    """
+    try:
+        gold_bytes = gold_path.read_bytes()
+    except FileNotFoundError:
+        raise VerifierError(f"input file not found: {gold_path}") from None
+    except OSError as exc:
+        raise VerifierError(f"could not read {gold_path}: {exc}") from exc
+    if hashlib.sha256(gold_bytes).hexdigest() != expected_sha256:
+        raise VerifierError("gold digest mismatch")
+    try:
+        gold_raw = json.loads(gold_bytes)
+    except json.JSONDecodeError:
+        raise VerifierError(f"gold set is not valid JSON: {gold_path}") from None
+    if not isinstance(gold_raw, list):
+        raise VerifierError("gold set must be a JSON list")
+    return gold_raw
+
+
 def _load_verifier_metadata(gold_path: Path) -> dict[str, Any]:
     """Load the sibling immutable task-bound verifier metadata beside the gold file.
 
     Requires the ``{schema_version, case_id, base_ref, head_ref,
     template_version, gold_sha256}`` object the compiler renders per case; a
-    missing/dict-violating field raises ``VerifierError``.
+    missing/dict-violating field raises ``VerifierError``. The versioned shape
+    is gated: ``schema_version`` must be 1 (parity with the candidate
+    artifact's own gate in ``verifier_core``) and ``template_version`` must be
+    a non-empty string, so a mismatched metadata schema fails the task whole
+    rather than mis-binding it.
     """
     meta = _read_json(gold_path.parent / "verifier-metadata.json")
     if not isinstance(meta, dict):
         raise VerifierError("verifier metadata must be a JSON object")
-    for field in ("case_id", "base_ref", "head_ref", "gold_sha256"):
+    for field in (
+        "schema_version",
+        "case_id",
+        "base_ref",
+        "head_ref",
+        "template_version",
+        "gold_sha256",
+    ):
         if field not in meta:
             raise VerifierError(f"verifier metadata missing required field {field}")
+    if meta["schema_version"] != 1:
+        raise VerifierError(
+            f"unsupported verifier metadata schema_version {meta['schema_version']!r}"
+        )
+    if not isinstance(meta["template_version"], str) or not meta["template_version"].strip():
+        raise VerifierError(
+            "verifier metadata template_version must be a non-empty string"
+        )
     return meta
 
 
@@ -587,20 +632,7 @@ def run_verifier(
             if artifact_raw[field] != metadata[field]:
                 raise VerifierError(f"candidate {field} does not match the bound task")
 
-        try:
-            gold_bytes = Path(gold_path).read_bytes()
-        except FileNotFoundError:
-            raise VerifierError(f"input file not found: {gold_path}") from None
-        except OSError as exc:
-            raise VerifierError(f"could not read {gold_path}: {exc}") from exc
-        if hashlib.sha256(gold_bytes).hexdigest() != metadata["gold_sha256"]:
-            raise VerifierError("gold digest mismatch")
-        try:
-            gold_raw = json.loads(gold_bytes)
-        except json.JSONDecodeError:
-            raise VerifierError(f"gold set is not valid JSON: {Path(gold_path)}") from None
-        if not isinstance(gold_raw, list):
-            raise VerifierError("gold set must be a JSON list")
+        gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])
         gold_parsed = verifier_core.validate_gold_set(gold_raw)
 
         verdicts: list[verifier_core.Verdict] = []
