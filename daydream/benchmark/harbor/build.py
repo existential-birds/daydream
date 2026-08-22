@@ -22,7 +22,7 @@ from pathlib import Path
 from daydream.benchmark import schema, snapshot, storage
 from daydream.benchmark.harbor import verifier_core as vc
 
-TEMPLATE_VERSION = "1"
+TEMPLATE_VERSION = "2"
 
 
 _METRIC_AGG_BEGIN = "# __AGGREGATION_BODY_BEGIN__"
