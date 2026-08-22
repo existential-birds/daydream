@@ -571,3 +571,15 @@ def test_stale_state_error_is_exported_curation_subtype():
     import daydream.benchmark as bm
     assert issubclass(bm.StaleStateError, bm.CurationError)
 
+
+def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    cu.accept_candidate(ws, case_id, src)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    with pytest.raises(cu.StaleStateError):
+        cu.mark_ready(ws, case_id, head_sha="f" * 40)   # stale attestation SHA
+    assert path.read_bytes() == before                    # a rejected mutation writes nothing
+
