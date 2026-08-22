@@ -188,10 +188,41 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path):
         else:  # manifest
             # A complete journal is verified against the after-state and kept.
             assert target.read_text() == "after"
-        if boundary not in ("staged", "backup"):
-            assert not (tmp_path / "transactions").exists() or not list(
-                (tmp_path / "transactions").iterdir()
-            )
+        assert not (tmp_path / "transactions").exists() or not list(
+            (tmp_path / "transactions").iterdir()
+        )
+
+
+def test_prejournal_stage_residue_is_removed(tmp_path):
+    target = tmp_path / "t.yaml"
+    target.write_text("before")
+    with Transaction(tmp_path, op_id="op-pre", kind="write") as tx:
+        _stage(tx, target, "after")
+        tx.inject_crash("staged")  # stage-*.bin written, NO journal.json
+    recover_startup(tmp_path)
+    assert target.read_text() == "before"  # untouched
+    txn = tmp_path / "transactions"
+    assert not txn.exists() or not list(txn.iterdir())  # residue gone
+
+
+def test_prejournal_backup_residue_is_removed(tmp_path):
+    target = tmp_path / "t.yaml"
+    target.write_text("before")
+    with Transaction(tmp_path, op_id="op-pre2", kind="write") as tx:
+        _stage(tx, target, "after")
+        tx.inject_crash("backup")  # stage + backup written, NO journal.json
+    recover_startup(tmp_path)
+    txn = tmp_path / "transactions"
+    assert not txn.exists() or not list(txn.iterdir())
+
+
+def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path):
+    op = tmp_path / "transactions" / "op-x"
+    op.mkdir(parents=True)
+    (op / "foreign.txt").write_text("not residue")
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+    assert (op / "foreign.txt").read_text() == "not residue"  # left untouched, never guessed/deleted
 
 
 def test_import_crash_transaction_restores_before_or_after(tmp_path):

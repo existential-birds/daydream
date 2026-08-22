@@ -15,6 +15,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from contextlib import suppress
@@ -533,17 +534,39 @@ def recover_startup(
     absent markers, and a ``complete`` journal is verified against after-state
     digests then cleared. With ``indexed``/``on_disk`` supplied and no journal
     present, the orphan rule applies: an on-disk import/case/bundle not in
-    ``indexed``, or an indexed file missing from disk, is corruption.
+    ``indexed``, or an indexed file missing from disk, is corruption. When no
+    journal is present, recovery still runs: it removes only positively-
+    identified pre-journal ``stage-*.bin``/``backup-*.bin`` residue and treats
+    any unidentifiable entry under ``transactions/`` as corruption.
     """
     root = Path(root)
     txn_root = root / "transactions"
     journal_files: list[Path] = []
+    residue_dirs: list[Path] = []
     if txn_root.exists():
         for op_dir in txn_root.iterdir():
-            if op_dir.is_dir():
-                jf = op_dir / "journal.json"
-                if jf.exists():
-                    journal_files.append(jf)
+            if op_dir.is_symlink():
+                # Never follow a symlink under transactions/ — it is
+                # unidentifiable residue and fails closed.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable symlink under transactions: {op_dir.name}"
+                )
+            if not op_dir.is_dir():
+                # A plain file under transactions/ is not our residue -> fail closed.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable file under transactions: {op_dir.name}"
+                )
+            jf = op_dir / "journal.json"
+            if jf.exists():
+                journal_files.append(jf)
+            elif _is_transaction_residue(op_dir):
+                residue_dirs.append(op_dir)
+            else:
+                # A dir with unknown contents is not positively-identified
+                # residue — fail closed and leave it untouched.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable residue under transactions: {op_dir.name}"
+                )
 
     if journal_files:
         # Phase 1: validate every journal + collect claimed target rels,
@@ -579,10 +602,40 @@ def recover_startup(
         _empty_transactions(root)
         return
 
+    # No journal present: remove only positively-identified pre-journal
+    # residue, then apply the orphan rule if indexed/on_disk were supplied.
+    for op_dir in residue_dirs:
+        shutil.rmtree(op_dir)
     if indexed is None or on_disk is None:
         return
 
     _apply_orphan_rule(root, indexed, on_disk)
+
+
+_TRANSACTION_RESIDUE_RE = re.compile(r"^(?:stage|backup)-\d{4}\.bin$")
+
+
+def _is_transaction_residue(op_dir: Path) -> bool:
+    """True iff ``op_dir`` is positively-identified pre-journal residue.
+
+    A residue dir is a real directory (not a symlink) whose *only* contents
+    are regular files matching the exact ``stage-NNNN.bin`` / ``backup-NNNN.bin``
+    staging patterns. A dir containing ``journal.json``, a subdirectory, a
+    foreign file, or any symlink is -- by definition -- not residue, so
+    recovery never guesses and never deletes anything it cannot identify.
+    """
+    if not op_dir.is_dir() or op_dir.is_symlink():
+        return False
+    try:
+        entries = list(op_dir.iterdir())
+    except OSError:
+        return False
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            return False
+        if not _TRANSACTION_RESIDUE_RE.match(entry.name):
+            return False
+    return True
 
 
 def _empty_transactions(root: Path) -> None:
