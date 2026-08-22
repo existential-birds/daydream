@@ -242,3 +242,48 @@ def bundle_heads(bundle_path: Path) -> set[str]:
         if len(parts) >= 2:
             heads.add(parts[1])
     return heads
+
+
+def validate_offline_clone(
+    bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
+) -> None:
+    """Clone the bundle with network disabled and verify refs/trees/diff.
+
+    Raises :class:`GitError` naming the failing check on any clone error,
+    missing ref, tree mismatch, or diff-digest mismatch. Returns ``None``.
+    """
+    bundle_path = Path(bundle_path)
+    import tempfile
+
+    clone_dir = tempfile.mkdtemp(prefix="clone-", dir=str(workdir))
+    try:
+        proc = git_ops._run_git(
+            Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), clone_dir],
+            retries=0, timeout=120,
+        )
+        if proc.returncode != 0:
+            raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
+        for ref, expected in (
+            ("refs/remotes/origin/base", base_tree),
+            ("refs/remotes/origin/head", head_tree),
+        ):
+            got = _run_git_cwd(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
+            if got != expected:
+                raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
+        diff = _run_git_cwd(clone_dir, ["diff", "--binary", "refs/remotes/origin/base", "refs/remotes/origin/head"], capture_bytes=True)
+        if hashlib.sha256(diff).hexdigest() != diff_sha256:
+            raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
+    finally:
+        shutil.rmtree(clone_dir, ignore_errors=True)
+    return None
+
+
+def _run_git_cwd(repo: Path, args: list[str], *, capture_bytes: bool = False) -> str | bytes:
+    """Run git and raise GitError on non-zero exit (offline-clone helper)."""
+    proc = git_ops._run_git(repo, args, retries=0, capture_bytes=capture_bytes, timeout=30)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace") if isinstance(proc.stderr, bytes) else proc.stderr
+        raise git_ops.GitError(f"git {' '.join(args)} failed: {stderr.strip()}")
+    if capture_bytes:
+        return proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
+    return proc.stdout.strip()

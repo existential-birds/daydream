@@ -208,3 +208,28 @@ def test_bundle_two_refs_deterministic(tmp_path):
     # determinism: rebuild and compare bytes
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
     assert sn.sha256_of(bundle) == sn.sha256_of(bundle)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: offline-clone validation
+# ---------------------------------------------------------------------------
+
+
+def test_offline_clone_validates(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
+    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+    sn.validate_offline_clone(bundle, _seed_base_tree(), _seed_head_tree(), diff_sha,
+                              workdir=tmp_path)
+    bad = tmp_path / "snapshots" / "bad.bundle"
+    bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
+    with pytest.raises(git_ops.GitError):
+        sn.validate_offline_clone(bad, _seed_base_tree(), _seed_head_tree(), diff_sha,
+                                  workdir=tmp_path)
