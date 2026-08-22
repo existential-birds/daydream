@@ -639,13 +639,20 @@ def _is_transaction_residue(op_dir: Path) -> bool:
 
 
 def _empty_transactions(root: Path) -> None:
-    """Remove any leftover per-op journal dirs (keep the empty ``transactions/`` root)."""
+    """Clean leftover per-op dirs, keeping the empty ``transactions/`` root.
+
+    Only dirs that pass :func:`_is_transaction_residue` (positive
+    identification) are removed. Symlinks, foreign files, and unknown subdirs
+    are never touched here — ``recover_startup`` already raised on them before
+    this runs — and a failure to remove a positively-identified dir propagates
+    rather than being swallowed.
+    """
     txn_root = root / "transactions"
     if not txn_root.exists():
         return
     for op_dir in txn_root.iterdir():
-        if op_dir.is_dir():
-            shutil.rmtree(op_dir, ignore_errors=True)
+        if _is_transaction_residue(op_dir):
+            shutil.rmtree(op_dir)
 
 
 def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:

@@ -376,3 +376,36 @@ def test_disjoint_transactions_both_recover(tmp_path):
         _stage(tx, t2, "b-after"); tx.prepare()
     recover_startup(tmp_path)  # disjoint targets must both roll back cleanly
     assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
+
+
+def test_empty_transactions_never_follows_symlink(tmp_path):
+    # A journaled op dir exists so recover_startup reaches _empty_transactions,
+    # plus a symlink under transactions/ that must NOT be followed or deleted.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("keep me")
+    with Transaction(tmp_path, op_id="op-ok", kind="write") as tx:
+        _stage(tx, tmp_path / "target.yaml", "new")
+        tx.prepare()
+    (tmp_path / "transactions" / "op-link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(WorkspaceCorrupt):  # symlink residue is unidentifiable -> fail closed
+        recover_startup(tmp_path)
+    assert (outside / "precious.txt").read_text() == "keep me"  # never followed/deleted
+    assert (tmp_path / "transactions" / "op-link").is_symlink()  # never removed
+
+
+def test_empty_transactions_removes_only_positive_residue(tmp_path):
+    # Journaled dir is cleaned by _recover_one_journal; a leftover positively-
+    # identified residue dir is removed; a foreign file is left untouched.
+    with Transaction(tmp_path, op_id="op-j", kind="write") as tx:
+        _stage(tx, tmp_path / "a.yaml", "x")
+        tx.prepare()
+    residue = tmp_path / "transactions" / "op-residue"
+    residue.mkdir(parents=True)
+    (residue / "stage-0000.bin").write_bytes(b"stale")
+    foreign = tmp_path / "transactions" / "op-foreign"
+    foreign.mkdir()
+    (foreign / "note.txt").write_text("keep")
+    with pytest.raises(WorkspaceCorrupt):  # foreign op dir is unidentifiable
+        recover_startup(tmp_path)
+    assert (foreign / "note.txt").read_text() == "keep"  # foreign left untouched
