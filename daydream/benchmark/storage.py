@@ -232,7 +232,8 @@ class WorkspaceLock:
 # ``complete`` journal. Because the journal lives on the same filesystem as
 # the targets and every phase is fsynced before the next begins, a crash at
 # any boundary restores either the whole before-state or the whole after-state
-# — never a checksum-drifted partial.
+# — never a checksum-drifted partial. Recovery is mode-safe: verified targets
+# keep ``0600``, and scaffold dirs kept by ``_remove_created_dirs`` stay ``0700``.
 
 
 @dataclass
@@ -812,6 +813,8 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
             raise WorkspaceCorrupt(
                 f"{root}: complete journal {t['rel']} digest mismatch (expected {t['after_digest']}, got {actual})"
             )
+        # Recovery never widens a private target's mode, even if it drifted.
+        os.chmod(target, 0o600)
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
 

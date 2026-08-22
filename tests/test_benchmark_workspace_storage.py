@@ -1,4 +1,5 @@
 import fcntl
+import os
 import stat
 
 import pytest
@@ -439,3 +440,30 @@ def test_single_target_target_boundary(tmp_path):
     recover_startup(root)
     assert t.read_text() == "before"
     assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
+
+
+def test_verify_complete_preserves_0600_target(tmp_path):
+    t = tmp_path / "target.yaml"; t.write_text("old"); os.chmod(t, 0o600)
+    with Transaction(tmp_path, op_id="op-c", kind="write") as tx:
+        _stage(tx, t, "new"); tx.commit(); tx.force_state("complete")
+    recover_startup(tmp_path)
+    assert stat.S_IMODE(t.stat().st_mode) == 0o600
+
+
+def test_rollback_preserves_0700_scaffold_dir(tmp_path):
+    with Transaction(tmp_path, op_id="op-i", kind="init") as tx:
+        tx.create_dir("cases"); tx.stage("cases/keep.yaml", b"keep")
+        tx.prepare()
+    (tmp_path / "cases" / "keep.yaml").write_text("keep")  # non-empty -> dir preserved
+    recover_startup(tmp_path)
+    if (tmp_path / "cases").exists():
+        assert stat.S_IMODE((tmp_path / "cases").stat().st_mode) == 0o700
+
+
+def test_rollback_committing_restored_target_is_0600(tmp_path):
+    t = tmp_path / "target.yaml"; t.write_text("old"); os.chmod(t, 0o600)
+    with Transaction(tmp_path, op_id="op-r", kind="write") as tx:
+        _stage(tx, t, "new"); tx.begin_commit(); tx.inject_crash()
+    recover_startup(tmp_path)
+    assert t.read_text() == "old"
+    assert stat.S_IMODE(t.stat().st_mode) == 0o600
