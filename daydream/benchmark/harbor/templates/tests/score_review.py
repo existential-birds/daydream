@@ -42,6 +42,32 @@ _PROMPT_CAP_BYTES = 24 * 1024
 _MAX_RETRIES = 3
 _REQUEST_TIMEOUT = 60.0
 
+_ESCAPED_FINDING_TAGS = {
+    "<gold_finding>": "&lt;gold_finding&gt;",
+    "</gold_finding>": "&lt;/gold_finding&gt;",
+    "<candidate_finding>": "&lt;candidate_finding&gt;",
+    "</candidate_finding>": "&lt;/candidate_finding&gt;",
+}
+
+
+def _escape_finding_delimiters(text: str) -> str:
+    """Neutralize the ``<..._finding>`` block delimiters in untrusted text.
+
+    The gold/candidate title, severity, path, and body are untrusted reference
+    data, not instructions. A literal closing tag inside one block would
+    terminate its structural block early and leak the remainder into the other
+    role's region; a literal opening tag could shift the boundary or synthesize
+    extra blocks. Escape all four delimiters so the injected text can never form
+    a real structural delimiter.
+    """
+    return (
+        text.replace("<gold_finding>", _ESCAPED_FINDING_TAGS["<gold_finding>"])
+        .replace("</gold_finding>", _ESCAPED_FINDING_TAGS["</gold_finding>"])
+        .replace("<candidate_finding>", _ESCAPED_FINDING_TAGS["<candidate_finding>"])
+        .replace("</candidate_finding>", _ESCAPED_FINDING_TAGS["</candidate_finding>"])
+    )
+
+
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
 
@@ -62,18 +88,26 @@ def _render_filled(
     candidate_body: str,
 ) -> str:
     return template.format(
-        gold_title=gold.get("title", ""),
-        gold_severity=str(gold.get("severity") or ""),
-        gold_path=gold.get("path", ""),
+        gold_title=_escape_finding_delimiters(str(gold.get("title") or "")),
+        gold_severity=_escape_finding_delimiters(
+            str(gold.get("severity") or "")
+        ),
+        gold_path=_escape_finding_delimiters(str(gold.get("path") or "")),
         gold_start_line=gold.get("start_line", ""),
         gold_end_line=gold.get("end_line", ""),
-        gold_body=gold_body,
-        candidate_title=candidate.get("title", ""),
-        candidate_severity=str(candidate.get("severity") or ""),
-        candidate_path=candidate.get("path", ""),
+        gold_body=_escape_finding_delimiters(gold_body),
+        candidate_title=_escape_finding_delimiters(
+            str(candidate.get("title") or "")
+        ),
+        candidate_severity=_escape_finding_delimiters(
+            str(candidate.get("severity") or "")
+        ),
+        candidate_path=_escape_finding_delimiters(
+            str(candidate.get("path") or "")
+        ),
         candidate_start_line=candidate.get("start_line", ""),
         candidate_end_line=candidate.get("end_line", ""),
-        candidate_body=candidate_body,
+        candidate_body=_escape_finding_delimiters(candidate_body),
     )
 
 
