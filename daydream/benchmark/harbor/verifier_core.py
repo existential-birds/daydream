@@ -368,51 +368,18 @@ def maximum_matching(
 class Reward:
     """The 12-field §10 per-task reward output."""
 
-    reward: float
-    tp: int
-    fp: int
-    fn: int
-    precision: float
-    recall: float
-    f1: float
-    gold_count: int
-    candidate_count: int
-    clean_task: int
-    clean_pass: int
-    verifier_error: int
-
-    @classmethod
-    def _make(
-        cls,
-        *,
-        reward: float = 0.0,
-        tp: int = 0,
-        fp: int = 0,
-        fn: int = 0,
-        precision: float = 0.0,
-        recall: float = 0.0,
-        f1: float = 0.0,
-        gold_count: int = 0,
-        candidate_count: int = 0,
-        clean_task: int = 0,
-        clean_pass: int = 0,
-        verifier_error: int = 0,
-    ) -> "Reward":
-        """Build a Reward with the 12 \u00a710 fields defaulting to zero."""
-        return cls(
-            reward=reward,
-            tp=tp,
-            fp=fp,
-            fn=fn,
-            precision=precision,
-            recall=recall,
-            f1=f1,
-            gold_count=gold_count,
-            candidate_count=candidate_count,
-            clean_task=clean_task,
-            clean_pass=clean_pass,
-            verifier_error=verifier_error,
-        )
+    reward: float = 0.0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+    gold_count: int = 0
+    candidate_count: int = 0
+    clean_task: int = 0
+    clean_pass: int = 0
+    verifier_error: int = 0
 
     def to_dict(self) -> dict[str, float | int]:
         """Numeric-only dict with exactly the 12 §10 keys."""
@@ -449,7 +416,7 @@ def _finding_id(finding: object) -> str:
 
 
 def _empty_side_error(gold_count: int) -> Reward:
-    return Reward._make(reward=0.0, gold_count=gold_count, verifier_error=1)
+    return Reward(reward=0.0, gold_count=gold_count, verifier_error=1)
 
 
 def score_review(
@@ -466,17 +433,17 @@ def score_review(
     candidate_count = len(candidates)
 
     if gold_count == 0 and candidate_count == 0:
-        return Reward._make(
+        return Reward(
             reward=1.0, precision=1.0, recall=1.0, f1=1.0,
             clean_task=1, clean_pass=1,
         )
     if gold_count == 0:
-        return Reward._make(
+        return Reward(
             fp=candidate_count, recall=1.0,
             candidate_count=candidate_count, clean_task=1,
         )
     if candidate_count == 0:
-        return Reward._make(
+        return Reward(
             fn=gold_count, precision=1.0, gold_count=gold_count,
         )
 
@@ -490,7 +457,7 @@ def score_review(
     precision = tp / (tp + fp) if (tp + fp) else 1.0
     recall = tp / (tp + fn) if (tp + fn) else 1.0
     f1 = 0.0 if tp == 0 else _f1(precision, recall)
-    return Reward._make(
+    return Reward(
         reward=f1,
         tp=tp,
         fp=fp,
@@ -551,7 +518,7 @@ def reward_details(
         "matches": [
             {"gold_id": g, "candidate_id": c} for g, c in sorted(matches)
         ],
-        "unmatched_gold": [gid for gid in gold_ids if gid not in matched_gold],
+        "unmatched_gold": sorted(gid for gid in gold_ids if gid not in matched_gold),
         "unmatched_candidates": sorted(
             cid for cid in cand_ids if cid not in matched_candidates
         ),
@@ -600,7 +567,10 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
     mean_task_score = sum(rewards) / task_count if task_count else 1.0
     micro_precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) else 1.0
     micro_recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) else 1.0
-    micro_f1 = _f1(micro_precision, micro_recall)
+    if total_tp == 0 and (total_tp + total_fp > 0 or total_tp + total_fn > 0):
+        micro_f1 = 0.0
+    else:
+        micro_f1 = _f1(micro_precision, micro_recall)
     clean_accuracy = clean_correct / clean_total if clean_total else 1.0
 
     return {

@@ -27,6 +27,17 @@ def test_zero_denominator_metrics_are_one():
     assert (m["micro_precision"], m["micro_recall"], m["micro_f1"]) == (1.0, 1.0, 1.0)
 
 
+def test_all_missed_pooled_f1_is_zero():
+    # tp==0 with non-zero FP/FN: pooled denominators are non-zero, so micro-F1
+    # must be 0.0, consistent with score_review's tp==0 rule (vs the
+    # genuinely zero-denominator 1.0 case above).
+    m = aggregate_metrics([_row(0.0, 0, 5, 5)])
+    assert m["micro_precision"] == 0.0
+    assert m["micro_recall"] == 0.0
+    assert m["micro_f1"] == 0.0
+    assert m["mean_task_score"] == 0.0
+
+
 def test_mean_task_score_and_counts():
     rows = [_row(1.0, 3, 0, 0), _row(0.5, 1, 1, 1), None, _row(0.0, 0, 0, 0, verifier_error=1)]
     m = aggregate_metrics(rows)

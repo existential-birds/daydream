@@ -374,7 +374,7 @@ def test_reward_details_shape_and_no_source_leak():
     for key in ("verdicts", "matches", "unmatched_gold", "unmatched_candidates"):
         assert key in details
     assert details["unmatched_gold"] == ["b" * 64]
-    assert sorted(details["unmatched_candidates"]) == sorted([cands[1].candidate_id])
+    assert details["unmatched_candidates"] == [cands[1].candidate_id]
     blob = reward_details_to_json(details)
     assert "same bug" in blob  # reasoning is kept
     assert "Cache key not scoped" not in blob  # finding body/title never leaks
