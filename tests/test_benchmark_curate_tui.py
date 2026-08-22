@@ -289,3 +289,27 @@ def test_quit_ends_and_single_case_defer_ends(tmp_path, fake_gh):
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     assert run_curate_tui(ws, read_line=_scripted("q")) == 0
     assert run_curate_tui(ws, case_id, read_line=_scripted("d")) == 0  # single-case d ends
+
+
+def test_ctrl_c_preserves_prior_actions_and_cleans_temp(tmp_path, fake_gh, capsys):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
+
+    reads = iter(["a", "1", None, "q"])   # a,1 = accept; None=(Ctrl-C); q quits after
+    def interrupted(_prompt):
+        nxt = next(reads)
+        if nxt is None:
+            raise KeyboardInterrupt
+        return nxt
+    run_curate_tui(ws, case_id, read_line=interrupted)
+
+    raw = load_yaml_strict(path)
+    assert len(raw["curation"]["findings"]) == 1          # prior action persisted
+    assert raw["curation"]["findings"][0]["provenance"]["source_ids"] == [src]
+    out = capsys.readouterr()
+    assert "interrupted" in out.out
+    assert "Traceback" not in out.err

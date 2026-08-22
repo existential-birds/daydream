@@ -473,15 +473,19 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
     """Run one case session; returns ``"quit"`` or ``"done"``."""
     print(render_case(cu.get_case(root, case_id)))
     while True:
-        action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
-        if action not in _ACTIONS:
-            print(f"unknown action: {action}")
-            continue
-        outcome = _run_action(action, root, case_id, cu.get_case(root, case_id), read_line)
-        if outcome in ("quit", "done"):
-            return outcome
-        if outcome == "rerender":
-            print(render_case(cu.get_case(root, case_id)))
+        try:
+            action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
+            if action not in _ACTIONS:
+                print(f"unknown action: {action}")
+                continue
+            outcome = _run_action(action, root, case_id, cu.get_case(root, case_id), read_line)
+            if outcome in ("quit", "done"):
+                return outcome
+            if outcome == "rerender":
+                print(render_case(cu.get_case(root, case_id)))
+        except KeyboardInterrupt:
+            print("interrupted \u2014 prior actions preserved")
+
 
 
 
@@ -502,21 +506,24 @@ def run_curate_tui(
         _run_case(root, case_id, read)
         return 0
     while True:
-        cases = cu.list_cases(root)
-        print(render_index_table(cases))
-        text = _prompt(read, "case (id or number), or q: ")
-        if text in ("a", "A"):
-            continue
-        stripped = text.strip()
-        if stripped in ("q", "Q"):
-            return 0
-        selected: str = stripped
-        if stripped.isdigit():
-            index = int(stripped) - 1
-            if not (0 <= index < len(cases)):
-                print(f"no case at row {stripped}; try again")
+        try:
+            cases = cu.list_cases(root)
+            print(render_index_table(cases))
+            text = _prompt(read, "case (id or number), or q: ")
+            if text in ("a", "A"):
                 continue
-            selected = cases[index]["case_id"]
-        if _run_case(root, selected, read) == "quit":
-            return 0
+            stripped = text.strip()
+            if stripped in ("q", "Q"):
+                return 0
+            selected: str = stripped
+            if stripped.isdigit():
+                index = int(stripped) - 1
+                if not (0 <= index < len(cases)):
+                    print(f"no case at row {stripped}; try again")
+                    continue
+                selected = cases[index]["case_id"]
+            if _run_case(root, selected, read) == "quit":
+                return 0
+        except KeyboardInterrupt:
+            print("interrupted \u2014 prior actions preserved")
 
