@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any, Protocol
@@ -415,8 +417,170 @@ async def judge_pairs(
     return await asyncio.gather(*(_judge(pair) for pair in pairs))
 
 
+_ENV_PROVIDER = "DAYDREAM_JUDGE_PROVIDER"
+_ENV_MODEL = "DAYDREAM_JUDGE_MODEL"
+_ENV_API_KEY = "DAYDREAM_JUDGE_API_KEY"
+_ENV_BASE_URL = "DAYDREAM_JUDGE_BASE_URL"
+_DEFAULT_PROVIDER = "anthropic"
+
+
+class _CountingClient:
+    """Wraps a judge client to observe request counts and capture errors."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.requests = 0
+        self.errors: list[str] = []
+
+    async def complete_json(self, **kwargs: Any) -> Any:
+        self.requests += 1
+        try:
+            return await self._inner.complete_json(**kwargs)
+        except Exception as exc:
+            self.errors.append(str(exc))
+            raise
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise VerifierError(f"input file not found: {path}") from None
+    except (json.JSONDecodeError, OSError) as exc:
+        raise VerifierError(f"could not read {path}: {exc}") from exc
+
+
+def _atomic_write(out_dir: Path, filename: str, payload: str) -> None:
+    """Write a file atomically via temp + rename so a crash never leaves a partial file."""
+    tmp = out_dir / f".{filename}.{os.getpid()}.tmp"
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(tmp, out_dir / filename)
+
+
+def _error_details(provider: str, model: str, request_counts: dict[str, int], errors: list[str]) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "request_counts": request_counts,
+        "errors": errors,
+        "verdicts": [],
+        "matches": [],
+        "unmatched_gold": [],
+        "unmatched_candidates": [],
+    }
+
+
+def run_verifier(
+    gold_path: str | Path,
+    artifact_path: str | Path,
+    out_dir: str | Path,
+    *,
+    client: Any,
+    env: dict[str, Any],
+) -> verifier_core.Reward:
+    """Validate gold + the candidate artifact, judge all pairs, score, and write atomically.
+
+    Any ``VerifierError`` (validation, judging, parsing, exhausted retries, or a
+    missing client) becomes a ``Reward(reward=0, verifier_error=1)`` — the task
+    fails whole, never reporting a partial score. Both output files are written
+    atomically (temp + rename). Never emits source or diffs.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    env = env or {}
+    provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+    model = env.get(_ENV_MODEL) or ""
+    request_counts: dict[str, int] = {"requests": 0}
+    errors: list[str] = []
+    gold_parsed: list[verifier_core.GoldFinding] = []
+    detail_prefix = {"provider": provider, "model": model, "request_counts": request_counts, "errors": errors}
+
+    try:
+        if client is None:
+            raise VerifierError("no judge client configured (missing DAYDREAM_JUDGE_*)")
+        gold_raw = _read_json(Path(gold_path))
+        if not isinstance(gold_raw, list):
+            raise VerifierError("gold set must be a JSON list")
+        gold_parsed = verifier_core.validate_gold_set(gold_raw)
+        artifact_raw = _read_json(Path(artifact_path))
+        verifier_core.validate_candidate_artifact(artifact_raw)
+
+        verdicts: list[verifier_core.Verdict] = []
+        matches: set[tuple[str, str]] = set()
+        counting: _CountingClient | None = None
+
+        if gold_parsed and artifact_raw.get("findings"):
+            counting = _CountingClient(client)
+            verdicts = asyncio.run(judge_pairs(gold_raw, artifact_raw["findings"], client=counting))
+            cand_ids = [
+                c.get("candidate_id", "") for c in artifact_raw["findings"]
+            ]
+            gold_ids = [g.finding_id for g in gold_parsed]
+            retained = verifier_core.retained_edges(verdicts, gold_ids, cand_ids)
+            matches = verifier_core.maximum_matching(retained, gold_ids, cand_ids)
+            request_counts["requests"] = counting.requests
+            if counting.errors:
+                errors.extend(counting.errors)
+
+        reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
+        candidates = verifier_core.validate_candidate_artifact(artifact_raw)
+        inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
+        details = {**inner, **detail_prefix}
+        _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(reward))
+        _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+        return reward
+    except VerifierError as exc:
+        errors.insert(0, str(exc))
+        error_reward = verifier_core.Reward(
+            reward=0.0, gold_count=len(gold_parsed), verifier_error=1
+        )
+        details = _error_details(provider, model, request_counts, errors)
+        _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(error_reward))
+        _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+        return error_reward
+
+
+def _build_client(env: dict[str, Any]) -> Any:
+    """Build the judge client from the DAYDREAM_JUDGE_* env surface."""
+    provider = env.get(_ENV_PROVIDER) or _DEFAULT_PROVIDER
+    model = env.get(_ENV_MODEL)
+    api_key = env.get(_ENV_API_KEY)
+    if not model or not api_key:
+        raise VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
+    if provider == "anthropic":
+        return AnthropicJudgeClient(api_key, model)
+    return OpenAIJudgeClient(
+        api_key, model, base_url=resolve_base_url(api_key, env.get(_ENV_BASE_URL))
+    )
+
+
 def main() -> None:
-    ...
+    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON."""
+    gold_path = Path(__file__).with_name("golden-review.json")
+    artifact_path = Path("/logs/artifacts/review.json")
+    out_dir = Path("/logs/verifier")
+    env = {
+        name: os.environ.get(name)
+        for name in (_ENV_PROVIDER, _ENV_MODEL, _ENV_API_KEY, _ENV_BASE_URL)
+    }
+    try:
+        client = _build_client(env)
+    except VerifierError:
+        client = None
+    try:
+        reward = run_verifier(gold_path, artifact_path, out_dir, client=client, env=env)
+    except Exception:
+        reward = verifier_core.Reward(reward=0.0, gold_count=0, verifier_error=1)
+    payload = (
+        reward.to_dict()
+        if hasattr(reward, "to_dict")
+        else {
+            "verifier_error": int(getattr(reward, "verifier_error", 0)),
+            "reward": float(getattr(reward, "reward", 0.0)),
+        }
+    )
+    print(json.dumps(payload))
+    sys.exit(1 if getattr(reward, "verifier_error", 0) else 0)
 
 
 if __name__ == "__main__":

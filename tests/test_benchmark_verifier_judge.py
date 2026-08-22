@@ -9,6 +9,7 @@ injected fake HTTP client against ``tmp_path``.
 
 
 import asyncio
+import json
 
 import pytest
 
@@ -311,3 +312,86 @@ async def test_judge_pairs_caps_concurrency_and_enforces_pair_cap(sr_module) -> 
     ]
     with pytest.raises(sr.VerifierError):
         await sr.judge_pairs(big_gold, big_cand, client=CountingClient())
+
+
+_REWARD_KEYS = {
+    "reward",
+    "tp",
+    "fp",
+    "fn",
+    "precision",
+    "recall",
+    "f1",
+    "gold_count",
+    "candidate_count",
+    "clean_task",
+    "clean_pass",
+    "verifier_error",
+}
+
+
+def _gold_list(n: int = 2) -> list[dict]:
+    return [
+        {
+            "finding_id": f"{i:064x}",
+            "title": "t",
+            "body": "b",
+            "severity": "high",
+            "path": "p",
+            "start_line": 1,
+            "end_line": 1,
+        }
+        for i in range(n)
+    ]
+
+
+def _candidate_artifact(sr_module, *, case_id: str = "case-x", n: int = 2) -> dict:
+    finding_gen = []
+    for i in range(n):
+        f = {
+            "title": "t",
+            "body": "b",
+            "severity": "high",
+            "path": "p",
+            "start_line": 1,
+            "end_line": 1,
+        }
+        f["candidate_id"] = sr_module.verifier_core.derive_candidate_id(case_id, f, i)
+        finding_gen.append(f)
+    return {
+        "schema_version": 1,
+        "case_id": case_id,
+        "base_ref": "base",
+        "head_ref": "head",
+        "findings": finding_gen,
+    }
+
+
+def test_run_verifier_writes_reward_and_details_atomically(sr_module, tmp_path, monkeypatch) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(2)))
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr)))
+    out_dir = tmp_path / "out"
+
+    class FakeClient:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 0.9, "reasoning": "same"}
+
+    env = {
+        "DAYDREAM_JUDGE_PROVIDER": "anthropic",
+        "DAYDREAM_JUDGE_MODEL": "m",
+        "DAYDREAM_JUDGE_API_KEY": "sk-ant-x",
+        "DAYDREAM_JUDGE_BASE_URL": None,
+    }
+    reward = sr.run_verifier(gold_path, artifact_path, out_dir, client=FakeClient(), env=env)
+
+    assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
+    rj = json.loads((out_dir / "reward.json").read_text())
+    assert set(rj.keys()) == _REWARD_KEYS
+    assert all(isinstance(v, (int, float)) for v in rj.values())
+    details = json.loads((out_dir / "reward-details.json").read_text())
+    assert details["provider"] == "anthropic" and details["model"] == "m"
+    assert "request_counts" in details and "errors" in details
+    assert "src/" not in json.dumps(details)  # never source/diffs
