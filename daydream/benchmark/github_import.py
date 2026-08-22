@@ -756,6 +756,42 @@ def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[str, st
     )
 
 
+def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
+    """Deterministic sha256 over the header fields that feed the compiled context.
+
+    Covers ``title``/``body``/``base``/``head`` (sha + ref) — the task-input
+    contract a reviewer is shown — computed at refresh time without a full
+    compile. A body/title/base/head change flips it; metadata-only changes
+    (updated_at, html_url, merged state) do not.
+    """
+    pr = doc.pull_request
+    payload = {
+        "title": str(pr.title or ""),
+        "body": str(pr.body or ""),
+        "base_sha": pr.base.sha,
+        "base_ref": pr.base.ref,
+        "head_sha": pr.head.sha,
+        "head_ref": pr.head.ref,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _task_input_signature_from_raw(raw: dict[str, Any]) -> str:
+    """The task-input signature computed over a raw import document's dict."""
+    pr = raw.get("pull_request") or {}
+    base = pr.get("base") or {}
+    head = pr.get("head") or {}
+    payload = {
+        "title": str(pr.get("title") or ""),
+        "body": str(pr.get("body") or ""),
+        "base_sha": base.get("sha"),
+        "base_ref": base.get("ref"),
+        "head_sha": head.get("sha"),
+        "head_ref": head.get("ref"),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
@@ -944,22 +980,31 @@ def _stage_fetch_failure(
 
 def _prior_import_state(
     root: Path, raw: dict[str, Any], number: int
-) -> tuple[frozenset[tuple[str, str]] | None, dict[str, dict[str, Any]], str]:
-    """The prior snapshot signature, prior case curations, and the import file path.
+) -> tuple[
+    frozenset[tuple[str, str]] | None,
+    str | None,
+    dict[str, dict[str, Any]],
+    str,
+]:
+    """The prior evidence signature, task-input signature, curations, and import path.
 
-    A missing/unreadable prior snapshot yields a ``None`` signature (so a
-    refresh cannot compare); an unreadable curation file is skipped, never fatal.
+    A missing/unreadable prior snapshot yields ``None`` for both signatures (so
+    a refresh cannot compare); an unreadable curation file is skipped, never
+    fatal.
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
     prior_sig: frozenset[tuple[str, str]] | None = None
+    prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
         try:
             prior_raw = storage.load_json_strict(root / existing["import_file"])
             prior_sig = _evidence_signature_from_raw(prior_raw)
+            prior_task_sig = _task_input_signature_from_raw(prior_raw)
         except Exception:
             prior_sig = None
+            prior_task_sig = None
         for case_id in existing.get("case_ids", []):
             try:
                 cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
@@ -967,7 +1012,7 @@ def _prior_import_state(
                     prior_curations[case_id] = cur
             except Exception:
                 pass
-    return prior_sig, prior_curations, import_file
+    return prior_sig, prior_task_sig, prior_curations, import_file
 
 
 def _import_one_pr(
@@ -981,10 +1026,23 @@ def _import_one_pr(
     origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
+    prior_sig, prior_task_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
-        changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
+        # stale only on an evidence change OR a task-input-contract change
+        # (the title/body/base/head a reviewer was shown); a metadata-only change
+        # updates checksums without staling gold.
+        changed = (
+            refresh
+            and prior_sig is not None
+            and (
+                prior_sig != _evidence_signature_from_doc(doc)
+                or (
+                    prior_task_sig is not None
+                    and prior_task_sig != _task_input_signature_from_doc(doc)
+                )
+            )
+        )
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
         cases, bundle_rels = _case_materialize(

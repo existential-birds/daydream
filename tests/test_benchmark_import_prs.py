@@ -725,6 +725,45 @@ def _curate_case(ws, case_file):
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
 
+def test_refresh_body_only_change_stales_gold(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # state=ready, attested
+    # body-only change: same evidence, edited PR body (feeds compiled context)
+    hdr = dict(_PR_HEADER)
+    hdr["body"] = "EDITED body that changes compiled context"
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"        # task-input contract changed -> stale
+
+
+def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    before_import_sha = before["source"]["import_sha256"]
+    # metadata-only change: updated_at + html_url, same title/body/base/head (no evidence change)
+    hdr = dict(_PR_HEADER)
+    hdr["updated_at"] = "2026-01-02T00:00:00Z"
+    hdr["html_url"] = "https://github.com/o/r/pull/101"
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"          # NOT staled
+    assert case["source"]["import_sha256"] != before_import_sha   # import checksum updated
+    assert case["curation"]["findings"]                  # curated gold preserved
+
+
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
