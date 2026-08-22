@@ -14,7 +14,7 @@ import yaml
 
 from daydream import git_ops
 from daydream.benchmark.schema import derive_finding_id
-from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.storage import atomic_write_yaml, load_yaml_strict
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_import_prs.py::_SEED_ENV).
@@ -489,12 +489,18 @@ def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
     assert ev["author"] == {"login": "alice", "type": "User"}
     assert ev["commit_id"] == head_sha
     assert ev["resolved"] is False and ev["outdated"] is False
-    # a candidate with no backing evidence record is tolerated (projection absent)
+    # a candidate with no backing evidence record is tolerated (projection
+    # absent) -- verified through get_case on a genuinely unmatched source_id,
+    # not by hand-constructing a stripped view (which would pass even if the
+    # projection logic silently attached an evidence dict unconditionally).
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     unmatched = {k: v for k, v in cand.items() if k != "evidence"}
     unmatched["source_id"] = "github:review:999"
-    view2 = dict(view)
-    view2["candidates"] = [unmatched]
-    assert "evidence" not in view2["candidates"][0]
+    raw["candidates"].append(unmatched)
+    atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    view2 = cu.get_case(ws, case_id)
+    assert "evidence" not in view2["candidates"][-1]   # unmatched source, absent
+    assert "evidence" in view2["candidates"][0]        # matched source, still joined
 
 
 def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path, fake_gh):
