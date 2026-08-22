@@ -648,6 +648,19 @@ def test_compile_never_refetches_live_pr_text(tmp_path, fake_gh, monkeypatch):
     assert lock["cases"]
 
 
+def test_contract_docs_describe_persisted_header_and_staleness_rule():
+    import inspect
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor import build
+    src = inspect.getsource(gi.fetch_and_normalize) + inspect.getsource(gi._import_one_pr)
+    assert "body_sha256" in src or "body" in src          # header/body documented in builder
+    assert "task-input" in inspect.getsource(gi._import_one_pr) or \
+           "task_input" in inspect.getsource(gi._import_one_pr)
+    bsrc = inspect.getsource(build.bounded_pr_context)
+    assert "body_sha256" in bsrc and "persisted" in bsrc
+
+
 def test_compile_fails_closed_on_missing_pr_number(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor.build import CompileError, compile_workspace

@@ -1164,10 +1164,15 @@ def fetch_and_normalize(
     """Fetch one PR's full evidence set through REST and normalize it.
 
     Pulls the PR header, then every submitted review, top-level inline comment,
-    and conversation comment in order. Every retrieved record is retained as an
-    :class:`EvidenceRecord` with a stable source ID and body hash; ``is_bot`` is
-    derived from the author type and never filters. Failure of any call raises
-    :class:`GitError` — never a silent default.
+    and conversation comment in order. The normalized ``pull_request`` block
+    carries the complete header: number, url/html_url, title, body, state,
+    merge/close timestamps, created/updated timestamps, author, exact
+    base/head (sha + ref), and the persisted ``title_sha256``/``body_sha256``
+    digests; the fetch ``payload_sha256`` spans the whole normalized import.
+    Every retrieved record is retained as an :class:`EvidenceRecord` with a
+    stable source ID and body hash; ``is_bot`` is derived from the author type
+    and never filters. Failure of any call raises :class:`GitError` — never a
+    silent default.
     """
     header = _fetch_with_retry(root, owner_repo, number)
 
