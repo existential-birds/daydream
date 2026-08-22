@@ -488,7 +488,7 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
         seen["gold"] = str(gold_path)
         seen["artifact"] = str(artifact_path)
         seen["out"] = str(out_dir)
-        return type("R", (), {"verifier_error": 0, "reward": 1.0})()
+        return sr.verifier_core.Reward(reward=1.0, verifier_error=0)
 
     monkeypatch.setattr(sr, "run_verifier", fake_run_verifier)
     # guard the env overrides: main() reads them from real os.environ and the
@@ -1251,6 +1251,15 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
         assert "allowlist" in str(e.value)
+
+
+def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module, capsys) -> None:
+    sr = sr_module
+    r = sr.verifier_core.Reward(reward=0.8, tp=2, verifier_error=0)
+    assert sr._emit_reward(r) == 0
+    assert json.loads(capsys.readouterr().out) == r.to_dict()   # full 12-key dict, never the 2-key fallback shape
+    r2 = sr.verifier_core.Reward(reward=0.0, verifier_error=1)
+    assert sr._emit_reward(r2) == 1
 
 
 def test_run_verifier_without_client_is_unscored(sr_module, tmp_path) -> None:

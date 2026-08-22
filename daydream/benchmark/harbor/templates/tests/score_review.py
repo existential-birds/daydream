@@ -1048,19 +1048,12 @@ def _emit_reward(reward: verifier_core.Reward) -> int:
     Shared by both ``main()`` terminal paths (a fail-closed client build
     rejection and the completed ``run_verifier``) so the two failure/success
     emissions cannot drift. ``Reward.to_dict()`` always exists (the compiled
-    verifier_core twin is byte-identical); the fallback dict is a defensive
-    guard that keeps the shape stable even if a duck-typed reward lacks it.
+    verifier_core twin is byte-identical), so the payload is always the full
+    12-key typed dict.
     """
-    payload = (
-        reward.to_dict()
-        if hasattr(reward, "to_dict")
-        else {
-            "verifier_error": int(getattr(reward, "verifier_error", 0)),
-            "reward": float(getattr(reward, "reward", 0.0)),
-        }
-    )
+    payload = reward.to_dict()
     print(json.dumps(payload))
-    return 1 if getattr(reward, "verifier_error", 0) else 0
+    return 1 if reward.verifier_error else 0
 
 
 def main() -> int:
