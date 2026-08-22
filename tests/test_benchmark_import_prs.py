@@ -2,11 +2,27 @@
 
 Covers the full import surface through the in-process ``fake_gh`` router:
 target parsing, six-check preflight + immutable identity, REST + GraphQL
-fetch/normalize, candidate projection, bounded rate-limit retry, atomic
-ledger/case transactions, refresh/staleness (curation preservation), and both
-e2e acceptance paths including partial-failure persistence. All ``gh``/``git``
-calls route through :mod:`daydream.git_ops` with ``cwd=<workspace root>``.
+fetch/import, candidate projection, bounded rate-limit retry, atomic
+ledger/case transactions, refresh/staleness (curation preservation), snapshot
+freeze wiring (ready|unreplayable cases + bundle staging), and both e2e
+acceptance paths including partial-failure persistence. All ``gh`` calls route
+through the ``fake_gh`` router; freeze mirror fetches hit a real local bare
+origin (no network).
 """
+
+import os
+import subprocess
+
+# Deterministic seed identity so a local bare origin's commits are stable and
+# reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
+_SEED_ENV = {
+    "GIT_AUTHOR_NAME": "Tester",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "Tester",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
 
 _PR_HEADER = {
     "number": 101,
@@ -196,9 +212,16 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
 
 
 def _seed_manifest(ws):
-    """Build an initialized private workspace with an unresolved Source (o/r)."""
+    """Build an initialized private workspace with an unresolved Source (o/r).
+
+    Idempotent: a caller may explicitly :func:`init_workspace` first (e.g. the
+    snapshot-freeze test pins reviewer/judge hosts), in which case the manifest
+    already exists and the scaffold is left untouched.
+    """
     from daydream.benchmark.workspace import init_workspace
 
+    if (ws / "benchmark.yaml").exists():
+        return
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
@@ -280,6 +303,103 @@ def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+
+
+# ---------------------------------------------------------------------------
+# real-git local-origin seed for snapshot-freeze wiring (no network)
+# ---------------------------------------------------------------------------
+
+
+def _seed_git(repo, *args: str, check: bool = True, env: dict[str, str] | None = None) -> str:
+    """Run git in *repo*, returning stripped stdout."""
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True,
+        env={**os.environ, **env} if env else os.environ.copy(), check=check,
+    )
+    if check and proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _seed_write(repo, name: str, content: str) -> None:
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    _seed_git(repo, "add", name)
+
+
+def _seed_commit(repo, message: str) -> str:
+    _seed_git(repo, "commit", "-m", message, env=_SEED_ENV)
+    return _seed_git(repo, "rev-parse", "HEAD")
+
+
+def _seed_local_origin(tmp_path, fake_gh) -> tuple[str, str, str]:
+    """Build a real local bare origin whose base/head are the PR's SHAs.
+
+    Uses the deterministic seed identity (same content/env as the snapshot
+    module's ``_seed_origin``), producing real base2/head commits. The feature
+    head is pushed as ``refs/pull/101/head`` and the canned PR 101 header is
+    re-seeded so its ``base.sha``/``head.sha`` match the origin — the
+    import-time freeze fetches real git objects (no network).
+
+    Returns ``(origin_url, base_sha, head_sha)``.
+    """
+    import shutil as _sh
+
+    repo = tmp_path / "local_wt"
+    if repo.exists():
+        _sh.rmtree(repo)
+    repo.mkdir()
+    _seed_git(repo, "init", "-b", "main")
+    _seed_write(repo, "readme.txt", "base1\n")
+    _seed_commit(repo, "base1")
+    _seed_write(repo, "base.py", "BASE = 2\n")
+    base_sha = _seed_commit(repo, "base2")
+    _seed_write(repo, "beyond.py", "BEYOND = 3\n")
+    _seed_commit(repo, "base3")
+    _seed_git(repo, "checkout", "--detach", base_sha)
+    (repo / "base.py").write_text("BASE = 20\n")
+    _seed_git(repo, "add", "base.py")
+    _seed_write(repo, "feature.py", "FEATURE = 1\n")
+    head_sha = _seed_commit(repo, "feature")
+    bare = tmp_path / "origin_local.git"
+    if bare.exists():
+        _sh.rmtree(bare)
+    bare.mkdir()
+    _seed_git(bare, "init", "--bare")
+    _seed_git(repo, "remote", "add", "origin", str(bare))
+    _seed_git(repo, "push", "origin", "main:main")
+    _seed_git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head", check=False)
+    # Re-seed the canned PR header so base.sha/head.sha are the real origin SHAs.
+    header = dict(_PR_HEADER)
+    header["base"] = {"ref": "main", "sha": base_sha}
+    header["head"] = {"ref": "feature/cache", "sha": head_sha}
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    return str(bare), base_sha, head_sha
+
+
+def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict, sha256_file
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)                 # identity + canned PR
+    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url)
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetched"
+    case_id = pr["case_ids"][0]
+    case = load_yaml_strict(ws / f"cases/{case_id}.yaml")
+    assert case["snapshot"]["status"] == "ready"
+    assert case["snapshot"]["original_base_sha"] == base_sha
+    assert case["snapshot"]["original_head_sha"] == head_sha
+    bundle = ws / case["snapshot"]["bundle_file"]
+    assert bundle.exists()
+    assert sha256_file(bundle) == case["snapshot"]["bundle_sha256"]
 
 
 def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):

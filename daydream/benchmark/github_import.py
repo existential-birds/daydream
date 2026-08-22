@@ -6,8 +6,9 @@ authentication, identity, repository read access + immutable identity); fetch
 and normalize a PR's header, submitted reviews, inline comments and
 conversation comments (REST) plus all review threads/replies (GraphQL);
 deterministically project import-time candidates; and atomically persist one
-import file, one materialized case per requested head, and the ledger through
-a single crash-consistent :class:`storage.Transaction`.
+import file, one frozen case per requested head (a ``ready|unreplayable``
+snapshot dict + its deterministic bundle), and the ledger through a single
+crash-consistent :class:`storage.Transaction`.
 
 Every ``gh``/``git`` call routes through :mod:`daydream.git_ops`, so the
 in-process ``fake_gh`` router intercepts it. Rate-limit retries are bounded
@@ -31,7 +32,7 @@ from typing import Any
 import yaml
 
 from daydream import git_ops
-from daydream.benchmark import schema, storage
+from daydream.benchmark import schema, snapshot, storage
 
 
 def _run_gh_preflight_status(root: Path):
@@ -669,18 +670,25 @@ def _case_materialize(
     import_file: str,
     import_sha256: str,
     *,
+    root: Path | None = None,
+    repo_slug: str = "",
+    origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
     changed: bool = False,
-) -> list[tuple[str, str, dict[str, Any]]]:
+) -> tuple[list[tuple[str, str, dict[str, Any]]], list[str]]:
     """One materialized case document per requested head.
 
-    When *changed* is True and a prior curated case exists, its curation is
-    carried over and flipped to ``stale`` with attestation cleared — findings
-    and exclusions are never overwritten by a refresh.
+    When *root*/origin are provided the case ``snapshot`` is frozen via
+    :func:`daydream.benchmark.snapshot.freeze_one` (a ``ready|unreplayable``
+    dict) and any produced bundle is returned in the second element for the
+    caller to stage atomically. When *changed* is True and a prior curated
+    case exists, its curation is carried over and flipped to ``stale`` with
+    attestation cleared — findings/exclusions are never overwritten by refresh.
     """
     pull_request = doc.pull_request
     base_sha = (pull_request.get("base") or {}).get("sha")
     out: list[tuple[str, str, dict[str, Any]]] = []
+    bundle_drops: list[str] = []
     seen: set[str] = set()
     for head_token in requested_heads:
         head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
@@ -701,31 +709,43 @@ def _case_materialize(
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             curation = dict(prior)
-            # Preserve prior curation whenever a curated case exists (unchanged
-            # re-import / refresh must NOT wipe findings or attestation). Only
-            # demote to stale (and clear attestation) when the evidence actually
-            # drifted (changed=True).
             if changed and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
-        case_doc: dict[str, Any] = {
-            "schema_version": 1,
-            "case_id": case_id,
-            "pull_request": pull_request,
-            "snapshot": {
+        if root is not None and origin_url is not None and base_sha and head_sha:
+            policy = "final_pr_head" if head_token == "final" else "explicit_head"
+            snapshot_doc = snapshot.freeze_one(
+                root,
+                repo_slug,
+                number,
+                base_tip=base_sha,
+                head_sha=head_sha,
+                policy=policy,
+                requested_head=head_token,
+                origin_url=origin_url,
+            )
+            if snapshot_doc.get("status") == "ready":
+                bundle_drops.append(snapshot_doc["bundle_file"])
+        else:
+            snapshot_doc = {
                 "status": "imported",
                 "policy": "final_pr_head",
                 "requested_head": head_token,
                 "original_base_sha": base_sha,
                 "original_head_sha": head_sha,
                 "error": None,
-            },
+            }
+        case_doc: dict[str, Any] = {
+            "schema_version": 1,
+            "case_id": case_id,
+            "pull_request": pull_request,
+            "snapshot": snapshot_doc,
             "source": {"import_file": import_file, "import_sha256": import_sha256},
             "curation": curation,
             "candidates": [c.model_dump(mode="json") for c in candidates],
         }
         out.append((case_id, f"cases/{case_id}.yaml", case_doc))
-    return out
+    return out, bundle_drops
 
 
 def _ledger_replace(raw: dict[str, Any], entry: dict[str, Any]) -> None:
@@ -865,6 +885,7 @@ def _import_one_pr(
     requested_heads: list[str],
     *,
     refresh: bool,
+    origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
     prior_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
@@ -873,12 +894,15 @@ def _import_one_pr(
         changed = refresh and prior_sig is not None and prior_sig != _evidence_signature_from_doc(doc)
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
-        cases = _case_materialize(
+        cases, bundle_rels = _case_materialize(
             doc, number, requested_heads, import_file, import_sha256,
+            root=root, repo_slug=repo, origin_url=origin_url,
             prior_curations=prior_curations, changed=changed,
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
+            for rel in bundle_rels:
+                tx.stage(rel, (root / rel).read_bytes())
             for _, case_path, case_doc in cases:
                 tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
             _stamp_fetched(
@@ -905,12 +929,15 @@ def run_import_prs(
     pr_numbers: list[int],
     heads: list[str] | None = None,
     refresh: bool = False,
+    origin_url: str | None = None,
 ) -> int:
     """Import each PR's evidence into one atomic import ledger/case transaction.
 
-    Runs startup recovery then preflight (identity idempotent), then for each PR
-    writes its import file, one case per requested head, and the ledger through
-    one :class:`Transaction` (``benchmark.yaml`` last). A failed fetch stages no
+    Runs startup recovery then preflight (identity idempotent), then for each
+    PR expects its import file, one case per requested head, and the ledger
+    through one :class:`Transaction` (``benchmark.yaml`` last). When present,
+    *origin_url* drives the snapshot freeze mirror fetch (defaults to the
+    repository's ``https://github.com/<repo>.git``). A failed fetch stages no
     import/case file — only a ledger flip to ``fetch_failed`` with an exact
     error. The overall exit is non-zero when any PR failed.
     """
@@ -927,8 +954,10 @@ def run_import_prs(
         preflight(root, len(pr_numbers))
         raw = storage.load_yaml_strict(root / "benchmark.yaml")
         repo = raw.get("source", {}).get("repository") or ""
+        if origin_url is None and repo:
+            origin_url = f"https://github.com/{repo}.git"
         for number in pr_numbers:
-            if _import_one_pr(root, raw, repo, number, requested_heads, refresh=refresh):
+            if _import_one_pr(root, raw, repo, number, requested_heads, refresh=refresh, origin_url=origin_url):
                 exit_code = 1
     return exit_code
 
