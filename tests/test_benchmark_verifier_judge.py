@@ -245,17 +245,7 @@ def test_instruction_shaped_finding_text_is_fenced_and_does_not_alter_parse(sr_m
 @pytest.mark.asyncio
 async def test_judge_pairs_caps_concurrency_and_enforces_pair_cap(sr_module) -> None:
     sr = sr_module
-    in_flight = 0
-    max_in_flight = 0
-
-    class CountingClient:
-        async def complete_json(self, *, user, system, max_tokens):
-            nonlocal in_flight, max_in_flight
-            in_flight += 1
-            max_in_flight = max(max_in_flight, in_flight)
-            await asyncio.sleep(0.01)
-            in_flight -= 1
-            return {"match": True, "confidence": 0.9, "reasoning": "x"}
+    client = _CountingClient()
 
     gold = [
         {
@@ -281,9 +271,9 @@ async def test_judge_pairs_caps_concurrency_and_enforces_pair_cap(sr_module) -> 
         }
         for i in range(5)
     ]
-    verdicts = await sr.judge_pairs(gold, cand, client=CountingClient())
+    verdicts = await sr.judge_pairs(gold, cand, client=client)
     assert len(verdicts) == 25
-    assert max_in_flight <= 10  # concurrency cap
+    assert client.max_in_flight <= 10  # concurrency cap
 
     # 5,000-pair cap: 51 gold x 100 candidates = 5100 > 5000
     big_gold = [
@@ -311,7 +301,7 @@ async def test_judge_pairs_caps_concurrency_and_enforces_pair_cap(sr_module) -> 
         for i in range(100)
     ]
     with pytest.raises(sr.VerifierError):
-        await sr.judge_pairs(big_gold, big_cand, client=CountingClient())
+        await sr.judge_pairs(big_gold, big_cand, client=_CountingClient())
 
 
 _REWARD_KEYS = {
@@ -328,6 +318,26 @@ _REWARD_KEYS = {
     "clean_pass",
     "verifier_error",
 }
+
+
+_DENSE_BODY = ("<gold_finding>" * (8192 // 14))[:8192]  # ~8 KiB of pure delimiter
+
+
+class _CountingClient:
+    """Fake judge client that counts requests and in-flight concurrency."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self.in_flight = 0
+        self.max_in_flight = 0
+
+    async def complete_json(self, *, user, system, max_tokens):
+        self.requests += 1
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)
+        self.in_flight -= 1
+        return {"match": True, "confidence": 0.9, "reasoning": "x"}
 
 
 def _gold_list(n: int = 2) -> list[dict]:
@@ -679,28 +689,28 @@ def test_escape_leaves_ordinary_finding_text_byte_identical(sr_module) -> None:
         assert literal in prompt  # ordinary text verbatim
 
 
-def test_render_pair_prompt_raises_generic_error_on_over_cap_after_escape(sr_module) -> None:
+def test_render_pair_prompt_raises_generic_error_on_over_cap(sr_module) -> None:
     sr = sr_module
-    dense_body = ("<gold_finding>" * (8192 // 14))[:8192]  # ~8 KiB of pure delimiter
-    finding = {"title": "t" * 500, "body": dense_body, "severity": "high",
+    oversized_body = "x" * 12_000  # raw payload alone exceeds the 24 KiB budget
+    finding = {"title": "t" * 500, "body": oversized_body, "severity": "high",
                "path": "p" * 200, "start_line": 1, "end_line": 1}
     with pytest.raises(sr.VerifierError) as exc:
         sr.render_pair_prompt(finding, finding, template=sr.JUDGE_PROMPT_TEMPLATE)
-    assert "24 KiB" in str(exc.value)      # generic message
-    assert dense_body not in str(exc.value)  # never embeds finding content
+    assert "24 KiB" in str(exc.value)        # generic message
+    assert oversized_body not in str(exc.value)  # never embeds finding content
     assert "t" * 500 not in str(exc.value)
 
 
-def test_over_cap_after_escape_fails_whole_task_with_no_judge_call(sr_module, tmp_path) -> None:
+def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "g.json"
     art_path = tmp_path / "r.json"
     out = tmp_path / "out"
-    dense_body = ("<gold_finding>" * (8192 // 14))[:8192]
-    gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": dense_body,
+    oversized_body = "x" * 12_000  # well over the verifier's 8 KiB body bound
+    gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": oversized_body,
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
     gold_path.write_text(json.dumps(gold))
-    cand = {"title": "t" * 500, "body": dense_body, "severity": "high",
+    cand = {"title": "t" * 500, "body": oversized_body, "severity": "high",
             "path": "p" * 200, "start_line": 1, "end_line": 1}
     cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
     art_path.write_text(json.dumps({
@@ -708,15 +718,7 @@ def test_over_cap_after_escape_fails_whole_task_with_no_judge_call(sr_module, tm
         "findings": [cand],
     }))
 
-    class CountingClient:
-        def __init__(self) -> None:
-            self.requests = 0
-
-        async def complete_json(self, *, user, system, max_tokens):
-            self.requests += 1
-            return {"match": True, "confidence": 0.9, "reasoning": "x"}
-
-    client = CountingClient()
+    client = _CountingClient()
     env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
@@ -725,4 +727,33 @@ def test_over_cap_after_escape_fails_whole_task_with_no_judge_call(sr_module, tm
     details = json.loads((out / "reward-details.json").read_text())
     assert details["request_counts"]["requests"] == 0
     blob = json.dumps(details)
-    assert dense_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
+    assert oversized_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
+
+
+def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "g.json"
+    art_path = tmp_path / "r.json"
+    out = tmp_path / "out"
+    # _DENSE_BODY is under the verifier's 8 KiB body byte bound, so the evaluator
+    # escapes it -- but the fused rendering must not let that inflate the pair
+    # past the cap and fail the whole task. A legal pair is judged, never voided.
+    gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": _DENSE_BODY,
+             "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
+    gold_path.write_text(json.dumps(gold))
+    cand = {"title": "t" * 500, "body": _DENSE_BODY, "severity": "high",
+            "path": "p" * 200, "start_line": 1, "end_line": 1}
+    cand["candidate_id"] = sr.verifier_core.derive_candidate_id("c", cand, 0)
+    art_path.write_text(json.dumps({
+        "schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
+        "findings": [cand],
+    }))
+
+    client = _CountingClient()
+    env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+           "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
+    reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
+    assert reward.verifier_error == 0  # verifier-legal dense pair is judged
+    assert client.requests == 1         # not failed whole
+    details = json.loads((out / "reward-details.json").read_text())
+    assert _DENSE_BODY not in json.dumps(details)  # never leaks finding content

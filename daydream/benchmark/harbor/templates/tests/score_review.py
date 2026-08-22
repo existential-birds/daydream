@@ -53,19 +53,17 @@ _ESCAPED_FINDING_TAGS = {
 def _escape_finding_delimiters(text: str) -> str:
     """Neutralize the ``<..._finding>`` block delimiters in untrusted text.
 
-    The gold/candidate title, severity, path, and body are untrusted reference
-    data, not instructions. A literal closing tag inside one block would
-    terminate its structural block early and leak the remainder into the other
-    role's region; a literal opening tag could shift the boundary or synthesize
-    extra blocks. Escape all four delimiters so the injected text can never form
-    a real structural delimiter.
+    Every untrusted scalar field (title, severity, path, start_line, end_line)
+    as well as both bodies is escaped at render time. A literal closing tag
+    inside one block would terminate its structural block early and leak the
+    remainder into the other role's region; a literal opening tag could shift
+    the boundary or synthesize extra blocks. Rewriting every delimiter to its
+    entity form means injected text can never form a real structural delimiter.
     """
-    return (
-        text.replace("<gold_finding>", _ESCAPED_FINDING_TAGS["<gold_finding>"])
-        .replace("</gold_finding>", _ESCAPED_FINDING_TAGS["</gold_finding>"])
-        .replace("<candidate_finding>", _ESCAPED_FINDING_TAGS["<candidate_finding>"])
-        .replace("</candidate_finding>", _ESCAPED_FINDING_TAGS["</candidate_finding>"])
-    )
+    escaped = text
+    for delimiter, entity in _ESCAPED_FINDING_TAGS.items():
+        escaped = escaped.replace(delimiter, entity)
+    return escaped
 
 
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -81,47 +79,72 @@ def _render_filled(
     *,
     gold_body: str,
     candidate_body: str,
+    escape: bool = True,
 ) -> str:
+    """Render one gold/candidate pair into ``template`` for a judge.
+
+    Every untrusted scalar field and each body is passed through
+    ``_escape_finding_delimiters`` so no literal delimiter can form a structural
+    block. With ``escape=False`` the raw payload is returned instead -- the
+    caller's pre-inflation budget yardstick.
+    """
+
+    def _field(value: object) -> str:
+        text = str(value or "")
+        return _escape_finding_delimiters(text) if escape else text
+
     return template.format(
-        gold_title=_escape_finding_delimiters(str(gold.get("title") or "")),
-        gold_severity=_escape_finding_delimiters(
-            str(gold.get("severity") or "")
-        ),
-        gold_path=_escape_finding_delimiters(str(gold.get("path") or "")),
-        gold_start_line=gold.get("start_line", ""),
-        gold_end_line=gold.get("end_line", ""),
-        gold_body=_escape_finding_delimiters(gold_body),
-        candidate_title=_escape_finding_delimiters(
-            str(candidate.get("title") or "")
-        ),
-        candidate_severity=_escape_finding_delimiters(
-            str(candidate.get("severity") or "")
-        ),
-        candidate_path=_escape_finding_delimiters(
-            str(candidate.get("path") or "")
-        ),
-        candidate_start_line=candidate.get("start_line", ""),
-        candidate_end_line=candidate.get("end_line", ""),
-        candidate_body=_escape_finding_delimiters(candidate_body),
+        gold_title=_field(gold.get("title")),
+        gold_severity=_field(gold.get("severity")),
+        gold_path=_field(gold.get("path")),
+        gold_start_line=_field(gold.get("start_line")),
+        gold_end_line=_field(gold.get("end_line")),
+        gold_body=_field(gold_body),
+        candidate_title=_field(candidate.get("title")),
+        candidate_severity=_field(candidate.get("severity")),
+        candidate_path=_field(candidate.get("path")),
+        candidate_start_line=_field(candidate.get("start_line")),
+        candidate_end_line=_field(candidate.get("end_line")),
+        candidate_body=_field(candidate_body),
     )
 
 
 def render_pair_prompt(gold: dict, candidate: dict, *, template: str) -> str:
     """Render a bounded, untrusted-fenced prompt for one gold/candidate pair.
 
-    The untrusted finding fields are HTML-entity-escaped by ``_render_filled`` so
-    injected delimiters can never form structural blocks. If the rendered pair
-    still exceeds 24 KiB, fail deterministically with ``VerifierError`` — never
-    truncate the pair and never silently report a partial result.
+    The untrusted finding fields are escaped by ``_render_filled`` so injected
+    delimiters can never form structural blocks. The 24 KiB budget is checked
+    against the raw, pre-escape payload — the same yardstick ``verifier_core``
+    uses when it bounds each field — because the escaping fence can only
+    inflate, and a pair the verifier accepts must not be voided whole by that
+    inflation. A pair that exceeds the raw budget fails deterministically with
+    ``VerifierError``: never truncate and never report a partial result.
     """
     gold_body = gold.get("body", "") or ""
     candidate_body = candidate.get("body", "") or ""
-    filled = _render_filled(
-        template, gold, candidate, gold_body=gold_body, candidate_body=candidate_body
+    # Budget against the raw, pre-escape payload. verifier_core binds each field
+    # in raw bytes, and the escaping pass is a delimiter-fence that can only
+    # inflate. Measuring the escaped pair makes a validator-legal pair (two dense
+    # 8 KiB bodies) trip the cap and fail the whole task -- a budget incoherence.
+    # Fencing inflates only when delimiters are present; such a pair is judged,
+    # never voided. Truly oversized raw input still fails deterministically.
+    raw = _render_filled(
+        template,
+        gold,
+        candidate,
+        gold_body=gold_body,
+        candidate_body=candidate_body,
+        escape=False,
     )
-    if len(filled.encode("utf-8")) > _PROMPT_CAP_BYTES:
+    if len(raw.encode("utf-8")) > _PROMPT_CAP_BYTES:
         raise VerifierError("rendered pair exceeds 24 KiB")
-    return filled
+    return _render_filled(
+        template,
+        gold,
+        candidate,
+        gold_body=gold_body,
+        candidate_body=candidate_body,
+    )
 
 
 def parse_verdict(raw: object) -> verifier_core.Verdict:
