@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,71 @@ def _git_ls_remote(root: Path, url: str) -> str:
     """Run an authenticated ``git ls-remote <url>`` and return the refs text."""
     proc = git_ops._run_git(root, ["ls-remote", url])
     return proc.stdout
+
+
+class ImportTargetError(Exception):
+    """An import-prs target (PR number/URL/file line/head SHA) failed to parse."""
+
+
+_PR_URL_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/pull/(\d+)$")
+
+
+@dataclass
+class ImportTargets:
+    """The deduplicated PR targets + requested heads for one import run."""
+
+    pr_numbers: list[int]
+    requested_heads: list[str]
+
+
+def _parse_pr_token(token: str) -> int:
+    """Parse one CLI arg or file line to a PR number, raising on anything else."""
+    token = token.strip()
+    if token.isdigit():
+        return int(token)
+    match = _PR_URL_RE.match(token)
+    if match is not None:
+        return int(match.group(3))
+    raise ImportTargetError(
+        f"invalid PR target {token!r} (expected a PR number or https://github.com/OWNER/REPO/pull/N)"
+    )
+
+
+def parse_import_targets(
+    pr_args: list[str],
+    pr_files: list[Path],
+    heads: list[str],
+) -> ImportTargets:
+    """Resolve CLI ``--pr`` args + ``--pr-file`` lines + ``--head`` SHAs.
+
+    Number/URL/file selections merge CLI-first then file in order and dedupe
+    to the first-seen, stable order. ``requested_heads`` always starts with
+    ``"final"`` (the PR's default head) followed by the validated 40-hex
+    ``heads``. An unparseable token or malformed head raises
+    :class:`ImportTargetError` naming the offending value.
+    """
+    numbers: list[int] = []
+    seen: set[int] = set()
+
+    def _add(number: int) -> None:
+        if number not in seen:
+            seen.add(number)
+            numbers.append(number)
+
+    for arg in pr_args:
+        _add(_parse_pr_token(arg))
+    for pr_file in pr_files:
+        for line in Path(pr_file).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            _add(_parse_pr_token(line))
+
+    validated_heads: list[str] = []
+    for head in heads:
+        if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+            raise ImportTargetError(f"invalid head SHA {head!r} (expected 40-hex)")
+        validated_heads.append(head)
+    return ImportTargets(pr_numbers=numbers, requested_heads=["final", *validated_heads])
 
 
 def _now_rfc3339() -> str:

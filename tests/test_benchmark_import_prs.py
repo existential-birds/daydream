@@ -176,3 +176,17 @@ def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
     assert by_src["github:review:5"].location is None               # review body
     assert by_src["github:review:5"].exact_acceptable is True
     assert "github:review:6" not in by_src                          # pure approval: no candidate
+
+
+def test_parse_targets_dedupes_and_orders(tmp_path):
+    from daydream.benchmark import github_import as gi
+
+    pf = tmp_path / "prs.txt"
+    pf.write_text("42\nhttps://github.com/o/r/pull/9\n7\n42\n")
+    targets = gi.parse_import_targets(
+        pr_args=["https://github.com/o/r/pull/9", "7"],
+        pr_files=[pf],
+        heads=["abc" * 13 + "1", "abc" * 13 + "2"],
+    )
+    assert targets.pr_numbers == [9, 7, 42]     # stable: CLI order then file order; dupes collapsed
+    assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
