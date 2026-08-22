@@ -30,7 +30,9 @@ _SEED_ENV = {
 _PR_HEADER = {
     "number": 101,
     "url": "https://github.com/o/r/pull/101",
+    "html_url": "https://github.com/o/r/pull/101",
     "title": "Fix cache",
+    "body": "",
     "state": "open",
     "base": {"ref": "main", "sha": "b" * 40},
     "head": {"ref": "feature/cache", "sha": "a" * 40},
@@ -121,6 +123,69 @@ def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
         fake_gh.set_response("GET", ep, [])
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     assert doc.pull_request.body == ""             # null -> empty string, never "None"
+
+
+@pytest.mark.parametrize("body_field,expected", [
+    (None, ""),                      # null body -> empty
+    ("", ""),                        # empty body
+    ("héllo wörld \u00e9", "héllo wörld \u00e9"),          # Unicode preserved
+    ("line1\nline2\nline3", "line1\nline2\nline3"),        # newlines preserved
+    ("x" * 50000, "x" * 50000),      # over context-limit body (never bounded here; persisted whole)
+])
+def test_import_body_shape_preserved(tmp_path, fake_gh, body_field, expected):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = body_field
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.pull_request.body == expected
+    assert doc.pull_request.body_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize("state,merged_at,closed_at,expect_merged", [
+    ("open", None, None, False),
+    ("closed", None, "2026-01-02T00:00:00Z", False),     # closed-unmerged
+    ("closed", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z", True),  # merged
+])
+def test_import_merged_state_distinction(tmp_path, fake_gh, state, merged_at, closed_at, expect_merged):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["state"] = state
+    header["merged_at"] = merged_at
+    header["closed_at"] = closed_at
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    pr = doc.pull_request
+    assert pr.state == state
+    assert (pr.merged_at is not None) == expect_merged
+    assert (pr.closed_at is not None) == (closed_at is not None)
+
+
+def test_import_no_comments_pr(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = "no comments here"
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.evidence == [] and doc.pull_request.body == "no comments here"
 
 
 def test_payload_digest_spans_header_and_evidence(tmp_path, fake_gh):
