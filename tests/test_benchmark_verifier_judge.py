@@ -537,3 +537,42 @@ def test_generated_asset_tree_is_self_contained(sr_module) -> None:
     assert "import daydream" not in metric.read_text()
     assert "#!/bin/sh" in (base / "test.sh").read_text()
     assert "FROM" in (base / "Dockerfile").read_text()
+
+
+@pytest.mark.asyncio
+async def test_both_providers_produce_identical_verdicts_and_errors(sr_module) -> None:
+    sr = sr_module
+    body_anthropic = {
+        "content": [{"type": "text", "text": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}]
+    }
+    body_openai = {
+        "choices": [{"message": {"content": '{"match": true, "confidence": 0.9, "reasoning": "same"}'}}]
+    }
+
+    def make(body):
+        class FakeClient:
+            async def post(self, url, *, headers, json, timeout):
+                return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self, _b=body: _b})()
+
+        return FakeClient()
+
+    anthropic = sr.AnthropicJudgeClient(api_key="k", model="m", http=make(body_anthropic))
+    openai = sr.OpenAIJudgeClient(api_key="k", model="m", base_url="https://x/v1", http=make(body_openai))
+
+    a = await anthropic.complete_json(user="u", system="s", max_tokens=64)
+    o = await openai.complete_json(user="u", system="s", max_tokens=64)
+    assert a == o == {"match": True, "confidence": 0.9, "reasoning": "same"}
+
+    # Identical error path: a 503 after retries -> VerifierError for both.
+    for provider in (anthropic, openai):
+        calls = []
+
+        class RetryClient:
+            async def post(self, url, *, headers, json, timeout):
+                calls.append(1)
+                return type("R", (), {"status_code": 503, "text": "down"})()
+
+        provider.http = RetryClient()
+        with pytest.raises(sr.VerifierError):
+            await provider.complete_json(user="u", system="s", max_tokens=64)
+        assert len(calls) == 3
