@@ -400,7 +400,10 @@ def test_build_gold_list_accepts_locationless_and_emits_nulls():
     assert set(entry) == {"finding_id", "title", "body", "severity", "path", "start_line", "end_line"}
     assert entry["path"] is None and entry["start_line"] is None and entry["end_line"] is None
     # compiled gold id is the task-key-scoped canonical digest, nulls -> ""
-    assert entry["finding_id"] == build._gold_finding_ids(key, finding)
+    payload = "\x1f".join([key, str(finding["title"]), str(finding["body"]),
+                            str(finding["severity"] or ""), "", "", ""])
+    expected = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    assert entry["finding_id"] == expected
     assert entry["finding_id"] != "a" * 64
 
 

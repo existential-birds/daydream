@@ -146,26 +146,23 @@ def _flatten_finding(finding: dict) -> dict:
     """
     location = finding.get("location")
     if not location:
-        return {
-            "title": finding.get("title"),
-            "body": finding.get("body"),
-            "severity": finding.get("severity"),
-            "path": None,
-            "start_line": None,
-            "end_line": None,
-        }
-    if location.get("path") is None or location.get("start_line") is None or location.get("end_line") is None:
-        raise CompileError(
-            f"finding {finding.get('finding_id')} has a partially populated location; "
-            "location must be all-null or fully populated"
-        )
+        path = start_line = end_line = None
+    else:
+        if location.get("path") is None or location.get("start_line") is None or location.get("end_line") is None:
+            raise CompileError(
+                f"finding {finding.get('finding_id')} has a partially populated location; "
+                "location must be all-null or fully populated"
+            )
+        path = location.get("path")
+        start_line = location.get("start_line")
+        end_line = location.get("end_line")
     return {
         "title": finding.get("title"),
         "body": finding.get("body"),
         "severity": finding.get("severity"),
-        "path": location.get("path"),
-        "start_line": location.get("start_line"),
-        "end_line": location.get("end_line"),
+        "path": path,
+        "start_line": start_line,
+        "end_line": end_line,
     }
 
 
