@@ -338,6 +338,39 @@ def test_ready_snapshot_rejects_missing_bundle_fields():
         CaseDocument.model_validate(raw)
 
 
+def test_ready_requires_snapshot_attestation():
+    raw = _valid_case_dict()
+    raw["curation"].update({"state": "ready", "snapshot_attested": False})
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_stale_requires_snapshot_not_attested():
+    raw = _valid_case_dict()
+    raw["curation"].update({"state": "stale", "snapshot_attested": True,
+                            "gold_status": None, "clean_attested": False})
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+
+
+def test_unreplayable_curation_requires_unreplayable_snapshot():
+    raw = _valid_case_dict()                       # snapshot.status == ready
+    raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
+                            "clean_attested": False, "gold_status": None, "findings": []})
+    with pytest.raises(ValidationError):           # ready snapshot + unreplayable state
+        CaseDocument.model_validate(raw)
+    # a genuine unreplayable snapshot + unreplayable state loads
+    raw["snapshot"] = {
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
+        "original_base_sha": None, "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
+    }
+    doc = CaseDocument.model_validate(raw)
+    assert doc.curation.state == "unreplayable"
+
+
 def test_unreplayable_snapshot_requires_error_and_null_bundle():
     raw = _valid_case_dict()
     raw["snapshot"] = {

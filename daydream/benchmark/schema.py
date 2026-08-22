@@ -772,6 +772,10 @@ class Curation(BaseModel):
     def _consistent(self) -> "Curation":
         if self.case_exclusion is not None and self.state != "excluded":
             raise ValueError("case_exclusion is only valid when state == 'excluded'")
+        if self.state == "ready" and self.snapshot_attested is not True:
+            raise ValueError("ready curation requires snapshot_attested=True")
+        if self.state == "stale" and self.snapshot_attested is not False:
+            raise ValueError("stale curation requires snapshot_attested=False")
         if self.gold_status == "findings":
             if not self.findings or self.clean_attested:
                 raise ValueError("gold_status 'findings' requires >=1 finding and clean_attested=False")
@@ -830,6 +834,18 @@ class CaseDocument(BaseModel):
         ids = [f.finding_id for f in self.curation.findings]
         if len(set(ids)) != len(ids):
             raise ValueError("case contains duplicate canonical findings")
+        return self
+
+    @model_validator(mode="after")
+    def _unreplayable_coupling(self) -> "CaseDocument":
+        if (
+            self.curation.state == "unreplayable"
+            and self.snapshot.status != "unreplayable"
+            and self.curation.case_exclusion is None
+        ):
+            raise ValueError(
+                "unreplayable curation requires an unreplayable snapshot unless case_exclusion is set"
+            )
         return self
 
 
