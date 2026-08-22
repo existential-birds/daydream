@@ -493,8 +493,11 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         help="file listing PR numbers/URLs, one per line (repeatable)",
     )
     import_prs_p.add_argument(
-        "--head", action="append", default=[], metavar="SHA",
-        help="requested head SHA in addition to the PR default head (repeatable)",
+        "--head", action="append", default=[], metavar="PR=<40-hex>",
+        help=(
+            "explicit head SHA of PR N (PR=<40-hex>, repeatable); a bare 40-hex "
+            "is accepted for back-compat and treated as the sole requested PR"
+        ),
     )
     import_prs_p.add_argument(
         "--refresh", action="store_true",

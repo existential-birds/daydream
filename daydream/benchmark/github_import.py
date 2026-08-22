@@ -207,9 +207,12 @@ def parse_import_targets(
 
     Number/URL/file selections merge CLI-first then file in order and dedupe
     to the first-seen, stable order. ``requested_heads`` always starts with
-    ``"final"`` (the PR's default head) followed by the validated 40-hex
-    ``heads``. An unparseable token or malformed head raises
-    :class:`ImportTargetError` naming the offending value.
+    ``"final"`` (the PR's default head). A ``--head`` token is either a bare
+    40-hex SHA (back-compat: treated as ``<PR>=<sha>`` for the sole requested
+    PR) or ``<PR_NUMBER>=<40-hex>``, which ties an explicit head to its PR and
+    keeps a distinct import/snapshot target alongside the PR's default head.
+    An unparseable token or malformed head raises :class:`ImportTargetError`
+    naming the offending value.
     """
     numbers: list[int] = []
     seen: set[int] = set()
@@ -229,9 +232,19 @@ def parse_import_targets(
 
     validated_heads: list[str] = []
     for head in heads:
-        if re.fullmatch(r"[0-9a-f]{40}", head) is None:
-            raise ImportTargetError(f"invalid head SHA {head!r} (expected 40-hex)")
-        validated_heads.append(head)
+        sha = head
+        if "=" in head:
+            pr_part, _, rhs = head.partition("=")
+            if not pr_part.isdigit() or not int(pr_part) > 0:
+                raise ImportTargetError(
+                    f"invalid head token {head!r} (expected PR=<40-hex>)"
+                )
+            sha = rhs
+        if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+            raise ImportTargetError(
+                f"invalid head SHA {head!r} (expected bare 40-hex or PR=<40-hex>)"
+            )
+        validated_heads.append(sha)
     return ImportTargets(pr_numbers=numbers, requested_heads=["final", *validated_heads])
 
 

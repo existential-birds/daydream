@@ -211,6 +211,25 @@ def test_parse_targets_dedupes_and_orders(tmp_path):
     assert targets.requested_heads == ["final", "abc" * 13 + "1", "abc" * 13 + "2"]  # 'final' always present
 
 
+def test_parse_head_pr_sha_grammar(tmp_path):
+    """``--head 101=<40-hex>`` (explicit head tied to its PR) parses to the SHA.
+
+    A bare 40-hex stays a back-compat superset; an unparseable RHS raises
+    :class:`ImportTargetError`.
+    """
+    import pytest
+
+    from daydream.benchmark import github_import as gi
+
+    sha = "a" * 40
+    targets = gi.parse_import_targets([], [], [f"101={sha}"])
+    assert targets.requested_heads == ["final", sha]
+    targets2 = gi.parse_import_targets([], [], [sha])
+    assert targets2.requested_heads == ["final", sha]
+    with pytest.raises(gi.ImportTargetError):
+        gi.parse_import_targets([], [], ["101=nothex"])
+
+
 def _seed_manifest(ws):
     """Build an initialized private workspace with an unresolved Source (o/r).
 
