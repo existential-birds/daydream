@@ -8,6 +8,7 @@ from daydream.benchmark.harbor.verifier_core import (
     Verdict,
     VerifierError,
     derive_candidate_id,
+    maximum_matching,
     parse_candidate_finding,
     parse_gold_finding,
     retained_edges,
@@ -248,3 +249,32 @@ def test_retained_edges_threshold():
     ]
     kept = retained_edges(vs, ["g1", "g2", "g3", "g4"], ["c1", "c2", "c3", "c4"])
     assert {(v.gold_id, v.candidate_id) for v in kept} == {("g1", "c1"), ("g4", "c4")}
+
+def test_max_cardinality_beats_greedy():
+    # A-1 (0.9), A-2 (0.8), B-1 (0.7) — greedy only matches A-1; max-cardinality matches 2.
+    vs = [Verdict("A", "1", True, 0.9, ""), Verdict("A", "2", True, 0.8, ""), Verdict("B", "1", True, 0.7, "")]
+    m = maximum_matching(vs, ["A", "B"], ["1", "2"])
+    assert m == {("A", "2"), ("B", "1")}
+
+
+def test_one_candidate_cannot_match_two_golds():
+    vs = [Verdict("g1", "c1", True, 0.9, ""), Verdict("g2", "c1", True, 0.8, "")]
+    m = maximum_matching(vs, ["g1", "g2"], ["c1"])
+    assert len(m) == 1
+    assert {c for _, c in m} == {"c1"}  # c1 used at most once
+
+
+def test_one_gold_cannot_match_two_candidates():
+    vs = [Verdict("g1", "c1", True, 0.9, ""), Verdict("g1", "c2", True, 0.8, "")]
+    m = maximum_matching(vs, ["g1"], ["c1", "c2"])
+    assert len(m) == 1 and {g for g, _ in m} == {"g1"}
+
+
+def test_matching_is_deterministic_across_runs():
+    # ties on confidence: ordering must still be stable run-to-run
+    vs = [Verdict("g1", "c1", True, 0.8, ""), Verdict("g1", "c2", True, 0.8, ""),
+          Verdict("g2", "c1", True, 0.8, ""), Verdict("g2", "c2", True, 0.8, "")]
+    gold, cand = ["g1", "g2"], ["c1", "c2"]
+    r1 = maximum_matching(vs, gold, cand)
+    r2 = maximum_matching(vs, gold, cand)
+    assert r1 == r2 == {("g1", "c1"), ("g2", "c2")}

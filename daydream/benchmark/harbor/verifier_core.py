@@ -325,3 +325,59 @@ def retained_edges(
         and v.gold_id in gold_set
         and v.candidate_id in cand_set
     ]
+
+
+# ---------------------------------------------------------------------------
+# maximum-cardinality one-to-one matching
+# ---------------------------------------------------------------------------
+
+
+def _edge_key(v: Verdict) -> tuple[float, str, str]:
+    return (-v.confidence, v.gold_id, v.candidate_id)
+
+
+def maximum_matching(
+    verdicts: list[Verdict],
+    gold_ids: list[str],
+    candidate_ids: list[str],
+) -> set[tuple[str, str]]:
+    """Maximum-cardinality one-to-one matching over retained verdict edges.
+
+    Edges are ordered deterministically (descending confidence, then gold ID,
+    then candidate ID); golds are visited in sorted-id order and candidates in
+    the fixed adjacency order, so the result is stable run-to-run. Never
+    iterates a set/dict for an ordering decision.
+    """
+    ordered = sorted(verdicts, key=_edge_key)
+    adjacency: dict[str, list[str]] = {}
+    for v in ordered:
+        adjacency.setdefault(v.gold_id, []).append(v.candidate_id)
+    gold_order = sorted(gold_ids)
+
+    match_candidate: dict[str, str] = {}  # candidate_id -> gold_id
+
+    def _first_free(gold: str) -> str | None:
+        for cand in adjacency.get(gold, []):
+            if cand not in match_candidate:
+                return cand
+        return None
+
+    def _augment(gold: str, seen: set[str]) -> bool:
+        for cand in adjacency.get(gold, []):
+            if cand in seen:
+                continue
+            seen.add(cand)
+            owner = match_candidate.get(cand)
+            if owner is None or _augment(owner, seen):
+                match_candidate[cand] = gold
+                return True
+        return False
+
+    for gold in gold_order:
+        free = _first_free(gold)
+        if free is not None:
+            match_candidate[free] = gold
+        else:
+            _augment(gold, set())
+
+    return {(match_candidate[c], c) for c in match_candidate}
