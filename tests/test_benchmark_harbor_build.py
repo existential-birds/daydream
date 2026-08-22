@@ -328,17 +328,25 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks():
     emoji = "😀"  # 4 UTF-8 bytes
     body = "a" * 1000 + emoji * 50 + "Z" * 500            # ends on a 4-byte char
     full = f"title: T\nbody: {body}"
-    ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=200)
+    # fixed 15-byte prefix ("title: T\nbody: ") puts the first emoji at bytes
+    # 1015..1018; max_bytes=1021 slices 2 bytes into the second emoji, so
+    # _truncate_utf8 must back off byte-by-byte to 1018 (the whole first
+    # emoji), exercising the UnicodeDecodeError path -- max_bytes=200 would
+    # cut inside the ASCII a*1000 run and never reach the multibyte block.
+    ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
     assert ctx.endswith("</historical_pr_context>")
     assert "[truncated; full_body_sha256=" in ctx
     # the truncated body must end on a whole UTF-8 char (no replacement chars / no split bytes)
     inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-    body_line = inner.splitlines()[-1].removeprefix("body: ")
-    body_line.encode("utf-8")                            # decodes cleanly: boundary is valid
-    assert "[truncated; full_body_sha256=" in body_line
-    digest = body_line.split("full_body_sha256=", 1)[1].rstrip("]")
+    body_line = next(
+        line for line in inner.splitlines() if line.startswith("body: ")
+    ).removeprefix("body: ")
+    body_line.encode("utf-8")                            # decodes the whole: boundary is valid
+    assert body_line.endswith(emoji)                      # kept the whole emoji, never split one
+    assert len(body_line.encode("utf-8")) <= 1021
+    marker = next(line for line in inner.splitlines() if line.startswith("[truncated"))
+    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
     assert digest == hashlib.sha256(full.encode("utf-8")).hexdigest()   # full-text digest
-    assert len(body_line.encode("utf-8")) <= 200
 
 
 def test_bounded_pr_context_missing_body_is_empty():
