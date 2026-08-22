@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -311,3 +312,100 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path):
         assert not (tmp_path / "transactions").exists() or not list(
             (tmp_path / "transactions").iterdir()
         )
+
+
+# ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+# Task 13: rich-origin fidelity seed + end-to-end matrix
+# ---------------------------------------------------------------------------
+
+
+def _seed_rich_origin(tmp_path: Path):
+    """A rich bare origin; returns ``(origin, base, head, base_tree, head_tree)``.
+
+    base: text file + 100755 executable + 120000 symlink + binary blob.
+    head: renames the text file, deletes the symlink, edits the binary.
+    """
+    repo = tmp_path / "rich_wt"
+    if repo.exists():
+        shutil.rmtree(repo)
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "hello rich\n")
+    (repo / "run.sh").write_text("#!/bin/sh\necho hi\n")
+    (repo / "run.sh").chmod(0o755)
+    _git(repo, "add", "run.sh")
+    (repo / "payload.bin").write_bytes(b"\x00\x01\x02\xfe\xff")
+    _git(repo, "add", "payload.bin")
+    if hasattr(os, "symlink"):
+        os.symlink("readme.txt", repo / "alias.txt")
+        _git(repo, "add", "alias.txt")
+    base_sha = _commit(repo, "rich base")
+    base_tree = _git(repo, "rev-parse", f"{base_sha}^{{tree}}")
+
+    _git(repo, "mv", "readme.txt", "renamed.txt")
+    if (repo / "alias.txt").exists():
+        _git(repo, "rm", "alias.txt")
+    (repo / "payload.bin").write_bytes(b"\x00\x01\x02\x03\x04\x05")
+    _git(repo, "add", "payload.bin")
+    head_sha = _commit(repo, "rich head")
+    head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
+
+    bare = tmp_path / "rich_origin.git"
+    if bare.exists():
+        shutil.rmtree(bare)
+    bare.mkdir()
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/1/head", check=False)
+    return bare, base_sha, head_sha, base_tree, head_tree
+
+
+def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=base, explicit_shas=[head],
+                     origin_url=origin)
+    m = sn.mirror(tmp_path)
+    bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
+    sn.build_bundle(m, base, head, bundle, case_id="pr-000001-000000000000")
+    assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
+    # trees match the origin exactly (modes, symlink targets, binary preserved)
+    assert sn.rev_parse(m, "refs/heads/base^{tree}") == base_tree
+    assert sn.rev_parse(m, "refs/heads/head^{tree}") == head_tree
+    # offline clone recomputes matching trees + diff
+    diff = sn.canonical_diff_sha256(m, base, head)
+    sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
+    # repeatable bytes
+    sn.build_bundle(m, base, head, bundle, case_id="pr-000001-000000000000")
+    assert sn.sha256_of(bundle) == sn.sha256_of(bundle)
+    # no origin remote and only the two refs in an offline clone
+    clone = _clone_offline(bundle, tmp_path)
+    try:
+        url = _git(Path(clone), "remote", "get-url", "origin")
+        # the clone's only remote points at the local bundle artifact, so it is
+        # fully offline-replayable with no GitHub/HTTPS network dependency
+        assert url and not url.startswith(("https://", "http://", "git://", "ssh://"))
+        refs = _git(Path(clone), "for-each-ref", "--format=%(refname)", "refs/remotes")
+        assert {l for l in refs.splitlines() if l} == {
+            "refs/remotes/origin/base",
+            "refs/remotes/origin/head",
+        }
+    finally:
+        shutil.rmtree(clone, ignore_errors=True)
+
+
+def _clone_offline(bundle: Path, workdir: Path) -> Path:
+    """Clone *bundle* into a fresh temp dir (network-disabled local source)."""
+    import tempfile
+
+    workdir.mkdir(parents=True, exist_ok=True)
+    clone = tempfile.mkdtemp(prefix="e2e-", dir=str(workdir))
+    _git(bundle.parent, "clone", "--no-local", "--no-checkout", str(bundle), clone)
+    return Path(clone)

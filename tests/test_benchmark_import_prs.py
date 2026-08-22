@@ -421,6 +421,37 @@ def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
     assert sha256_file(bundle) == case["snapshot"]["bundle_sha256"]
 
 
+def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path, fake_gh):
+    """Same PR via import is idempotent; a distinct explicit head is a new case.
+
+    Also proves one shared ``cache/repository.git`` serves both without ref
+    collision.
+    """
+    from daydream.benchmark import github_import as gi, snapshot as sn
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    # default head only first
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    ids1 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    # same PR + same head again -> same idempotent case
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    ids2 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    assert ids1 == ids2
+    # a distinct head (unreachable in this origin) -> a distinct case id
+    alt_head = "cdef" * 10
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[alt_head], origin_url=origin_url) == 0
+    ids3 = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]["case_ids"]
+    assert len(ids3) == len(ids1) + 1 and ids3[-1].endswith(alt_head[:12])
+    # one shared mirror, no ref collision: the PR-head ref still resolves to head
+    assert (ws / "cache" / "repository.git").exists()
+    assert sn.rev_parse(ws / "cache/repository.git", "refs/pull/101/head") == head_sha
+
+
 def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict, sha256_file
