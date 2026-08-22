@@ -574,6 +574,13 @@ class _ImportRepository(BaseModel):
     name_with_owner: str
     visibility: Literal["public", "private"]
 
+    @field_validator("id")
+    @classmethod
+    def _id_is_opaque_string(cls, value: str) -> str:
+        if value.strip().isdigit():
+            raise ValueError("repository id must be an opaque string, not numeric")
+        return value
+
 
 class _FetchInfo(BaseModel):
     """The fetch bookkeeping of one import document."""
@@ -927,7 +934,7 @@ class PreflightLedger(BaseModel):
     last_verified_at: str
     repository: str
     repository_id: str | None
-    visibility: str
+    visibility: Literal["public", "private"]
     matched: bool
 
 

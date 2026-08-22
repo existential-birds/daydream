@@ -126,6 +126,13 @@ def test_import_repository_id_is_opaque_string():
 
     r = _ImportRepository(id="R_kgDOABC123", name_with_owner="o/r", visibility="private")
     assert r.id == "R_kgDOABC123"
+    # numeric-only ids (Pydantic would otherwise coerce int->str) must not model;
+    # blank "" is the deliberate unresolved sentinel from _repository_block.
+    with pytest.raises(ValidationError):
+        _ImportRepository(id="5", name_with_owner="o/r", visibility="private")
+    with pytest.raises(ValidationError):
+        _ImportRepository(id=123456, name_with_owner="o/r", visibility="private")
+    assert _ImportRepository(id="", name_with_owner="o/r", visibility="private").id == ""
 
 
 

@@ -329,6 +329,20 @@ def test_preflight_rejects_numeric_node_id(tmp_path, fake_gh):
     assert ex.value.code == "repo_unresolved"
 
 
+def test_preflight_rejects_numeric_string_node_id(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    # The legacy stale-int representation can arrive as a numeric-only *string*;
+    # _verify_repo_view must fail closed on it too (isdigit() reject branch).
+    fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": "12345"})
+    with pytest.raises(gi.PreflightError) as ex:
+        gi.preflight(ws, pr_count=1)
+    assert ex.value.code == "repo_unresolved"
+
+
 def test_status_reports_last_preflight_verification(tmp_path, fake_gh, capsys):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.cli import _handle_benchmark_status
@@ -673,12 +687,7 @@ def _pr_header(number: int) -> dict:
 def _seed_identity(fake_gh) -> None:
     """Seed the preflight identity + repo-access responses (no PR data)."""
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
-    )
+    fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
 
 
 def _seed_rest(gh, number: int, *, reviews, comments, issue_comments) -> None:

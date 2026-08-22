@@ -27,13 +27,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 import yaml
 
 from daydream import git_ops
 from daydream.benchmark import schema, snapshot, storage
-from daydream.benchmark.workspace import _rfc3339_now
 
 
 def _run_gh_preflight_status(root: Path):
@@ -89,7 +88,7 @@ def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
     return view
 
 
-def _verify_repo_view(view: dict[str, Any], repo_slug: str) -> tuple[str, str]:
+def _verify_repo_view(view: dict[str, Any], repo_slug: str) -> tuple[str, Literal["public", "private"]]:
     """Verify a repo view matches the workspace's exact repository identity.
 
     Returns ``(repository_id, visibility)``. Every mismatch, missing id, or
@@ -114,7 +113,7 @@ def _verify_repo_view(view: dict[str, Any], repo_slug: str) -> tuple[str, str]:
     visibility = str(view.get("visibility") or "").lower()
     if visibility not in ("public", "private"):
         raise PreflightError("repo_unresolved", f"unrecognized visibility {visibility!r}")
-    return repository_id, visibility
+    return repository_id, cast(Literal["public", "private"], visibility)
 
 
 def _persist_identity(root: Path, repo_slug: str, repository_id: str, visibility: str) -> None:
@@ -193,7 +192,7 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     # ledger so ``status`` can surface whether the last import/refresh actually
     # re-verified repository identity + read access.
     ledger = schema.PreflightLedger(
-        last_verified_at=_rfc3339_now(),
+        last_verified_at=_now_rfc3339(),
         repository=repo_slug,
         repository_id=repository_id,
         visibility=visibility,
