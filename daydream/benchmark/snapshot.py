@@ -176,3 +176,69 @@ def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> st
         stderr = proc.stderr.decode("utf-8", errors="replace")
         raise git_ops.GitError(f"git diff --binary {base_sha} {head_sha} failed: {stderr.strip()}")
     return hashlib.sha256(proc.stdout).hexdigest()
+
+
+def sha256_of(path: Path) -> str:
+    """sha256 file digest of *path*."""
+    return storage.sha256_file(path)
+
+
+def _synthetic_env() -> dict[str, str]:
+    return {**os.environ, **_SYNTH_AUTHOR, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def build_bundle(
+    mirror_repo: Path, base_sha: str, head_sha: str, bundle_path: Path, case_id: str | None = None
+) -> None:
+    """Write a deterministic minimal ``refs/heads/base`` + ``refs/heads/head`` bundle.
+
+    Builds two synthetic commits directly from the original base/head tree
+    objects with pinned identity/timestamp, then exposes only the two refs. Any
+    non-zero step raises :class:`GitError` so the caller maps it to
+    ``bundle_failure``.
+    """
+    bundle_path = Path(bundle_path)
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    env = _synthetic_env()
+    base_tree = rev_parse(mirror_repo, f"{base_sha}^{{tree}}")
+    head_tree = rev_parse(mirror_repo, f"{head_sha}^{{tree}}")
+
+    base_proc = git_ops._run_git(
+        mirror_repo, ["commit-tree", base_tree, "-m", "snapshot base"], env_cmd=env, retries=0, timeout=30
+    )
+    if base_proc.returncode != 0:
+        raise git_ops.GitError(f"snapshot base commit-tree failed: {base_proc.stderr.strip()}")
+    base_commit = base_proc.stdout.strip()
+    head_proc = git_ops._run_git(
+        mirror_repo, ["commit-tree", head_tree, "-p", base_commit, "-m", "snapshot head"],
+        env_cmd=env, retries=0, timeout=30,
+    )
+    if head_proc.returncode != 0:
+        raise git_ops.GitError(f"snapshot head commit-tree failed: {head_proc.stderr.strip()}")
+    head_commit = head_proc.stdout.strip()
+    for ref, sha in (("refs/heads/base", base_commit), ("refs/heads/head", head_commit)):
+        up = git_ops._run_git(mirror_repo, ["update-ref", ref, sha], env_cmd=env, retries=0, timeout=30)
+        if up.returncode != 0:
+            raise git_ops.GitError(f"git update-ref {ref} failed: {up.stderr.strip()}")
+    bundle = git_ops._run_git(
+        mirror_repo, ["bundle", "create", str(bundle_path), "refs/heads/base", "refs/heads/head"],
+        env_cmd=env, retries=0, timeout=120,
+    )
+    if bundle.returncode != 0:
+        raise git_ops.GitError(f"git bundle create failed: {bundle.stderr.strip()}")
+
+
+def bundle_heads(bundle_path: Path) -> set[str]:
+    """The list of refs a bundle exposes."""
+    bundle_path = Path(bundle_path)
+    proc = git_ops._run_git(
+        bundle_path.parent, ["bundle", "list-heads", str(bundle_path)], retries=0, timeout=30
+    )
+    if proc.returncode != 0:
+        raise git_ops.GitError(f"git bundle list-heads failed: {proc.stderr.strip()}")
+    heads: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            heads.add(parts[1])
+    return heads

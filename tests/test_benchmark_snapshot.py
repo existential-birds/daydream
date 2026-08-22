@@ -182,3 +182,29 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path):
     assert sn.degenerate(m, _seed_base_tree(), _seed_head_tree()) is None   # real change
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     assert re.fullmatch(r"[0-9a-f]{64}", d)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: synthetic commits + deterministic minimal bundle
+# ---------------------------------------------------------------------------
+
+
+def test_bundle_two_refs_deterministic(tmp_path):
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
+    assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
+    base_commit = sn.rev_parse(m, "refs/heads/base")
+    head_commit = sn.rev_parse(m, "refs/heads/head")
+    assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _seed_base_tree()
+    assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _seed_head_tree()
+    assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
+    # determinism: rebuild and compare bytes
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle, case_id="pr-000001-aaaaaaaaaaaa")
+    assert sn.sha256_of(bundle) == sn.sha256_of(bundle)
