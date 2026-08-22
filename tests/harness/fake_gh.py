@@ -56,6 +56,18 @@ def _argv_opt(argv: list[str], name: str) -> str | None:
             return argv[i + 1]
     return None
 
+_GIT_CREDENTIAL_HELPER = (
+    "protocol=https\n"
+    "host=github.com\n"
+    "username=x\n"
+    "password=<fake>\n"
+)
+
+_LS_REMOTE_DEFAULT = (
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/head\n"
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/heads/base\n"
+)
+
 _EMPTY_THREADS_RESPONSE: dict[str, Any] = {
     "data": {
         "repository": {
@@ -244,6 +256,12 @@ def _handle_gh(argv: list[str], stdin_text: str, state: Path) -> tuple[int, str,
         return _handle_pr_create(argv, state)
     if argv[:2] == ["repo", "view"]:
         return _handle_repo_view(argv, state)
+    if argv[:2] == ["auth", "status"]:
+        _record(state, {"kind": "auth status", "argv": argv, "stdin": ""})
+        return 0, "", ""
+    if argv[:2] == ["auth", "git-credential"]:
+        _record(state, {"kind": "auth git-credential", "argv": argv, "stdin": ""})
+        return 0, _GIT_CREDENTIAL_HELPER, ""
     if not argv or argv[0] != "api":
         return 1, "", f"fake gh: unsupported invocation: {argv!r}\n"
     return _handle_api(argv, state)
@@ -513,6 +531,18 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
         if isinstance(args, (list, tuple)) and args and args[0] == "gh":
             rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
             return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
+        if (
+            isinstance(args, (list, tuple))
+            and args
+            and args[0] == "git"
+            and "ls-remote" in args
+        ):
+            refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
+            _record(
+                state_dir,
+                {"kind": "git ls-remote", "argv": list(args), "env": kwargs.get("env")},
+            )
+            return subprocess.CompletedProcess(list(args), 0, stdout=refs, stderr="")
         return real_run(args, *pargs, **kwargs)
 
     monkeypatch.setattr("daydream.git_ops.subprocess.run", router)
