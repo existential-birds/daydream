@@ -9,6 +9,7 @@ from daydream.benchmark.harbor.verifier_core import (
     derive_candidate_id,
     parse_candidate_finding,
     parse_gold_finding,
+    validate_candidate_artifact,
 )
 
 
@@ -134,3 +135,78 @@ def test_null_fields_normalize_to_empty_string():
     cid = derive_candidate_id("case-x", raw, 0)
     raw2 = _cand(title="", body="", severity=None)
     assert cid == derive_candidate_id("case-x", raw2, 0)
+
+
+def _artifact(findings, **overrides):
+    base = {
+        "schema_version": 1,
+        "case_id": "case-x",
+        "base_ref": "base",
+        "head_ref": "head",
+        "findings": findings,
+    }
+    base.update(overrides)
+    return base
+
+
+def _valid_findings(n=1, key="case-x"):
+    out = []
+    groups: dict[tuple, int] = {}
+    for i in range(n):
+        base = _cand(title=f"f{i}", body=f"body{i}")
+        canon = (
+            f"f{i}",
+            f"body{i}",
+            base.get("severity") or "",
+            base["path"],
+            base["start_line"],
+            base["end_line"],
+        )
+        ordinal = groups.get(canon, 0)
+        groups[canon] = ordinal + 1
+        base["candidate_id"] = derive_candidate_id(key, base, ordinal)
+        out.append(base)
+    return out
+
+
+def test_artifact_accepts_and_returns_models():
+    fs = validate_candidate_artifact(_artifact(_valid_findings(2)))
+    assert len(fs) == 2 and all(isinstance(f, CandidateFinding) for f in fs)
+
+
+def test_artifact_rejects_duplicate_candidate_id():
+    dup = _valid_findings(2)
+    dup[1] = dict(dup[0])  # same id, different title → not allowed
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact(dup))
+
+
+def test_artifact_rejects_mismatched_candidate_id():
+    bad = _valid_findings(1)
+    bad[0]["candidate_id"] = "f" * 64  # does not match derived id
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact(bad))
+
+
+def test_artifact_rejects_wrong_schema_version():
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact([], schema_version=2))
+
+
+def test_artifact_rejects_missing_refs():
+    art = _artifact([])
+    del art["head_ref"]
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(art)
+
+
+def test_artifact_rejects_over_one_mib():
+    big = _valid_findings(1)
+    big[0]["body"] = "x" * (1_048_576)  # artifact JSON > 1 MiB
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact(big))
+
+
+def test_artifact_rejects_over_100_findings():
+    with pytest.raises(VerifierError):
+        validate_candidate_artifact(_artifact(_valid_findings(101)))

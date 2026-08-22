@@ -8,6 +8,7 @@ source, no pydantic, no third-party imports.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 
@@ -223,3 +224,59 @@ def _component_int(finding: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise VerifierError(f"{name} must be an integer, got {value!r}")
     return value
+
+
+# ---------------------------------------------------------------------------
+# candidate artifact + gold set validation
+# ---------------------------------------------------------------------------
+
+
+def _canonical_tuple(finding: object) -> tuple[object, ...]:
+    return (
+        str(_finding_component(finding, "title") or ""),
+        str(_finding_component(finding, "body") or ""),
+        str(_finding_component(finding, "severity") or ""),
+        str(_finding_component(finding, "path")),
+        _component_int(finding, "start_line"),
+        _component_int(finding, "end_line"),
+    )
+
+
+def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding]:
+    """Validate a §9 candidate artifact and return its parsed findings."""
+    if not isinstance(raw, dict):
+        raise VerifierError("candidate artifact must be a dict")
+    try:
+        schema_version = raw["schema_version"]
+        case_id = raw["case_id"]
+        base_ref = raw["base_ref"]
+        head_ref = raw["head_ref"]
+        findings = raw["findings"]
+    except KeyError as exc:
+        raise VerifierError(f"missing artifact field {exc.args[0]}") from exc
+    if schema_version != 1:
+        raise VerifierError(f"unsupported schema_version {schema_version!r}")
+    if not isinstance(case_id, str) or not isinstance(base_ref, str) or not isinstance(head_ref, str):
+        raise VerifierError("case_id/base_ref/head_ref must be strings")
+    if len(json.dumps(raw).encode("utf-8")) > MAX_ARTIFACT_BYTES:
+        raise VerifierError("candidate artifact exceeds 1 MiB")
+    if not isinstance(findings, list):
+        raise VerifierError("artifact findings must be a list")
+    if len(findings) > MAX_CANDIDATE_FINDINGS:
+        raise VerifierError("candidate artifact exceeds 100 findings")
+
+    parsed = [parse_candidate_finding(f) for f in findings]  # type: ignore[arg-type]
+
+    seen: dict[tuple[object, ...], int] = {}
+    ids: set[str] = set()
+    for finding in parsed:
+        canon = _canonical_tuple(finding)
+        ordinal = seen.get(canon, 0)
+        seen[canon] = ordinal + 1
+        expected = derive_candidate_id(case_id, finding, ordinal)
+        if finding.candidate_id != expected:
+            raise VerifierError("candidate_id does not match the derived id")
+        if finding.candidate_id in ids:
+            raise VerifierError("duplicate candidate_id in artifact")
+        ids.add(finding.candidate_id)
+    return parsed
