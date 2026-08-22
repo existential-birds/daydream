@@ -10,6 +10,7 @@ through the ``fake_gh`` router; freeze mirror fetches hit a real local bare
 origin (no network).
 """
 
+import hashlib
 import os
 import subprocess
 
@@ -65,6 +66,46 @@ def test_preflight_gh_and_ls_remote_wire_command_scoped_helper(tmp_path, fake_gh
     assert "-c" in ls.argv and any(a.startswith("credential.helper=") for a in ls.argv)
     assert "gh auth git-credential" in joined and "password=" not in joined
     assert ls.env is not None and ls.env.get("GIT_TERMINAL_PROMPT") == "0"
+
+
+def test_fetch_persists_complete_pr_header(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = "fixes the cache\n\nand tests"
+    header["html_url"] = "https://github.com/o/r/pull/101"
+    header["merged_at"] = "2026-01-02T00:00:00Z"
+    header["closed_at"] = "2026-01-02T00:00:00Z"
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    pr = doc.pull_request
+    assert pr.body == "fixes the cache\n\nand tests"
+    assert pr.html_url == "https://github.com/o/r/pull/101"
+    assert pr.title_sha256 == hashlib.sha256(b"Fix cache").hexdigest()
+    assert pr.body_sha256 == hashlib.sha256("fixes the cache\n\nand tests".encode()).hexdigest()
+    assert pr.head.ref == "feature/cache"          # head.ref parity with base.ref
+    assert pr.merged_at is not None and pr.closed_at is not None
+    assert pr.number == 101 and pr.author.login == "alice"
+
+
+def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    header = dict(_PR_HEADER)
+    header["body"] = None                          # GitHub returns null for empty
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", header)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    assert doc.pull_request.body == ""             # null -> empty string, never "None"
 
 
 def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):

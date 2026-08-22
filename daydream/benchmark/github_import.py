@@ -1123,15 +1123,23 @@ def fetch_and_normalize(
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
     base = header.get("base") or {}
     head = header.get("head") or {}
+    title = header.get("title") or ""
+    body = header.get("body") or ""          # null/empty -> "", Unicode/newlines preserved byte-for-byte
     pull_request = {
-        "number": header["number"],
+        "number": header["number"],          # KeyError propagates if absent — fail closed, never 0
         "url": header.get("url") or "",
-        "title": header.get("title") or "",
+        "html_url": header.get("html_url") or "",
+        "title": title,
+        "body": body,
         "state": header.get("state") or "",
+        "title_sha256": hashlib.sha256(title.encode("utf-8")).hexdigest(),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "base": {"sha": base.get("sha"), "ref": base.get("ref")},
-        "head": {"sha": head.get("sha")},
+        "head": {"sha": head.get("sha"), "ref": head.get("ref")},
         "created_at": header.get("created_at"),
         "updated_at": header.get("updated_at"),
+        "merged_at": header.get("merged_at"),
+        "closed_at": header.get("closed_at"),
         "author": _as_author(header),
     }
     return schema.ImportDocument.model_validate(
