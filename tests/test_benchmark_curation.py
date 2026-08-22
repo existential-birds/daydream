@@ -633,6 +633,18 @@ def test_concurrent_adds_then_final_readiness_lands(tmp_path, fake_gh):
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
 
+def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # acquires + releases the lock
+    assert (ws / ".benchmark.lock").read_bytes() == b""         # lock file is empty: no repo evidence/credentials
+    with pytest.raises(cu.CurationError) as ei:
+        cu.exclude_evidence(ws, case_id, "not-a-source", reason="duplicate")
+    msg = str(ei.value)
+    assert "o/r" not in msg and "token" not in msg.lower() and "api_key" not in msg.lower()
+
+
 def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
     import time
     from daydream.benchmark import curation as cu
