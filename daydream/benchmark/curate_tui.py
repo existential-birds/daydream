@@ -179,6 +179,17 @@ def _launch_editor(initial: str) -> str | None:
             pass
 
 
+def _service_error(exc: BaseException, outcome: str = "continue") -> str:
+    """Print a curation error message and return the action-loop *outcome*.
+
+    Shared by every ``_action_*`` handler so a typed ``cu.CurationError``
+    (or a ``ValidationError`` from a malformed atom) renders as a one-line
+    message plus a verdict, never a bare traceback.
+    """
+    print(str(exc))
+    return outcome
+
+
 def _editor_fragment_new() -> str:
     """One blank template finding as an editable YAML fragment."""
     return yaml.safe_dump({"findings": [{
@@ -240,8 +251,7 @@ def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Calla
     try:
         cu.add_findings(root, case_id, findings=atoms)
     except (cu.CurationError, ValidationError) as exc:
-        print(str(exc))
-        return "rerender"
+        return _service_error(exc, "rerender")
     print(f"added {len(atoms)} authored finding(s)")
     return "rerender"
 
@@ -272,8 +282,7 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
     try:
         cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms)
     except (cu.CurationError, ValidationError) as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"replaced finding with {len(atoms)} atom(s)")
     return "rerender"
 
@@ -306,8 +315,7 @@ def _action_exclude_case(
     try:
         cu.exclude_case(root, case_id, reason, note=note)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"excluded case {case_id}")
     return "rerender"
 
@@ -319,8 +327,7 @@ def _action_reinclude(
     try:
         cu.reinclude_case(root, case_id)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"re-included case {case_id}")
     return "rerender"
 
@@ -341,8 +348,7 @@ def _action_clean(
     try:
         cu.attest_clean(root, case_id)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"attested {case_id} clean")
     return "rerender"
 
@@ -362,8 +368,7 @@ def _action_ready(
     try:
         cu.mark_ready(root, case_id, head_sha=head)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"marked {case_id} ready")
     return "rerender"
 
@@ -398,8 +403,7 @@ def _action_exclude(
     try:
         cu.exclude_evidence(root, case_id, source_id, reason=reason, note=note)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"excluded {source_id}")
     return "rerender"
 
@@ -426,30 +430,31 @@ def _action_accept(root: Path, case_id: str, view: dict[str, Any], read_line: Ca
     try:
         cu.accept_candidate(root, case_id, src)
     except cu.CurationError as exc:
-        print(str(exc))
-        return "continue"
+        return _service_error(exc)
     print(f"accepted {src} as a historical finding")
     return "rerender"
 
 
+# Dispatch table: one stable binding per action char. Kept as a module-level dict
+# (rather than an 11-branch if/elif ladder) so it cannot drift from the _ACTIONS
+# frozenset and adding a binding is a single-key change.
+_ACTION_DISPATCH: dict[str, Callable[[Path, str, dict[str, Any], Callable[[str], str]], str]] = {
+    "a": _action_accept,
+    "n": _action_new,
+    "e": _action_edit,
+    "x": _action_exclude,
+    "c": _action_clean,
+    "r": _action_ready,
+    "z": _action_exclude_case,
+    "i": _action_reinclude,
+}
+
+
 def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
     """Dispatch one recognized action; returns the next action-loop outcome."""
-    if action == "a":
-        return _action_accept(root, case_id, view, read_line)
-    if action == "n":
-        return _action_new(root, case_id, view, read_line)
-    if action == "e":
-        return _action_edit(root, case_id, view, read_line)
-    if action == "x":
-        return _action_exclude(root, case_id, view, read_line)
-    if action == "c":
-        return _action_clean(root, case_id, view, read_line)
-    if action == "r":
-        return _action_ready(root, case_id, view, read_line)
-    if action == "z":
-        return _action_exclude_case(root, case_id, view, read_line)
-    if action == "i":
-        return _action_reinclude(root, case_id, view, read_line)
+    handler = _ACTION_DISPATCH.get(action)
+    if handler is not None:
+        return handler(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"
@@ -542,7 +547,13 @@ def run_curate_tui(
                     return 0
             except KeyboardInterrupt:
                 print("interrupted \u2014 prior actions preserved")
-    except (cu.CurationError, WorkspaceCorrupt) as exc:
+    except (
+        cu.CurationError,
+        WorkspaceCorrupt,
+        ValidationError,
+        KeyError,
+        TypeError,
+    ) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
