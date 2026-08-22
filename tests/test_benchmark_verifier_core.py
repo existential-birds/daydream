@@ -505,3 +505,25 @@ def test_partial_location_rejected(partial):
         parse_candidate_finding(_cand(**partial))
     with pytest.raises(VerifierError):
         parse_gold_finding(_gold(**partial))
+
+
+def test_mixed_located_locationless_set_matching_is_id_keyed():
+    g_loc = _gold(title="Located", path="src/a.py", start_line=1, end_line=1)
+    g_loc["finding_id"] = _canonical_gold_id("case-x", g_loc)
+    g_non = _gold(title="Locationless", path=None, start_line=None, end_line=None)
+    g_non["finding_id"] = _canonical_gold_id("case-x", g_non)
+    gold = validate_gold_set([g_loc, g_non], case_id="case-x")
+
+    c_loc = _cand(title="Located", path="src/a.py", start_line=1, end_line=1)
+    c_loc["candidate_id"] = derive_candidate_id("case-x", c_loc, 0)
+    c_non = _cand(title="Locationless", path=None, start_line=None, end_line=None)
+    c_non["candidate_id"] = derive_candidate_id("case-x", c_non, 0)
+    art = _artifact([c_loc, c_non])
+
+    vs = [
+        Verdict(g_loc["finding_id"], c_loc["candidate_id"], True, 0.9, "same"),
+        Verdict(g_non["finding_id"], c_non["candidate_id"], True, 0.9, "same"),
+    ]
+    r = score_review(gold, art, vs)
+    assert (r.tp, r.fp, r.fn) == (2, 0, 0)
+    assert r.reward == 1.0 and r.verifier_error == 0
