@@ -467,3 +467,24 @@ def test_rollback_committing_restored_target_is_0600(tmp_path):
     recover_startup(tmp_path)
     assert t.read_text() == "old"
     assert stat.S_IMODE(t.stat().st_mode) == 0o600
+
+
+def test_restart_recovery_is_idempotent(tmp_path):
+    t = tmp_path / "target.yaml"; t.write_text("old")
+    with Transaction(tmp_path, op_id="op-idem", kind="write") as tx:
+        _stage(tx, t, "new"); tx.begin_commit(); tx.inject_crash()
+    recover_startup(tmp_path)   # first pass: roll back committing journal
+    first_txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
+    recover_startup(tmp_path)   # second pass: must be a clean no-op
+    assert t.read_text() == "old"                       # state identical to first pass
+    txn = list((tmp_path / "transactions").iterdir()) if (tmp_path / "transactions").exists() else []
+    assert txn == first_txn                              # no leftover residue, no second-pass failure
+
+
+def test_complete_restart_recovery_is_idempotent(tmp_path):
+    t = tmp_path / "target.yaml"; t.write_text("old")
+    with Transaction(tmp_path, op_id="op-idem2", kind="write") as tx:
+        _stage(tx, t, "new"); tx.commit(); tx.force_state("complete")
+    recover_startup(tmp_path)
+    recover_startup(tmp_path)   # second pass: complete journal already verified+cleaned
+    assert t.read_text() == "new"
