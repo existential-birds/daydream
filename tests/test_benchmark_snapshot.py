@@ -268,3 +268,46 @@ def test_freeze_one_ready_and_reasons(tmp_path):
                         policy="explicit_head", requested_head="0" * 40, origin_url=origin)
     assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
     assert ur2["bundle_file"] is None
+
+
+# ---------------------------------------------------------------------------
+# Task 10: crash injection at case/bundle/manifest transaction boundaries
+# ---------------------------------------------------------------------------
+
+
+def test_freeze_crash_recovers_whole_before_or_after(tmp_path):
+    """A crash at any freeze {bundle, case, manifest} boundary heals whole.
+
+    Mirrors the import-crash transaction test, substituting the snapshot bundle
+    for one staged file: ``journal``/``data`` restore the whole before-state,
+    ``manifest`` keeps the complete after-state, and ``transactions/`` is left
+    empty after recovery.
+    """
+    from daydream.benchmark import storage
+    from daydream.benchmark.storage import recover_startup
+
+    for boundary in ("journal", "data", "manifest"):
+        case_dir = tmp_path / "cases"
+        snap_dir = tmp_path / "snapshots"
+        for d in (case_dir, snap_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        (case_dir / "pr-000001-aaaaaaaaaaaa.yaml").write_text("case-before")
+        (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").write_bytes(b"bundle-before")
+        (tmp_path / "benchmark.yaml").write_text("ledger-before")
+        with storage.Transaction(tmp_path, op_id=f"freeze-{boundary}", kind="freeze") as tx:
+            tx.stage("snapshots/pr-000001-aaaaaaaaaaaa.bundle", b"bundle-after")
+            tx.stage("cases/pr-000001-aaaaaaaaaaaa.yaml", b"case-after")
+            tx.stage("benchmark.yaml", b"ledger-after")
+            tx.inject_crash(boundary)
+        recover_startup(tmp_path)
+        if boundary in ("journal", "data"):
+            assert (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").read_bytes() == b"bundle-before"
+            assert (case_dir / "pr-000001-aaaaaaaaaaaa.yaml").read_text() == "case-before"
+            assert (tmp_path / "benchmark.yaml").read_text() == "ledger-before"
+        else:  # manifest (complete journal kept)
+            assert (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").read_bytes() == b"bundle-after"
+            assert (case_dir / "pr-000001-aaaaaaaaaaaa.yaml").read_text() == "case-after"
+            assert (tmp_path / "benchmark.yaml").read_text() == "ledger-after"
+        assert not (tmp_path / "transactions").exists() or not list(
+            (tmp_path / "transactions").iterdir()
+        )
