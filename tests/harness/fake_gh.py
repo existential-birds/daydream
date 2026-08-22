@@ -226,10 +226,14 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         return 1, "", "fake gh: unrecognized graphql query\n"
     key = f"{method} {endpoint}"
     if key in responses:
+        if responses[key] is None:
+            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[key], jq), ""
     # Query strings select/paginate; the canned response is keyed by path alone.
     bare_key = f"{method} {endpoint.split('?')[0]}"
     if bare_key in responses:
+        if responses[bare_key] is None:
+            return 1, "", f"fake gh: 404 {endpoint} (no such resource)\n"
         return 0, _emit(responses[bare_key], jq), ""
     if method == "GET" and re.fullmatch(r"repos/[^/]+/[^/]+/pulls/\d+/reviews", endpoint):
         return 0, _emit([], jq), ""

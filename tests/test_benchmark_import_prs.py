@@ -261,3 +261,66 @@ def test_rate_limit_retries_three_then_fails_pr(tmp_path, fake_gh, monkeypatch):
     ok = gi._fetch_with_retry(ws, "o/r", 101)
     assert attempts["n"] == 3 and ok.returncode == 0
     assert slept and all(w <= 60 for w in slept)  # Retry-After honored, 60s cap
+
+
+def _seed_preflight(ws, fake_gh, *, pull_header=_PR_HEADER):
+    """Seed an unresolved workspace + canned preflight/REST data for pr 101."""
+    _seed_manifest(ws)
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response(
+        "repo-view-full",
+        value={"id": 5, "nameWithOwner": "o/r",
+               "url": "https://github.com/o/r", "visibility": "PRIVATE",
+               "defaultBranchRef": {"name": "main"}},
+    )
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", pull_header)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+
+
+def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict, sha256_file
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)  # preflight + rest/graphql canned data for pr 101 (one head)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetched"
+    assert pr["import_file"] == "imports/pr-000101.json"
+    assert pr["import_sha256"] == sha256_file(ws / pr["import_file"])
+    assert pr["requested_heads"] == ["final"]
+    assert pr["case_ids"] == ["pr-000101-" + "a" * 12]   # head from _PR_HEADER
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
+
+
+def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh, pull_header=None)  # 404 -> fetch fails
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    assert rc != 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetch_failed"
+    assert pr["error"]["code"] and pr["error"]["message"]
+    assert pr["import_file"] is None and pr["import_sha256"] is None
+    assert not (ws / "imports" / "pr-000101.json").exists()
+
+
+def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.workspace import workspace_status
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"])
+    assert rc == 0
+    st = workspace_status(ws)
+    assert st.workspace_state != "empty"
+    assert st.repository_identity_resolved is True

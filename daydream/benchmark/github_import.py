@@ -603,6 +603,191 @@ def _payload_sha256(records: list[schema.EvidenceRecord]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _case_materialize(
+    doc: schema.ImportDocument,
+    number: int,
+    requested_heads: list[str],
+    import_file: str,
+    import_sha256: str,
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """One materialized case document per requested head."""
+    pull_request = doc.pull_request
+    base_sha = (pull_request.get("base") or {}).get("sha")
+    out: list[tuple[str, str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    for head_token in requested_heads:
+        head_sha = head_token if head_token != "final" else (pull_request.get("head") or {}).get("sha")
+        if not head_sha or head_sha in seen:
+            continue
+        seen.add(head_sha)
+        case_id = schema.case_id_for(number, head_sha)
+        candidates = project_candidates(doc, head_sha)
+        case_doc: dict[str, Any] = {
+            "schema_version": 1,
+            "case_id": case_id,
+            "pull_request": pull_request,
+            "snapshot": {
+                "status": "imported",
+                "policy": "final_pr_head",
+                "requested_head": head_token,
+                "original_base_sha": base_sha,
+                "original_head_sha": head_sha,
+                "error": None,
+            },
+            "source": {"import_file": import_file, "import_sha256": import_sha256},
+            "curation": {
+                "state": "draft",
+                "snapshot_attested": False,
+                "clean_attested": False,
+                "gold_status": None,
+                "findings": [],
+                "exclusions": [],
+                "case_exclusion": None,
+            },
+            "candidates": [c.model_dump(mode="json") for c in candidates],
+        }
+        out.append((case_id, f"cases/{case_id}.yaml", case_doc))
+    return out
+
+
+def _ledger_replace(raw: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Replace (or append) one ``pull_requests[]`` entry, keeping stable order."""
+    raw["pull_requests"] = [
+        e for e in raw.get("pull_requests", []) if e.get("number") != entry["number"]
+    ]
+    raw["pull_requests"].append(entry)
+
+
+def _stamp_fetched(
+    raw: dict[str, Any],
+    number: int,
+    import_file: str,
+    import_sha256: str,
+    requested_heads: list[str],
+    case_ids: list[str],
+) -> None:
+    schema.validate_pr_transition(
+        _pending_pr_state(raw, number), "fetched"
+    )
+    _ledger_replace(
+        raw,
+        {
+            "number": number,
+            "import_state": "fetched",
+            "import_file": import_file,
+            "import_sha256": import_sha256,
+            "error": None,
+            "requested_heads": requested_heads,
+            "case_ids": case_ids,
+        },
+    )
+    for case_id in case_ids:
+        raw.setdefault("cases", []).append(
+            {"case_id": case_id, "pr_number": number, "case_file": f"cases/{case_id}.yaml"}
+        )
+    raw["cases"] = _sorted_cases(raw["cases"])
+
+
+def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) -> None:
+    schema.validate_pr_transition(_pending_pr_state(raw, number), "fetch_failed")
+    _ledger_replace(
+        raw,
+        {
+            "number": number,
+            "import_state": "fetch_failed",
+            "import_file": None,
+            "import_sha256": None,
+            "error": {"code": code, "message": message},
+            "requested_heads": [],
+            "case_ids": [],
+        },
+    )
+
+
+def _pending_pr_state(raw: dict[str, Any], number: int) -> str:
+    for entry in raw.get("pull_requests", []):
+        if entry.get("number") == number:
+            return entry.get("import_state", "pending")
+    return "pending"
+
+
+def _sorted_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _key(c: dict[str, Any]) -> tuple[int, str, str]:
+        return (int(c["pr_number"]), schema.head_sha_from_case_id(c["case_id"]), c["case_id"])
+
+    return sorted(cases, key=_key)
+
+
+def _manifest_bytes(raw: dict[str, Any]) -> bytes:
+    return yaml.safe_dump(raw, sort_keys=False).encode("utf-8")
+
+
+def run_import_prs(
+    root: Path,
+    pr_numbers: list[int],
+    heads: list[str] | None = None,
+    refresh: bool = False,
+) -> int:
+    """Import each PR's evidence into one atomic import ledger/case transaction.
+
+    Runs startup recovery then preflight (identity idempotent), then for each PR
+    writes its import file, one case per requested head, and the ledger through
+    one :class:`Transaction` (``benchmark.yaml`` last). A failed fetch stages no
+    import/case file — only a ledger flip to ``fetch_failed`` with an exact
+    error. The overall exit is non-zero when any PR failed.
+    """
+    del refresh
+    root = Path(root)
+    requested_heads: list[str] = []
+    seen_heads: set[str] = set()
+    for head in ["final", *(heads or [])]:
+        if head not in seen_heads:
+            seen_heads.add(head)
+            requested_heads.append(head)
+    exit_code = 0
+    with storage.WorkspaceLock(root):
+        storage.recover_startup(root)
+        preflight(root, len(pr_numbers))
+        raw = storage.load_yaml_strict(root / "benchmark.yaml")
+        repo = raw.get("source", {}).get("repository") or ""
+        for number in pr_numbers:
+            try:
+                doc = fetch_and_normalize(root, repo, number, heads or ["final"])
+                import_file = f"imports/pr-{number:06d}.json"
+                import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
+                import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+                cases = _case_materialize(
+                    doc, number, requested_heads, import_file, import_sha256
+                )
+                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+                    tx.stage(import_file, import_bytes)
+                    for _, case_path, case_doc in cases:
+                        tx.stage(case_path, yaml.safe_dump(case_doc, sort_keys=False).encode("utf-8"))
+                    _stamp_fetched(
+                        raw,
+                        number,
+                        import_file,
+                        import_sha256,
+                        requested_heads,
+                        [c[0] for c in cases],
+                    )
+                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
+                    tx.commit()
+            except _ImportRateLimitError as exc:
+                _stages_failed(raw, number, "rate_limit", str(exc))
+                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
+                    tx.commit()
+                exit_code = 1
+            except (git_ops.GitError, schema.TransitionError, storage.WorkspaceError, PreflightError) as exc:
+                _stages_failed(raw, number, "fetch", str(exc))
+                with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
+                    tx.stage("benchmark.yaml", _manifest_bytes(raw))
+                    tx.commit()
+                exit_code = 1
+    return exit_code
+
+
 def _repository_block(root: Path, owner_repo: str) -> dict[str, Any]:
     """The resolved repository identity for the import.
 
