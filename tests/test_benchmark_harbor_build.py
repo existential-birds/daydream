@@ -649,16 +649,39 @@ def test_compile_never_refetches_live_pr_text(tmp_path, fake_gh, monkeypatch):
 
 
 def test_contract_docs_describe_persisted_header_and_staleness_rule():
+    """Lock the contract wording, not the identifiers.
+
+    Greps the docstrings/comments (the contract text) rather than source
+    identifiers or locals, so removing or rewording the documented contract
+    fails the test.
+    """
     import inspect
 
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.harbor import build
-    src = inspect.getsource(gi.fetch_and_normalize) + inspect.getsource(gi._import_one_pr)
-    assert "body_sha256" in src or "body" in src          # header/body documented in builder
-    assert "task-input" in inspect.getsource(gi._import_one_pr) or \
-           "task_input" in inspect.getsource(gi._import_one_pr)
-    bsrc = inspect.getsource(build.bounded_pr_context)
-    assert "body_sha256" in bsrc and "persisted" in bsrc
+
+    def flat(doc: str) -> str:
+        return " ".join(doc.split())
+
+    # The normalized-header doc must describe the persisted body + digests.
+    header_doc = flat(inspect.getdoc(gi.fetch_and_normalize))
+    assert "carries the complete header: number, url/html_url, title, body, state" in header_doc
+    assert "persisted" in header_doc and "body_sha256" in header_doc
+
+    # The staleness rule: a task-input (title/body/base/head) change stales
+    # gold; metadata-only changes (updated_at, html_url, merged state) do not.
+    sig_doc = flat(inspect.getdoc(gi._task_input_signature_from_doc))
+    assert "the task-input contract a reviewer is shown" in sig_doc
+    assert "A body/title/base/head change flips it; metadata-only changes" in sig_doc
+    assert "(updated_at, html_url, merged state) do not." in sig_doc
+    assert "stale only on an evidence change OR a task-input-contract change" in inspect.getsource(gi._import_one_pr)
+
+    # The truncation marker doc must attest the persisted body digest and
+    # forbid re-deriving it from the escaped surface.
+    marker_doc = flat(inspect.getdoc(build.bounded_pr_context))
+    assert "[truncated; full_body_sha256=<digest>]" in marker_doc
+    assert "persisted" in marker_doc and "body_sha256" in marker_doc
+    assert "never re-derived from the escaped surface" in marker_doc
 
 
 def test_compile_fails_closed_on_missing_pr_number(tmp_path, fake_gh):

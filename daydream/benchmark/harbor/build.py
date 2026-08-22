@@ -494,7 +494,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         files[rel] = sha
 
     number = pull_request.get("number")
-    if not isinstance(number, int):
+    if type(number) is not int:
         raise CompileError(f"case {case_id} missing or malformed PR number: {number!r}")
 
     return {

@@ -776,11 +776,21 @@ def _task_input_signature_from_doc(doc: schema.ImportDocument) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _task_input_signature_from_raw(raw: dict[str, Any]) -> str:
-    """The task-input signature computed over a raw import document's dict."""
+def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
+    """The task-input signature computed over a raw import document's dict.
+
+    A predate import file persisted ``head: {sha}`` without ``ref`` and no
+    ``body``, so the task-input contract cannot be reconstructed from what it
+    stored. Returns ``None`` for such files so the task-input arm of ``changed``
+    stays inert until the file is re-persisted with the full header; a fresh
+    file always carries both keys (``body`` may be ``""``, ``head.ref`` may be
+    ``None``) and yields a comparable signature.
+    """
     pr = raw.get("pull_request") or {}
-    base = pr.get("base") or {}
     head = pr.get("head") or {}
+    if "body" not in pr or "ref" not in head:
+        return None
+    base = pr.get("base") or {}
     payload = {
         "title": str(pr.get("title") or ""),
         "body": str(pr.get("body") or ""),
