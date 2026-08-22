@@ -6,8 +6,14 @@ mutates the case YAML/model directly. Rendering is plain-string builders for
 deterministic tests; Rich stays available for live styling.
 """
 
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
+
+import yaml
+from pydantic import ValidationError
 
 from daydream.benchmark import curation as cu
 
@@ -134,6 +140,145 @@ _ACTIONS = frozenset("aenxcrdziq")
 _ACTION_PROMPT = "action [a/e/n/x/c/r/d/z/i/q]: "
 
 
+def _pick_editor() -> str:
+    """Deterministic editor resolution: ``$VISUAL`` -> ``$EDITOR`` -> ``vi``."""
+    for var in ("VISUAL", "EDITOR"):
+        value = os.environ.get(var)
+        if value:
+            return value
+    return "vi"
+
+
+def _launch_editor(initial: str) -> str | None:
+    """Open *initial* in the user's editor; return edited text or ``None``.
+
+    A ``0600`` temp ``.yaml`` buffer is created and removed in a ``finally`` so
+    an editor interrupt cannot leak it. A nonzero editor exit removes the buffer
+    and returns ``None`` (no mutation).
+    """
+    editor = _pick_editor()
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        os.chmod(path, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(initial)
+        try:
+            proc = subprocess.run([editor, path], text=False)
+        except (subprocess.SubprocessError, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        return Path(path).read_text()
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def _editor_fragment_new() -> str:
+    """One blank template finding as an editable YAML fragment."""
+    return yaml.safe_dump({"findings": [{
+        "title": "", "body": "", "severity": None,
+        "location": None, "source_ids": [],
+    }]}, sort_keys=False)
+
+
+def _editor_fragment_edit(finding: dict[str, Any]) -> str:
+    """The existing *finding* as one editable YAML fragment atom."""
+    atom = {
+        "title": finding.get("title"),
+        "body": finding.get("body"),
+        "severity": finding.get("severity"),
+        "location": finding.get("location"),
+        "source_ids": (finding.get("provenance") or {}).get("source_ids") or [],
+    }
+    return yaml.safe_dump({"findings": [atom]}, sort_keys=False)
+
+
+def _parse_fragment(text: str) -> list[dict[str, Any]] | None:
+    """Parse edited YAML into a list of non-blank finding atoms, or ``None``.
+
+    Requires a dict with a non-empty ``findings`` list of atoms each carrying a
+    non-blank ``title``/``body`` string."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    findings = data.get("findings")
+    if not isinstance(findings, list) or not findings:
+        return None
+    atoms: list[dict[str, Any]] = []
+    for item in findings:
+        if not isinstance(item, dict):
+            return None
+        title = item.get("title")
+        body = item.get("body")
+        if not isinstance(title, str) or not title.strip():
+            return None
+        if not isinstance(body, str) or not body.strip():
+            return None
+        atoms.append(item)
+    return atoms
+
+
+def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
+    """The ``[n]`` author action: edit a blank fragment, add every atom."""
+    text = _launch_editor(_editor_fragment_new())
+    if text is None:
+        print("editor cancelled or failed; nothing written")
+        return "continue"
+    atoms = _parse_fragment(text)
+    if atoms is None:
+        print("invalid fragment; nothing written")
+        return "continue"
+    try:
+        for atom in atoms:
+            cu.add_finding(
+                root, case_id,
+                title=atom["title"], body=atom["body"],
+                severity=atom.get("severity"),
+                location=atom.get("location"),
+                source_ids=atom.get("source_ids") or [],
+            )
+    except (cu.CurationError, ValidationError) as exc:
+        print(str(exc))
+        return "continue"
+    print(f"added {len(atoms)} authored finding(s)")
+    return "rerender"
+
+
+def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
+    """The ``[e]`` edit action: replace one gold finding with its re-written atoms."""
+    findings = (view.get("curation") or {}).get("findings") or []
+    text = _prompt(read_line, "finding (number, 0 to cancel): ").strip()
+    if text == "0":
+        return "continue"
+    try:
+        indices = parse_indices(text, len(findings))
+    except ValueError as exc:
+        print(str(exc))
+        return "continue"
+    finding = findings[indices[0]]
+    frag = _launch_editor(_editor_fragment_edit(finding))
+    if frag is None:
+        print("editor cancelled or failed; nothing written")
+        return "continue"
+    atoms = _parse_fragment(frag)
+    if atoms is None:
+        print("invalid fragment; nothing written")
+        return "continue"
+    try:
+        cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms)
+    except (cu.CurationError, ValidationError) as exc:
+        print(str(exc))
+        return "continue"
+    print(f"replaced finding with {len(atoms)} atom(s)")
+    return "rerender"
+
+
 def _action_accept(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
     """The ``[a]`` accept-candidate action: one exact-acceptable candidate."""
     candidates = view.get("candidates") or []
@@ -163,6 +308,10 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
     """Dispatch one recognized action; returns the next action-loop outcome."""
     if action == "a":
         return _action_accept(root, case_id, view, read_line)
+    if action == "n":
+        return _action_new(root, case_id, view, read_line)
+    if action == "e":
+        return _action_edit(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"

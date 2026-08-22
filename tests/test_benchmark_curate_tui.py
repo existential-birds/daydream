@@ -7,6 +7,7 @@ YAML/state via service reads.
 """
 
 import pytest
+from pathlib import Path
 
 from tests.test_benchmark_curation import _seed_ready_case
 
@@ -106,3 +107,76 @@ def test_action_accept_non_exact_candidate_offers_edit_path(tmp_path, fake_gh, c
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))
     assert path.read_bytes() == after_rewrite                 # unchanged
     assert "not exactly acceptable" in capsys.readouterr().out
+
+
+def test_action_new_via_real_editor_persists_authored(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    log = tmp_path / "editor.log"
+    editor = tmp_path / "edit.sh"
+    editor.write_text("#!/bin/sh\nprintf '%s %s\\n' \"$(stat -c '%a' \"$1\")\" \"$1\" > \"$LOG\"\n"
+                      "cat > \"$1\" <<'EOF'\nfindings:\n"
+                      "  - title: New concern\n    body: fresh wording\n"
+                      "    severity: medium\n    location: null\n    source_ids: []\nEOF\n")
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("LOG", str(log))
+
+    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert f["title"] == "New concern" and f["provenance"]["kind"] == "authored"
+    assert raw["curation"]["state"] == "draft"
+    mode, buf = log.read_text().strip().split(" ", 1)
+    assert mode == "600"                        # editor buffer was mode 0600
+    assert not Path(buf).exists()               # buffer removed after the edit
+
+
+def test_editor_nonzero_exit_leaves_state_unchanged(tmp_path, fake_gh, monkeypatch, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    editor = tmp_path / "fail.sh"; editor.write_text("#!/bin/sh\nexit 3\n"); editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+
+    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
+    assert path.read_bytes() == before                       # unchanged
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_editor_malformed_buffer_is_discarded(tmp_path, fake_gh, monkeypatch, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"; before = path.read_bytes()
+    editor = tmp_path / "bad.sh"
+    editor.write_text("#!/bin/sh\ncat > \"$1\" <<'EOF'\ntitle: [unclosed\nEOF\n")
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+
+    run_curate_tui(ws, case_id, read_line=_scripted("n", "q"))
+    assert path.read_bytes() == before
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
+    import yaml as _yaml
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    current = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    editor = tmp_path / "edit2.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n"
+        "  - title: Reworked\n    body: edited wording\n"
+        "    severity: low\n    location: null\n"
+        f"    source_ids: [{current['source_id']}]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor)); monkeypatch.delenv("EDITOR", raising=False)
+
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "e", "1", "q"))
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    f = raw["curation"]["findings"][0]
+    assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
