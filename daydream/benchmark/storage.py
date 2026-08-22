@@ -15,10 +15,12 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -231,7 +233,8 @@ class WorkspaceLock:
 # ``complete`` journal. Because the journal lives on the same filesystem as
 # the targets and every phase is fsynced before the next begins, a crash at
 # any boundary restores either the whole before-state or the whole after-state
-# — never a checksum-drifted partial.
+# — never a checksum-drifted partial. Recovery is mode-safe: verified targets
+# keep ``0600``, and scaffold dirs kept by ``_remove_created_dirs`` stay ``0700``.
 
 
 @dataclass
@@ -316,7 +319,7 @@ class Transaction:
         ``init_workspace`` build the private scaffold subdirs through the same
         crash-consistent journal instead of leaving them outside it.
         """
-        rel = _rel_of(self._root, target_rel)
+        rel = _resolve_target(self._root, target_rel)
         ensure_private_dir(self._root / rel)
         if rel not in self._created_dirs:
             self._created_dirs.append(rel)
@@ -328,7 +331,7 @@ class Transaction:
         ``transactions/<op_id>/`` and records before/after digests. The real
         target is not touched here.
         """
-        rel = _rel_of(self._root, target_rel)
+        rel = _resolve_target(self._root, target_rel)
         if rel in self._states:
             raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
         target = self._root / rel
@@ -369,6 +372,21 @@ class Transaction:
         self._write_journal()
         _fsync_file(self._journal_path())
 
+    def _begin_committing(self) -> None:
+        """Transition the journal to ``committing`` with nothing applied.
+
+        A transaction enters ``committing`` by rewriting the journal with
+        ``state == committing`` and ``applied_count == 0`` before any target
+        is replaced. Both ``begin_commit`` and the per-target crash-injection
+        branch collapse to this single sequence, so the ``target-<n>``
+        mid-loop crash state stays byte-identical to a real halt reached via
+        ``begin_commit``.
+        """
+        self._state = "committing"
+        self._applied_count = 0
+        self._write_journal()
+        _fsync_file(self._journal_path())
+
     def begin_commit(self) -> None:
         """Rewrite the journal ``committing``, then apply targets in ordered list.
 
@@ -379,12 +397,25 @@ class Transaction:
         last-replaced file unrecoverable — a checksum-drifted mixed state the
         journal's never-drift contract forbids.
         """
-        self._state = "committing"
-        self._applied_count = 0
-        self._write_journal()
-        _fsync_file(self._journal_path())
-        for rel in self._replacement_order:
+        self._begin_committing()
+        self._apply_replacements()
+        _fsync_dir(self._root)
+
+    def _apply_replacements(self, *, stop_after: int | None = None) -> None:
+        """Apply targets in ``replacement_order``, fsyncing each rename.
+
+        Each target's rename is made durable (file + *parent directory* fsync)
+        before the next target is applied, so a crash at any per-target
+        boundary still restores the whole before- or after-state, never a
+        checksum-drifted mix. ``stop_after`` (a test-only hook) applies only
+        the first ``N`` targets and leaves the journal ``committing`` with
+        ``applied_count == N``, byte-identical to a real mid-loop crash.
+        """
+        for i, rel in enumerate(self._replacement_order):
+            if stop_after is not None and i >= stop_after:
+                break
             st = self._states[rel]
+            rel = _resolve_target(self._root, rel)
             target = self._root / rel
             ensure_private_dir(target.parent)
             st.applied = True
@@ -394,7 +425,7 @@ class Transaction:
             os.replace(st.stage_path, target)
             _fsync_file(target)
             os.chmod(target, 0o600)
-        _fsync_dir(self._root)
+            _fsync_dir(target.parent)
 
     def commit(self) -> None:
         """Run the full pipeline to ``complete`` and remove the journal."""
@@ -414,13 +445,14 @@ class Transaction:
     def inject_crash(self, boundary: str | None = None) -> None:
         """Simulate a crash at a named pipeline boundary (test-only).
 
-        With ``boundary is None`` (Task 4's scalar form) this simply halts at
-        the transaction's current state — recovery must adjudicate whatever
-        phase is already persisted. With a named ``boundary``
+        With ``boundary is None`` this simply halts at the transaction's
+        current state — recovery must adjudicate whatever phase is already
+        persisted. With a named ``boundary``
         (``staged|backup|journal|data|manifest``) it first advances to that
         boundary (so a caller may drive an arbitrary mid-state) and then
-        halts. This is the acceptance-test hook that proves a crash restores
-        either the whole before- or after-state.
+        halts. A ``target-<n>`` boundary applies exactly the first ``n``
+        targets of ``replacement_order`` under ``committing`` and halts,
+        leaving a crash state byte-identical to a real mid-loop halt.
         """
         if boundary is None or boundary in ("staged", "backup"):
             # Staging (and any backup file) is written but no journal is
@@ -444,6 +476,25 @@ class Transaction:
             self.prepare()
             self.begin_commit()
             self.force_state("complete")
+            return
+        if boundary is not None and boundary.startswith("target-"):
+            # Per-target boundary ``target-<n>``: prepare, then apply exactly
+            # the first ``n`` targets and halt before the parent-dir fsync of
+            # the next rename / the final root fsync. Recovery rolls all of
+            # them back, restoring the all-old state. ``target-0`` is exactly
+            # the ``journal`` boundary (prepared, nothing applied).
+            suffix = boundary[len("target-"):]
+            try:
+                n = int(suffix)
+            except ValueError:
+                raise ValueError(f"invalid target boundary {boundary!r}") from None
+            if not (0 <= n <= len(self._replacement_order)):
+                raise ValueError(f"target boundary {n!r} out of range")
+            self.prepare()
+            if n == 0:
+                return
+            self._begin_committing()
+            self._apply_replacements(stop_after=n)
             return
         raise ValueError(f"unknown crash boundary {boundary!r}")
 
@@ -488,11 +539,47 @@ def _fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _rel_of(root: Path, target: str | Path) -> str:
+@lru_cache(maxsize=None)
+def _resolve_cached(root_r: str, target: str) -> str:
+    """Resolve ``target`` against the already-resolved absolute ``root_r``.
+
+    Every non-partial resolution/containment failure fails closed with
+    :class:`WorkspaceCorrupt`, mirroring the sibling strict loaders. The
+    result is memoized on ``(root_r, target)`` so recovery consumers that
+    re-resolve the same validated rels after :func:`_validate_journal` reuse
+    the canonical rel instead of repeating ``Path.resolve()`` syscalls.
+    """
     p = Path(target)
-    if p.is_absolute():
-        return os.path.relpath(p, root).replace(os.sep, "/")
-    return p.as_posix()
+    candidate = p if p.is_absolute() else Path(root_r) / p
+    try:
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCorrupt(
+            f"{root_r}: cannot resolve target {target!r}: {exc}"
+        ) from exc
+    try:
+        rel = resolved.relative_to(Path(root_r))
+    except ValueError:
+        raise WorkspaceCorrupt(
+            f"{root_r}: target resolves outside the workspace root: {target!r}"
+        ) from None
+    return rel.as_posix()
+
+
+def _resolve_target(root: Path, target: str | Path) -> str:
+    """Resolve ``target`` to a canonical POSIX rel, forcing it beneath ``root``.
+
+    The containment invariant is enforced at the *resolved* path, not the
+    literal string: a ``../x`` relative input, an absolute path, and a path
+    whose parent is a symlink to an outside directory all collapse to
+    "resolves outside root" and are rejected uniformly. Absolute paths that
+    resolve inside the root are accepted (the canonical ``rel`` is returned).
+    """
+    try:
+        root_r = Path(root).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceCorrupt(f"{root}: cannot resolve the workspace root: {exc}") from exc
+    return _resolve_cached(str(root_r), str(target))
 
 
 # ---------------------------------------------------------------------------
@@ -508,59 +595,195 @@ def recover_startup(
 ) -> None:
     """Recover an interrupted journal before reading workspace state.
 
-    A ``prepared`` journal rolls back (targets were never applied); a
-    ``committing`` journal rolls back in reverse from backups/absent markers;
-    a ``complete`` journal is verified against after_state digests and then
-    cleared. With ``indexed``/``on_disk`` supplied and no journal present, the
-    orphan rule applies: an on-disk import/case/bundle not in ``indexed``, or
-    an indexed file missing from disk, is corruption.
+    Recovery is fail-closed and two-phase. Phase 1 loads and validates the
+    *entire* journal set (via :func:`_validate_journal`) and builds a
+    ``{rel: op_dir}`` claim map, rejecting any cross-transaction target
+    conflict before any filesystem mutation. Phase 2 then dispatches each
+    validated journal: a ``prepared`` journal rolls back (targets were never
+    applied), a ``committing`` journal rolls back in reverse from backups/
+    absent markers, and a ``complete`` journal is verified against after-state
+    digests then cleared. With ``indexed``/``on_disk`` supplied and no journal
+    present, the orphan rule applies: an on-disk import/case/bundle not in
+    ``indexed``, or an indexed file missing from disk, is corruption. When no
+    journal is present, recovery still runs: it removes only positively-
+    identified pre-journal ``stage-*.bin``/``backup-*.bin`` residue and treats
+    any unidentifiable entry under ``transactions/`` as corruption.
     """
     root = Path(root)
     txn_root = root / "transactions"
     journal_files: list[Path] = []
+    residue_dirs: list[Path] = []
     if txn_root.exists():
         for op_dir in txn_root.iterdir():
-            if op_dir.is_dir():
-                jf = op_dir / "journal.json"
-                if jf.exists():
-                    journal_files.append(jf)
+            if op_dir.is_symlink():
+                # Never follow a symlink under transactions/ — it is
+                # unidentifiable residue and fails closed.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable symlink under transactions: {op_dir.name}"
+                )
+            if not op_dir.is_dir():
+                # A plain file under transactions/ is not our residue -> fail closed.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable file under transactions: {op_dir.name}"
+                )
+            jf = op_dir / "journal.json"
+            if jf.exists():
+                journal_files.append(jf)
+            elif _is_transaction_residue(op_dir):
+                residue_dirs.append(op_dir)
+            else:
+                # A dir with unknown contents is not positively-identified
+                # residue — fail closed and leave it untouched.
+                raise WorkspaceCorrupt(
+                    f"{root}: unidentifiable residue under transactions: {op_dir.name}"
+                )
 
     if journal_files:
+        # Phase 1: validate every journal + collect claimed target rels,
+        # rejecting any cross-transaction conflict before mutation.
+        journaled: list[tuple[Path, dict[str, Any]]] = []
+        claims: dict[str, str] = {}
         for jf in journal_files:
-            _recover_one_journal(root, jf, jf.parent)
+            try:
+                doc = load_json_strict(jf)
+            except WorkspaceCorrupt as exc:
+                raise WorkspaceCorrupt(
+                    f"{root}: unreadable transaction journal: {exc}"
+                ) from exc
+            op_dir = jf.parent
+            _validate_journal(root, op_dir, doc)
+            journaled.append((op_dir, doc))
+            for t in _targets_from_doc(doc):
+                rel = _resolve_target(root, t["rel"])
+                if rel in claims:
+                    raise WorkspaceCorrupt(
+                        f"{root}: cross-transaction target conflict on {rel!r}"
+                    )
+                claims[rel] = op_dir.name
+        # Phase 2: dispatch each validated journal (no conflict possible now).
+        for op_dir, doc in journaled:
+            state = doc.get("state")
+            if state == "prepared":
+                _rollback_prepared(root, op_dir, doc)
+            elif state == "committing":
+                _rollback_committing(root, op_dir, doc)
+            else:  # complete
+                _verify_complete(root, op_dir, doc)
         _empty_transactions(root)
         return
 
+    # No journal present: remove only positively-identified pre-journal
+    # residue, then apply the orphan rule if indexed/on_disk were supplied.
+    for op_dir in residue_dirs:
+        shutil.rmtree(op_dir)
     if indexed is None or on_disk is None:
         return
 
     _apply_orphan_rule(root, indexed, on_disk)
 
 
+_TRANSACTION_RESIDUE_RE = re.compile(r"^(?:stage|backup)-\d{4}\.bin$")
+
+
+def _is_transaction_residue(op_dir: Path) -> bool:
+    """True iff ``op_dir`` is positively-identified pre-journal residue.
+
+    A residue dir is a real directory (not a symlink) whose *only* contents
+    are regular files matching the exact ``stage-NNNN.bin`` / ``backup-NNNN.bin``
+    staging patterns. A dir containing ``journal.json``, a subdirectory, a
+    foreign file, or any symlink is -- by definition -- not residue, so
+    recovery never guesses and never deletes anything it cannot identify.
+    """
+    if not op_dir.is_dir() or op_dir.is_symlink():
+        return False
+    try:
+        entries = list(op_dir.iterdir())
+    except OSError:
+        return False
+    if not entries:
+        return False
+    for entry in entries:
+        if entry.is_symlink() or not entry.is_file():
+            return False
+        if not _TRANSACTION_RESIDUE_RE.match(entry.name):
+            return False
+    return True
+
+
 def _empty_transactions(root: Path) -> None:
-    """Remove any leftover per-op journal dirs (keep the empty ``transactions/`` root)."""
+    """Clean leftover per-op dirs, keeping the empty ``transactions/`` root.
+
+    Only dirs that pass :func:`_is_transaction_residue` (positive
+    identification) are removed. Symlinks, foreign files, and unknown subdirs
+    are never touched here — ``recover_startup`` already raised on them before
+    this runs — and a failure to remove a positively-identified dir propagates
+    rather than being swallowed.
+    """
     txn_root = root / "transactions"
     if not txn_root.exists():
         return
     for op_dir in txn_root.iterdir():
-        if op_dir.is_dir():
-            shutil.rmtree(op_dir, ignore_errors=True)
+        if _is_transaction_residue(op_dir):
+            shutil.rmtree(op_dir)
 
 
-def _recover_one_journal(root: Path, journal_path: Path, op_dir: Path) -> None:
-    try:
-        doc = load_json_strict(journal_path)
-    except WorkspaceCorrupt as exc:
-        raise WorkspaceCorrupt(f"{root}: unreadable transaction journal: {exc}") from exc
+def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
+    """Strictly validate a journal document, failing closed with no mutation.
+
+    Every check here is a hard requirement: a journal that violates any rule
+    is corruption, never something to silently skip or partially trust. The
+    validator performs no filesystem mutation — it only proves the doc is
+    structurally sound and that every path it names resolves within ``root``.
+    Recovery readers then trust the validated ``rel`` strings.
+    """
     state = doc.get("state")
-    if state == "prepared":
-        _rollback_prepared(root, op_dir, doc)
-    elif state == "committing":
-        _rollback_committing(root, op_dir, doc)
-    elif state == "complete":
-        _verify_complete(root, op_dir, doc)
-    else:
-        raise WorkspaceCorrupt(f"{root}: unknown journal state {state!r}")
+    if state not in ("prepared", "committing", "complete"):
+        raise WorkspaceCorrupt(f"{root}: invalid journal state {state!r}")
+    if doc.get("op_id") != op_dir.name:
+        raise WorkspaceCorrupt(
+            f"{root}: journal op_id {doc.get('op_id')!r} does not match dir {op_dir.name!r}"
+        )
+    targets = doc.get("targets")
+    if not isinstance(targets, list):
+        raise WorkspaceCorrupt(f"{root}: journal targets is not a list")
+    rels: set[str] = set()
+    for t in targets:
+        if not isinstance(t, dict) or not isinstance(t.get("rel"), str):
+            raise WorkspaceCorrupt(f"{root}: malformed journal target entry")
+        rel = _resolve_target(root, t["rel"])
+        if rel in rels:
+            raise WorkspaceCorrupt(f"{root}: duplicate target rel in journal: {rel!r}")
+        rels.add(rel)
+        for field in ("stage", "backup"):
+            val = t.get(field)
+            if val is None and field == "backup":
+                continue
+            # Reject empty strings too: os.path.basename("") == "", so the bare
+            # name check alone would accept "", letting ``op_dir / "" == op_dir``
+            # make _rollback_committing rename the whole op dir as the target.
+            if not isinstance(val, str) or not val or os.path.basename(val) != val:
+                raise WorkspaceCorrupt(f"{root}: journal target {rel!r} {field} is not a bare filename")
+    order = doc.get("replacement_order")
+    if not isinstance(order, list):
+        raise WorkspaceCorrupt(f"{root}: journal replacement_order is not a list")
+    for item in order:
+        if not isinstance(item, str):
+            raise WorkspaceCorrupt(f"{root}: journal replacement_order entry is not a string")
+        if item not in rels:
+            raise WorkspaceCorrupt(
+                f"{root}: journal replacement_order names unknown target {item!r}"
+            )
+    applied = doc.get("applied_count")
+    if not isinstance(applied, int) or not (0 <= applied <= len(order)):
+        raise WorkspaceCorrupt(f"{root}: journal applied_count is out of bounds")
+    created = doc.get("created_dirs")
+    if created is not None:
+        if not isinstance(created, list):
+            raise WorkspaceCorrupt(f"{root}: journal created_dirs is not a list")
+        for rel in created:
+            if not isinstance(rel, str):
+                raise WorkspaceCorrupt(f"{root}: malformed journal created_dirs entry")
+            _resolve_target(root, rel)
 
 
 def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
@@ -585,7 +808,10 @@ def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
 def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     order = doc.get("replacement_order") or []
     applied = int(doc.get("applied_count") or 0)
-    targets = {t["rel"]: t for t in _targets_from_doc(doc)}
+    # Key by the canonical rel the validator computed (replacement_order holds
+    # canonical rels), so a crafted non-canonical target rel can't silently
+    # evade recovery via a key mismatch (fail-closed all-or-nothing).
+    targets = {_resolve_target(root, t["rel"]): t for t in _targets_from_doc(doc)}
     # Reverse order so benchmark.yaml (last) is restored first.
     prefix = order[: applied if applied else len(order)]
     for rel in reversed(prefix):
@@ -597,9 +823,11 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         if backup is not None:
             os.replace(op_dir / backup, target)
             os.chmod(target, 0o600)
+            _fsync_dir(target.parent)
         else:
             with suppress(OSError):
                 target.unlink()
+            _fsync_dir(target.parent)
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
     _remove_created_dirs(root, doc)
@@ -614,20 +842,24 @@ def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
     """
     created = doc.get("created_dirs") or []
     for rel in sorted(created, key=len, reverse=True):
+        rel = _resolve_target(root, rel)
         with suppress(OSError):
             (root / rel).rmdir()
 
 
 def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     for t in _targets_from_doc(doc):
-        target = root / t["rel"]
+        rel = _resolve_target(root, t["rel"])
+        target = root / rel
         if not target.exists():
-            raise WorkspaceCorrupt(f"{root}: complete journal {t['rel']} missing on disk")
+            raise WorkspaceCorrupt(f"{root}: complete journal {rel} missing on disk")
         actual = sha256_file(target)
         if actual != t["after_digest"]:
             raise WorkspaceCorrupt(
-                f"{root}: complete journal {t['rel']} digest mismatch (expected {t['after_digest']}, got {actual})"
+                f"{root}: complete journal {rel} digest mismatch (expected {t['after_digest']}, got {actual})"
             )
+        # Recovery never widens a private target's mode, even if it drifted.
+        os.chmod(target, 0o600)
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
 
