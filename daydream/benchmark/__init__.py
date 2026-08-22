@@ -15,10 +15,14 @@ from daydream.benchmark.orchestrator import run_bench
 from daydream.benchmark.prs import EVALUABLE_PRS, EvaluablePR, load_evaluable_prs
 from daydream.benchmark.schema import (
     BenchmarkManifest,
+    Candidate,
     CaseDocument,
     CaseIndexEntry,
+    EvidenceRecord,
+    ImportDocument,
     PullRequestEntry,
     Snapshot,
+    SnapshotImported,
     classify_validation,
     derive_workspace_state,
     normalize_hostname,
@@ -28,22 +32,28 @@ from daydream.benchmark.workspace import (
     validate_workspace,
     workspace_status,
 )
+from daydream.benchmark.github_import import run_import_prs
 
 __all__ = [
     "EVALUABLE_PRS",
     "BenchConfig",
     "BenchmarkManifest",
+    "Candidate",
     "CaseDocument",
     "CaseIndexEntry",
+    "EvidenceRecord",
     "EvaluablePR",
+    "ImportDocument",
     "PullRequestEntry",
     "Snapshot",
+    "SnapshotImported",
     "classify_validation",
     "derive_workspace_state",
     "init_workspace",
     "load_evaluable_prs",
     "normalize_hostname",
     "run_bench",
+    "run_import_prs",
     "validate_workspace",
     "workspace_status",
 ]

@@ -451,10 +451,13 @@ def _handle_bench_command(argv: list[str]) -> int:
 
 
 def _build_benchmark_parser() -> argparse.ArgumentParser:
-    """Build the ``daydream benchmark`` subcommand parser."""
+    """Build the ``daydream benchmark`` subcommand parser.
+
+    Sub-verbs: ``init``, ``status``, ``validate``, and ``import-prs``.
+    """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
-        description="Private PR benchmark workspace: init/status/validate.",
+        description="Private PR benchmark workspace: init/status/validate/import-prs.",
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -474,7 +477,60 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     validate_p = sub.add_parser("validate", help="validate the workspace (0/2/1 exit codes)")
     validate_p.add_argument("dir", type=Path, help="workspace directory")
 
+    import_prs_p = sub.add_parser(
+        "import-prs", help="import explicit private GitHub PR evidence into the workspace"
+    )
+    import_prs_p.add_argument("dir", type=Path, help="workspace directory")
+    import_prs_p.add_argument(
+        "--pr",
+        action="append",
+        default=[],
+        metavar="N|URL",
+        help="PR number or https://github.com/OWNER/REPO/pull/N (repeatable)",
+    )
+    import_prs_p.add_argument(
+        "--pr-file", action="append", default=[], type=Path, metavar="FILE",
+        help="file listing PR numbers/URLs, one per line (repeatable)",
+    )
+    import_prs_p.add_argument(
+        "--head", action="append", default=[], metavar="SHA",
+        help="requested head SHA in addition to the PR default head (repeatable)",
+    )
+    import_prs_p.add_argument(
+        "--refresh", action="store_true",
+        help="re-fetch already-imported PRs",
+    )
+
     return parser
+
+
+def _handle_benchmark_import_prs(args) -> int:
+    """Import explicit private PRs: parse targets, preflight, then run the import.
+
+    Expected errors (mis-tokenized targets, preflight failure) print a message
+    to stderr and return exit ``1`` — never a bare traceback.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.workspace import WorkspaceCorrupt
+
+    try:
+        targets = gi.parse_import_targets(args.pr, args.pr_file, args.head)
+    except gi.ImportTargetError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    try:
+        return gi.run_import_prs(
+            args.dir,
+            targets.pr_numbers,
+            heads=targets.requested_heads,
+            refresh=args.refresh,
+        )
+    except gi.PreflightError as exc:
+        print(f"{exc.code}: {exc.message}", file=sys.stderr)
+        return 1
+    except WorkspaceCorrupt as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def _handle_benchmark_init(dir_path: Path, repo: str, reviewer_hosts: list[str], judge_hosts: list[str]) -> int:
@@ -519,11 +575,12 @@ def _handle_benchmark_validate(dir_path: Path) -> int:
 
 
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle ``daydream benchmark init|status|validate``.
+    """Handle ``daydream benchmark init|status|validate|import-prs``.
 
     Returns an exit code; ``daydream.cli.main`` translates it to a
-    process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``)
-    are printed to stderr and mapped to exit ``1`` — never a bare traceback.
+    process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
+    ``ImportTargetError``/``PreflightError``) are printed to stderr and mapped
+    to exit ``1`` — never a bare traceback.
     """
 
     parser = _build_benchmark_parser()
@@ -538,5 +595,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_status(args.dir)
     if sub == "validate":
         return _handle_benchmark_validate(args.dir)
+    if sub == "import-prs":
+        return _handle_benchmark_import_prs(args)
     parser.print_help(file=sys.stderr)
     return 2

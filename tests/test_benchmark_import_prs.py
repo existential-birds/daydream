@@ -324,3 +324,26 @@ def test_status_reflects_fetched_import_and_resolved_identity(tmp_path, fake_gh)
     st = workspace_status(ws)
     assert st.workspace_state != "empty"
     assert st.repository_identity_resolved is True
+
+
+def test_cli_import_prs_drives_command(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    rc = _handle_benchmark_command(["import-prs", str(ws), "--pr", "101", "--head", "a" * 40])
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert raw["pull_requests"][0]["import_state"] == "fetched"
+    out = capsys.readouterr().out
+    assert "octocat" in out and "private" in out        # preflight print: identity + visibility
+    assert "1" in out                                       # requested PR count
+    assert str(ws / "imports") in out                      # local destination
+
+
+def test_benchmark_help_lists_import_prs():
+    import subprocess
+
+    r = subprocess.run(["daydream", "benchmark", "--help"], capture_output=True, text=True)
+    assert r.returncode == 0 and "import-prs" in r.stdout
