@@ -610,6 +610,44 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
 
 
+def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path, fake_gh):
+    from daydream.benchmark.harbor.build import compile_workspace
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    # inject a long, Unicode, delimiter-bearing body into the case doc
+    body = "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
+    _inject_body(ws, case_id, body)
+    lock = compile_workspace(ws)
+    key = next(iter(lock["cases"]))
+    instr = (ws / "harbor" / key / "instruction.md").read_text()
+    # the raw unbounded body text must not appear outside the bounded block
+    inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
+    assert "secret-sentinel-7f3c" not in outside
+    # bounded block is escaped: no real closing delimiter from the body
+    assert instr.count("</historical_pr_context>") == 1
+    # no raw body in any other shipped file (instruction.md's bounded block is
+    # the sole allowed conduit and is validated separately above)
+    for rel, _ in lock["files"].items():
+        if rel.endswith("instruction.md"):
+            continue
+        p = ws / "harbor" / rel
+        if p.is_file() and rel.endswith((".md", ".json")):
+            assert "secret-sentinel-7f3c" not in p.read_text(errors="replace")
+
+
+def test_compile_never_refetches_live_pr_text(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor.build import compile_workspace
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+
+    def boom(*a, **k):
+        raise AssertionError("compile must not fetch live PR text")
+
+    monkeypatch.setattr(gi, "fetch_and_normalize", boom)
+    lock = compile_workspace(ws)      # must succeed without any GitHub fetch
+    assert lock["cases"]
+
+
 def test_compile_fails_closed_on_missing_pr_number(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor.build import CompileError, compile_workspace
