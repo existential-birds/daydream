@@ -19,6 +19,7 @@ import shutil
 from pathlib import Path
 
 from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark.harbor import verifier_core as vc
 
 TEMPLATE_VERSION = "1"
 
@@ -136,26 +137,30 @@ def _flatten_finding(finding: dict) -> dict:
     """Map a curated finding to its provenance-free gold/artifact shape.
 
     Returns the content fields ``{title, body, severity, path, start_line,
-    end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``.
-    A missing or ``None`` location (a locationless review finding that names a
-    defect without a file or line) emits explicit null location fields -- a
-    valid, provably locationless gold entry. A partially populated location
-    (at least one of path/start_line/end_line ``None``) can never emit
-    validation-passing gold, so it raises :class:`CompileError` naming the
-    finding -- never a silent drop and never a fabricated path or line.
+    end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``
+    and are normalized by the verifier's own :func:`verifier_core._validate_location`
+    so the all-or-none location rule lives in exactly one place. A missing or
+    ``None`` location (a locationless review finding that names a defect without
+    a file or line) collapses to explicit null location fields -- a valid,
+    provably locationless gold entry. A partially populated location (at least
+    one of path/start_line/end_line ``None``) can never emit validation-passing
+    gold, so a :class:`CompileError` is raised naming the finding -- never a
+    silent drop and never a fabricated path or line.
     """
     location = finding.get("location")
     if not location:
         path = start_line = end_line = None
     else:
-        if location.get("path") is None or location.get("start_line") is None or location.get("end_line") is None:
-            raise CompileError(
-                f"finding {finding.get('finding_id')} has a partially populated location; "
-                "location must be all-null or fully populated"
-            )
         path = location.get("path")
         start_line = location.get("start_line")
         end_line = location.get("end_line")
+    try:
+        path, start_line, end_line = vc._validate_location(path, start_line, end_line)
+    except vc.VerifierError as exc:
+        raise CompileError(
+            f"finding {finding.get('finding_id')} has a partially populated location; "
+            "location must be all-null or fully populated"
+        ) from exc
     return {
         "title": finding.get("title"),
         "body": finding.get("body"),
@@ -216,7 +221,6 @@ def build_oracle_artifact(opaque_key: str, findings: list) -> dict:
     components so a locationless compiled artifact groups field-for-field with
     the verifier's own canonical tuple (``_canonical_tuple``).
     """
-    from daydream.benchmark.harbor import verifier_core as vc
     if not findings:
         return {
             "schema_version": 1,

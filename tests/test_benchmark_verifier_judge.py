@@ -958,7 +958,10 @@ def test_located_pair_does_not_render_none(sr_module) -> None:
     located = {"title": "t", "body": "b", "severity": "high",
                "path": "src/a.py", "start_line": 1, "end_line": 4}
     prompt = sr.render_pair_prompt(located, located, template=sr.JUDGE_PROMPT_TEMPLATE)
-    assert "path: src/a.py" in prompt and "lines: 1-4" in prompt and "<none>" not in prompt
+    assert "path: src/a.py" in prompt and "lines: 1-4" in prompt
+    # The located fields must not be replaced by the locationless marker: the
+    # finding's own path/lines render their real values (the template doc
+    # paragraph may mention ``<none>``, so only the field lines are checked).
 
 
 def test_locationless_pair_stays_within_prompt_cap(sr_module) -> None:
