@@ -207,7 +207,7 @@ def test_spike_head_file_line_count_from_mirror(tmp_path, fake_gh):
 def test_accept_candidate_produces_historical_derived_finding(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    view = cu.list_case(ws, case_id)
+    view = cu.get_case(ws, case_id)
     cand = next(c for c in view["candidates"] if c["exact_acceptable"])
 
     cu.accept_candidate(ws, case_id, cand["source_id"])
@@ -253,7 +253,7 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    view = cu.list_case(ws, case_id)
+    view = cu.get_case(ws, case_id)
     src = view["candidates"][0]["source_id"]
 
     cu.exclude_evidence(ws, case_id, src, reason="fixed_before_snapshot")
@@ -265,10 +265,10 @@ def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake
         cu.exclude_evidence(ws, case_id, src, reason="other")          # other needs a note
     with pytest.raises(cu.CurationError):
         cu.exclude_evidence(ws, case_id, src, reason="not_a_reason")   # literal contract
-    # duplicate exclusion of the same source is a no-op (idempotent), not an error
+    # re-excluding the same source is last-wins: it replaces the existing row
     cu.exclude_evidence(ws, case_id, src, reason="incorrect")
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert len(raw["curation"]["exclusions"]) == 1
+    assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "incorrect", "note": None}]
 
 
 def test_reopen_for_mutation_transitions(tmp_path, fake_gh):
@@ -287,7 +287,7 @@ def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path, fake_gh)
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id,
-        next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+        next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
 
     # wrong SHA is rejected; correct SHA attests
     with pytest.raises(cu.CurationError):
@@ -310,7 +310,7 @@ def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     # put the case in ready + attested with one historical finding
     cu.accept_candidate(ws, case_id,
-        next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+        next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
     cu.mark_ready(ws, case_id, head_sha=head_sha)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
@@ -326,7 +326,7 @@ def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
 def test_exclude_and_reinclude_case_transitions(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
-    snap_status = cu.list_case(ws, case_id)["snapshot"]["status"]  # "ready"
+    snap_status = cu.get_case(ws, case_id)["snapshot"]["status"]  # "ready"
     assert snap_status == "ready"
 
     cu.exclude_case(ws, case_id, reason="not_suitable")
@@ -351,7 +351,7 @@ def test_exclude_and_reinclude_case_transitions(tmp_path, fake_gh):
 def test_apply_gold_fragment_strips_forged_fields_and_never_ready(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _head = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    cand = next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     src = cand["source_id"]
 
     fragment = {
@@ -386,13 +386,14 @@ def test_stable_curation_types_exported():
 def test_stale_case_edit_stays_stale_and_re_attests(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    src = next(c["source_id"] for c in cu.list_case(ws, case_id)["candidates"])
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
     # force the case into stale + attested (simulating a refresh that flipped ready->stale)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
     raw["curation"].update({"state": "stale", "snapshot_attested": True})
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 
+    cu.accept_candidate(ws, case_id, src)                        # stale edit stays stale
     cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # stale edit stays stale
     raw = load_yaml_strict(path)
     assert raw["curation"]["state"] == "stale"
@@ -441,7 +442,7 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
     assert [c["case_id"] for c in cases] == [case_id]
     assert cases[0]["state"] == "draft" and cases[0]["gold_mode"] == "clean"
 
-    view = cu.list_case(ws, case_id)
+    view = cu.get_case(ws, case_id)
     assert view["snapshot"]["status"] == "ready"
     assert cu._head_file_line_count(ws, head_sha, "feature.py") == 4
     with pytest.raises(cu.CurationError):

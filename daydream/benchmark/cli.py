@@ -620,7 +620,7 @@ def _handle_benchmark_curate(args) -> int:
     try:
         fragment = load_yaml_strict(args.apply_gold)
         cu.apply_gold_fragment(args.dir, args.case, fragment)
-    except (cu.CurationError, WorkspaceCorrupt, git_ops.GitError, ValidationError) as exc:
+    except (cu.CurationError, WorkspaceCorrupt, git_ops.GitError, ValidationError, KeyError, TypeError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     return 0

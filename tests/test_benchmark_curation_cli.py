@@ -18,7 +18,7 @@ def test_cli_curate_apply_gold_writes_0600_and_never_ready(tmp_path, fake_gh, ca
     from daydream.benchmark.cli import _handle_benchmark_command
 
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    cand = next(c for c in cu.list_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     frag_path = tmp_path / "gold.yaml"
     frag_path.write_text(yaml.safe_dump({
         "findings": [{"title": cand["title"], "body": cand["body"], "severity": None,
@@ -37,6 +37,24 @@ def test_cli_curate_apply_gold_writes_0600_and_never_ready(tmp_path, fake_gh, ca
     raw = load_yaml_strict(case_path)
     assert raw["curation"]["state"] == "draft" and raw["curation"]["snapshot_attested"] is False
     assert raw["curation"]["findings"][0]["provenance"]["kind"] == "historical"
+
+
+def test_cli_curate_apply_gold_malformed_fragment_clean_exit(tmp_path, fake_gh, capsys):
+    """A malformed fragment (missing required keys) maps to exit 1, no traceback."""
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    frag_path = tmp_path / "gold.yaml"
+    frag_path.write_text(yaml.safe_dump({
+        "findings": [{"body": "missing title"}],      # dereferences frag['title']
+        "exclusions": [{"reason": "other"}],           # dereferences exc['source_id']
+        "case_exclusion": {"note": "no reason"},       # dereferences case_exclusion['reason']
+    }, sort_keys=False))
+
+    rc = _handle_benchmark_command(
+        ["curate", str(ws), "--case", case_id, "--apply-gold", str(frag_path)])
+    assert rc == 1
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_cli_curate_without_apply_gold_rejects_on_non_tty(tmp_path, fake_gh, capsys):

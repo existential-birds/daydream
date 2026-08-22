@@ -102,7 +102,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
     return out
 
 
-def list_case(root: Path, case_id: str) -> dict[str, Any]:
+def get_case(root: Path, case_id: str) -> dict[str, Any]:
     """Read-only view of one case document (its raw case dict)."""
     return _load_case(root, case_id)
 
@@ -204,6 +204,11 @@ def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
     for fid in set(ids):
         if ids.count(fid) > 1:
             raise CurationError(f"case {case_id} has duplicate finding {fid}")
+
+    # A ready (final-attested) case must be snapshot-attested; the fixed schema
+    # does not express this, so the curation service enforces it as a rule.
+    if curation.get("state") == "ready" and not curation.get("snapshot_attested"):
+        raise CurationError(f"case {case_id} is ready but not snapshot-attested")
 
     candidates = raw.get("candidates") or []
     for finding in findings:
@@ -403,6 +408,23 @@ _EVIDENCE_REASONS = frozenset({
 })
 
 
+def _set_clean(curation: dict[str, Any]) -> None:
+    """Attest one case's gold set as reviewed-clean (deterministic derivation).
+
+    Sets clean-attested and the clean gold status + mode, and clears any
+    snapshot attestation (a clean-attested case is never ready-attested by this
+    path). The state must already be reopened for mutation (:func:`_reopen_for_mutation`
+    clears a ready/stale case's snapshot attestation); ``_set_clean`` re-clears it
+    so the audit fields stay internally consistent. Shared by :func:`attest_clean`
+    and the :func:`apply_gold_fragment` clean branch so the clean-attestation
+    triple lives in one place.
+    """
+    curation["snapshot_attested"] = False
+    curation["clean_attested"] = True
+    curation["gold_status"] = "clean"
+    curation["gold_mode"] = "clean"
+
+
 def _append_evidence_exclusion(
     curation: dict[str, Any], source_id: str, reason: str, note: str | None
 ) -> None:
@@ -429,10 +451,7 @@ def exclude_evidence(
     """
     raw = _load_case(root, case_id)
     _validate_evidence_exclusion_contract(reason, note)
-
-    candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
-    if source_id not in candidate_ids:
-        raise CurationError(f"source {source_id} is not a candidate of case {case_id}")
+    _check_candidate_sources(raw, [source_id], case_id)
 
     curation = raw.setdefault("curation", {})
     _reopen_for_mutation(curation)
@@ -504,6 +523,10 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
     if head_sha != original:
         raise CurationError(f"attestation SHA mismatch: expected {original} got {head_sha}")
     curation = raw.setdefault("curation", {})
+    if not curation.get("findings"):
+        raise CurationError(
+            f"case {case_id} cannot be marked ready with an empty gold findings set"
+        )
     _validate_transition(curation.get("state"), "ready")
     curation["state"] = "ready"
     curation["snapshot_attested"] = True
@@ -524,13 +547,12 @@ def attest_clean(root: Path, case_id: str) -> None:
         raise CurationError(
             f"case {case_id} has gold findings; clean attestation requires an empty gold set"
         )
-    # An empty-findings case's clean attestation is deterministic: clean gold
-    # status and clean mode. It never sets snapshot_attested and never changes
-    # ``state`` (stays draft) — the final-attest op remains required.
-    curation["snapshot_attested"] = False
-    curation["clean_attested"] = True
-    curation["gold_status"] = "clean"
-    curation["gold_mode"] = "clean"
+    # Route through the mutation discipline: a ready/stale case reopens to
+    # draft (clearing snapshot attestation) instead of lingering as
+    # ready-but-unattested, which the revalidation guard forbids. A draft case
+    # stays draft -- the final-attest op remains required.
+    _reopen_for_mutation(curation)
+    _set_clean(curation)
     _stage_case(root, case_id, raw, op="attest-clean")
 
 
@@ -551,6 +573,7 @@ def _apply_case_exclusion(
     state = _demote_ready(curation)
     _validate_transition(state, "excluded")
     curation["state"] = "excluded"
+    curation["snapshot_attested"] = False
     curation["case_exclusion"] = {"reason": reason, "note": note}
 
 
@@ -584,6 +607,7 @@ def reinclude_case(root: Path, case_id: str) -> None:
     destination = "draft" if snapshot_doc.get("status") == "ready" else "unreplayable"
     _validate_transition("excluded", destination)
     curation["state"] = destination
+    curation["snapshot_attested"] = False
     curation["case_exclusion"] = None
     _stage_case(root, case_id, raw, op="reinclude-case")
 
@@ -647,9 +671,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
         reason = exc["reason"]
         note = exc.get("note")
         _validate_evidence_exclusion_contract(reason, note)
-        candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
-        if src not in candidate_ids:
-            raise CurationError(f"source {src} is not a candidate of case {case_id}")
+        _check_candidate_sources(raw, [src], case_id)
         _append_evidence_exclusion(curation, src, reason, note)
     curation["exclusions"] = curation.get("exclusions") or []
 
@@ -665,9 +687,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             raise CurationError(
                 f"case {case_id} clean fragment requires an empty gold findings set"
             )
-        curation["clean_attested"] = True
-        curation["gold_status"] = "clean"
-        curation["gold_mode"] = "clean"
+        _set_clean(curation)
     else:
         _derive_content(raw)
     _stage_case(root, case_id, raw, op="apply-gold")
