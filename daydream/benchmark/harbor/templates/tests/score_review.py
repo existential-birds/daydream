@@ -294,17 +294,27 @@ def parse_verdict(raw: object) -> verifier_core.Verdict:
     verifier_core.validate_exact_keys(raw, {"match", "confidence", "reasoning"}, "verdict")
     match = raw["match"]
     if not isinstance(match, bool):
-        raise VerifierError(f"verdict 'match' must be a boolean, got {match!r}")
+        raise VerifierError(
+            f"verdict 'match' must be a boolean, got {_bounded_error(repr(match))}"
+        )
     confidence = raw["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
         raise VerifierError(
-            f"verdict 'confidence' must be a number in [0,1], got {confidence!r}"
+            f"verdict 'confidence' must be a number in [0,1], got {_bounded_error(repr(confidence))}"
         )
     if not 0.0 <= confidence <= 1.0:
-        raise VerifierError(f"verdict 'confidence' must be in [0,1], got {confidence!r}")
+        raise VerifierError(
+            f"verdict 'confidence' must be in [0,1], got {_bounded_error(repr(confidence))}"
+        )
     reasoning = raw["reasoning"]
     if not isinstance(reasoning, str):
-        raise VerifierError(f"verdict 'reasoning' must be a string, got {reasoning!r}")
+        raise VerifierError(
+            f"verdict 'reasoning' must be a string, got {_bounded_error(repr(reasoning))}"
+        )
+    # Reasoning is capped at 32 KiB and rejected -- never truncated-and-accepted
+    # -- so an oversized/untrusted value can never bloat a diagnostic.
+    if len(reasoning.encode("utf-8")) > _REASONING_CAP_BYTES:
+        raise VerifierError("verdict reasoning exceeds 32 KiB")
     return verifier_core.Verdict(
         gold_id="",
         candidate_id="",

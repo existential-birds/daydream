@@ -1123,3 +1123,20 @@ async def test_response_body_is_size_capped_before_json_parse(sr_module) -> None
                                           content=lambda b: b, allowlist={"u"})
     assert "256 KiB" in str(e.value) or "exceeds" in str(e.value)
     assert len(calls) == 1  # oversized body is terminal, not retried
+
+
+def test_verdict_reasoning_is_size_capped_and_errors_are_bounded(sr_module) -> None:
+    sr = sr_module
+    ok = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "short"})
+    assert ok.match is True
+    # over-cap reasoning rejected with a typed bounded diagnostic
+    with pytest.raises(sr.VerifierError) as e:
+        sr.parse_verdict({"match": True, "confidence": 0.9,
+                          "reasoning": "r" * (sr._REASONING_CAP_BYTES + 1)})
+    assert "reasoning" in str(e.value)
+    assert ("r" * 64) not in str(e.value)  # never embeds the oversized value
+    # non-string reasoning whose repr is huge is bounded
+    huge = {"match": True, "confidence": 0.9, "reasoning": ["x" * 5000]}
+    with pytest.raises(sr.VerifierError) as e:
+        sr.parse_verdict(huge)
+    assert len(str(e.value).encode("utf-8")) < 5000  # never echoes the full value
