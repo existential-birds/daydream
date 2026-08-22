@@ -286,10 +286,21 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
 
 
 def validate_gold_set(raw: list[dict[str, object]]) -> list[GoldFinding]:
-    """Validate a gold set against the 50-finding cap and field limits."""
+    """Validate a gold set: 50-finding cap, per-member fields, canonical unique ids."""
     if len(raw) > MAX_GOLD_FINDINGS:
         raise VerifierError("gold set exceeds 50 findings")
-    return [parse_gold_finding(f) for f in raw]
+    parsed = [parse_gold_finding(f) for f in raw]
+    seen: set[str] = set()
+    for f in parsed:
+        expected = hashlib.sha256(
+            _SEP.join(str(part) for part in _canonical_tuple(f)).encode("utf-8")
+        ).hexdigest()
+        if f.finding_id != expected:
+            raise VerifierError("gold finding_id is not the canonical digest")
+        if f.finding_id in seen:
+            raise VerifierError("duplicate gold finding_id")
+        seen.add(f.finding_id)
+    return parsed
 
 
 # ---------------------------------------------------------------------------

@@ -341,18 +341,16 @@ class _CountingClient:
 
 
 def _gold_list(n: int = 2) -> list[dict]:
-    return [
-        {
-            "finding_id": f"{i:064x}",
-            "title": "t",
-            "body": "b",
-            "severity": "high",
-            "path": "p",
-            "start_line": 1,
-            "end_line": 1,
-        }
-        for i in range(n)
-    ]
+    import hashlib as _h
+    out = []
+    for i in range(n):
+        f = {"title": f"t{i}", "body": "b", "severity": "high",
+             "path": "p", "start_line": 1, "end_line": 1}
+        payload = "\x1f".join([f["title"], f["body"], f["severity"],
+                               f["path"], str(f["start_line"]), str(f["end_line"])])
+        f["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
+        out.append(f)
+    return out
 
 
 def _candidate_artifact(sr_module, *, case_id: str = "case-x", n: int = 2) -> dict:
@@ -738,8 +736,12 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module, tmp
     # _DENSE_BODY is under the verifier's 8 KiB body byte bound, so the evaluator
     # escapes it -- but the fused rendering must not let that inflate the pair
     # past the cap and fail the whole task. A legal pair is judged, never voided.
-    gold = [{"finding_id": "0" * 64, "title": "t" * 500, "body": _DENSE_BODY,
+    gold = [{"title": "t" * 500, "body": _DENSE_BODY,
              "severity": "high", "path": "p" * 200, "start_line": 1, "end_line": 1}]
+    payload = "\x1f".join([gold[0]["title"], gold[0]["body"], gold[0]["severity"],
+                            gold[0]["path"], str(gold[0]["start_line"]), str(gold[0]["end_line"])])
+    import hashlib as _h
+    gold[0]["finding_id"] = _h.sha256(payload.encode("utf-8")).hexdigest()
     gold_path.write_text(json.dumps(gold))
     cand = {"title": "t" * 500, "body": _DENSE_BODY, "severity": "high",
             "path": "p" * 200, "start_line": 1, "end_line": 1}

@@ -1,5 +1,6 @@
 """Tests for the stdlib-only harbor verifier core module."""
 
+import hashlib
 import json
 
 import pytest
@@ -222,12 +223,20 @@ def test_artifact_rejects_over_100_findings():
         validate_candidate_artifact(_artifact(_valid_findings(101)))
 
 def test_gold_set_accepts_and_returns_models():
-    gs = validate_gold_set([_gold(), _gold(finding_id="b" * 64, title="B")])
+    g1 = _gold()
+    g1["finding_id"] = _canonical_gold_id(g1)
+    g2 = _gold(title="B")
+    g2["finding_id"] = _canonical_gold_id(g2)
+    gs = validate_gold_set([g1, g2])
     assert len(gs) == 2 and all(isinstance(g, GoldFinding) for g in gs)
 
 
 def test_gold_set_rejects_over_50():
-    many = [_gold(finding_id=(hex(i)[2:].zfill(64)), title=f"f{i}") for i in range(51)]
+    many = []
+    for i in range(51):
+        f = _gold(title=f"f{i}")
+        f["finding_id"] = _canonical_gold_id(f)
+        many.append(f)
     with pytest.raises(VerifierError):
         validate_gold_set(many)
 
@@ -400,3 +409,28 @@ def test_gold_set_rejects_unknown_finding_key():
     g["provenance"] = {"kind": "authored", "source_ids": []}
     with pytest.raises(VerifierError):
         validate_gold_set([g])
+
+
+def _canonical_gold_id(f: dict) -> str:
+    payload = "\x1f".join([
+        str(f.get("title") or ""), str(f.get("body") or ""),
+        str(f.get("severity") or ""), str(f.get("path") or ""),
+        str(f.get("start_line")), str(f.get("end_line")),
+    ])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def test_gold_set_rejects_non_canonical_finding_id():
+    f = _gold()
+    f["finding_id"] = "f" * 64  # valid 64-hex but not the canonical digest
+    with pytest.raises(VerifierError):
+        validate_gold_set([f])
+
+
+def test_gold_set_rejects_duplicate_finding_ids():
+    fid = _canonical_gold_id(_gold())
+    with pytest.raises(VerifierError):
+        validate_gold_set([
+            {**_gold(), "finding_id": fid},
+            {**_gold(), "finding_id": fid},
+        ])
