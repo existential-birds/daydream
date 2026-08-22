@@ -371,3 +371,35 @@ Caveats:
 - **4 PRs unscored.** The offline set has 26 evaluable PRs; daydream's sweep covered 22 (the remainder exceeded per-PR time caps or hit transient failures). The sweep is resumable.
 - **Precision gap.** 36 TP against 139 FP. Precision (0.206) is the weakest metric of the three. Recall (0.590) is competitive, ranking 10th of 42 tools. The precision gap is what the training milestone is meant to close.
 - **Tied to this setup.** Reviewer pipeline, date both move the number.
+
+## Private PR benchmark workspaces (`daydream benchmark`)
+
+Beyond the legacy `daydream bench` scoring run, a separate **private PR
+benchmark workspace** houses the repo's own PR-review cases for training and
+evals. `daydream benchmark` initializes, inspects, and validates a private,
+GitHub-only benchmark workspace whose on-disk state is strictly validated,
+crash-consistent, and safe to build on.
+
+- `daydream benchmark init <dir> --repo OWNER/REPO --reviewer-host HOST --judge-host HOST`
+  creates a private workspace: `0700` root + `imports/ cases/ snapshots/
+  transactions/ runtime/ cache/ harbor/`, a self-ignoring `.gitignore`, and a
+  strictly validated `benchmark.yaml` manifest. Rather than a bare
+  `OWNER/REPO`, it persists an immutable forge-identity block. Reviewer and
+  judge **egress hosts** are normalized (lowercase, scheme/credential/port/
+  path stripped); both allowlists must be nonempty. Hosts `--reviewer-host`
+  and `--judge-host` are repeatable. A nonempty target directory is refused.
+- `daydream benchmark status <dir>` reads the derived workspace state
+  (`empty` / `collecting` / `ready` / …), whether the repository identity is
+  **unresolved**, and the PR ledger — read-only, safe to run concurrently
+  with another read-only command.
+- `daydream benchmark validate <dir>` returns a numeric **exit**: `0` ready,
+  `2` structurally valid but incomplete (for example an unresolved
+  repository identity on a fresh workspace), `1` corrupt (invalid or missing
+  `benchmark.yaml`, or an orphan or missing indexed file).
+
+The legacy `daydream bench` command remains available alongside `benchmark`;
+removal is a separate cutover.
+
+All workspace writes are atomic and journaled (`prepared | committing |
+complete`) under the workspace lock, so a crash mid-mutation restores either
+the whole before- or after-state — never a checksum-drifted partial.

@@ -16,6 +16,7 @@ checkout (``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -447,3 +448,95 @@ def _handle_bench_command(argv: list[str]) -> int:
     _load_bench_dotenv()
     config = _bench_config_from_argv(argv)
     return run_bench(config)
+
+
+def _build_benchmark_parser() -> argparse.ArgumentParser:
+    """Build the ``daydream benchmark`` subcommand parser."""
+    parser = argparse.ArgumentParser(
+        prog="daydream benchmark",
+        description="Private PR benchmark workspace: init/status/validate.",
+    )
+    sub = parser.add_subparsers(dest="subcommand")
+
+    init_p = sub.add_parser("init", help="create a private benchmark workspace")
+    init_p.add_argument("dir", type=Path, help="workspace directory (must be empty/absent)")
+    init_p.add_argument("--repo", required=True, help="OWNER/REPO repository")
+    init_p.add_argument(
+        "--reviewer-host", action="append", default=[], help="reviewer egress host (repeatable)"
+    )
+    init_p.add_argument(
+        "--judge-host", action="append", default=[], help="judge egress host (repeatable)"
+    )
+
+    status_p = sub.add_parser("status", help="show read-only derived workspace state")
+    status_p.add_argument("dir", type=Path, help="workspace directory")
+
+    validate_p = sub.add_parser("validate", help="validate the workspace (0/2/1 exit codes)")
+    validate_p.add_argument("dir", type=Path, help="workspace directory")
+
+    return parser
+
+
+def _handle_benchmark_init(dir_path: Path, repo: str, reviewer_hosts: list[str], judge_hosts: list[str]) -> int:
+    """Run ``init_workspace`` and report classification + egress boundary."""
+    from daydream.benchmark.workspace import InitError, init_workspace
+
+    try:
+        manifest = init_workspace(dir_path, repo, reviewer_hosts, judge_hosts)
+    except InitError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    classification = manifest.privacy.classification
+    egress = " ".join(manifest.privacy.reviewer_allowed_hosts + manifest.privacy.judge_allowed_hosts)
+    print(f"classification: {classification}")
+    print(f"egress boundary: {egress}")
+    return 0
+
+
+def _handle_benchmark_status(dir_path: Path) -> int:
+    """Print the read-only derived workspace state + unresolved identity."""
+    from daydream.benchmark.workspace import WorkspaceCorrupt, workspace_status
+
+    try:
+        status = workspace_status(dir_path)
+    except WorkspaceCorrupt as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    unresolved = "unresolved" if not status.repository_identity_resolved else "resolved"
+    print(f"workspace state: {status.workspace_state}")
+    print(f"repository identity: {unresolved}")
+    print(f"ledger entries: {len(status.ledger.pull_requests)}")
+    return 0
+
+
+def _handle_benchmark_validate(dir_path: Path) -> int:
+    """Print the human-readable classification and return the numeric code."""
+    from daydream.benchmark.workspace import validate_workspace
+
+    code, label = validate_workspace(dir_path)
+    print(f"validation: {label}")
+    return code
+
+
+def _handle_benchmark_command(argv: list[str]) -> int:
+    """Handle ``daydream benchmark init|status|validate``.
+
+    Returns an exit code; ``daydream.cli.main`` translates it to a
+    process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``)
+    are printed to stderr and mapped to exit ``1`` — never a bare traceback.
+    """
+
+    parser = _build_benchmark_parser()
+    args = parser.parse_args(argv)
+    sub = args.subcommand
+    if sub is None:
+        parser.print_help()
+        return 0
+    if sub == "init":
+        return _handle_benchmark_init(args.dir, args.repo, args.reviewer_host, args.judge_host)
+    if sub == "status":
+        return _handle_benchmark_status(args.dir)
+    if sub == "validate":
+        return _handle_benchmark_validate(args.dir)
+    parser.print_help(file=sys.stderr)
+    return 2
