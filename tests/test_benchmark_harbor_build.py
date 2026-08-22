@@ -47,3 +47,14 @@ def test_spike_bundle_heads_is_exactly_base_head(tmp_path):
     (tmp_path / "b.bundle").write_bytes(bundle_bytes)
     heads = snapshot.bundle_heads(tmp_path / "b.bundle")
     assert heads == {"refs/heads/base", "refs/heads/head"}
+
+
+def test_derive_task_key_is_opaque_and_deterministic():
+    from daydream.benchmark.harbor import build
+    case_id = "pr-000101-1a2b3c4d5e6f"
+    k = build.derive_task_key(case_id)
+    assert k.startswith("case-") and len(k) == len("case-") + 12
+    assert k == build.derive_task_key(case_id)          # deterministic
+    assert k != build.derive_task_key("pr-000101-1a2b3c4d5e60")  # distinct case -> distinct key
+    assert "pr-" not in k and case_id not in k          # reveals no authoring case id
+    assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
