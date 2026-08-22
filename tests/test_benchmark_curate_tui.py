@@ -203,3 +203,47 @@ def test_action_exclude_evidence_rejects_stray_note(tmp_path, fake_gh, capsys):
                    read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
     assert path.read_bytes() == before                      # service rejects the note
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_clean_confirm_does_not_mark_ready(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # empty gold
+    run_curate_tui(ws, case_id, read_line=_scripted("c", "y", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["clean_attested"] is True and cur["gold_status"] == "clean"
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert ("as reviewed clean with zero expected findings" in
+            capsys.readouterr().out)
+
+
+def test_mark_ready_requires_yes_and_exact_sha(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft"                        # 'n' declined the attest
+    out = capsys.readouterr().out
+    assert f"valid against head {head_sha}" in out        # exact SHA confirmation shown
+    assert f"mark {case_id} ready?" in out
+
+
+def test_stale_case_shows_marker_and_re_attests(tmp_path, fake_gh, capsys):
+    import yaml
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import render_case, run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["curation"]["state"] = "stale"; raw["curation"]["snapshot_attested"] = True
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))   # force stale + attested
+
+    assert "stale" in render_case(cu.get_case(ws, case_id))  # stale marker rendered
+
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    out = capsys.readouterr().out
+    assert f"valid against head {head_sha}" in out          # stale re-ran the SHA confirm

@@ -290,6 +290,49 @@ _EVIDENCE_REASONS = (
 )
 
 
+def _action_clean(
+    root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
+) -> str:
+    """The ``[c]`` clean-attest action (requires an empty gold findings set)."""
+    findings = (view.get("curation") or {}).get("findings") or []
+    if findings:
+        print("[c] requires an empty gold findings set")
+        return "continue"
+    answer = _prompt(
+        read_line, f"Mark {case_id} as reviewed clean with zero expected findings? [y/N] "
+    ).strip()
+    if answer.lower() != "y":
+        return "continue"
+    try:
+        cu.attest_clean(root, case_id)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"attested {case_id} clean")
+    return "rerender"
+
+
+def _action_ready(
+    root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
+) -> str:
+    """The ``[r]`` mark-ready action (exact-head-SHA confirmation)."""
+    head = (view.get("snapshot") or {}).get("original_head_sha") or ""
+    answer = _prompt(
+        read_line,
+        f"Attest that this golden review is valid against head {head} "
+        f"and mark {case_id} ready? [y/N] ",
+    ).strip()
+    if answer.lower() != "y":
+        return "continue"
+    try:
+        cu.mark_ready(root, case_id, head_sha=head)
+    except cu.CurationError as exc:
+        print(str(exc))
+        return "continue"
+    print(f"marked {case_id} ready")
+    return "rerender"
+
+
 def _action_exclude(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
 ) -> str:
@@ -358,6 +401,10 @@ def _run_action(action: str, root: Path, case_id: str, view: dict[str, Any], rea
         return _action_edit(root, case_id, view, read_line)
     if action == "x":
         return _action_exclude(root, case_id, view, read_line)
+    if action == "c":
+        return _action_clean(root, case_id, view, read_line)
+    if action == "r":
+        return _action_ready(root, case_id, view, read_line)
     if action == "q":
         print("saving; run curate again to resume")
         return "quit"
