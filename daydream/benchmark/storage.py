@@ -524,12 +524,16 @@ def recover_startup(
 ) -> None:
     """Recover an interrupted journal before reading workspace state.
 
-    A ``prepared`` journal rolls back (targets were never applied); a
-    ``committing`` journal rolls back in reverse from backups/absent markers;
-    a ``complete`` journal is verified against after_state digests and then
-    cleared. With ``indexed``/``on_disk`` supplied and no journal present, the
-    orphan rule applies: an on-disk import/case/bundle not in ``indexed``, or
-    an indexed file missing from disk, is corruption.
+    Recovery is fail-closed and two-phase. Phase 1 loads and validates the
+    *entire* journal set (via :func:`_validate_journal`) and builds a
+    ``{rel: op_dir}`` claim map, rejecting any cross-transaction target
+    conflict before any filesystem mutation. Phase 2 then dispatches each
+    validated journal: a ``prepared`` journal rolls back (targets were never
+    applied), a ``committing`` journal rolls back in reverse from backups/
+    absent markers, and a ``complete`` journal is verified against after-state
+    digests then cleared. With ``indexed``/``on_disk`` supplied and no journal
+    present, the orphan rule applies: an on-disk import/case/bundle not in
+    ``indexed``, or an indexed file missing from disk, is corruption.
     """
     root = Path(root)
     txn_root = root / "transactions"
@@ -542,8 +546,36 @@ def recover_startup(
                     journal_files.append(jf)
 
     if journal_files:
+        # Phase 1: validate every journal + collect claimed target rels,
+        # rejecting any cross-transaction conflict before mutation.
+        journaled: list[tuple[Path, dict[str, Any]]] = []
+        claims: dict[str, str] = {}
         for jf in journal_files:
-            _recover_one_journal(root, jf, jf.parent)
+            try:
+                doc = load_json_strict(jf)
+            except WorkspaceCorrupt as exc:
+                raise WorkspaceCorrupt(
+                    f"{root}: unreadable transaction journal: {exc}"
+                ) from exc
+            op_dir = jf.parent
+            _validate_journal(root, op_dir, doc)
+            journaled.append((op_dir, doc))
+            for t in _targets_from_doc(doc):
+                rel = _resolve_target(root, t["rel"])
+                if rel in claims:
+                    raise WorkspaceCorrupt(
+                        f"{root}: cross-transaction target conflict on {rel!r}"
+                    )
+                claims[rel] = op_dir.name
+        # Phase 2: dispatch each validated journal (no conflict possible now).
+        for op_dir, doc in journaled:
+            state = doc.get("state")
+            if state == "prepared":
+                _rollback_prepared(root, op_dir, doc)
+            elif state == "committing":
+                _rollback_committing(root, op_dir, doc)
+            else:  # complete
+                _verify_complete(root, op_dir, doc)
         _empty_transactions(root)
         return
 
@@ -606,7 +638,6 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     for item in order:
         if not isinstance(item, str):
             raise WorkspaceCorrupt(f"{root}: journal replacement_order entry is not a string")
-        order_rels.add(item)
         if item not in rels:
             raise WorkspaceCorrupt(
                 f"{root}: journal replacement_order names unknown target {item!r}"
@@ -614,24 +645,6 @@ def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     applied = doc.get("applied_count")
     if not isinstance(applied, int) or not (0 <= applied <= len(order)):
         raise WorkspaceCorrupt(f"{root}: journal applied_count is out of bounds")
-
-
-def _recover_one_journal(root: Path, journal_path: Path, op_dir: Path) -> None:
-    try:
-        doc = load_json_strict(journal_path)
-    except WorkspaceCorrupt as exc:
-        raise WorkspaceCorrupt(f"{root}: unreadable transaction journal: {exc}") from exc
-    # Fail closed: validate the whole doc BEFORE any unlink/replace/rmdir.
-    _validate_journal(root, op_dir, doc)
-    state = doc.get("state")
-    if state == "prepared":
-        _rollback_prepared(root, op_dir, doc)
-    elif state == "committing":
-        _rollback_committing(root, op_dir, doc)
-    elif state == "complete":
-        _verify_complete(root, op_dir, doc)
-    else:
-        raise WorkspaceCorrupt(f"{root}: unknown journal state {state!r}")
 
 
 def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:

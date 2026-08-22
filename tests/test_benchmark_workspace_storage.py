@@ -322,3 +322,26 @@ def test_journal_replacement_order_unknown_target_fails_closed(tmp_path):
         lambda d: d.__setitem__("replacement_order", ["not-a-target"]))
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
+
+
+def test_cross_transaction_target_conflict_is_corruption(tmp_path):
+    target = tmp_path / "target.yaml"
+    target.write_text("before")
+    for i in (1, 2):
+        with Transaction(tmp_path, op_id=f"op-{i}", kind="write") as tx:
+            _stage(tx, target, f"after-{i}")
+            tx.prepare()
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path)
+    assert target.read_text() == "before"  # neither journal applied; no last-writer-wins
+
+
+def test_disjoint_transactions_both_recover(tmp_path):
+    t1 = tmp_path / "a.yaml"; t2 = tmp_path / "b.yaml"
+    t1.write_text("a-before"); t2.write_text("b-before")
+    with Transaction(tmp_path, op_id="op-a", kind="write") as tx:
+        _stage(tx, t1, "a-after"); tx.prepare()
+    with Transaction(tmp_path, op_id="op-b", kind="write") as tx:
+        _stage(tx, t2, "b-after"); tx.prepare()
+    recover_startup(tmp_path)  # disjoint targets must both roll back cleanly
+    assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
