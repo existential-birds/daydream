@@ -513,9 +513,23 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
         nodes {
           id isResolved isOutdated isResolvedBy subjectType path line originalLine side startSide
           comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
             nodes { id databaseId body author { login type isBot } createdAt updatedAt url replyTo { id } }
           }
         }
+      }
+    }
+  }
+}
+"""
+
+_THREAD_COMMENTS_QUERY = """
+query ThreadComments($threadId: ID!, $commentsAfter: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $commentsAfter) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id databaseId body author { login type isBot } createdAt updatedAt url replyTo { id } }
       }
     }
   }
@@ -552,11 +566,11 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
     return fields
 
 
-def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any]) -> dict[str, Any]:
-    """Call the paginated reviewThreads GraphQL query honoring the rate-limit retry policy.
+def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any], *, query: str = _REVIEW_THREADS_QUERY) -> dict[str, Any]:
+    """Call one GraphQL query honoring the rate-limit retry policy.
 
     REST paths flow through :func:`_call_with_rate_limit_retry` (3 attempts,
-    honoring Retry-After); the GraphQL query must follow the same policy so a
+    honoring Retry-After); GraphQL queries must follow the same policy so a
     transient rate limit is retried and, when exhausted, surfaces as
     :class:`_ImportRateLimitError` (recorded as ``rate_limit`` in the ledger,
     not ``fetch``).
@@ -569,7 +583,7 @@ def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any]) -> dic
                 "graphql",
                 method="POST",
                 idempotent=True,
-                input_data={"query": _REVIEW_THREADS_QUERY, "variables": variables},
+                input_data={"query": query, "variables": variables},
             )
             return resp
         except git_ops.RateLimitError as exc:
@@ -583,11 +597,58 @@ def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any]) -> dic
     ) from last_rate_limit
 
 
+def _graphql_thread_comments(
+    root: Path, thread_id: str, *, after: str | None = None
+) -> dict[str, Any]:
+    """Fetch one nested page of a review thread's comments via ``node(id:)``.
+
+    An ``errors`` block, a missing/null ``data.node``, or a ``comments``
+    connection lacking ``pageInfo``/``nodes`` raises :class:`GitError` with a
+    message naming the thread id — never a silent empty fallback, so a malformed
+    page can never drop replies.
+    """
+    variables: dict[str, Any] = {"threadId": thread_id}
+    if after is not None:
+        variables["commentsAfter"] = after
+    resp = _graphql_with_rate_limit_retry(root, variables, query=_THREAD_COMMENTS_QUERY)
+    if not isinstance(resp, dict):
+        raise git_ops.GitError(
+            f"graphql thread comments for {thread_id} returned a non-object response"
+        )
+    if resp.get("errors"):
+        raise git_ops.GitError(f"graphql thread comments for {thread_id} failed: {resp['errors']}")
+    try:
+        node = resp["data"]["node"]
+    except (KeyError, TypeError) as exc:
+        raise git_ops.GitError(
+            f"graphql response missing node for thread {thread_id}: {exc}"
+        ) from exc
+    if node is None:
+        raise git_ops.GitError(f"graphql node(id:{thread_id}) returned null")
+    try:
+        comments = node["comments"]
+    except (KeyError, TypeError) as exc:
+        raise git_ops.GitError(
+            f"graphql thread {thread_id} missing comments connection: {exc}"
+        ) from exc
+    if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list) or not isinstance(
+        comments.get("pageInfo"), dict
+    ):
+        raise git_ops.GitError(f"graphql thread {thread_id} comments missing nodes/pageInfo")
+    return comments
+
+
 def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[dict[str, Any]]:
     """Paginate every review thread (and reply) for a PR via GraphQL.
 
-    A GraphQL ``errors`` block, a missing ``data.repository.pullRequest.reviewThreads``
-    key, or a failed call raises :class:`GitError` — never a silent empty fallback.
+    The outer loop walks ``reviewThreads`` by cursor; a thread whose nested
+    ``comments(first: 100)`` connection reports ``hasNextPage`` is completed by
+    a per-thread ``node(id:)`` follow-up loop that walks strictly forward by
+    ``endCursor``, so every reply past 100 is collected exactly once and page
+    boundaries never reorder or drop comments. A GraphQL ``errors`` block, a
+    missing ``data.repository.pullRequest.reviewThreads`` key, a failed call, or
+    a nested ``comments`` connection missing ``pageInfo.hasNextPage`` raises
+    :class:`GitError` — never a silent empty fallback.
     """
     owner, name = owner_repo.split("/", 1)
     all_nodes: list[dict[str, Any]] = []
@@ -612,6 +673,35 @@ def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[di
         after = page_info.get("endCursor")
         if after is None:
             raise git_ops.GitError("graphql reviewThreads hasNextPage without an endCursor")
+    for thread in all_nodes:
+        comments = thread.get("comments")
+        if not isinstance(comments, dict):
+            raise git_ops.GitError(
+                f"graphql review thread {thread.get('id')} has no comments connection"
+            )
+        page_info = comments.get("pageInfo")
+        if not isinstance(page_info, dict) or "hasNextPage" not in page_info:
+            raise git_ops.GitError(
+                f"graphql review thread {thread.get('id')} comments missing pageInfo.hasNextPage"
+            )
+        if not page_info.get("hasNextPage"):
+            continue
+        nested_after = page_info.get("endCursor")
+        if nested_after is None:
+            raise git_ops.GitError(
+                f"graphql review thread {thread.get('id')} comments hasNextPage without an endCursor"
+            )
+        while True:
+            page = _graphql_thread_comments(root, thread["id"], after=nested_after)
+            comments.setdefault("nodes", []).extend(page["nodes"])
+            page_info = page["pageInfo"]
+            if not page_info.get("hasNextPage"):
+                break
+            nested_after = page_info.get("endCursor")
+            if nested_after is None:
+                raise git_ops.GitError(
+                    f"graphql thread comments for {thread['id']} hasNextPage without an endCursor"
+                )
     return all_nodes
 
 

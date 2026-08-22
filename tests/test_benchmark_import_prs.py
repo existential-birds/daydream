@@ -1116,7 +1116,35 @@ def test_spike_nested_comments_paginate_past_100(tmp_path, fake_gh):
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
     ids = {e.database_id for e in doc.evidence}
     assert {1000 + i for i in range(1, 151)} <= ids     # all 150 collected
-    assert len([e for e in doc.evidence if 1000 <= e.database_id <= 1149]) == 150
+    assert len([e for e in doc.evidence if 1000 <= e.database_id <= 1150]) == 150
+
+
+def test_graphql_threads_replies_collect_past_100(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    comments = [{"id": f"c{i}", "databaseId": 2000 + i, "body": f"reply {i}",
+                 "author": {"login": "eve", "type": "User"},
+                 "createdAt": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+                 "replyTo": {"id": "c1"},
+                 "url": f"https://github.com/o/r/pull/101#discussion_r{2000+i}"}
+                for i in range(1, 251)]     # 250 replies -> 3 nested pages
+    fake_gh._serve_thread_comments("thread_9", comments, page_size=100)
+    fake_gh._write_threads([{"id": "thread_9", "isResolved": False,
+        "isOutdated": False, "subjectType": "LINE", "path": "a.py", "line": 4,
+        "side": "RIGHT", "comments": {"nodes": comments[:100]}}], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    replies = [e for e in doc.evidence if 2000 <= e.database_id <= 2250]
+    assert len(replies) == 250
+    assert len({e.database_id for e in replies}) == 250        # no dup
+    # deterministic creation order preserved end to end
+    assert [e.database_id for e in sorted(replies, key=lambda r: r.database_id)] \
+           == sorted(range(2001, 2251))
 
 
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
