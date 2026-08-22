@@ -409,3 +409,33 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path):
     with pytest.raises(WorkspaceCorrupt):  # foreign op dir is unidentifiable
         recover_startup(tmp_path)
     assert (foreign / "note.txt").read_text() == "keep"  # foreign left untouched
+
+
+def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path):
+    # 3 targets; inject a crash after each individual rename/fsync boundary.
+    for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
+        root = tmp_path / f"ws-{n}"; root.mkdir()
+        before = {}
+        for i in range(3):
+            rel = f"cases/t{i}.yaml"
+            before[rel] = f"before-{i}"
+            p = root / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(before[rel])
+        with Transaction(root, op_id=f"op-{n}", kind="import") as tx:
+            for i in range(3):
+                _stage(tx, root / f"cases/t{i}.yaml", f"after-{i}")
+            tx.inject_crash(boundary=f"target-{n}")  # new per-target boundary
+        recover_startup(root)
+        for rel, content in before.items():
+            assert (root / rel).read_text() == content  # every target back to all-old
+        assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())
+
+
+def test_single_target_target_boundary(tmp_path):
+    root = tmp_path / "ws"; root.mkdir()
+    t = root / "t.yaml"; t.write_text("before")
+    with Transaction(root, op_id="op-1t", kind="write") as tx:
+        _stage(tx, t, "after")
+        tx.inject_crash(boundary="target-0")
+    recover_startup(root)
+    assert t.read_text() == "before"
+    assert not (root / "transactions").exists() or not list((root / "transactions").iterdir())

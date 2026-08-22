@@ -384,7 +384,22 @@ class Transaction:
         self._applied_count = 0
         self._write_journal()
         _fsync_file(self._journal_path())
-        for rel in self._replacement_order:
+        self._apply_replacements()
+        _fsync_dir(self._root)
+
+    def _apply_replacements(self, *, stop_after: int | None = None) -> None:
+        """Apply targets in ``replacement_order``, fsyncing each rename.
+
+        Each target's rename is made durable (file + *parent directory* fsync)
+        before the next target is applied, so a crash at any per-target
+        boundary still restores the whole before- or after-state, never a
+        checksum-drifted mix. ``stop_after`` (a test-only hook) applies only
+        the first ``N`` targets and leaves the journal ``committing`` with
+        ``applied_count == N``, byte-identical to a real mid-loop crash.
+        """
+        for i, rel in enumerate(self._replacement_order):
+            if stop_after is not None and i >= stop_after:
+                break
             st = self._states[rel]
             rel = _resolve_target(self._root, rel)
             target = self._root / rel
@@ -396,7 +411,7 @@ class Transaction:
             os.replace(st.stage_path, target)
             _fsync_file(target)
             os.chmod(target, 0o600)
-        _fsync_dir(self._root)
+            _fsync_dir(target.parent)
 
     def commit(self) -> None:
         """Run the full pipeline to ``complete`` and remove the journal."""
@@ -416,13 +431,14 @@ class Transaction:
     def inject_crash(self, boundary: str | None = None) -> None:
         """Simulate a crash at a named pipeline boundary (test-only).
 
-        With ``boundary is None`` (Task 4's scalar form) this simply halts at
-        the transaction's current state — recovery must adjudicate whatever
-        phase is already persisted. With a named ``boundary``
+        With ``boundary is None`` this simply halts at the transaction's
+        current state — recovery must adjudicate whatever phase is already
+        persisted. With a named ``boundary``
         (``staged|backup|journal|data|manifest``) it first advances to that
         boundary (so a caller may drive an arbitrary mid-state) and then
-        halts. This is the acceptance-test hook that proves a crash restores
-        either the whole before- or after-state.
+        halts. A ``target-<n>`` boundary applies exactly the first ``n``
+        targets of ``replacement_order`` under ``committing`` and halts,
+        leaving a crash state byte-identical to a real mid-loop halt.
         """
         if boundary is None or boundary in ("staged", "backup"):
             # Staging (and any backup file) is written but no journal is
@@ -446,6 +462,28 @@ class Transaction:
             self.prepare()
             self.begin_commit()
             self.force_state("complete")
+            return
+        if boundary is not None and boundary.startswith("target-"):
+            # Per-target boundary ``target-<n>``: prepare, then apply exactly
+            # the first ``n`` targets and halt before the parent-dir fsync of
+            # the next rename / the final root fsync. Recovery rolls all of
+            # them back, restoring the all-old state. ``target-0`` is exactly
+            # the ``journal`` boundary (prepared, nothing applied).
+            suffix = boundary[len("target-"):]
+            try:
+                n = int(suffix)
+            except ValueError:
+                raise ValueError(f"invalid target boundary {boundary!r}") from None
+            if not (0 <= n <= len(self._replacement_order)):
+                raise ValueError(f"target boundary {n!r} out of range")
+            self.prepare()
+            if n == 0:
+                return
+            self._state = "committing"
+            self._applied_count = 0
+            self._write_journal()
+            _fsync_file(self._journal_path())
+            self._apply_replacements(stop_after=n)
             return
         raise ValueError(f"unknown crash boundary {boundary!r}")
 
@@ -741,9 +779,11 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         if backup is not None:
             os.replace(op_dir / backup, target)
             os.chmod(target, 0o600)
+            _fsync_dir(target.parent)
         else:
             with suppress(OSError):
                 target.unlink()
+            _fsync_dir(target.parent)
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
     _remove_created_dirs(root, doc)
