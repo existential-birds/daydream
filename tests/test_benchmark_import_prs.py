@@ -1228,6 +1228,38 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path, fake_gh):
     assert doc2.fetch.payload_sha256 == payload
 
 
+def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 40, "node_id": "DIFF_40", "user": {"login": "dave", "type": "User"},
+         "body": "outdated root", "commit_id": "a" * 40, "path": "a.py", "line": 5,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r40"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([{"id": "thread_2", "isResolved": True,
+        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "path": "a.py", "line": 5, "originalLine": 4, "side": "RIGHT",
+        "startSide": None,
+        "comments": {"nodes": [
+            {"id": "c40", "databaseId": 40, "body": "outdated root",
+             "author": {"login": "dave", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z",
+             "url": "https://github.com/o/r/pull/101#discussion_r40"}]}}],
+        number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    cands = {c.source_id: c for c in gi.project_candidates(doc, head_sha="a" * 40)}
+    cand = cands["github:inline_comment:40"]
+    assert cand.exact_acceptable is False
+    assert cand.not_exact_reason == "outdated"
+
+
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
     import pytest
