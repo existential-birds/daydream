@@ -8,6 +8,8 @@ rejection / transition surface of :mod:`daydream.benchmark.curation`.
 
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -15,6 +17,8 @@ import yaml
 from daydream import git_ops
 from daydream.benchmark.schema import derive_finding_id
 from daydream.benchmark.storage import atomic_write_yaml, load_yaml_strict
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_import_prs.py::_SEED_ENV).
@@ -545,4 +549,170 @@ def test_validate_case_accepts_clean_and_rejects_duplicate_and_over_cap(tmp_path
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
     with pytest.raises(cu.CurationError):
         cu.validate_case(ws, case_id)
+
+
+_WORKER = (
+    "import sys\n"
+    "from daydream.benchmark import curation as cu\n"
+    "op, ws, cid = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+    "if op == 'add':\n"
+    "    cu.add_finding(ws, cid, title=sys.argv[4], body='b', severity='low',\n"
+    "                   location={'path': 'feature.py', 'start_line': 1, 'end_line': 1},\n"
+    "                   source_ids=[])\n"
+    "elif op == 'accept':\n"
+    "    cu.accept_candidate(ws, cid, sys.argv[4])\n"
+    "elif op == 'exclude':\n"
+    "    cu.exclude_evidence(ws, cid, sys.argv[4], reason='duplicate')\n"
+    "elif op == 'clean':\n"
+    "    cu.attest_clean(ws, cid)\n"
+    "else:\n"
+    "    raise SystemExit('unknown op')\n"
+)
+
+
+def _spawn_worker(args: list[str]) -> subprocess.Popen[str]:
+    return subprocess.Popen(
+        [sys.executable, "-c", _WORKER, *args],
+        cwd=_REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+def test_concurrent_accept_and_add_do_not_lose_updates(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    procs = [_spawn_worker(["accept", str(ws), case_id, src])]
+    procs += [_spawn_worker(["add", str(ws), case_id, f"conc-{i}"]) for i in range(4)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, (out, err)
+    findings = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
+    assert len(findings) == 5                                   # all 5 concurrent updates landed
+    assert {"conc-0", "conc-1", "conc-2", "conc-3"} <= {f["title"] for f in findings}
+    hist = [f for f in findings if f["provenance"]["kind"] == "historical"]
+    assert len(hist) == 1 and hist[0]["provenance"]["source_ids"] == [src]
+
+
+def test_concurrent_excludes_serialize_to_single_row(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
+    # Mixed concurrent mutations on one case: 3 idempotent excludes of the same
+    # source must serialize to a single row, AND 3 distinguishable adds must all
+    # land — a lost update (if the workspace lock were removed) would drop one.
+    procs = [_spawn_worker(["exclude", str(ws), case_id, src]) for _ in range(3)]
+    procs += [_spawn_worker(["add", str(ws), case_id, f"mix-{i}"]) for i in range(3)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, (out, err)
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["exclusions"] == [{"source_id": src, "reason": "duplicate", "note": None}]
+    assert {"mix-0", "mix-1", "mix-2"} <= {f["title"] for f in raw["curation"]["findings"]}
+    assert cu.validate_case(ws, case_id) is None                # case not corrupted by interleaving
+
+
+def test_concurrent_clean_attestation_serializes(tmp_path, fake_gh):
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)   # empty gold
+    procs = [_spawn_worker(["clean", str(ws), case_id]) for _ in range(3)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, (out, err)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["clean_attested"] is True and cur["gold_status"] == "clean"
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+
+
+def test_concurrent_adds_then_final_readiness_lands(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    procs = [_spawn_worker(["add", str(ws), case_id, f"r-{i}"]) for i in range(3)]
+    for p in procs:
+        out, err = p.communicate(timeout=120)
+        assert p.returncode == 0, (out, err)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)                 # final readiness on top of the concurrent adds
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    # All three concurrent adds land before readiness (order is lock-acquisition
+    # order, so title order is nondeterministic — assert the set, not the order).
+    assert sorted(f["title"] for f in raw["curation"]["findings"]) == ["r-0", "r-1", "r-2"]
+    assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
+
+
+def test_lock_file_and_error_text_contain_no_repo_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")   # acquires + releases the lock
+    assert (ws / ".benchmark.lock").read_bytes() == b""         # lock file is empty: no repo evidence/credentials
+    with pytest.raises(cu.CurationError) as ei:
+        cu.exclude_evidence(ws, case_id, "not-a-source", reason="duplicate")
+    msg = str(ei.value)
+    assert "o/r" not in msg and "token" not in msg.lower() and "api_key" not in msg.lower()
+
+
+def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    lock_path = ws / ".benchmark.lock"
+    # A writer holds the flock for a long window (30s) — far longer than any
+    # plausible read-only path — so a differential probe can detect whether the
+    # read-only paths block on the lock without a fragile wall-clock assertion.
+    holder = subprocess.Popen(
+        [sys.executable, "-c",
+         "import fcntl, time, sys\n"
+         "fd = open(sys.argv[1], 'w')\n"
+         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+         "print('held', flush=True)\n"
+         "time.sleep(30)\n",
+         str(lock_path)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert holder.stdout.readline().strip() == "held"            # another process now holds the flock
+    try:
+        cu.list_cases(ws)
+        cu.get_case(ws, case_id)
+        cu.validate_case(ws, case_id)
+        # The writer must STILL be holding the flock after the reads returned:
+        # had a read-only path blocked on the lock it could not finish until the
+        # writer released (30s later).
+        assert holder.poll() is None
+    finally:
+        holder.wait(timeout=30)
+
+
+def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import Transaction
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    mutated = dict(raw)
+    mutated["curation"] = dict(raw["curation"])
+    mutated["curation"]["state"] = "excluded"          # an interrupted mutation left in flight
+    with Transaction(ws, op_id=f"curate-{case_id}", kind="curation:exclude-case") as tx:
+        tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
+        tx.inject_crash("target-1")                    # target applied under 'committing', then halt
+    assert load_yaml_strict(path)["curation"]["state"] == "excluded"
+    cu.add_finding(ws, case_id, title="recovered", body="b", severity="low",
+                   location={"path": "feature.py", "start_line": 1, "end_line": 1}, source_ids=[])
+    assert not list((ws / "transactions").iterdir())   # prior journal healed
+    final = load_yaml_strict(path)
+    assert final["curation"]["state"] == "draft"       # interrupted 'excluded' write was rolled back
+    assert [f["title"] for f in final["curation"]["findings"]] == ["recovered"]
+
+
+def test_stale_state_error_is_exported_curation_subtype():
+    import daydream.benchmark as bm
+    assert issubclass(bm.StaleStateError, bm.CurationError)
+
+
+def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
+    cu.accept_candidate(ws, case_id, src)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    with pytest.raises(cu.StaleStateError):
+        cu.mark_ready(ws, case_id, head_sha="f" * 40)   # stale attestation SHA
+    assert path.read_bytes() == before                    # a rejected mutation writes nothing
 

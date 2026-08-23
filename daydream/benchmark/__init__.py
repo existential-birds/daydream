@@ -14,8 +14,10 @@ consumers and future issues.
 from daydream.benchmark.config import BenchConfig
 from daydream.benchmark.curation import (  # noqa: F401 - stable service surface
     CurationError,
+    StaleStateError,
     accept_candidate,
     add_finding,
+    add_findings,
     apply_gold_fragment,
     attest_clean,
     exclude_case,
@@ -56,6 +58,7 @@ __all__ = [
     "BenchConfig",
     "BenchmarkManifest",
     "CurationError",
+    "StaleStateError",
     "Candidate",
     "CaseDocument",
     "CaseIndexEntry",
@@ -75,6 +78,7 @@ __all__ = [
     "run_import_prs",
     "accept_candidate",
     "add_finding",
+    "add_findings",
     "apply_gold_fragment",
     "attest_clean",
     "exclude_case",

@@ -2,6 +2,8 @@ import hashlib
 import uuid
 from pathlib import Path
 
+import yaml
+
 from daydream.benchmark import migrate, schema, storage
 
 _BASE = "0123456789abcdef0123456789abcdef01234567"
@@ -158,3 +160,28 @@ def test_upgrade_cli_error_returns_1(tmp_path, capsys):
     rc = _handle_benchmark_command(["upgrade", str(ws)])
     assert rc == 1
     assert "error" in capsys.readouterr().err
+
+
+def test_migrate_heals_interrupted_journal_under_lock(tmp_path):
+    """migrate_workspace must recover_startup under the workspace lock (like every
+    other locked writer) so a crashed curator journal is healed before it reads;
+    and its transaction op_id must be flat so no residue is left that bricks a
+    later recover_startup with WorkspaceCorrupt."""
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(path)
+    mutated = dict(raw)
+    mutated["curation"] = dict(raw["curation"])
+    mutated["curation"]["state"] = "excluded"    # an interrupted mutation left in flight
+    with storage.Transaction(ws, op_id=f"migrate-{case_id}", kind="migrate") as tx:
+        tx.stage(f"cases/{case_id}.yaml", yaml.safe_dump(mutated, sort_keys=False).encode("utf-8"))
+        tx.inject_crash("target-1")              # target applied under 'committing', then halt
+    assert storage.load_yaml_strict(path)["curation"]["state"] == "excluded"
+
+    migrate.migrate_workspace(ws)               # recover_startup under lock rolls the crash back
+
+    assert not list((ws / "transactions").iterdir())    # healed AND no residue left behind
+    final = storage.load_yaml_strict(path)
+    assert final["curation"]["state"] == "draft"        # interrupted 'excluded' write rolled back
+    assert final["schema_version"] == 2                 # the migration still ran
+    storage.recover_startup(ws)                         # a follow-up recovery must not brick
