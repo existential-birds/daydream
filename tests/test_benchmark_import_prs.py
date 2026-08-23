@@ -1642,6 +1642,111 @@ def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path, fake_gh
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
 
 
+def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path, fake_gh):
+    """A refresh whose re-freeze of a curated pinned head goes unreplayable
+    (force-push/rebased branch made the head unreachable) must fail the refresh
+    (rc != 0) and keep the curated ready case + its bundle intact and indexed —
+    never write the unreplayable snapshot over the curated case (issue #813)."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    case_id = f"pr-000101-{head_sha[:12]}"
+    _curate_case(ws, f"{case_id}.yaml")
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    before = load_yaml_strict(case_path)
+    assert before["snapshot"]["status"] == "ready"
+    bundle_rel = before["snapshot"]["bundle_file"]
+
+    # force-push: repoint refs/pull/101/head to a commit that does NOT contain
+    # the pinned head (a rebased branch), so the pinned head is unreachable.
+    repo = tmp_path / "local_wt"
+    _seed_git(repo, "checkout", "main")
+    _seed_write(repo, "rebased.py", "REBASED = 1\n")
+    _seed_git(repo, "add", "rebased.py")
+    new_head = _seed_commit(repo, "force-pushed rebased head")
+    _seed_git(repo, "push", "-f", "origin", f"{new_head}:refs/pull/101/head", check=False)
+    hdr = dict(_PR_HEADER)
+    hdr["head"] = {"ref": "feature/cache", "sha": new_head}
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=[], refresh=True, origin_url=origin_url)
+    assert rc != 0
+    after = load_yaml_strict(case_path)
+    assert after["snapshot"]["status"] == "ready"   # NOT replaced with unreplayable
+    assert after["curation"]["state"] == "ready"     # curated gold preserved
+    assert (ws / bundle_rel).exists()                  # bundle still on disk and referenced
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetched"            # last-good linkage preserved
+    assert pr["latest_error"] is not None              # attempt recorded, not silent
+    code, _label = validate_workspace(ws)
+    assert code == 0                                    # no orphan bundle corruption
+
+
+def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path, fake_gh):
+    """A hand-edited/externally-mutated curation whose referenced source_id is
+    non-canonical must fail the re-import (rc != 0) instead of being silently
+    dropped from the per-case stale gate — never fail open (issue #813)."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    case_path = ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # hand-edit: a non-canonical referenced source_id (malformed reference).
+    raw = load_yaml_strict(case_path)
+    raw["curation"]["findings"][0]["provenance"]["source_ids"] = [
+        "https://github.com/o/r/pull/101#discussion_r1"
+    ]
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0                                      # fail closed, not silently skipped
+    after = load_yaml_strict(ws / "benchmark.yaml")
+    pr = after["pull_requests"][0]
+    assert pr["latest_error"] is not None
+    on_disk = load_yaml_strict(case_path)
+    assert on_disk["curation"]["findings"][0]["provenance"]["source_ids"] == [
+        "https://github.com/o/r/pull/101#discussion_r1"
+    ]   # curation was NOT rewritten by the failed refresh
+
+
+def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path, fake_gh):
+    """reply_to_id gates candidacy (replies are evidence, never candidates), so it
+    must sit in the projection hash: a comment gaining reply status shifts the
+    candidate set and must flip the signature, staling a referencing case."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # the same comment now carries a reply parent (gains reply status): its
+    # projection hash must flip even though body/anchor fields are unchanged.
+    reply = dict(_seed_discussion(1))
+    reply["in_reply_to_id"] = 10
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [reply])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"       # referenced id's projection changed
+    assert case["curation"]["findings"]               # curated gold preserved
+
+
 def test_reimport_changed_referenced_evidence_stales(tmp_path, fake_gh):
     """A plain re-import (refresh=False) with changed referenced evidence must not
     silently keep the curated case ready — it routes through the same per-case

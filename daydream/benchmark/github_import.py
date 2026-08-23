@@ -940,7 +940,8 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
     One digest per physical evidence record over exactly the fields that feed
     candidate projection and the curated review surface: body sha, author
     (login/type), commit anchors, path/line anchors, side, subject type,
-    resolution state, dismissal, and review state. Values use ``.get()``
+    reply status (replies are evidence, never candidates), resolution
+    state, dismissal, and review state. Values use ``.get()``
     defaults (``False`` for booleans, ``None`` for optional fields, ``""`` for
     strings) so an absent pre-canonicalization key equals the canonical
     default. ``kind``/``source_id``/``database_id``/``url``/timestamps are
@@ -963,6 +964,7 @@ def _evidence_projection_hash(rec: dict[str, Any]) -> str:
         "side": rec.get("side"),
         "start_side": rec.get("start_side"),
         "subject_type": rec.get("subject_type"),
+        "reply_to_id": rec.get("reply_to_id"),
         "resolved": bool(rec.get("resolved", False)),
         "outdated": bool(rec.get("outdated", False)),
         "dismissed": bool(rec.get("dismissed", False)),
@@ -981,7 +983,7 @@ def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[
     both feeds twice, while the canonical format emits exactly one
     ``inline_comment`` per database id. The per-record hash spans the full
     projection-relevant provenance (body, author, commit/anchor fields, sides,
-    subject type, resolution state, dismissal, review state) and excludes
+    subject type, reply status, resolution state, dismissal, review state) and excludes
     ``kind``/``source_id``/``database_id``/``url``/timestamps, so a duplicate pre-canon record
     collapses only when its projections are identical; when the thread copy lacks the commit
     anchors the two copies project differently, and the refresh changed-check treats the fresh
@@ -1051,6 +1053,22 @@ def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _referenced_evidence_id(sid: str) -> int:
+    """The trailing database id of one canonical ``github:<kind>:<id>`` source_id.
+
+    Fail-closed, mirroring the schema's ``_canonical_source_id`` validator: a
+    non-canonical source_id (a hand-edited or externally-mutated curation) is
+    corrupt prior state and is never silently dropped from the referenced-
+    evidence set, or the per-case stale gate would fail open and let
+    referenced evidence change without the case flipping stale.
+    """
+    if not schema._SOURCE_ID_RE.fullmatch(sid):
+        raise storage.WorkspaceCorrupt(
+            f"curation references non-canonical source_id {sid!r}"
+        )
+    return int(sid.rsplit(":", 1)[-1])
+
+
 def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
     """The physical database_ids a curation references via its source_ids.
 
@@ -1058,7 +1076,9 @@ def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
     ``exclusions[].source_id`` by parsing the canonical
     ``github:<kind>:<id>`` form to the trailing int. Used by the per-case
     stale decision so a case stales only when evidence *it references*
-    changed; an unreferenced record never flips it.
+    changed; an unreferenced record never flips it. A non-canonical
+    reference raises :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    (see :func:`_referenced_evidence_id`) instead of being skipped.
     """
     ids: set[int] = set()
     for finding in curation.get("findings", []):
@@ -1066,16 +1086,11 @@ def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
             continue
         provenance = finding.get("provenance") or {}
         for sid in provenance.get("source_ids", []):
-            match = schema._SOURCE_ID_RE.fullmatch(str(sid))
-            if match:
-                ids.add(int(str(sid).rsplit(":", 1)[-1]))
+            ids.add(_referenced_evidence_id(str(sid)))
     for exclusion in curation.get("exclusions", []):
         if not isinstance(exclusion, dict):
             continue
-        sid = exclusion.get("source_id")
-        match = schema._SOURCE_ID_RE.fullmatch(str(sid or ""))
-        if match:
-            ids.add(int(str(sid).rsplit(":", 1)[-1]))
+        ids.add(_referenced_evidence_id(str(exclusion.get("source_id") or "")))
     return ids
 
 
@@ -1109,7 +1124,12 @@ def _case_materialize(
     *task_input_changed* (PR-wide) or its own referenced evidence ids
     intersect *changed_ids* (a referenced record changed or disappeared).
     An unreferenced evidence change never stales it and an untouched PR keeps
-    it ready — findings/exclusions are never overwritten by refresh.
+    it ready — findings/exclusions are never overwritten by refresh. A freeze
+    of an existing ``ready|stale`` case that comes back ``unreplayable`` (the
+    pinned head became unreachable after a force-push/rebased branch) raises
+    :class:`~daydream.git_ops.GitError` instead of writing an unreplayable
+    snapshot over the curated case — the refresh then fails like the sibling
+    fetch-failure path (rc != 0, last-good linkage kept).
     """
     pull_request = doc.pull_request
     base_sha = pull_request.base.sha
@@ -1164,6 +1184,22 @@ def _case_materialize(
             )
             if snapshot_doc.get("status") == "ready" and bundle_bytes is not None:
                 bundle_drops.append((snapshot_doc["bundle_file"], bundle_bytes))
+            elif snapshot_doc.get("status") != "ready" and prior_curations and (
+                prior_curations.get(case_id) or {}
+            ).get("state") in ("ready", "stale"):
+                # A pinned head that became unreachable (force-push/rebased
+                # branch) makes the re-freeze of a previously curated case
+                # unreplayable. Never overwrite the curated case's snapshot
+                # with an unreplayable dict: that would orphan its staged
+                # bundle and silently flip the case out of ready while
+                # _import_one_pr still returns 0. Fail the refresh like the
+                # sibling fetch-failure path (rc 1, last-good linkage kept)
+                # so the curated state and its bundle stay intact and indexed.
+                error = snapshot_doc.get("error") or {}
+                raise git_ops.GitError(
+                    f"PR {number} freeze of curated case {case_id} is unreplayable "
+                    f"({error.get('reason')}): {error.get('detail')}"
+                )
         else:
             snapshot_doc = {
                 "status": "imported",
