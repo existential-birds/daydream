@@ -175,3 +175,25 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned():
     assert "/verifier" not in text
     assert "test.sh" in text and "score_review.py" in text
     assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
+
+
+def test_render_job_config_matches_plan_s8_and_oracle_differs():
+    import yaml
+
+    from daydream.benchmark.harbor import package as pkg
+
+    job = yaml.safe_load(pkg.render_job_config(oracle=False))
+    assert job["jobs_dir"] == "jobs" and job["n_attempts"] == 1
+    assert job["n_concurrent_trials"] == 4
+    assert job["environment"] == {"type": "docker", "delete": True}
+    agent = job["agents"][0]
+    assert agent["import_path"] == "daydream.benchmark.harbor.agent:DaydreamReviewAgent"
+    assert "DAYDREAM_REVIEW_API_KEY" in agent["env"]
+    assert job["datasets"] == [{"path": "."}]
+    assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
+    assert "DAYDREAM_JUDGE_API_KEY" in job["verifier"]["env"]
+
+    oracle = yaml.safe_load(pkg.render_job_config(oracle=True))
+    assert oracle["agents"] == [{"name": "oracle"}]
+    assert oracle["verifier"] == job["verifier"]
+    assert oracle["metrics"] == job["metrics"]

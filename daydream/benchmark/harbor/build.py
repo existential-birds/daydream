@@ -814,12 +814,22 @@ def compile_workspace(root: Path) -> dict:
                 ).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
+            from daydream.benchmark.harbor.package import render_job_config
+
+            job_bytes = render_job_config(oracle=False)
+            oracle_job_bytes = render_job_config(oracle=True)
+            (stage / "harbor-job.yaml").write_bytes(job_bytes)
+            (stage / "harbor-oracle.yaml").write_bytes(oracle_job_bytes)
             metric_bytes = render_metric()
             (stage / "metric.py").write_bytes(metric_bytes)
             (stage / "jobs").mkdir(exist_ok=True)
 
             all_files["README.md"] = hashlib.sha256(_ROOT_README.encode("utf-8")).hexdigest()
+            all_files["harbor-job.yaml"] = hashlib.sha256(job_bytes).hexdigest()
+            all_files["harbor-oracle.yaml"] = hashlib.sha256(oracle_job_bytes).hexdigest()
             all_files["metric.py"] = hashlib.sha256(metric_bytes).hexdigest()
+            control_plane["harbor-job.yaml"] = job_bytes.decode("utf-8")
+            control_plane["harbor-oracle.yaml"] = oracle_job_bytes.decode("utf-8")
 
             lock = _build_lock(case_rows, _authoring_input_digest(case_docs, manifest), all_files)
             lock_bytes = json.dumps(lock, sort_keys=True, indent=2).encode("utf-8")

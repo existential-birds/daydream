@@ -10,6 +10,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from daydream.benchmark.harbor.build import CompileError
 
 GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
@@ -87,6 +89,38 @@ def resolve_harbor() -> str:
             remediation=remediation,
         )
     return str(executable)
+
+
+def render_job_config(*, oracle: bool) -> bytes:
+    """Render a deterministic Harbor job or Oracle configuration."""
+    agents = [{"name": "oracle"}] if oracle else [{
+        "import_path": "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
+        "env": {
+            "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-claude}",
+            "DAYDREAM_REVIEW_MODEL": "${DAYDREAM_REVIEW_MODEL}",
+            "DAYDREAM_REVIEW_API_KEY": "${DAYDREAM_REVIEW_API_KEY}",
+            "DAYDREAM_REVIEW_BASE_URL": "${DAYDREAM_REVIEW_BASE_URL}",
+        },
+    }]
+    document = {
+        "jobs_dir": "jobs",
+        "n_attempts": 1,
+        "n_concurrent_trials": 4,
+        "environment": {"type": "docker", "delete": True},
+        "agents": agents,
+        "verifier": {"env": {
+            "DAYDREAM_JUDGE_PROVIDER": "${DAYDREAM_JUDGE_PROVIDER:-anthropic}",
+            "DAYDREAM_JUDGE_MODEL": "${DAYDREAM_JUDGE_MODEL}",
+            "DAYDREAM_JUDGE_API_KEY": "${DAYDREAM_JUDGE_API_KEY}",
+            "DAYDREAM_JUDGE_BASE_URL": "${DAYDREAM_JUDGE_BASE_URL}",
+        }},
+        "datasets": [{"path": "."}],
+        "metrics": [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}],
+    }
+    try:
+        return yaml.safe_dump(document, sort_keys=False).encode("utf-8")
+    except yaml.YAMLError as exc:
+        raise PackageError(f"cannot serialize Harbor job config: {exc}") from exc
 
 
 def render_verifier_dockerfile(*, base_image: str) -> bytes:
