@@ -371,3 +371,52 @@ def test_clean_all_yes_deletes_curated_and_derived(tmp_path):
     assert not (ws / "imports").exists() and not (ws / "cases").exists()
     assert not (ws / "snapshots").exists()
     assert report.recoverable is False        # curated deletion is unrecoverable
+
+
+# ---------------------------------------------------------------------------
+# Task 11: acceptance matrix — locking, idempotency, derived-union
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_lock_held_during_mutation(tmp_path, monkeypatch):
+    ws = _seed_clean_ws(tmp_path)
+    (ws / "cache" / "repository.git").mkdir(parents=True)
+    held = []
+    real_lock = clean_mod.WorkspaceLock
+
+    class RecordingLock(real_lock):
+        def __enter__(self):
+            held.append(True)
+            return super().__enter__()
+
+    monkeypatch.setattr(clean_mod, "WorkspaceLock", RecordingLock)
+    clean_mod.clean_workspace(ws, jobs=True)   # ledger mutation path
+    assert held                     # a workspace lock was acquired
+
+
+def test_clean_idempotent_repeat_noop(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    (ws / "cache" / "repository.git").mkdir(parents=True)
+    r1 = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
+    r2 = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
+    assert r1.exit_code == 0 and r2.exit_code == 0
+    assert r2.cache_deleted == 0 and r2.job_dirs_deleted == 0 and r2.trajectory_deleted == 0
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists()
+
+
+def test_clean_derived_union_deletes_all_derived(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    (ws / "cache" / "repository.git").mkdir(parents=True)
+    (ws / "cache" / "harbor-build-stage").mkdir(parents=True)
+    run_id = "00000000-0000-0000-0000-0000000000e1"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "case" / "agent").mkdir(parents=True)
+    (job / "case" / "agent" / "trajectory.json").write_text("{}")
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("c", removed=False)])
+    r = clean_mod.clean_workspace(ws, cache=True, jobs=True, trajectories=True)
+    assert r.cache_deleted == 2 and r.job_dirs_deleted == 1
+    assert r.trajectory_deleted == 1 and r.images_removed == 1
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists()        # derived union preserves source/gold
