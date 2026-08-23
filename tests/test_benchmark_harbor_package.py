@@ -55,3 +55,29 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path):
     uv_lock.write_bytes(uv_lock.read_bytes() + b"\n# drift\n")
     regenerated2 = pkg.generate_runtime_lock(uv_lock, daydream_version=ver)
     assert regenerated2 != committed
+
+
+def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path):
+    import importlib.metadata
+
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+
+    ver = importlib.metadata.version("daydream")
+    good = tmp_path / f"daydream-{ver}-py3-none-any.whl"
+    good.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    info = pkg.validate_wheel(good, daydream_version=ver)
+    assert info.distribution == "daydream" and info.version == ver
+    assert len(info.sha256) == 64
+
+    bad = tmp_path / "daydream-0.99.0-py3-none-any.whl"
+    bad.write_bytes(b"x")
+    with pytest.raises(pkg.PackageError) as mismatch:
+        pkg.validate_wheel(bad, daydream_version=ver)
+    assert bad.name in str(mismatch.value)
+    assert "daydream-" + ver in str(mismatch.value)
+
+    with pytest.raises(pkg.PackageError) as missing:
+        pkg.validate_wheel(tmp_path / "absent.whl", daydream_version=ver)
+    assert "absent.whl" in str(missing.value)

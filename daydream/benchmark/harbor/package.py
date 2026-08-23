@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from daydream.benchmark.harbor.build import CompileError
@@ -18,6 +20,38 @@ class PackageError(CompileError):
         self.remediation = remediation
         suffix = f" Remediation: {remediation}" if remediation else ""
         super().__init__(message + suffix)
+
+
+@dataclass(frozen=True)
+class WheelInfo:
+    """Validated Daydream wheel identity and content digest."""
+
+    distribution: str
+    version: str
+    sha256: str
+
+
+def validate_wheel(wheel_path: Path, *, daydream_version: str) -> WheelInfo:
+    """Validate the exact wheel filename for the running Daydream release."""
+    wheel_path = Path(wheel_path)
+    expected = f"daydream-{daydream_version}-py3-none-any.whl"
+    if not wheel_path.is_file() or wheel_path.name != expected:
+        raise PackageError(
+            f"wheel {wheel_path.name!r} is missing or mismatched; expected {expected!r}",
+            remediation="run `uv build --wheel` and pass the wheel for the running Daydream version",
+        )
+    if not re.fullmatch(r"daydream-[^-]+-py3-none-any\.whl", wheel_path.name):
+        raise PackageError(
+            f"wheel {wheel_path.name!r} is not the expected Daydream wheel {expected!r}",
+            remediation="run `uv build --wheel`",
+        )
+    try:
+        digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise PackageError(
+            f"cannot read wheel {wheel_path}: {exc}", remediation="run `uv build --wheel`"
+        ) from exc
+    return WheelInfo(distribution="daydream", version=daydream_version, sha256=digest)
 
 
 def render_lock_header(
