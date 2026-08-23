@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import daydream.benchmark.harbor.clean as clean_mod
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 
 
@@ -120,3 +121,26 @@ def test_handle_clean_routes_to_clean_workspace(tmp_path, monkeypatch):
     assert captured["cache"] is True and captured["jobs"] is True
     assert captured["trajectories"] is True
     assert captured["all_"] is False and captured["yes"] is True
+
+
+# ---------------------------------------------------------------------------
+# Task 2: CleanReport + empty-selection no-op
+# ---------------------------------------------------------------------------
+
+
+def test_clean_report_has_exit_code_and_summary():
+    r = clean_mod.CleanReport()
+    assert r.exit_code == 0
+    lines = r.summary_lines()
+    assert isinstance(lines, list)
+    assert len(lines) >= 1   # a summary line exists
+
+
+def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path):
+    ws = _seed_clean_ws(tmp_path)          # benchmark.yaml + imports/cases/snapshots/
+    report = clean_mod.clean_workspace(ws)  # no selection flags
+    assert report.exit_code == 0
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists(), f"{name} must be preserved on a no-flag clean"
+    assert report.cache_deleted == 0 and report.job_dirs_deleted == 0
+    assert report.trajectory_deleted == 0 and report.images_removed == 0
