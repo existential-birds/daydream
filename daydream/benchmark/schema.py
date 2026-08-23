@@ -874,13 +874,10 @@ def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
     curation.pop("task_spec_approved_at", None)
     if curation.get("state") == "ready" and curation.get("task_spec_sha256") is None:
         from daydream.benchmark.harbor.build import (
-            ASSIGNMENT_TEXT,
-            render_task_spec,
+            task_spec_digest,
         )
 
-        curation["task_spec_sha256"] = hashlib.sha256(
-            render_task_spec(doc, instruction=ASSIGNMENT_TEXT)
-        ).hexdigest()
+        curation["task_spec_sha256"] = task_spec_digest(doc)
     doc["curation"] = curation
     return doc
 

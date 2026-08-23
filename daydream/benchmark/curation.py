@@ -37,7 +37,6 @@ clone, and ``git_ops``."""
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import tempfile
 import threading
@@ -841,9 +840,7 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str
         if stored_task_spec_sha256 is None:
             from daydream.benchmark.harbor import build
 
-            stored_task_spec_sha256 = hashlib.sha256(
-                build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
-            ).hexdigest()
+            stored_task_spec_sha256 = build.task_spec_digest(raw)
         curation["state"] = "ready"
         curation["snapshot_attested"] = True
         curation["task_spec_sha256"] = stored_task_spec_sha256

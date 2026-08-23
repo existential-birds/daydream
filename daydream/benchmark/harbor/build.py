@@ -277,6 +277,20 @@ def render_task_spec(case_doc: dict, *, instruction: str) -> bytes:
     return "\n".join(parts).encode("utf-8")
 
 
+def task_spec_digest(case_doc: dict) -> str:
+    """Canonical sha256 hexdigest of the rendered ``Task.md`` for *case_doc*.
+
+    Single source for the task-spec invariant (sha256 over the deterministic
+    render under the fixed ``ASSIGNMENT_TEXT``), shared by the approve,
+    compile-verify, authoring-digest, and legacy-backfill derivations so a
+    change to render_task_spec, its inputs, or the hash algorithm cannot drift
+    between call sites.
+    """
+    return hashlib.sha256(
+        render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
+    ).hexdigest()
+
+
 def _flatten_finding(finding: dict) -> dict:
     """Map a curated finding to its provenance-free gold/artifact shape.
 
@@ -563,9 +577,7 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
             "requested_base_sha": snapshot.get("requested_base_sha"),
             "head": snapshot.get("original_head_sha"),
             "bundle_sha256": snapshot.get("bundle_sha256"),
-            "task_spec_sha256": hashlib.sha256(
-                render_task_spec(raw, instruction=ASSIGNMENT_TEXT)
-            ).hexdigest(),
+            "task_spec_sha256": task_spec_digest(raw),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -581,7 +593,7 @@ def _write_task_spec(stage: Path, case_doc: dict) -> str:
     row.
     """
     task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
-    task_spec_sha256 = hashlib.sha256(task_spec_bytes).hexdigest()
+    task_spec_sha256 = task_spec_digest(case_doc)
     approved = (case_doc.get("curation") or {}).get("task_spec_sha256")
     if task_spec_sha256 != approved:
         raise CompileError(
