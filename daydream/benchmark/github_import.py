@@ -686,6 +686,21 @@ def _graphql_with_rate_limit_retry(
     ) from last_rate_limit
 
 
+def _next_cursor(page_info: dict[str, Any], *, context: str) -> str | None:
+    """Return the next ``endCursor``, or ``None`` when there is no next page.
+
+    Fails closed: a connection reporting ``hasNextPage`` without an
+    ``endCursor`` raises :class:`GitError` naming ``context`` instead of
+    silently dropping a page.
+    """
+    if not page_info.get("hasNextPage"):
+        return None
+    after = page_info.get("endCursor")
+    if after is None:
+        raise git_ops.GitError(f"graphql {context} hasNextPage without an endCursor")
+    return after
+
+
 def _graphql_thread_comments(
     root: Path, thread_id: str, *, after: str | None = None
 ) -> dict[str, Any]:
@@ -720,8 +735,10 @@ def _graphql_thread_comments(
         raise git_ops.GitError(
             f"graphql thread {thread_id} missing comments connection: {exc}"
         ) from exc
-    if not isinstance(comments, dict) or not isinstance(comments.get("nodes"), list) or not isinstance(
-        comments.get("pageInfo"), dict
+    if not (
+        isinstance(comments, dict)
+        and isinstance(comments.get("nodes"), list)
+        and isinstance(comments.get("pageInfo"), dict)
     ):
         raise git_ops.GitError(f"graphql thread {thread_id} comments missing nodes/pageInfo")
     return comments
@@ -757,11 +774,9 @@ def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[di
             raise git_ops.GitError(f"graphql response missing reviewThreads: {exc}") from exc
         all_nodes.extend(threads.get("nodes") or [])
         page_info = threads.get("pageInfo") or {}
-        if not page_info.get("hasNextPage"):
-            break
-        after = page_info.get("endCursor")
+        after = _next_cursor(page_info, context="reviewThreads")
         if after is None:
-            raise git_ops.GitError("graphql reviewThreads hasNextPage without an endCursor")
+            break
     for thread in all_nodes:
         comments = thread.get("comments")
         if not isinstance(comments, dict):
@@ -773,24 +788,20 @@ def _graphql_review_threads(root: Path, owner_repo: str, number: int) -> list[di
             raise git_ops.GitError(
                 f"graphql review thread {thread.get('id')} comments missing pageInfo.hasNextPage"
             )
-        if not page_info.get("hasNextPage"):
-            continue
-        nested_after = page_info.get("endCursor")
+        nested_after = _next_cursor(
+            page_info, context=f"review thread {thread.get('id')} comments"
+        )
         if nested_after is None:
-            raise git_ops.GitError(
-                f"graphql review thread {thread.get('id')} comments hasNextPage without an endCursor"
-            )
+            continue
         while True:
             page = _graphql_thread_comments(root, thread["id"], after=nested_after)
             comments.setdefault("nodes", []).extend(page["nodes"])
             page_info = page["pageInfo"]
-            if not page_info.get("hasNextPage"):
-                break
-            nested_after = page_info.get("endCursor")
+            nested_after = _next_cursor(
+                page_info, context=f"thread comments for {thread['id']}"
+            )
             if nested_after is None:
-                raise git_ops.GitError(
-                    f"graphql thread comments for {thread['id']} hasNextPage without an endCursor"
-                )
+                break
     return all_nodes
 
 

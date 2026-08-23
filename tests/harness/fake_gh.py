@@ -15,8 +15,7 @@ a JSONL log the :class:`FakeGh` helper parses, and replies from a canned
 response map (``responses.json``) plus built-in behaviors:
 
 - ``gh api graphql`` with a ``reviewThreads`` query returns the configured
-  prior-thread inventory (empty by default), served as a multi-page cursor
-  catalog when configured via ``_write_threads_paginated``;
+  prior-thread inventory (empty by default), served via ``_write_threads``;
 - ``gh api graphql`` with a ``node(id:)``/``PullRequestReviewThread`` query
   returns the configured per-thread nested-comment page catalog
   (``_serve_thread_comments``);
@@ -245,16 +244,6 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             return 0, json.dumps(pages[idx]) + "\n", ""
         if "reviewThreads" in query:
             pr_num = variables.get("number") if isinstance(variables, dict) else None
-            pages_key = f"graphql_thread_pages:{pr_num}" if pr_num is not None else None
-            pages = responses.get(pages_key) if pages_key is not None else None
-            if isinstance(pages, list) and pages:
-                # Multi-page outer inventory: the response's own hasNextPage /
-                # endCursor drives the next page when ``after`` matches it.
-                after = variables.get("after") if isinstance(variables, dict) else None
-                idx = 0 if after is None else int(str(after).rsplit(":outer:", 1)[1]) + 1
-                if idx >= len(pages):
-                    return 1, "", f"fake gh: reviewThreads cursor {after!r} past the page list\n"
-                return 0, json.dumps(pages[idx]) + "\n", ""
             key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
             value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
             return 0, json.dumps(value) + "\n", ""
@@ -611,20 +600,6 @@ class FakeGh:
         response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
         key = f"graphql_threads:{number}" if number is not None else "graphql_threads"
         responses[key] = response
-        self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
-
-    def _write_threads_paginated(
-        self, pages: list[dict[str, Any]], number: int | None = None
-    ) -> None:
-        """Serve a multi-page outer ``reviewThreads`` inventory.
-
-        Each element of *pages* is a full reviewThreads response body; page N's
-        ``endCursor`` (``"<pr>:outer:<N>"``) selects page N+1 when the caller
-        passes it as ``after``; the last page must report ``hasNextPage: false``.
-        """
-        responses = self._read_responses()
-        key = f"graphql_thread_pages:{number}" if number is not None else "graphql_thread_pages"
-        responses[key] = copy.deepcopy(pages)
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
 
     def _serve_thread_comments(
