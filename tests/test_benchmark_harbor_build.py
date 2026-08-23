@@ -1071,3 +1071,51 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
     # a different case renders different bytes
     raw2 = dict(raw); raw2["pull_request"] = dict(raw["pull_request"]); raw2["pull_request"]["title"] = "Other"
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
+
+
+def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
+    import hashlib
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # ready with a rendered digest (Task 4)
+    key = build.derive_task_key(case_id)
+    lock = build.compile_workspace(ws)
+    tm = ws / "harbor" / key / "Task.md"
+    assert tm.exists()                                          # R10 written
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    expected = hashlib.sha256(build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    actual = hashlib.sha256(tm.read_bytes()).hexdigest()
+    assert actual == expected                                   # R10: compiled == approved bytes
+    assert actual == lock["cases"][key]["task_spec_sha256"]     # R10/R11: lock inventory matches
+    assert actual == raw["curation"]["task_spec_sha256"]        # matches the approved curation digest
+    assert lock["cases"][key]["files"]["Task.md"] == actual     # per-case files{} inventory (R11)
+    assert lock["files"][f"{key}/Task.md"] == actual            # root files{} inventory
+    # Task.md is the only hidden-truth surface; it must not be copied into tests/ or environment/
+    rels = {str(p.relative_to(ws / "harbor" / key)) for p in (ws / "harbor" / key).rglob("*") if p.is_file()}
+    assert "Task.md" in rels
+    assert not any(r.startswith("tests/") and r.endswith("Task.md") for r in rels)
+    assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
+
+
+def test_spec_change_forces_recompile(tmp_path, fake_gh):
+    import hashlib
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock1 = build.compile_workspace(ws)
+    # mutate the instruction-relevant input (PR title), re-render, re-approve, recompile
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(path)
+    head_sha = raw["snapshot"]["original_head_sha"]
+    raw["pull_request"] = dict(raw["pull_request"]); raw["pull_request"]["title"] = "Changed title"
+    storage.atomic_write_yaml(path, raw)
+    new_digest = hashlib.sha256(
+        build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    raw2 = storage.load_yaml_strict(path)
+    raw2["curation"] = dict(raw2["curation"])
+    raw2["curation"]["state"] = "draft"; raw2["curation"]["snapshot_attested"] = False
+    storage.atomic_write_yaml(path, raw2)
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
+    lock2 = build.compile_workspace(ws)
+    assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile

@@ -551,6 +551,9 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
             "requested_base_sha": snapshot.get("requested_base_sha"),
             "head": snapshot.get("original_head_sha"),
             "bundle_sha256": snapshot.get("bundle_sha256"),
+            "task_spec_sha256": hashlib.sha256(
+                render_task_spec(raw, instruction=ASSIGNMENT_TEXT)
+            ).hexdigest(),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -565,6 +568,17 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     snapshot = case_doc.get("snapshot") or {}
     curation = case_doc.get("curation") or {}
     findings = curation.get("findings") or []
+
+    # The hidden evaluation contract: byte-deterministic render, verified
+    # against the human-approved digest before any bytes are written (R10/R8).
+    task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
+    task_spec_sha256 = hashlib.sha256(task_spec_bytes).hexdigest()
+    approved = curation.get("task_spec_sha256")
+    if task_spec_sha256 != approved:
+        raise CompileError(
+            f"case {case_id} task spec digest {task_spec_sha256} != approved {approved}"
+        )
+    (case_stage / "Task.md").write_bytes(task_spec_bytes)
 
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)
@@ -621,7 +635,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
 
     files: dict[str, str] = {}
     for rel in (
-        "README.md", "instruction.md", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "environment/repository.bundle",
         "tests/golden-review.json", "tests/verifier-metadata.json",
         "solution/golden-review.json",
     ):
@@ -644,6 +658,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
         "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
         "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "task_spec_sha256": task_spec_sha256,
         "verifier_script_sha256": hashlib.sha256(
             (case_stage / "tests" / "score_review.py").read_bytes()
             + (case_stage / "tests" / "verifier_core.py").read_bytes()
@@ -735,6 +750,7 @@ def compile_workspace(root: Path) -> dict:
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
                 control_plane[f"{key}/README.md"] = _CASE_README
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
+                control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
                 control_plane[f"{key}/tests/verifier-metadata.json"] = (
                     stage / key / "tests" / "verifier-metadata.json"
                 ).read_text()
