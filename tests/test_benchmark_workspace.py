@@ -244,6 +244,7 @@ def _write_case_docs(root, curation_state):
             policy="final_pr_head",
             requested_head="final",
             original_base_sha=base_sha,
+            requested_base_sha=base_sha,
             original_head_sha=head_sha,
             base_tree_sha="1" * 40,
             head_tree_sha="2" * 40,

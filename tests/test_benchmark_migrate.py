@@ -66,7 +66,8 @@ def _seed_v1_case():
         },
         "snapshot": {
             "status": "ready", "policy": "final_pr_head", "requested_head": "final",
-            "original_base_sha": _BASE, "original_head_sha": _HEAD_HEX,
+            "original_base_sha": _BASE, "requested_base_sha": _BASE,
+            "original_head_sha": _HEAD_HEX,
             "base_tree_sha": "0" * 40, "head_tree_sha": "0" * 40,
             "diff_sha256": "a" * 64, "bundle_file": "snapshots/x.bundle",
             "bundle_sha256": "b" * 64, "error": None,

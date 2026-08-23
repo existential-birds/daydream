@@ -1062,7 +1062,10 @@ def _case_materialize(
                 "status": "imported",
                 "policy": "final_pr_head" if head_token == "final" else "explicit_head",
                 "requested_head": head_token,
+                # both base SHAs carry the PR base tip at import — the merge
+                # base is not yet computed and diverges on imported -> ready.
                 "original_base_sha": base_sha,
+                "requested_base_sha": base_sha,
                 "original_head_sha": head_sha,
                 "error": None,
             }
