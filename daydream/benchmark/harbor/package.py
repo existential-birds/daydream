@@ -389,7 +389,14 @@ def _render_and_check(
 
 
 def render_task_toml(opaque_key: str) -> bytes:
-    """Render the fixed Harbor schema-1.4 task configuration."""
+    """Render the fixed Harbor schema-1.4 task configuration.
+
+    The ``[environment.env]`` block threads the opaque per-case task key and the
+    deterministic ``base``/``head`` ref names into the agent container (Harbor
+    natively injects ``[environment].env`` into the environment). The case key
+    is the only per-case value; everything else is fixed. No judge/credential/
+    archive configuration is ever rendered onto the agent surface.
+    """
     # TOML is intentionally rendered directly: fixed ordering and no timestamp
     # make these bytes part of the deterministic compiled-tree contract.
     return f'''schema_version = "1.4"
@@ -410,6 +417,11 @@ workdir = "/workspace/repo"
 cpus = 2
 memory_mb = 4096
 storage_mb = 10240
+
+[environment.env]
+DAYDREAM_REVIEW_CASE_ID = "{opaque_key}"
+DAYDREAM_REVIEW_BASE_REF = "base"
+DAYDREAM_REVIEW_HEAD_REF = "head"
 
 [verifier]
 timeout_sec = 900.0
