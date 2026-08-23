@@ -126,3 +126,18 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path, monkeypa
         assert sentinel not in judge_blob            # ... nor through the judge request body
     for p, digest in zip((secret_file, source_file, agent_file), pre.values()):
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)
+
+
+def test_verifier_asset_set_never_includes_task_md(tmp_path, monkeypatch):
+    """The verifier image/asset set is fixed and must not read Task.md (R12/R13 constraint)."""
+    import hashlib, json, os, subprocess, sys, threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from pathlib import Path
+    # The fixed verifier asset set is exactly what templates/tests/Dockerfile COPYs:
+    # score_review.py verifier_core.py judge_prompt.md golden-review.json test.sh
+    dockerfile = _TEMPLATES_TESTS / "Dockerfile"
+    df = dockerfile.read_text()
+    for forbidden in ("Task.md", "task_spec"):
+        assert forbidden not in df, f"verifier Dockerfile must not reference {forbidden}"
+    for rel in ("score_review.py", "verifier_core.py", "judge_prompt.md", "golden-review.json", "test.sh"):
+        assert (_TEMPLATES_TESTS / rel).exists()

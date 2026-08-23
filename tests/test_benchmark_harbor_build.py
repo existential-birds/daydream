@@ -1137,3 +1137,19 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
         assert False, "expected CompileError for leaked identifier"
     except CompileError as exc:
         assert "Task.md" in str(exc)
+
+
+def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    build.compile_workspace(ws)
+    key = build.derive_task_key(case_id)
+    case = ws / "harbor" / key
+    # Task.md lives only at the case root; never under tests/ (verifier) or environment/ (agent)
+    assert (case / "Task.md").is_file()
+    for sub in ("tests", "environment"):
+        rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
+        assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
+    # agent task surface is instruction.md, and the environment Dockerfile clones only the bundle
+    env_docker = (case / "environment" / "Dockerfile").read_text() if (case / "environment" / "Dockerfile").exists() else ""
+    assert "Task.md" not in env_docker
