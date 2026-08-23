@@ -455,13 +455,13 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
     Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``.
+    ``curate``, ``calibrate-judge``, ``run``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
             "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
-            "import-prs/curate/calibrate-judge."
+            "import-prs/curate/calibrate-judge/run."
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
@@ -537,6 +537,17 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     calibrate_p.add_argument("dir", type=Path, help="workspace directory")
     calibrate_p.add_argument(
         "--yes", action="store_true", help="confirm the paid 72-call calibration run"
+    )
+
+    run_p = sub.add_parser(
+        "run", help="supervise a Harbor run behind the Oracle self-match gate"
+    )
+    run_p.add_argument("dir", type=Path, help="workspace directory")
+    run_p.add_argument(
+        "--oracle", action="store_true", help="run the Oracle self-match pass"
+    )
+    run_p.add_argument(
+        "--yes", action="store_true", help="confirm the paid run without prompting"
     )
 
     return parser
@@ -710,6 +721,34 @@ def _handle_benchmark_calibrate(args) -> int:
     )
 
 
+def _handle_benchmark_run(args) -> int:
+    """Supervise a Harbor run in the workspace behind the Oracle gate.
+
+    Threads the reviewer/judge env vars into the supervisor (mirroring
+    :func:`_handle_benchmark_calibrate`); expected supervisor errors already
+    print to stderr inside ``run_run`` and return a nonzero code — this
+    handler does not wrap them in a traceback.
+    """
+    from daydream.benchmark.harbor import run as run_mod
+
+    env = {
+        name: os.environ.get(name)
+        for name in (
+            "DAYDREAM_REVIEW_BACKEND",
+            "DAYDREAM_REVIEW_MODEL",
+            "DAYDREAM_REVIEW_API_KEY",
+            "DAYDREAM_REVIEW_BASE_URL",
+            "DAYDREAM_JUDGE_PROVIDER",
+            "DAYDREAM_JUDGE_MODEL",
+            "DAYDREAM_JUDGE_API_KEY",
+            "DAYDREAM_JUDGE_BASE_URL",
+        )
+    }
+
+    return run_mod.run_run(args.dir, oracle=args.oracle, yes=args.yes, env=env)
+
+
+
 def _handle_benchmark_curate(args) -> int:
     """Curate a case: derive everything, never attests to ready.
 
@@ -750,7 +789,8 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     Returns an exit code; ``daydream.cli.main`` translates it to a
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
     ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
-    stderr and mapped to exit ``1`` — never a bare traceback.
+    stderr and mapped to exit ``1`` — never a bare traceback. ``run`` dispatches
+    to :func:`_handle_benchmark_run` (the supervised Harbor runner).
     """
 
     parser = _build_benchmark_parser()
@@ -775,5 +815,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_curate(args)
     if sub == "calibrate-judge":
         return _handle_benchmark_calibrate(args)
+    if sub == "run":
+        return _handle_benchmark_run(args)
     parser.print_help(file=sys.stderr)
     return 2

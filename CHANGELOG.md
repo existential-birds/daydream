@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **benchmark:** add `daydream benchmark run <workspace> [--oracle] [--yes]` command (supervised Harbor runs behind the Oracle self-match gate, private `runtime/harbor.json` cleanup ledger)
 - **benchmark:** add `daydream benchmark calibrate-judge <workspace>` command (drives the exact packaged judge path, 24-pair fixture, three-part pass gate, private `runtime/calibration-receipt.json`)
 
 ### Changed
