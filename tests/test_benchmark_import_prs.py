@@ -11,6 +11,7 @@ origin (no network).
 """
 
 import hashlib
+import json
 import os
 import subprocess
 
@@ -290,6 +291,35 @@ def test_review_thread_queries_request_only_schema_fields():
     from daydream.benchmark import github_import as gi
     assert gs.unknown_query_fields(gi._REVIEW_THREADS_QUERY) == set()
     assert gs.unknown_query_fields(gi._THREAD_COMMENTS_QUERY) == set()
+
+
+def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
+    """Reintroducing a field GitHub's schema does not define fails CI through the fake gh."""
+    from tests.harness.fake_gh import _handle_api
+    state = tmp_path / "state"; state.mkdir()
+    payload = state / "q.json"
+    payload.write_text(json.dumps({
+        "query": "query X($o:String!,$n:String!,$p:Int!){ repository(owner:$o,name:$n){"
+                 " pullRequest(number:$p){ reviewThreads(first:50){ nodes{ id isBot } } } } }",
+        "variables": {"o": "o", "n": "r", "p": 1},
+    }))
+    rc, _out, err = _handle_api(["api", "graphql", "--input", str(payload)], state)
+    assert rc == 1
+    assert "isBot" in err
+
+
+def test_fake_gh_accepts_fixed_review_threads_query(tmp_path):
+    """The fixed production query routes through the fake without a schema rejection."""
+    from tests.harness.fake_gh import _handle_api
+    from daydream.benchmark import github_import as gi
+    state = tmp_path / "state"; state.mkdir()
+    payload = state / "q.json"
+    payload.write_text(json.dumps({
+        "query": gi._REVIEW_THREADS_QUERY,
+        "variables": {"o": "o", "n": "r", "number": 1},
+    }))
+    rc, _out, err = _handle_api(["api", "graphql", "--input", str(payload)], state)
+    assert rc == 0 and "schema" not in err
 
 
 def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):

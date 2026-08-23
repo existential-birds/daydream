@@ -15,10 +15,12 @@ a JSONL log the :class:`FakeGh` helper parses, and replies from a canned
 response map (``responses.json``) plus built-in behaviors:
 
 - ``gh api graphql`` with a ``reviewThreads`` query returns the configured
-  prior-thread inventory (empty by default), served via ``_write_threads``;
+  prior-thread inventory (empty by default), served via ``_write_threads``; the
+  query is first validated against the checked-in GitHub schema subset and
+  rejected if it requests fields the real schema does not define;
 - ``gh api graphql`` with a ``node(id:)``/``PullRequestReviewThread`` query
   returns the configured per-thread nested-comment page catalog
-  (``_serve_thread_comments``);
+  (``_serve_thread_comments``), likewise schema-validated;
 - ``gh api graphql`` with a ``minimizeComment`` mutation returns a minimized
   success (the Task 0 spike's chosen stale-finding mechanism);
 - ``GET repos/<o>/<r>/pulls/<n>/reviews`` returns the configured review list
@@ -51,6 +53,7 @@ from typing import Any
 import pytest
 
 from daydream.pr_review import finding_marker
+from tests.harness import github_schema
 
 
 def _argv_opt(argv: list[str], name: str) -> str | None:
@@ -224,6 +227,11 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
     if endpoint == "graphql":
         query = (payload or {}).get("query", "")
         variables = (payload or {}).get("variables") or {}
+        if "reviewThreads" in query or "PullRequestReviewThread" in query:
+            unknown = github_schema.unknown_query_fields(query)
+            if unknown:
+                return (1, "",
+                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
         if "minimizeComment" in query:
             reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
             return 0, json.dumps(reply) + "\n", ""
