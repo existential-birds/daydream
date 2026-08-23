@@ -144,3 +144,32 @@ def test_clean_no_flags_deletes_nothing_and_preserves_gold(tmp_path):
         assert (ws / name).exists(), f"{name} must be preserved on a no-flag clean"
     assert report.cache_deleted == 0 and report.job_dirs_deleted == 0
     assert report.trajectory_deleted == 0 and report.images_removed == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 3: --cache
+# ---------------------------------------------------------------------------
+
+
+def test_clean_cache_deletes_only_cache_targets(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    (ws / "cache" / "repository.git").mkdir(parents=True)
+    (ws / "cache" / "harbor-build-stage").mkdir(parents=True)
+    report = clean_mod.clean_workspace(ws, cache=True)
+    assert report.exit_code == 0
+    assert report.cache_deleted == 2
+    assert not (ws / "cache" / "repository.git").exists()
+    assert not (ws / "cache" / "harbor-build-stage").exists()
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists(), f"curated {name} must survive --cache"
+    # the empty cache/ dir itself remains (clean removes targets, not the scaffold)
+    assert (ws / "cache").is_dir()
+
+
+def test_clean_cache_absent_target_is_already_clean(tmp_path):
+    ws = _seed_clean_ws(tmp_path)  # no cache/ targets yet
+    report = clean_mod.clean_workspace(ws, cache=True)
+    assert report.exit_code == 0 and report.cache_absent == 2
+    assert report.cache_deleted == 0
+    # container job dirs / trajectories untouched when only --cache is given
+    assert report.job_dirs_deleted == 0 and report.trajectory_deleted == 0

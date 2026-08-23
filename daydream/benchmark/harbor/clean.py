@@ -16,9 +16,21 @@ rmi``; CI stays hermetic).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from daydream.benchmark.storage import (
+    WorkspaceCorrupt,
+    WorkspaceLock,
+    _resolve_target,
+    atomic_write_json,
+)
+
+
+_CACHE_TARGETS = ("cache/repository.git", "cache/harbor-build-stage")
 
 
 def _default_docker_rm(refs: list[str]) -> dict[str, Any]:
@@ -68,6 +80,38 @@ class CleanReport:
         ]
 
 
+def _delete_path(path: Path) -> None:
+    """Delete a containment-resolved filesystem target (symlink-safe).
+
+    Callers must have resolved ``path`` through ``_resolve_target``/containment
+    already; this only removes the exact link (for a symlink) or the tree/file.
+    """
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path, ignore_errors=False)
+    else:
+        path.unlink()
+
+
+def _clean_cache(root: Path, report: CleanReport) -> None:
+    """Remove the disposable clone + build stage under ``cache/``.
+
+    Each target is resolved through ``storage._resolve_target`` (forcing
+    containment and rejecting symlink escapes/``..``/outside-root as
+    ``WorkspaceCorrupt``). A target already absent is a no-op. The ``cache/``
+    scaffold dir itself is never removed.
+    """
+    for rel in _CACHE_TARGETS:
+        resolved = _resolve_target(root, rel)
+        target = root / Path(resolved)
+        if not target.exists() and not target.is_symlink():
+            report.cache_absent += 1
+            continue
+        _delete_path(target)
+        report.cache_deleted += 1
+
+
 def clean_workspace(
     root,
     *,
@@ -78,4 +122,7 @@ def clean_workspace(
     yes: bool = False,
 ) -> CleanReport:
     """Delete only the requested ledger-derived artifacts (empty selection = no-op)."""
-    return CleanReport()
+    report = CleanReport()
+    if cache:
+        _clean_cache(Path(root), report)
+    return report
