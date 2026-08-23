@@ -110,6 +110,26 @@ def test_materialized_case_carries_full_pr_header(tmp_path, fake_gh):
     assert "merged_at" in pr and "closed_at" in pr and "html_url" in pr
 
 
+def test_import_only_snapshot_records_requested_base_sha(tmp_path, fake_gh):
+    """Import-only (root=None, no freeze) writes SnapshotImported with both
+    SHAs = the PR base tip (origin/head SHAs are the PR-known values; the merge
+    base is not yet computed and diverges on imported -> ready).
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)                 # REST + canned PR for pr 101
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    snapshot = case["snapshot"]
+    assert snapshot["status"] == "imported"
+    # both base SHAs carry the PR base tip at import
+    assert snapshot["requested_base_sha"] == snapshot["original_base_sha"]
+    assert snapshot["original_base_sha"] == "b" * 40
+    assert snapshot["requested_base_sha"] == "b" * 40
+
+
 def test_fetch_normalizes_null_body_to_empty_string(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
 
