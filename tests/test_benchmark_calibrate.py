@@ -269,26 +269,32 @@ def test_receipt_has_no_credentials_or_source():
     assert "DAYDREAM_JUDGE_API_KEY" not in text and "Cache key not tenant-scoped" not in text
 
 
-def _workspace(tmp_path):
-    ws = tmp_path / "ws"
-    (ws / "runtime").mkdir(parents=True)
-    (ws / "benchmark.yaml").write_text(json.dumps({
-        "schema_version": 1,
-        "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
-        "created_at": "2026-08-21T12:00:00Z",
-        "source": {"provider": "github", "hostname": "github.com",
-                    "repository": "OWNER/REPO", "repository_id": None,
-                    "visibility": "unresolved"},
-        "privacy": {"classification": "confidential",
-                    "reviewer_data": "source_snapshot",
-                    "reviewer_allowed_hosts": ["review.example"],
-                    "judge_data": "finding_text_and_location_only",
-                    "judge_allowed_hosts": ["127.0.0.1"],
-                    "archive": "disabled", "uploads": "disabled"},
-        "pull_requests": [],
-        "cases": [],
-    }))
-    return ws
+@pytest.fixture
+def ws_factory():
+    """Build a workspace with ``127.0.0.1`` on the judge host allowlist."""
+
+    def _build(tmp_path):
+        ws = tmp_path / "ws"
+        (ws / "runtime").mkdir(parents=True)
+        (ws / "benchmark.yaml").write_text(json.dumps({
+            "schema_version": 1,
+            "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
+            "created_at": "2026-08-21T12:00:00Z",
+            "source": {"provider": "github", "hostname": "github.com",
+                        "repository": "OWNER/REPO", "repository_id": None,
+                        "visibility": "unresolved"},
+            "privacy": {"classification": "confidential",
+                        "reviewer_data": "source_snapshot",
+                        "reviewer_allowed_hosts": ["review.example"],
+                        "judge_data": "finding_text_and_location_only",
+                        "judge_allowed_hosts": ["127.0.0.1"],
+                        "archive": "disabled", "uploads": "disabled"},
+            "pull_requests": [],
+            "cases": [],
+        }))
+        return ws
+
+    return _build
 
 
 def _scripted_http(responses):
@@ -305,50 +311,117 @@ def _scripted_http(responses):
     return Fake(), i
 
 
-def test_run_calibration_pass_writes_receipt(tmp_path):
-    from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
-    pairs = _load_fixture()
-    responses = []
-    for p in pairs:
-        m = p["label"] == "match"
-        verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-        responses.extend([verdict] * 3)  # one response per call: 72 total
-    assert len(responses) == 72
-    fake, counter = _scripted_http(responses)
-    code = run_calibration(_workspace(tmp_path), yes=True, env=_env(), http=fake)
-    assert code == 0
-    assert (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
-    assert counter[0] == 72
+class TestCalibrateAcceptance:
+    """The six acceptance-mandated fake-endpoint calibration cases.
 
+    Each drives the full packaged judge path with an injected fake http client;
+    none opens a socket or makes a paid call.
+    """
 
-def test_run_calibration_accuracy_failure_no_receipt(tmp_path):
-    from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
-    pairs = _load_fixture()
-    responses = []
-    wrong_seen = 0
-    for p in pairs:
-        m = p["label"] == "match"
-        if p["label"] == "match" and wrong_seen < 3:
-            m = False  # 3 match pairs judged as nonmatch -> majority failure
-            wrong_seen += 1
-        verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-        responses.extend([verdict] * 3)
-    assert len(responses) == 72 and wrong_seen == 3
-    fake, counter = _scripted_http(responses)
-    code = run_calibration(_workspace(tmp_path), yes=True, env=_env(), http=fake)
-    assert code == 1
-    assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
-    assert counter[0] == 72
+    def test_run_calibration_pass_writes_receipt(self, tmp_path, ws_factory):
+        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
+        pairs = _load_fixture()
+        responses = []
+        for p in pairs:
+            m = p["label"] == "match"
+            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
+            responses.extend([verdict] * 3)  # one response per call: 72 total
+        assert len(responses) == 72
+        fake, counter = _scripted_http(responses)
+        code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
+        assert code == 0
+        assert (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+        assert counter[0] == 72
 
-def test_run_calibration_refuses_before_any_call(tmp_path):
-    from daydream.benchmark.harbor.calibrate import run_calibration
-    fake, counter = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
-    code = run_calibration(
-        _workspace(tmp_path), yes=False, confirm=lambda _: False, env=_env(), http=fake
-    )
-    assert code == 1
-    assert counter[0] == 0
-    assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+    def test_accuracy_failure_no_receipt(self, tmp_path, ws_factory):
+        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
+        pairs = _load_fixture()
+        responses = []
+        wrong_seen = 0
+        for p in pairs:
+            m = p["label"] == "match"
+            if p["label"] == "match" and wrong_seen < 3:
+                m = False  # 3 match pairs judged as nonmatch -> majority failure
+                wrong_seen += 1
+            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
+            responses.extend([verdict] * 3)
+        assert len(responses) == 72 and wrong_seen == 3
+        fake, counter = _scripted_http(responses)
+        code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
+        assert code == 1
+        assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+        assert counter[0] == 72
+
+    def test_confirmation_refuses_before_any_call(self, tmp_path, ws_factory):
+        from daydream.benchmark.harbor.calibrate import run_calibration
+        fake, counter = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
+        code = run_calibration(
+            ws_factory(tmp_path), yes=False, confirm=lambda _: False, env=_env(), http=fake
+        )
+        assert code == 1
+        assert counter[0] == 0
+        assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+
+    def test_acceptance_instability_failure(self, tmp_path, ws_factory, capsys):
+        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
+        pairs = _load_fixture()
+        responses = []
+        for idx, p in enumerate(pairs):
+            if idx == 0:  # first match pair: retained [T,F,T] -> unstable
+                responses += [{"match": True, "confidence": 0.9, "reasoning": "x"},
+                              {"match": True, "confidence": 0.5, "reasoning": "x"},
+                              {"match": True, "confidence": 0.9, "reasoning": "x"}]
+            else:
+                m = p["label"] == "match"
+                responses += [{"match": m, "confidence": 0.95 if m else 0.1,
+                               "reasoning": "x"} for _ in range(3)]
+        fake, counter = _scripted_http(responses)
+        code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "instability" in err and "0" in err
+        assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+
+    def test_acceptance_invalidation_through_gate(self, tmp_path, ws_factory):
+        from daydream.benchmark.harbor.calibrate import (
+            _invalidation_inputs,
+            _load_fixture,
+            _load_judge_template,
+            is_receipt_current,
+            run_calibration,
+        )
+        pairs = _load_fixture()
+        responses = []
+        for p in pairs:
+            m = p["label"] == "match"
+            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
+            responses.extend([verdict] * 3)
+        fake, _ = _scripted_http(responses)
+        assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
+        receipt = tmp_path / "ws" / "runtime" / "calibration-receipt.json"
+        assert is_receipt_current(
+            receipt, _invalidation_inputs(_env(), pairs, _load_judge_template())
+        ) is True
+        changed = dict(_env())
+        changed["DAYDREAM_JUDGE_MODEL"] = "other"
+        assert is_receipt_current(
+            receipt, _invalidation_inputs(changed, pairs, _load_judge_template())
+        ) is False
+
+    def test_acceptance_zero_source_leakage(self, tmp_path, ws_factory):
+        from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
+        pairs = _load_fixture()
+        responses = []
+        for p in pairs:
+            m = p["label"] == "match"
+            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
+            responses.extend([verdict] * 3)
+        fake, _ = _scripted_http(responses)
+        assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
+        receipt = (tmp_path / "ws" / "runtime" / "calibration-receipt.json").read_text()
+        assert not re.search(r"sk-ant-|sk-or-|Bearer |x-api-key", receipt)
+        assert "Cache key not tenant-scoped" not in receipt
+        assert "DAYDREAM_JUDGE_API_KEY" not in receipt
 
 
 def test_calibrate_judge_subparser_and_flags():
