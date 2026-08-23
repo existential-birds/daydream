@@ -12,6 +12,7 @@ command surface.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import inspect
 import json
 import os
@@ -622,9 +623,20 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)
     (case_stage / "README.md").write_text(_CASE_README)
-    from daydream.benchmark.harbor.package import render_task_toml
+    from daydream.benchmark.harbor.package import (
+        ENV_BASE_IMAGE,
+        render_environment_dockerfile,
+        render_task_toml,
+    )
 
     (case_stage / "task.toml").write_bytes(render_task_toml(key))
+    (case_stage / "environment").mkdir(exist_ok=True)
+    (case_stage / "environment" / "Dockerfile").write_bytes(
+        render_environment_dockerfile(
+            base_image=ENV_BASE_IMAGE,
+            daydream_version=importlib.metadata.version("daydream"),
+        )
+    )
 
     bundle_rel = snapshot.get("bundle_file")
     expected = snapshot.get("bundle_sha256")
@@ -678,7 +690,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     files: dict[str, str] = {}
     for rel in (
         "README.md", "instruction.md", "Task.md", "task.toml", "environment/repository.bundle",
-        "tests/golden-review.json", "tests/verifier-metadata.json",
+        "environment/Dockerfile", "tests/golden-review.json", "tests/verifier-metadata.json",
         "solution/golden-review.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
@@ -794,6 +806,9 @@ def compile_workspace(root: Path) -> dict:
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
                 control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
                 control_plane[f"{key}/task.toml"] = (stage / key / "task.toml").read_text()
+                control_plane[f"{key}/environment/Dockerfile"] = (
+                    stage / key / "environment" / "Dockerfile"
+                ).read_text()
                 control_plane[f"{key}/tests/verifier-metadata.json"] = (
                     stage / key / "tests" / "verifier-metadata.json"
                 ).read_text()

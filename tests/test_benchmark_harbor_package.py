@@ -146,3 +146,21 @@ def test_render_task_toml_matches_plan_s8():
         "storage_mb": 4096,
     }
     assert "dataset.toml" not in text and "registry" not in text
+
+
+def test_render_environment_dockerfile_clones_bundle_no_remote():
+    from daydream.benchmark.harbor import package as pkg
+
+    dockerfile = pkg.render_environment_dockerfile(
+        base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0"
+    ).decode()
+    assert dockerfile.startswith("FROM " + pkg.ENV_BASE_IMAGE)
+    assert "git clone" in dockerfile and "repository.bundle" in dockerfile
+    assert "/workspace/repo" in dockerfile
+    assert "checkout" in dockerfile and "base" in dockerfile and "head" in dockerfile
+    assert "rm" in dockerfile and "repository.bundle" in dockerfile
+    assert "WORKDIR /workspace/repo" in dockerfile
+    assert "remote remove" in dockerfile
+    assert "--require-hashes" in dockerfile and "--no-deps" in dockerfile
+    for forbidden in ("Task.md", "solution/", "tests/score_review", "COPY .."):
+        assert forbidden not in dockerfile

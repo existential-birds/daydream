@@ -13,6 +13,9 @@ from pathlib import Path
 from daydream.benchmark.harbor.build import CompileError
 
 GENERATION_COMMAND = "uv export --frozen --no-dev --no-emit-project --format requirements-txt"
+_BASE_DIGEST = "sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2357f8b4"
+ENV_BASE_IMAGE = f"python:3.12-slim@{_BASE_DIGEST}"
+VERIFIER_BASE_IMAGE = ENV_BASE_IMAGE
 
 
 class PackageError(CompileError):
@@ -84,6 +87,30 @@ def resolve_harbor() -> str:
             remediation=remediation,
         )
     return str(executable)
+
+
+def render_environment_dockerfile(*, base_image: str, daydream_version: str) -> bytes:
+    """Render and validate the isolated agent environment image."""
+    template = Path(__file__).parent.joinpath("templates/environment/Dockerfile").read_text()
+    text = template.replace("__BASE_IMAGE__", base_image).replace(
+        "__DAYDREAM_VERSION__", daydream_version
+    )
+    required = (
+        "git clone",
+        "repository.bundle",
+        "/workspace/repo",
+        "checkout head",
+        "rev-parse --verify base",
+        "rev-parse --verify head",
+        "remote remove",
+        "WORKDIR /workspace/repo",
+        "--require-hashes",
+        "--no-deps",
+    )
+    missing = [directive for directive in required if directive not in text]
+    if missing:
+        raise PackageError(f"environment Dockerfile template is missing directives: {missing}")
+    return text.encode("utf-8")
 
 
 def render_task_toml(opaque_key: str) -> bytes:
