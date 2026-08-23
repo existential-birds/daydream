@@ -173,3 +173,37 @@ def test_clean_cache_absent_target_is_already_clean(tmp_path):
     assert report.cache_deleted == 0
     # container job dirs / trajectories untouched when only --cache is given
     assert report.job_dirs_deleted == 0 and report.trajectory_deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 4: --trajectories
+# ---------------------------------------------------------------------------
+
+
+def test_clean_trajectories_deletes_job_trajectories_only(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000a1"
+    job = ws / "harbor" / "jobs" / run_id
+    traj = job / "case-abc" / "agent" / "trajectory.json"
+    traj.parent.mkdir(parents=True)
+    traj.write_text("{}")
+    (job / "case-abc" / "verifier").mkdir(parents=True)
+    (job / "case-abc" / "verifier" / "reward.json").write_text("{}")
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("case-abc__1", removed=False)])
+    report = clean_mod.clean_workspace(ws, trajectories=True)
+    assert report.exit_code == 0 and report.trajectory_deleted == 1
+    assert not traj.exists()
+    assert (job / "case-abc" / "verifier" / "reward.json").exists()  # dir remains
+    assert job.is_dir()  # --trajectories does not remove the job dir itself
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists()
+
+
+def test_clean_trajectories_absent_dir_is_already_clean(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    _append_ledger_run(ws, "00000000-0000-0000-0000-0000000000a2",
+                       state="complete", environments=[])
+    report = clean_mod.clean_workspace(ws, trajectories=True)
+    assert report.exit_code == 0 and report.trajectory_absent == 1
+    assert report.job_dirs_deleted == 0

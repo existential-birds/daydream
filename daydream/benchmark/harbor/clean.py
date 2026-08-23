@@ -22,12 +22,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from daydream.benchmark.harbor.run import (
+    RunError,
+    _load_ledger,
+    _validate_job_dir,
+)
 from daydream.benchmark.storage import (
     WorkspaceCorrupt,
     WorkspaceLock,
     _resolve_target,
     atomic_write_json,
 )
+
+RunError  # re-exported for the CLI handler / hermetic escape tests
 
 
 _CACHE_TARGETS = ("cache/repository.git", "cache/harbor-build-stage")
@@ -112,6 +119,27 @@ def _clean_cache(root: Path, report: CleanReport) -> None:
         report.cache_deleted += 1
 
 
+def _clean_trajectories(root: Path, report: CleanReport) -> None:
+    """Delete contained ``agent/trajectory.json`` files in ledgered job dirs.
+
+    Ledger-driven: every job dir is validated under ``<ws>/harbor/jobs/``
+    (``RunError`` on escape) and every glob hit is containment-resolved
+    (``WorkspaceCorrupt`` on a symlinked trajectory escaping the workspace).
+    The job dir and its non-trajectory content are left intact.
+    """
+    doc = _load_ledger(root)
+    for entry in doc["runs"]:
+        job_abs = _validate_job_dir(root, entry["job_dir"])
+        job_path = Path(job_abs)
+        if not job_path.is_dir():
+            report.trajectory_absent += 1
+            continue
+        for hit in job_path.rglob("agent/trajectory.json"):
+            _resolve_target(root, hit)
+            hit.unlink()
+            report.trajectory_deleted += 1
+
+
 def clean_workspace(
     root,
     *,
@@ -122,7 +150,10 @@ def clean_workspace(
     yes: bool = False,
 ) -> CleanReport:
     """Delete only the requested ledger-derived artifacts (empty selection = no-op)."""
+    root = Path(root).resolve()
     report = CleanReport()
     if cache:
-        _clean_cache(Path(root), report)
+        _clean_cache(root, report)
+    if trajectories:
+        _clean_trajectories(root, report)
     return report
