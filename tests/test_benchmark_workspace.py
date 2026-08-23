@@ -384,3 +384,37 @@ def test_curated_fixture_writes_schema_valid_case(tmp_path):
     pr = m.pull_requests[0]
     assert pr.import_state == "fetched" and pr.import_file and pr.import_sha256
     ImportDocument.model_validate(load_json_strict(root / pr.import_file))   # import round-trips
+
+
+def _write_minimal_invalid_workspace(tmp_path, curation_state="ready"):
+    """A workspace whose case doc is the OLD minimal shape (Task 2 removed)."""
+    import yaml
+
+    root = _write_curated_workspace(tmp_path, curation_state)
+    case_file = next((root / "cases").glob("*.yaml"))
+    case_file.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "case_id": "pr-000101-0123456789ab",
+             "curation": {"state": curation_state}},
+            sort_keys=False,
+        )
+    )
+    return root
+
+
+def test_validate_minimal_invalid_ready_returns_1(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    code, label = validate_workspace(root)
+    assert code == 1
+    assert "corrupt" in label.lower()
+
+
+def test_status_rejects_minimal_invalid_case(tmp_path):
+    from daydream.benchmark.storage import WorkspaceCorrupt
+    from daydream.benchmark.workspace import workspace_status
+
+    root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    with pytest.raises(WorkspaceCorrupt):
+        workspace_status(root)
