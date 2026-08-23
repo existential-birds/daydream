@@ -748,7 +748,6 @@ def _handle_benchmark_run(args) -> int:
     return run_mod.run_run(args.dir, oracle=args.oracle, yes=args.yes, env=env)
 
 
-
 def _handle_benchmark_curate(args) -> int:
     """Curate a case: derive everything, never attests to ready.
 

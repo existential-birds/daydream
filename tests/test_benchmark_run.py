@@ -351,12 +351,15 @@ def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path):
     ws = _ws(tmp_path)
     _seed_calibration_receipt(ws)
     captures = {}
-    job_dir = (ws / "harbor" / "jobs" / "run-1").resolve()
 
     def spawn(cmd, *, cwd, env):
         captures["cwd"] = str(cwd)
         captures["args"] = cmd
         captures["env"] = env
+        # run_run assigns a fresh uuid4 job dir and records it in the ledger
+        # before spawning; write reward evidence into that recorded dir.
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        job_dir = Path(ledger["runs"][0]["job_dir"])
         verifier = job_dir / "case-abc" / "verifier"
         verifier.mkdir(parents=True, exist_ok=True)
         (verifier / "reward.json").write_text(json.dumps(
@@ -386,10 +389,11 @@ def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path, monkeypatch
     unrelated.mkdir()
     monkeypatch.chdir(unrelated)
     captured = {}
-    job_dir = (ws / "harbor" / "jobs" / "run-2").resolve()
 
     def spawn(cmd, *, cwd, env):
         captured["cwd"] = str(cwd)
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        job_dir = Path(ledger["runs"][0]["job_dir"])
         verifier = job_dir / "case-abc" / "verifier"
         verifier.mkdir(parents=True, exist_ok=True)
         (verifier / "reward.json").write_text(json.dumps(
@@ -425,9 +429,10 @@ def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path):
 
     ws = _ws(tmp_path)
     _seed_calibration_receipt(ws)
-    job_dir = (ws / "harbor" / "jobs" / "run-3").resolve()
 
     def spawn(cmd, *, cwd, env):
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        job_dir = Path(ledger["runs"][0]["job_dir"])
         verifier = job_dir / "case-abc" / "verifier"
         verifier.mkdir(parents=True, exist_ok=True)
         (verifier / "reward.json").write_text(json.dumps(

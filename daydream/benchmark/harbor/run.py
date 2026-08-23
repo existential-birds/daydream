@@ -246,7 +246,11 @@ def ledger_append_running(
     workspace: Path, *, run_id: str, compiled_lock_sha256: str, job_dir: str,
     mode: str = "oracle",
 ) -> None:
-    """Append a ``running`` entry for a unique job dir (block-before-spawn)."""
+    """Append a ``running`` entry (written before Harbor spawns) for this run.
+
+    Uniqueness is the freshly generated uuid4 ``run_id``; the ``job_dir`` is
+    validated only for containment under ``<ws>/harbor/jobs/``.
+    """
     contained = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
         doc = _load_ledger(workspace)
@@ -393,7 +397,10 @@ def _preflight(
 def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
     """Parse Harbor's job dir for per-task scores + resolved environments.
 
-    Returns ``(oracle_ok, environments)``. A task is scored when its
+    Fail-closed: returns ``(oracle_ok, environments)`` where a trial with no
+    score evidence (neither ``reward.json`` nor ``reward-details.json`` — e.g.
+    Harbor returned/wrote nothing) or an empty job dir blocks the oracle rather
+    than passing with zero per-task evidence. A task is scored when its
     ``<trial>/verifier/reward.json`` exists; it is *unscored* when only
     ``reward-details.json`` exists (the infra-error path — never a numeric
     zero). Oracle success requires every trial scored with ``reward == 1.0``
@@ -406,11 +413,14 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
     oracle_ok = True
     for trial in sorted(job_dir.iterdir()):
         if not trial.is_dir():
-            continue
+            continue  # a non-directory sibling is not a task trial
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
         if not reward_path.is_file():
-            continue  # not one of the compiled task trials
+            # No score evidence at all — not even reward-details.json: Harbor
+            # returned or wrote nothing for this trial (abort mid-write). Fail
+            # closed rather than silently skipping it as a clean task.
+            return (False, [])
         env = _environment_from_trial(trial)
         reward = _parse_reward(reward_path)
         if reward is None:
@@ -421,16 +431,10 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
         verr = reward.get("verifier_error")
         if verr is None or float(reward.get("reward") or 0.0) < 1.0 or int(verr) != 0:
             oracle_ok = False
-    # A details-only unscored task blocks the receipt even when no reward.json
-    # was present (Oracle must reproduce gold for every compiled task).
-    for trial in sorted(job_dir.iterdir()):
-        if not trial.is_dir():
-            continue
-        verifier = trial / "verifier"
-        if (verifier / "reward.json").is_file():
-            continue
-        if (verifier / "reward-details.json").is_file():
-            return (False, [])
+    # An empty job dir (Harbor returned and wrote nothing) is not a
+    # reproduction: the oracle must present evidence for every compiled task.
+    if not environments:
+        return (False, [])
     return (oracle_ok, environments)
 
 
@@ -451,9 +455,15 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
     not pin a concrete ``docker_image``.
     """
     digest = hashlib.sha256()
-    for path in sorted((trial / "verifier").rglob("*")) if (trial / "verifier").is_dir() else []:
-        digest.update(path.name.encode("utf-8"))
-        digest.update(path.read_bytes())
+    task_toml = trial / "task.toml"
+    if task_toml.is_file():
+        digest.update(task_toml.name.encode("utf-8"))
+        digest.update(task_toml.read_bytes())
+    env_root = trial / "environment"
+    if env_root.is_dir():
+        for path in sorted(env_root.rglob("*")):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
     environment_id = digest.hexdigest()
     return {
         "trial_name": trial.name,
@@ -465,11 +475,14 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
     }
 
 
-def _oracle_receipt_document(
+def _current_state_mapping(
     *, compiled_lock_sha256: str, env: dict[str, Any], calibration_digest: str,
-    result_dir: Path,
 ) -> dict[str, Any]:
-    """Assemble the private deterministic Oracle receipt (mode-0600)."""
+    """The current Oracle/Harbor state an oracle receipt must match.
+
+    Shared verbatim by the receipt document (``_oracle_receipt_document``) and
+    the default-run gate (``_default_run_gate``) so the two cannot drift.
+    """
     version = importlib.metadata.version("harbor")
     major_minor = ".".join(str(version).split(".")[:2])
     sr = calibrate._load_judge_template()
@@ -483,9 +496,21 @@ def _oracle_receipt_document(
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
         "attempts": 3,
         "calibration_receipt_sha256": calibration_digest,
-        "result_dir": str(Path(result_dir).resolve()),
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+
+
+def _oracle_receipt_document(
+    *, compiled_lock_sha256: str, env: dict[str, Any], calibration_digest: str,
+    result_dir: Path,
+) -> dict[str, Any]:
+    """Assemble the private deterministic Oracle receipt (mode-0600)."""
+    doc = _current_state_mapping(
+        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        calibration_digest=calibration_digest,
+    )
+    doc["result_dir"] = str(Path(result_dir).resolve())
+    doc["timestamp"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return doc
 
 
 def _write_oracle_receipt(
@@ -525,20 +550,10 @@ def _default_run_gate(
         return f"malformed oracle receipt at {receipt_path}: {exc}"
     if not isinstance(receipt, dict):
         return f"malformed oracle receipt at {receipt_path}"
-    version = importlib.metadata.version("harbor")
-    major_minor = ".".join(str(version).split(".")[:2])
-    sr = calibrate._load_judge_template()
-    current = {
-        "compiled_lock_sha256": compiled_lock_sha256,
-        "harbor_version": major_minor,
-        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
-        "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
-        "judge_host": _judge_host_from_env(env),
-        "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
-        "threshold": verifier_core.CONFIDENCE_THRESHOLD,
-        "attempts": 3,
-        "calibration_receipt_sha256": calibration_digest,
-    }
+    current = _current_state_mapping(
+        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        calibration_digest=calibration_digest,
+    )
     for key, value in current.items():
         if receipt.get(key) != value:
             label = key.replace("_", " ")
@@ -582,15 +597,18 @@ def _calibration_digest(workspace: Path) -> str:
         return ""
 
 
-def _latest_job_dir(workspace: Path) -> Path | None:
-    """The most recently written job directory under ``<ws>/harbor/jobs/``."""
-    jobs_root = workspace / "harbor" / "jobs"
-    if not jobs_root.is_dir():
-        return None
-    dirs = [p for p in jobs_root.iterdir() if p.is_dir()]
-    if not dirs:
-        return None
-    return max(dirs, key=lambda p: p.stat().st_mtime_ns)
+def _ledger_job_dir(workspace: Path, run_id: str) -> Path:
+    """The job dir recorded for ``run_id`` (the ledger, not an mtime guess).
+
+    Selecting by the ledger rather than the newest-mtime ``jobs/`` dir means a
+    spawn that wrote nothing cannot cause a prior run's job dir to be attested
+    by this run's oracle receipt.
+    """
+    doc = _load_ledger(workspace)
+    for run in doc["runs"]:
+        if run.get("run_id") == run_id:
+            return Path(run["job_dir"])
+    raise RunError(f"run {run_id!r} not found in cleanup ledger {_ledger_path(workspace)}")
 
 
 def run_run(
@@ -606,7 +624,7 @@ def run_run(
     """Supervised Harbor run: fail-closed preflight, then one gated run.
 
     The Oracle path (``oracle=True``) runs a self-match pass to prove the stack
-    reproduces gold and writes ``harbor/oize/coracle-receipt.json`` on success;
+    reproduces gold and writes ``harbor/oracle-receipt.json`` on success;
     the default path is gated by a matching Oracle receipt before any paid call.
     Every run is recorded in ``runtime/harbor.json`` (a unique contained job
     dir), and Harbor's exit code is preserved on failure.
@@ -661,9 +679,9 @@ def run_run(
 
     # 7. Post-run: parse results and reconcile the ledger / receipt.
     try:
-        actual_dir = _latest_job_dir(workspace)
+        actual_dir = _ledger_job_dir(workspace, run_id)
         if oracle:
-            ok, _ = _parse_job_results(actual_dir) if actual_dir else (False, [])
+            ok, _ = _parse_job_results(actual_dir)
             if returncode != 0 or not ok:
                 if returncode == 0:
                     print(
@@ -673,7 +691,6 @@ def run_run(
                     )
                 ledger_mark(workspace, run_id, state="cleanup_pending")
                 return returncode or 1
-            assert actual_dir is not None
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
                 env=env, calibration_digest=_calibration_digest(workspace),
