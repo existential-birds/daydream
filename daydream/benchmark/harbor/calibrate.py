@@ -12,6 +12,7 @@ Measuring, never tuning: no weights or thresholds are derived here.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
@@ -138,3 +139,29 @@ def _validate_workspace_host(allowlist: list[str] | set[str], host: str) -> None
         raise ValueError(
             f"judge host {host!r} is not in the workspace judge_allowed_hosts allowlist"
         )
+
+
+def _judge_pairs(
+    template: Any, client: Any, pairs: list[dict[str, Any]], *, attempts: int = 3
+) -> list[list[Any]]:
+    """Drive the packaged ``judge_pairs`` three times per pair, in fixture order.
+
+    Each invocation is 1 gold x 1 candidate, so it makes exactly one judge call;
+    24 pairs x ``attempts`` calls for the exact 72-call budget. Judge-call
+    failures propagate via the packaged module's ``VerifierError`` — never a
+    silent fallback (a judge-call failure aborts the run, fail-closed).
+    """
+    per_pair: list[list[Any]] = []
+    for pair in pairs:
+        runs: list[Any] = []
+        for _ in range(attempts):
+            verdicts = asyncio.run(
+                template.judge_pairs(
+                    gold=[pair["gold"]],
+                    candidates=[pair["candidate"]],
+                    client=client,
+                )
+            )
+            runs.append(verdicts[0])
+        per_pair.append(runs)
+    return per_pair

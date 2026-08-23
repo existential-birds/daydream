@@ -120,3 +120,29 @@ def test_out_of_allowlist_host_rejected(tmp_path):
     with pytest.raises(ValueError):
         _validate_workspace_host(allow, "evil.example")
     _validate_workspace_host(allow, "127.0.0.1")  # in-allowlist passes
+
+
+def test_judge_pairs_makes_exactly_72_calls():
+    from daydream.benchmark.harbor.calibrate import (
+        _judge_pairs,
+        _load_fixture,
+        _load_judge_template,
+    )
+
+    sr = _load_judge_template()
+    pairs = _load_fixture()
+    calls = []
+
+    class Fake:
+        async def post(self, url, *, headers, json, timeout):
+            calls.append(1)
+            content = '{"match": true, "confidence": 0.9, "reasoning": "x"}'
+            body = {"choices": [{"message": {"content": content}}]}
+            return type("R", (), {"status_code": 200, "text": "ok",
+                                  "json": lambda self: body})()
+    client = sr.OpenAIJudgeClient("k", "m", base_url="http://127.0.0.1:9", http=Fake())
+    per_pair = _judge_pairs(sr, client, pairs, attempts=3)
+    assert len(per_pair) == 24
+    assert all(len(runs) == 3 for runs in per_pair)
+    assert len(calls) == 72
+    assert all(r.match is True and r.confidence == 0.9 for runs in per_pair for r in runs)
