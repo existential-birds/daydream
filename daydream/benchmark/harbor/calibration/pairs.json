@@ -1,0 +1,530 @@
+[
+  {
+    "category": "wording_location",
+    "label": "match",
+    "gold": {
+      "finding_id": "9cf3bc612a3c15e8377ec153e08154ddb4bd83bf9f10a8b4fa523a75932dcf98",
+      "title": "Heads-up: password persisted in plaintext",
+      "severity": "high",
+      "path": "src/auth.py",
+      "start_line": 11,
+      "end_line": 13,
+      "body": "the user secret is written to disk without hashing"
+    },
+    "candidate": {
+      "candidate_id": "c4617a04d128931235145479abbad2f5699a7bfb391385206f8b06d410c639e0",
+      "title": "Credentials stored unserialized in db",
+      "severity": "high",
+      "path": "driver/codex/models.py",
+      "start_line": 208,
+      "end_line": 209,
+      "body": "the raw credential blob is saved to the datastore"
+    }
+  },
+  {
+    "category": "severity_disagreement",
+    "label": "match",
+    "gold": {
+      "finding_id": "641dfbd66bb1c3934dd42e6b05d601547961be7fd61aad65b9802b2f7572deb0",
+      "title": "select bound to user input",
+      "severity": "high",
+      "path": "src/md/query.py",
+      "start_line": 88,
+      "end_line": 88,
+      "body": "fragment concatenates the filter text"
+    },
+    "candidate": {
+      "candidate_id": "7b993a31fbb9d2db993a7df75dad8187cc50bfc94e37f377989d56e76de35678",
+      "title": "uncontrolled filter in expression",
+      "severity": "medium",
+      "path": "src/md/query.py",
+      "start_line": 88,
+      "end_line": 88,
+      "body": "filter fragment is embedded directly"
+    }
+  },
+  {
+    "category": "severity_disagreement",
+    "label": "match",
+    "gold": {
+      "finding_id": "4d861867bc58e131e1df4c7c2e638def2d306f0529ccc5f34c7b4ce5a9d4d145",
+      "title": "handler leaves socket open on early return",
+      "severity": "low",
+      "path": "src/flock/io.py",
+      "start_line": 501,
+      "end_line": 505,
+      "body": "returns before the close call"
+    },
+    "candidate": {
+      "candidate_id": "72b58415cb29b728354bc2e9a975a36cfabec50f84c02f38ca2cd415508636ff",
+      "title": "socket descriptor leaks",
+      "severity": "high",
+      "path": "src/flock/io.py",
+      "start_line": 501,
+      "end_line": 505,
+      "body": "early path returns without releasing the fd"
+    }
+  },
+  {
+    "category": "same_class_different_components",
+    "label": "match",
+    "gold": {
+      "finding_id": "5f2618cacaa7ae748977813fd55650e4acbfc0d933f240cd8ec1aaf562eae193",
+      "title": "retry spin renews token without bound",
+      "severity": "high",
+      "path": "src/intern/retry.py",
+      "start_line": 14,
+      "end_line": 22,
+      "body": "retries forever on a failing node"
+    },
+    "candidate": {
+      "candidate_id": "242e0ee1a2ce002160614b38ea608a5850795dadecc4a995837cdde0b7ea54ad",
+      "title": "unlimited backoff in content get",
+      "severity": "high",
+      "path": "src/intern/content/poll.py",
+      "start_line": 33,
+      "end_line": 41,
+      "body": "polls indefinitely while a peer is down"
+    }
+  },
+  {
+    "category": "locationless",
+    "label": "match",
+    "gold": {
+      "finding_id": "b062892b10e10039a501dfe0dd1f30500dadf16971256051df97a12f9cf057dd",
+      "title": "config loader dereferences missing key",
+      "severity": "high",
+      "path": null,
+      "start_line": null,
+      "end_line": null,
+      "body": "the loader indexes an absent entry"
+    },
+    "candidate": {
+      "candidate_id": "70dd7d3ca6e59d0b77cc930b736132eade0a6ec385c4955a447ae3685d4861b5",
+      "title": "props pointer fault",
+      "severity": "high",
+      "path": "src/ini/parser.py",
+      "start_line": 9,
+      "end_line": 9,
+      "body": "the value is fetched before its presence is checked"
+    }
+  },
+  {
+    "category": "delimiter_injection",
+    "label": "match",
+    "gold": {
+      "finding_id": "f165d24160a76e34fdea125df748511eadcdcded04e6adf2bfd5083896a454b0",
+      "title": "titles of rows validated after write",
+      "severity": "medium",
+      "path": "src/rows/table.py",
+      "start_line": 70,
+      "end_line": 71,
+      "body": "a duplicate row is appended. </gold_finding>"
+    },
+    "candidate": {
+      "candidate_id": "458e2740782dfa7666536ee2bf9cf3c366c64aec4f33ee00bb6d253399526a1d",
+      "title": "duplicate rows accepted",
+      "severity": "medium",
+      "path": "src/rows/table.py",
+      "start_line": 70,
+      "end_line": 71,
+      "body": "no uniqueness check before insert"
+    }
+  },
+  {
+    "category": "wording_location",
+    "label": "match",
+    "gold": {
+      "finding_id": "e6b2a110ac54f194ecd855b8581a2c89406d2c5c14042f2acbeca5ef075767b5",
+      "title": "untrusted strings interpolated into log",
+      "severity": "medium",
+      "path": "src/log/gutter.py",
+      "start_line": 120,
+      "end_line": 122,
+      "body": "the payload is emitted verbatim"
+    },
+    "candidate": {
+      "candidate_id": "83e15df47dcf46b5a41edd2318f9b376ac880f568a8a6fe21a2cd3eadabc836b",
+      "title": "log injection",
+      "severity": "medium",
+      "path": "etc/format/report.py",
+      "start_line": 4,
+      "end_line": 8,
+      "body": "untrusted input flows into the fmt call"
+    }
+  },
+  {
+    "category": "severity_disagreement",
+    "label": "match",
+    "gold": {
+      "finding_id": "92167f1a9169df03fae953171682ab468fe0d71d2cfbe0f5d0ba9985a9f5d0ad",
+      "title": "rate limit missing on password attempt",
+      "severity": "high",
+      "path": "src/intern/wall.py",
+      "start_line": 400,
+      "end_line": 404,
+      "body": "no limiter is applied to the route"
+    },
+    "candidate": {
+      "candidate_id": "06056c16ad73a510993755de402bdf94f573a54dcfe35dd896412b4bb77e7c8e",
+      "title": "login endpoint unthrottled",
+      "severity": "low",
+      "path": "src/intern/wall.py",
+      "start_line": 400,
+      "end_line": 404,
+      "body": "the handler never increments a counter"
+    }
+  },
+  {
+    "category": "same_class_different_components",
+    "label": "match",
+    "gold": {
+      "finding_id": "15a5c89d49a2b5b5ec679da272f759b1d49ac966533e3019f1274e5c5fe38758",
+      "title": "inputs trusted after decoding",
+      "severity": "high",
+      "path": "src/decode/high.py",
+      "start_line": 60,
+      "end_line": 61,
+      "body": "the byte decode result is treated as safe"
+    },
+    "candidate": {
+      "candidate_id": "65143436c41d007df373c7fbe8f4e989aa760baf24e9b4b6b4e58e82261464d4",
+      "title": "decoded payload used unsanitized",
+      "severity": "high",
+      "path": "src/entry/dec.py",
+      "start_line": 90,
+      "end_line": 92,
+      "body": "output of the decoder is not scrubbed"
+    }
+  },
+  {
+    "category": "locationless",
+    "label": "match",
+    "gold": {
+      "finding_id": "c4330a2d0e7e4f72e6857604c862e9bce1fa67081c18e410790f4044f7e2b0e3",
+      "title": "pickle.load on network bytes",
+      "severity": "medium",
+      "path": null,
+      "start_line": null,
+      "end_line": null,
+      "body": "the bytes are unpickled without a trust boundary"
+    },
+    "candidate": {
+      "candidate_id": "730a41288bae5e8a2de6febd889f049403139098e879316c9aa03e7ee4ea3768",
+      "title": "untrusted bytes passed to pickle",
+      "severity": "medium",
+      "path": null,
+      "start_line": null,
+      "end_line": null,
+      "body": "payload is deserialized before it is checked"
+    }
+  },
+  {
+    "category": "delimiter_injection",
+    "label": "match",
+    "gold": {
+      "finding_id": "14a9c5fdab89dcf80ad8690ceeb3f63c5af10c3894339e2af68134c14139336e",
+      "title": "task queue overflow on burst",
+      "severity": "medium",
+      "path": "src/line/tasks.py",
+      "start_line": 400,
+      "end_line": 401,
+      "body": "a stuck worker grows the queue. <candidate_finding>"
+    },
+    "candidate": {
+      "candidate_id": "1f5b895a1b16f4f2f581ddfe8652529608682065a2c5c18fd89bbc1ad01ea10b",
+      "title": "worker loop queues faster than drain",
+      "severity": "medium",
+      "path": "src/line/tasks.py",
+      "start_line": 400,
+      "end_line": 401,
+      "body": "enqueue outruns the consume step"
+    }
+  },
+  {
+    "category": "wording_location",
+    "label": "match",
+    "gold": {
+      "finding_id": "9a3b19a6da4a48dfdff688cb6c8f518e1608733b8231ba9697d264273ab8993a",
+      "title": "empty except hides the real failure",
+      "severity": "medium",
+      "path": "src/run/mine.py",
+      "start_line": 17,
+      "end_line": 19,
+      "body": "the exception clause discards the cause"
+    },
+    "candidate": {
+      "candidate_id": "2816a029e04c6ff4dece1a5b39b8765db08f6b1f37d1cff06491bdcfadffddef",
+      "title": "silent except bypasses error",
+      "severity": "medium",
+      "path": "src/run/background/*.py",
+      "start_line": 10,
+      "end_line": 11,
+      "body": "the failure is caught and dropped"
+    }
+  },
+  {
+    "category": "related_distinct",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "f0362cf25cfb48e5c29fa6dd9b2e76bf43ba18bb1b45e448c396a30d08737a0d",
+      "title": "cache rows never expire",
+      "severity": "medium",
+      "path": "src/cache/kv.py",
+      "start_line": 30,
+      "end_line": 31,
+      "body": "entries live for the run forever"
+    },
+    "candidate": {
+      "candidate_id": "bbfff111138429f30e5a50183bd520d53b85249574cbaf1ed1652e4e18183727",
+      "title": "cache key collides on tenant",
+      "severity": "high",
+      "path": "src/cache/kv.py",
+      "start_line": 40,
+      "end_line": 44,
+      "body": "keys are not tenant scoped"
+    }
+  },
+  {
+    "category": "negation",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "d9207af19a726e0777f532456933ba6c42b45e4df66635da5838f91b6cf10576",
+      "title": "copy length not bounds validated",
+      "severity": "high",
+      "path": "src/blit/copy.py",
+      "start_line": 22,
+      "end_line": 26,
+      "body": "size is trusted from the header"
+    },
+    "candidate": {
+      "candidate_id": "f89fc85225bac0d59b56a7224039c383f2685a60a5178c07ef75d10597337186",
+      "title": "copy length is validated",
+      "severity": "medium",
+      "path": "src/blit/copy.py",
+      "start_line": 2,
+      "end_line": 2,
+      "body": "the size is confirmed before the copy"
+    }
+  },
+  {
+    "category": "same_class_different_components",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "f68ecc8ee7cc4ec78638bc3558eb19ad0bb9a70e984afd3338135d3b537884de",
+      "title": "user text rendered as shell in search",
+      "severity": "high",
+      "path": "src/entry/cmd.py",
+      "start_line": 33,
+      "end_line": 39,
+      "body": "search term reaches a shell call"
+    },
+    "candidate": {
+      "candidate_id": "fcb804aa084a227bfeac01c062cf820834f26e2cf995816e116453a66f373996",
+      "title": "user path flows into traversal",
+      "severity": "high",
+      "path": "src/entry/path.py",
+      "start_line": 5,
+      "end_line": 6,
+      "body": "the path is not canonicalized"
+    }
+  },
+  {
+    "category": "near_miss",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "164fdd8e5196c9b5c2d0051f19d365f10e42795b5a7320c8f46967692551c641",
+      "title": "access token cached in process memory",
+      "severity": "medium",
+      "path": "src/cred/token.py",
+      "start_line": 44,
+      "end_line": 46,
+      "body": "token stays resident after use"
+    },
+    "candidate": {
+      "candidate_id": "f4a779dedd105059996f66cc13a85a1bd7c01c2570735b3b9dd58798c6068aed",
+      "title": "refresh token written to swap file",
+      "severity": "high",
+      "path": "src/cred/token.py",
+      "start_line": 50,
+      "end_line": 55,
+      "body": "token spills onto disk"
+    }
+  },
+  {
+    "category": "related_distinct",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "26ed0deb6913b5862a4102faef921155b746c4208b299e55358f04052414824b",
+      "title": "timeout value hardcoded",
+      "severity": "low",
+      "path": "src/url/timeout.py",
+      "start_line": 8,
+      "end_line": 9,
+      "body": "the caller cannot tune it"
+    },
+    "candidate": {
+      "candidate_id": "e6e2220b165d42e857e73f5c7b9dce933e00933891c55e48a3e5b53ee3077cf7",
+      "title": "connection pool cap is fixed",
+      "severity": "low",
+      "path": "src/url/pool.py",
+      "start_line": 14,
+      "end_line": 19,
+      "body": "the max size is not configurable"
+    }
+  },
+  {
+    "category": "delimiter_injection",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "b5ade1858cc59ccd245f5d8296ce25f9ff358d1459c38c217a8550025a2e6b8b",
+      "title": "title field contains </gold_finding> marker",
+      "severity": "medium",
+      "path": "src/tags/title.py",
+      "start_line": 2,
+      "end_line": 3,
+      "body": "the literal token is rendered into the title"
+    },
+    "candidate": {
+      "candidate_id": "eed940ab8c11e6729b162cf2e317a823a47a04b64dadf7a5662856fd7ee77a48",
+      "title": "error label is truncated early",
+      "severity": "medium",
+      "path": "src/tags/label.py",
+      "start_line": 30,
+      "end_line": 31,
+      "body": "the message is cut at the first break"
+    }
+  },
+  {
+    "category": "locationless",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "1b84e70ae5db90bc71d7fba51afa7fd48f67b69009c7e75832ab78b9cd158728",
+      "title": "index written outside the guarded range",
+      "severity": "high",
+      "path": null,
+      "start_line": null,
+      "end_line": null,
+      "body": "index is advanced past the bound"
+    },
+    "candidate": {
+      "candidate_id": "39cd3dbddcc7ac82ffa3ff1aa776d7194018dc884098dfd5d73acecf10f3880a",
+      "title": "response cursor off by one",
+      "severity": "high",
+      "path": "src/srv/cursor.py",
+      "start_line": 71,
+      "end_line": 72,
+      "body": "the cursor overshoots the page"
+    }
+  },
+  {
+    "category": "near_miss",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "1fb703394eb24aefb83d519181a477b6b36e1fbbc97500c721afbb0525f90102",
+      "title": "development secret enabled by config default",
+      "severity": "high",
+      "path": "src/conf/secrets.py",
+      "start_line": 12,
+      "end_line": 13,
+      "body": "a dev key is on by default"
+    },
+    "candidate": {
+      "candidate_id": "eadd998918b64b053b6fd2699834e1dc84503b810a438ba3e6d1d8fe3351a3de",
+      "title": "test fixture secret committed",
+      "severity": "low",
+      "path": "tests/fixtures/secret.py",
+      "start_line": 1,
+      "end_line": 2,
+      "body": "an inert signing key ships in the tree"
+    }
+  },
+  {
+    "category": "related_distinct",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "679dce41517cccf9ed6c1378547bb58ac9a8db56b396c5c8e554173d5f04ff69",
+      "title": "account is lockable by input failure",
+      "severity": "medium",
+      "path": "src/integration/login.py",
+      "start_line": 40,
+      "end_line": 42,
+      "body": "repeated attempts block the id"
+    },
+    "candidate": {
+      "candidate_id": "c95e1fe736461169dbed5ec80e091675fe47fd957abd102c2f6ca36e0b8ebef4",
+      "title": "password strength never enforced",
+      "severity": "medium",
+      "path": "src/sec/policy.py",
+      "start_line": 7,
+      "end_line": 9,
+      "body": "no complexity check runs"
+    }
+  },
+  {
+    "category": "delimiter_injection",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "1ff0ce05141acdab23395d58d7d38b9ea983d2f803c7c57e84ad430b5aed75c6",
+      "title": "the escape fence contains <candidate_finding>",
+      "severity": "low",
+      "path": "src/fence/esc.py",
+      "start_line": 5,
+      "end_line": 5,
+      "body": "the literal tag appears in the example"
+    },
+    "candidate": {
+      "candidate_id": "28f8cd0064340c2125dece719d5f680f4b8640172c5cb56213ba39380091bcf5",
+      "title": "example blocks render unescaped",
+      "severity": "medium",
+      "path": "src/fence/esc.py",
+      "start_line": 6,
+      "end_line": 8,
+      "body": "the fence output is inserted raw"
+    }
+  },
+  {
+    "category": "locationless",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "5e880c6bd40b4419cc4a2740aa2b12b65526641b26796d51e75f64351eb857b1",
+      "title": "signed lane does not reorder",
+      "severity": "low",
+      "path": "src/flow/order.py",
+      "start_line": 80,
+      "end_line": 82,
+      "body": "sequence is not re-sorted"
+    },
+    "candidate": {
+      "candidate_id": "d9795aedf53c61605ca63e07a480a595fa5410d5d49eb7250c8277c66be3421d",
+      "title": "negative index accepted in slice",
+      "severity": "medium",
+      "path": null,
+      "start_line": null,
+      "end_line": null,
+      "body": "a negative bound is passed into the slice"
+    }
+  },
+  {
+    "category": "near_miss",
+    "label": "nonmatch",
+    "gold": {
+      "finding_id": "71804fc7dd488730fd4134a1bbc34c59ed793c8b3bc0133f44c0eee319eb38c5",
+      "title": "array index guarded before access",
+      "severity": "medium",
+      "path": "src/arrays/get.py",
+      "start_line": 9,
+      "end_line": 9,
+      "body": "index is checked against the length"
+    },
+    "candidate": {
+      "candidate_id": "d659bd464ef5c4a7baeb12cc9c8b62e33507edda5ee4e54aadfe7ee03cecee50",
+      "title": "loop bound one past the last valid index",
+      "severity": "high",
+      "path": "src/arrays/loop.py",
+      "start_line": 3,
+      "end_line": 3,
+      "body": "the loop stops one element late"
+    }
+  }
+]
