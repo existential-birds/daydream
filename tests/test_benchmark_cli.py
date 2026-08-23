@@ -27,6 +27,25 @@ def test_benchmark_parser_has_build_harbor_and_compiled():
     assert validate_args.compiled is True
 
 
+def test_benchmark_build_harbor_real_cli_entry(tmp_path, fake_gh, capsys):
+    import importlib.metadata
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from tests.test_benchmark_harbor_build import _seed_ready_workspace
+
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    version = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{version}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    code = _handle_benchmark_command([
+        "build-harbor", str(ws), "--daydream-wheel", str(wheel)
+    ])
+    assert code == 0
+    assert (ws / "harbor/benchmark.lock.json").is_file()
+    assert "built Harbor dataset" in capsys.readouterr().out
+
+
 def test_format_elapsed():
     assert _format_elapsed(45.4) == "45s"
     assert _format_elapsed(252) == "4m12s"

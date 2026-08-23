@@ -10,6 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -124,19 +125,74 @@ def build_harbor(root: Path, *, wheel: Path) -> dict:
     return build.compile_workspace(Path(root), wheel=Path(wheel))
 
 
+def _validate_compiled_local(root: Path) -> Path:
+    """Verify compiled inventory hashes, exact file set, and control-plane leakage."""
+    import json
+
+    from daydream.benchmark.harbor import build
+
+    compiled = root / "harbor"
+    if not compiled.is_dir():
+        raise PackageError(f"compiled dataset is missing: {compiled}")
+    lock_path = compiled / "benchmark.lock.json"
+    try:
+        lock = json.loads(lock_path.read_text())
+        inventory = lock["files"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise PackageError(f"compiled lock is missing or invalid: {lock_path}: {exc}") from exc
+    if not isinstance(inventory, dict):
+        raise PackageError(f"compiled lock files inventory is invalid: {lock_path}")
+    actual = {
+        str(path.relative_to(compiled))
+        for path in compiled.rglob("*")
+        if path.is_file() and path != lock_path
+    }
+    expected = set(inventory)
+    if actual != expected:
+        raise PackageError(
+            f"compiled file inventory mismatch (missing={sorted(expected - actual)}, extra={sorted(actual - expected)})"
+        )
+    for rel, expected_sha in sorted(inventory.items()):
+        path = compiled / rel
+        actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual_sha != expected_sha:
+            raise PackageError(f"compiled file hash mismatch for {rel}: {actual_sha} != {expected_sha}")
+
+    daydream = lock.get("daydream")
+    if daydream and daydream.get("version") != importlib.metadata.version("daydream"):
+        raise PackageError(
+            f"compiled wheel version {daydream.get('version')} does not match running Daydream "
+            f"{importlib.metadata.version('daydream')}",
+            remediation="run `uv build --wheel` and rebuild with `daydream benchmark build-harbor`",
+        )
+    text_names = {
+        "README.md", "instruction.md", "Task.md", "task.toml", "Dockerfile",
+        "runtime-requirements.lock", "verifier-metadata.json", "harbor-job.yaml", "harbor-oracle.yaml",
+    }
+    control_plane = {
+        rel: (compiled / rel).read_text(errors="replace")
+        for rel in sorted(inventory)
+        if Path(rel).name in text_names
+    }
+    cases = lock.get("cases") or {}
+    repository_slug = next(iter(cases.values())).get("repository", "") if cases else ""
+    build.leakage_scan(control_plane, repository_slug=repository_slug)
+    return compiled
+
+
 def validate_compiled(root: Path | None) -> int:
-    """Validate local authoring state and require compatible Harbor."""
-    resolve_harbor()
+    """Validate local authoring/compiled state and all Harbor models."""
     if root is None:
+        resolve_harbor()
         raise PackageError("compiled workspace path is required")
     from daydream.benchmark.workspace import validate_workspace
 
-    code, label = validate_workspace(Path(root))
+    root = Path(root)
+    code, label = validate_workspace(root)
     if code != 0:
         raise PackageError(f"compiled workspace authoring validation failed: {label}")
-    compiled = Path(root) / "harbor"
-    if not compiled.is_dir():
-        raise PackageError(f"compiled dataset is missing: {compiled}")
+    compiled = _validate_compiled_local(root)
+    resolve_harbor()
 
     try:
         from harbor.models.job.config import JobConfig
@@ -197,7 +253,7 @@ def runtime_lock_header_fields(text: str) -> dict[str, str]:
 
 def render_job_config(*, oracle: bool) -> bytes:
     """Render a deterministic Harbor job or Oracle configuration."""
-    agents = [{"name": "oracle"}] if oracle else [{
+    agents: list[dict[str, Any]] = [{"name": "oracle"}] if oracle else [{
         "import_path": "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
         "env": {
             "DAYDREAM_REVIEW_BACKEND": "${DAYDREAM_REVIEW_BACKEND:-claude}",
