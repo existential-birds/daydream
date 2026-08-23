@@ -96,6 +96,16 @@ def _prompt(read_line: Callable[[str], str], message: str) -> str:
     return read_line("")
 
 
+def _evidence_entries(view: dict[str, Any]) -> list[Any]:
+    """The ordered evidence entries to render/page/edit/exclude in *view*.
+
+    Prefers the full import-evidence list and falls back to ``candidates`` only
+    for a minimal dict without an ``evidence`` key, so the render, edit,
+    exclude, and pager paths all target the same set and cannot drift.
+    """
+    return view.get("evidence") or view.get("candidates") or []
+
+
 def render_case(case: dict[str, Any]) -> str:
     """Render a plain-text snapshot header + numbered evidence list.
 
@@ -113,7 +123,7 @@ def render_case(case: dict[str, Any]) -> str:
     policy = snapshot.get("policy") or "-"
     state = curation.get("state") or "-"
     candidates = case.get("candidates") or []
-    entries = case.get("evidence") or candidates
+    entries = _evidence_entries(case)
     lines = [
         f"case {case.get('case_id')}: state={state} policy={policy} head={head}",
     ]
@@ -314,7 +324,7 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
     :func:`add_edited_findings`.
     """
     findings = (view.get("curation") or {}).get("findings") or []
-    entries = view.get("evidence") or view.get("candidates") or []
+    entries = _evidence_entries(view)
     first = _prompt(
         read_line,
         "edit finding (number) or author from evidence [a] (0 to cancel): ",
@@ -467,7 +477,7 @@ def _action_exclude(
     prompts for the single note applied to the whole range, so a range
     exclusion is never a dead-end the service immediately rejects.
     """
-    entries = view.get("evidence") or view.get("candidates") or []
+    entries = _evidence_entries(view)
     text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
     if text == "0":
         return "continue"
@@ -490,13 +500,16 @@ def _action_exclude(
             return "continue"
     elif len(indices) == 1:
         note = _prompt(read_line, "note: ").strip() or None
-    for index in indices:
-        try:
-            cu.exclude_evidence(
-                root, case_id, entries[index]["source_id"], reason=reason, note=note
-            )
-        except cu.CurationError as exc:
-            return _service_error(exc)
+    try:
+        cu.exclude_evidence_batch(
+            root,
+            case_id,
+            [entries[i]["source_id"] for i in indices],
+            reason=reason,
+            note=note,
+        )
+    except cu.CurationError as exc:
+        return _service_error(exc)
     print(f"excluded {len(indices)} evidence source(s)")
     return "rerender"
 
@@ -576,7 +589,7 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
             if action not in _ACTIONS:
                 if action.isdigit():
                     view = cu.get_case(root, case_id)
-                    entries = view.get("evidence") or view.get("candidates") or []
+                    entries = _evidence_entries(view)
                     index = int(action) - 1
                     if not (0 <= index < len(entries)):
                         print(f"no evidence number {action}")

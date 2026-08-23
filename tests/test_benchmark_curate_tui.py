@@ -252,6 +252,35 @@ def test_action_edit_authors_edited_finding_from_non_candidate_evidence(tmp_path
     assert f["provenance"]["source_ids"] == ["github:review:100"]
 
 
+def test_edit_author_prefills_selected_evidence_source_ids(tmp_path, fake_gh, monkeypatch):
+    """The [e]->a author selector must pin the selected evidence's source_ids
+    into the editor buffer before it opens, so a wrong/empty/off-by-one prefill
+    cannot slip past the callers that rewrite source_ids in their heredocs."""
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    log = tmp_path / "prefill.log"
+    editor = tmp_path / "prefill.sh"
+    editor.write_text(
+        "#!/bin/sh\n"
+        "cat > \"$LOG\" < \"$1\"\n"
+        "cat > \"$1\" <<'EOF'\nfindings:\n  - title: From selected\n    body: pinned\n"
+        "    severity: null\n    location: null\n    source_ids: [github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("LOG", str(log))
+
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
+    # verdict: the prefill in the editor buffer carried the selected source_id
+    prefill = log.read_text()
+    assert "source_ids" in prefill and "- github:review:100" in prefill
+    assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
+
+
 def test_action_edit_splits_one_evidence_into_two_findings(tmp_path, fake_gh, monkeypatch):
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict

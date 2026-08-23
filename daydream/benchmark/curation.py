@@ -812,6 +812,31 @@ def exclude_evidence(
     _with_case_lock(root, case_id, "exclude-evidence", mutate)
 
 
+def exclude_evidence_batch(
+    root: Path, case_id: str, source_ids: list[str], *, reason: str, note: str | None = None
+) -> None:
+    """Exclude several evidence sources from gold in one atomic transaction.
+
+    The batch sibling of :func:`exclude_evidence`: validates the reason/note
+    contract and every source up front (all-or-nothing), then appends the whole
+    selection under one lock+transaction, so a mid-selection service failure
+    stages nothing and cannot leave earlier sources committed. Matches the
+    atomic ``add_findings``/``add_edited_findings`` mutation family the TUI
+    uses for its multi-method actions.
+    """
+
+    def mutate(raw: dict[str, Any]) -> None:
+        _validate_evidence_exclusion_contract(reason, note)
+        for source_id in source_ids:
+            _check_evidence_sources(root, raw, [source_id], case_id)
+        curation = raw.setdefault("curation", {})
+        _reopen_for_mutation(curation)
+        for source_id in source_ids:
+            _append_evidence_exclusion(curation, source_id, reason, note)
+
+    _with_case_lock(root, case_id, "exclude-evidence", mutate)
+
+
 def _validate_transition(frm: str | None, to: str) -> None:
     """Enforce one case state transition, exposing :class:`CurationError`.
 
