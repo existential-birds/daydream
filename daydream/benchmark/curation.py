@@ -698,7 +698,7 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
                 f"attestation SHA mismatch: expected {original} got {head_sha}"
             )
         curation = raw.setdefault("curation", {})
-        if not curation.get("findings"):
+        if not curation.get("findings") and not curation.get("clean_attested"):
             raise CurationError(
                 f"case {case_id} cannot be marked ready with an empty gold findings set"
             )
