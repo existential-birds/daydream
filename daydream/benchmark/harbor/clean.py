@@ -7,7 +7,9 @@ workspace recorded it created: the disposable ``cache/`` clone + build stage
 (``--jobs``) — all driven by ``runtime/harbor.json``, never guessed. Curated
 source/gold (``benchmark.yaml``, ``imports/``, ``cases/``, ``snapshots/``) is
 preserved unless the single explicit ``--all --yes`` total-deletion path is
-taken. Every filesystem target is containment-/symlink-escape-checked via the
+taken — and then only after every derived stage has completed, so a
+derived-stage failure never destroys the unrecoverable curated content. Every
+filesystem target is containment-/symlink-escape-checked via the
 existing ``storage._resolve_target`` / ``run._validate_job_dir`` primitives and
 fails closed (``RunError``/``WorkspaceCorrupt``). Docker removal runs through an
 injectable ``docker_rm`` seam (the real production default shells ``docker
@@ -46,10 +48,20 @@ _CURATED_DIRS = ("imports", "cases", "snapshots")
 def _default_docker_rm(refs: list[str]) -> dict[str, Any]:
     """Default Docker image-removal seam: shell ``docker rmi`` (real path).
 
-    Hermetic tests inject a stub; CI never exercises this default.
+    A non-zero returncode whose stderr names the image as already missing
+    (``No such image``) is surfaced as ``absent`` so ``_clean_jobs`` counts an
+    already-absent image instead of a failed removal. Hermetic tests inject a
+    stub; CI never exercises this default.
     """
-    completed = subprocess.run(["docker", "rmi", *refs])
-    return {"returncode": completed.returncode}
+    completed = subprocess.run(
+        ["docker", "rmi", *refs],
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    result = {"returncode": completed.returncode}
+    if completed.returncode != 0 and "No such image" in (completed.stderr or ""):
+        result["absent"] = True
+    return result
 
 
 @dataclass
@@ -160,9 +172,12 @@ def _clean_jobs(
     For each non-``cleaned`` run, every environment whose ``removed`` flag is
     not already true is removed via the injectable ``docker_rm`` seam using only
     the exact recorded ``image_id``/``image_tags`` refs. A failed removal leaves
-    the run's job dir and prior state intact (partial-failure rule); a run
-    transitions to ``cleaned`` only when its job dir is gone/absent *and* all of
-    its environments are removed. One locked load-mutate-write pass.
+    the run's job dir and prior state intact (partial-failure rule); an
+    already-absent image (the seam reports ``absent``) is persisted as removed
+    without failing the run. A run transitions to ``cleaned`` only when its job
+    dir is gone/absent *and* all of its environments are removed — a run whose
+    job dir never materialized has no images, so it is cleanable with no
+    recorded environments. One locked load-mutate-write pass.
     """
     docker_rm = docker_rm or _default_docker_rm
     with WorkspaceLock(root):
@@ -173,13 +188,22 @@ def _clean_jobs(
                 report.runs_already_clean += 1
                 continue
             validated = _validate_job_dir(root, entry["job_dir"])
+            run_path = Path(validated)
             envs = entry.get("environments") or []
             if not envs:
                 # No recorded image refs, so the run's spawned Docker images
-                # cannot be addressed. Keep the job dir and prior state rather
-                # than deleting an irreconcileable run and silently orphaning
-                # the images it spawned.
-                report.images_failed += 1
+                # cannot be addressed. A run whose job dir never materialized
+                # has no images either, so it is cleanable; a run that does
+                # have a job dir must keep it and its prior state rather than
+                # deleting an irreconcileable run and silently orphaning the
+                # images it spawned.
+                if run_path.is_dir():
+                    report.images_failed += 1
+                    continue
+                report.job_dirs_absent += 1
+                entry["state"] = "cleaned"
+                report.runs_cleaned += 1
+                changed = True
                 continue
             all_removed = True
             for env in envs:
@@ -190,6 +214,13 @@ def _clean_jobs(
                     env["removed"] = True
                     changed = True
                     report.images_removed += 1
+                elif result.get("absent"):
+                    # The image is already gone (an external prune or a prior
+                    # partial removal): count it absent and persist the flag so
+                    # a later pass does not re-attempt (and re-fail) it.
+                    env["removed"] = True
+                    changed = True
+                    report.images_absent += 1
                 else:
                     report.images_failed += 1
                     all_removed = False
@@ -198,7 +229,6 @@ def _clean_jobs(
                 # later pass does not re-attempt (and re-fail) already-removed
                 # images, but keep the job dir and the run's pre-clean state.
                 continue
-            run_path = Path(validated)
             if run_path.is_dir():
                 _delete_path(run_path)
                 report.job_dirs_deleted += 1
@@ -263,8 +293,9 @@ def clean_workspace(
     if jobs or all_:
         _clean_jobs(root, report, docker_rm=docker_rm)
     # Curated source/gold is unrecoverable, so it is deleted only after every
-    # derived stage has completed; a later-stage error must not have already
-    # destroyed an irreplaceable workspace.
-    if all_:
+    # derived stage has completed; a derived-stage soft failure (an image the
+    # jobs stage could not remove) must not have already destroyed an
+    # irreplaceable workspace.
+    if all_ and report.exit_code == 0:
         _clean_curated(root, report)
     return report

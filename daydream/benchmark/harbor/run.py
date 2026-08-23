@@ -705,18 +705,16 @@ def run_run(
             ledger_mark(workspace, run_id, state="complete",
                         environments=environments)
             return write_code or returncode
-        # Default real run: preserve Harbor's exact exit code.
-        if returncode != 0:
-            if actual_dir.is_dir():
-                _, environments = _parse_job_results(actual_dir)
-            else:
-                environments = []
-            ledger_mark(workspace, run_id, state="cleanup_pending",
-                        environments=environments)
-        else:
-            _, environments = _parse_job_results(actual_dir)
-            ledger_mark(workspace, run_id, state="complete",
-                        environments=environments)
+        # Default real run: preserve Harbor's exact exit code. Failing and
+        # successful runs persist the same resolved trial environments;
+        # ``_parse_job_results`` already returns ``(False, [])`` for a missing
+        # job dir, so no is_dir() pre-check is needed.
+        _, environments = _parse_job_results(actual_dir)
+        ledger_mark(
+            workspace, run_id,
+            state="cleanup_pending" if returncode != 0 else "complete",
+            environments=environments,
+        )
         return returncode
     except Exception:
         print("unexpected error during supervised run", file=sys.stderr)

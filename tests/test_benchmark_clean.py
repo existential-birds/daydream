@@ -352,6 +352,33 @@ def test_partial_failure_persists_removed_flags(tmp_path):
     assert row["environments"][1]["removed"] is True  # persisted, not dropped
 
 
+def test_clean_jobs_absent_image_counts_absent_without_blocking(tmp_path):
+    """An already-absent image (the docker_rm seam reports ``absent``) is
+    counted as absent, not failed, and does not block the run from cleaning:
+    without this, an externally-pruned image re-fails forever and the run
+    never transitions to ``cleaned``.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000e2"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    env = _docker_env("c", removed=False, image_id="hb__absent")
+    _append_ledger_run(ws, run_id, state="complete", environments=[env])
+
+    def absent(refs):
+        return {"returncode": 1, "absent": True}
+
+    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=absent)
+    assert report.exit_code == 0
+    assert report.images_absent == 1 and report.images_failed == 0
+    assert report.job_dirs_deleted == 1 and report.runs_cleaned == 1
+    assert not job.exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    # persisted so a later pass does not re-attempt (and re-fail) the image
+    assert ledger["runs"][0]["environments"][0]["removed"] is True
+    assert ledger["runs"][0]["state"] == "cleaned"
+
+
 def test_clean_jobs_keeps_dir_when_environments_empty(tmp_path):
     """A ledger row with no recorded environments cannot be cleaned: deleting
     its job dir would permanently orphan the images that run spawned. Keep the
@@ -372,6 +399,23 @@ def test_clean_jobs_keeps_dir_when_environments_empty(tmp_path):
     assert job.is_dir()
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
     assert ledger["runs"][0]["state"] == "complete"  # never marked cleaned
+
+
+def test_clean_jobs_cleans_run_whose_job_dir_never_materialized(tmp_path):
+    """A failed run recorded with empty environments and no job dir (Harbor
+    never wrote one) has no images either, so ``clean --jobs`` transitions it
+    to ``cleaned`` instead of blocking the workspace on an unrecoverable row.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000d4"
+    _append_ledger_run(ws, run_id, state="cleanup_pending", environments=[])
+    report = clean_mod.clean_workspace(ws, jobs=True)
+    assert report.exit_code == 0
+    assert report.job_dirs_absent == 1 and report.runs_cleaned == 1
+    assert report.images_failed == 0
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleaned"
+    assert not (ws / "harbor" / "jobs" / run_id).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +489,28 @@ def test_clean_all_preserves_curated_when_derived_stage_raises(tmp_path):
         clean_mod.clean_workspace(ws, all_=True, yes=True, docker_rm=boom)
     for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
         assert (ws / name).exists(), f"curated {name} must survive a derived-stage failure"
+
+
+def test_clean_all_preserves_curated_when_derived_stage_soft_fails(tmp_path):
+    """A soft derived-stage failure (a ``docker_rm`` non-zero returncode, not
+    an exception) must also preserve curated source/gold: the pass exits
+    non-zero, and an unrecoverable workspace must not be destroyed first.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000f2"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("c", removed=False)])
+
+    def fail_soft(refs):
+        return {"returncode": 1}
+
+    report = clean_mod.clean_workspace(ws, all_=True, yes=True, docker_rm=fail_soft)
+    assert report.exit_code == 1 and report.images_failed == 1
+    assert report.gold_deleted == 0 and report.recoverable is True
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists(), f"curated {name} must survive a soft derived failure"
 
 
 # ---------------------------------------------------------------------------
