@@ -513,10 +513,10 @@ query ReviewThreads($owner: String!, $name: String!, $number: Int!, $after: Stri
       reviewThreads(first: 50, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          id isResolved isOutdated isResolvedBy subjectType path line originalLine side startSide
+          id isResolved isOutdated subjectType path line originalLine side: diffSide startSide: startDiffSide
           comments(first: 100) {
             pageInfo { hasNextPage endCursor }
-            nodes { id databaseId body author { login type isBot } createdAt updatedAt url replyTo { id } }
+            nodes { id databaseId body author { login type: __typename } createdAt updatedAt url replyTo { id } }
           }
         }
       }
@@ -531,7 +531,7 @@ query ThreadComments($threadId: ID!, $commentsAfter: String) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $commentsAfter) {
         pageInfo { hasNextPage endCursor }
-        nodes { id databaseId body author { login type isBot } createdAt updatedAt url replyTo { id } }
+        nodes { id databaseId body author { login type: __typename } createdAt updatedAt url replyTo { id } }
       }
     }
   }
