@@ -948,5 +948,10 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
 
     monkeypatch.setattr(ws_mod, "load_case_documents", spy)
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    build.compile_workspace(ws)
+    key = build.derive_task_key(case_id)
+    lock = build.compile_workspace(ws)
     assert calls, "compile must consume the shared model-gated loader"
+    case = ws / "harbor" / key
+    assert (case / "instruction.md").exists()
+    assert (case / "tests" / "golden-review.json").exists()
+    assert lock["cases"][key]["case_id"] == case_id

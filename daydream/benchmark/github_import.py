@@ -1003,11 +1003,20 @@ def _prior_import_state(
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
+        prior_import_file = existing.get("import_file")
+        if not prior_import_file:
+            # A fetched ledger entry must name its import document; one that
+            # lacks or nulls import_file is corrupt prior state — without the
+            # guard it escapes as a bare KeyError/TypeError instead of the
+            # documented fail-closed WorkspaceCorrupt of the strict loaders.
+            raise storage.WorkspaceCorrupt(
+                f"{root}: fetched ledger entry for PR {number} is missing import_file"
+            )
         # Ledger-derived authoring paths go through the containment gate (same
         # as every other workspace authoring read), so an absolute or escaping
         # import_file/case_id can never read outside the workspace root.
         prior_raw = storage.load_json_strict(
-            storage.resolve_authoring_path(root, existing["import_file"])
+            storage.resolve_authoring_path(root, prior_import_file)
         )
         prior_sig = _evidence_signature_from_raw(prior_raw)
         prior_task_sig = _task_input_signature_from_raw(prior_raw)

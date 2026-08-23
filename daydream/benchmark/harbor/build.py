@@ -574,9 +574,9 @@ def compile_workspace(root: Path) -> dict:
         manifest["cases"] = sorted(
             manifest.get("cases") or [],
             key=lambda c: (
-                int(c["pr_number"]),
-                schema.head_sha_from_case_id(c["case_id"]),
-                c["case_id"],
+                int(c.get("pr_number", 0) or 0),
+                schema.head_sha_from_case_id(c.get("case_id", "")),
+                c.get("case_id", ""),
             ),
         )
         # Every indexed case is loaded through the shared model-gated loader
