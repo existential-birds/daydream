@@ -520,32 +520,3 @@ def test_case_pr_absent_from_ledger_is_corruption(tmp_path):
     _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
     code, label = validate_workspace(root)
     assert code == 1 and "corrupt" in label.lower()
-
-
-def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path):
-    from daydream.benchmark.workspace import validate_workspace
-
-    root = _write_curated_workspace(tmp_path, "ready")
-    # manifest cases[] pr_number disagrees with the case doc's pull_request.number
-    _mutate_manifest_case(tmp_path, pr_number=999)
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
-
-
-def test_case_file_not_exact_index_path_is_corruption(tmp_path):
-    from daydream.benchmark.workspace import validate_workspace
-
-    root = _write_curated_workspace(tmp_path, "ready")
-    # manifest case_file is not exactly cases/<case_id>.yaml
-    _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
-
-
-def test_case_pr_absent_from_ledger_is_corruption(tmp_path):
-    from daydream.benchmark.workspace import validate_workspace
-
-    root = _write_curated_workspace(tmp_path, "ready")
-    _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
