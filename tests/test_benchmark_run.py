@@ -6,8 +6,9 @@ Task 2: fail-closed preflight checks.
 import json
 from pathlib import Path
 
-from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
+import pytest
 
+from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 
 # ---------------------------------------------------------------------------
 # shared hermetic fixtures (Tasks 2-8)
@@ -140,3 +141,198 @@ def test_preflight_blocks_missing_calibration_receipt_for_oracle(tmp_path):
 
     errs = run_mod._preflight(_ws(tmp_path), oracle=True, env=_env(), docker_ok=lambda: True)
     assert any("calibration" in e for e in errs)  # runtime/calibration-receipt.json absent
+
+
+# ---------------------------------------------------------------------------
+# Task 3: pre-run spend summary
+# ---------------------------------------------------------------------------
+
+
+def test_pre_run_summary_lists_all_required_fields(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    text = run_mod._pre_run_summary(ws, env=_env())
+    for needle in (
+        "task count", "reviewer model", "judge provider", "judge model",
+        "judge host", "attempts", "concurrency", "timeouts",
+        "oracle pair", "benchmark judge pair", "time-bounded",
+    ):
+        assert needle.lower() in text.lower(), f"summary missing {needle!r}"
+    assert "rm" in text        # reviewer model threaded from env
+    assert "127.0.0.1" in text # judge host threaded from env
+
+
+# ---------------------------------------------------------------------------
+# Task 4: runtime/harbor.json cleanup ledger
+# ---------------------------------------------------------------------------
+
+
+def test_ledger_append_running_and_mark_complete(tmp_path):
+    import stat
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = tmp_path / "ws"
+    (ws / "runtime").mkdir(parents=True)
+    run_id = "00000000-0000-0000-0000-000000000001"
+    job_dir = str((ws / "harbor" / "jobs" / run_id).resolve())
+    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
+                                  job_dir=job_dir)
+    path = ws / "runtime" / "harbor.json"
+    doc = json.loads(path.read_text())
+    assert doc["schema_version"] == 1
+    assert doc["runs"][0]["run_id"] == run_id
+    assert doc["runs"][0]["state"] == "running"
+    assert doc["runs"][0]["job_dir"] == job_dir
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    run_mod.ledger_mark(ws, run_id, state="complete", environments=[{
+        "trial_name": "case-abc__1", "environment_id": "env-1", "backend": "docker",
+        "image_id": "sha256:abc", "image_tags": ["tag"], "removed": False}])
+    doc = json.loads(path.read_text())
+    assert doc["runs"][0]["state"] == "complete"
+    assert doc["runs"][0]["environments"][0]["image_id"] == "sha256:abc"
+
+
+def test_ledger_rejects_non_contained_job_dir(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = tmp_path / "ws"
+    (ws / "runtime").mkdir(parents=True)
+    with pytest.raises(run_mod.RunError):
+        run_mod.ledger_append_running(ws, run_id="x", compiled_lock_sha256="a" * 64,
+                                      job_dir=str(tmp_path / "outside"))
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Harbor result parsing + Oracle receipt
+# ---------------------------------------------------------------------------
+
+
+def _score(reward):
+    return {"reward": reward, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}
+
+
+def test_oracle_parse_success_writes_receipt(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    (ws / "runtime" / "calibration-receipt.json").write_text(json.dumps({"inputs": {"cal": 1}}))
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    # spike-confirmed layout: reward.json lives under <trial>/verifier/
+    (verifier / "reward.json").write_text(json.dumps(_score(1.0)))
+    ok, _ = run_mod._parse_job_results(job_dir)
+    assert ok is True
+    code = run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256="a" * 64, env=_env(),
+        calibration_digest="c" * 64,
+    )
+    assert code == 0
+    receipt = json.loads((ws / "harbor" / "oracle-receipt.json").read_text())
+    for key in ("compiled_lock_sha256", "harbor_version", "judge_provider", "judge_model",
+                "judge_host", "verifier_template_sha256", "threshold", "attempts",
+                "calibration_receipt_sha256", "result_dir", "timestamp"):
+        assert key in receipt, f"receipt missing {key}"
+    assert receipt["compiled_lock_sha256"] == "a" * 64
+    assert receipt["calibration_receipt_sha256"] == "c" * 64
+
+
+def test_oracle_no_receipt_on_reward_below_one(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(json.dumps(_score(0.8)))
+    ok, _ = run_mod._parse_job_results(job_dir)
+    assert ok is False
+    code = run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256="a" * 64, env=_env(),
+        calibration_digest="c" * 64,
+    )
+    assert code == 1
+    assert not (ws / "harbor" / "oracle-receipt.json").exists()
+
+
+def test_oracle_no_receipt_on_unscored_task(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    # infra error path writes reward-details.json only -> unscored, blocks
+    (verifier / "reward-details.json").write_text("{}")
+    ok, _ = run_mod._parse_job_results(job_dir)
+    assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Task 6: default-run gate
+# ---------------------------------------------------------------------------
+
+
+def test_gate_blocks_on_compiled_lock_mismatch(tmp_path):
+    import hashlib
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    lock = {"schema_version": 1, "cases": {}}
+    lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(json.dumps(_score(1.0)))
+    assert run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env(),
+        calibration_digest="c" * 64,
+    ) == 0
+    # now the current compiled lock digest differs from the receipt's
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(
+        {"schema_version": 1, "cases": {}, "touched": True}))
+    reason = run_mod._default_run_gate(
+        ws, env=_env(), compiled_lock_sha256=hashlib.sha256(
+            json.dumps({"schema_version": 1, "cases": {}, "touched": True}).encode()
+        ).hexdigest(), calibration_digest="c" * 64,
+    )
+    assert reason is not None
+    assert "compiled lock" in reason
+
+
+def test_gate_blocks_when_oracle_receipt_missing(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    reason = run_mod._default_run_gate(
+        _ws(tmp_path), env=_env(), compiled_lock_sha256="a" * 64,
+        calibration_digest="c" * 64,
+    )
+    assert reason is not None
+    assert "no matching oracle receipt" in reason
+
+
+def test_gate_passes_when_inputs_match(tmp_path):
+    import hashlib
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    lock = {"schema_version": 1, "cases": {}}
+    lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
+    job_dir = ws / "harbor" / "jobs" / "run-1"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(json.dumps(_score(1.0)))
+    assert run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env(),
+        calibration_digest="c" * 64,
+    ) == 0
+    reason = run_mod._default_run_gate(
+        ws, env=_env(), compiled_lock_sha256=lock_sha, calibration_digest="c" * 64,
+    )
+    assert reason is None

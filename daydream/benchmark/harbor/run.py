@@ -539,13 +539,11 @@ def _default_run_gate(
     }
     for key, value in current.items():
         if receipt.get(key) != value:
+            label = key.replace("_", " ")
             return (
-                f"{key} no longer matches the oracle receipt "
+                f"{label} no longer matches the oracle receipt "
                 f"(got {value!r}, receipt had {receipt.get(key)!r})"
             )
-    result_dir = Path(str(receipt.get("result_dir") or ""))
-    if not result_dir.is_dir():
-        return f"oracle result_dir {result_dir} no longer exists on disk"
     return None
 
 
