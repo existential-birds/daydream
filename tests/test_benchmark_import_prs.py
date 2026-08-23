@@ -1508,3 +1508,58 @@ def test_signature_ignores_format_drift_duplicate_and_kind():
     canon = [base]
     assert gi._evidence_signature_from_raw({"evidence": dup}) \
         == gi._evidence_signature_from_raw({"evidence": canon})
+
+
+# ---------------------------------------------------------------------------
+# per-case staleness via reference intersection (issue #813): a case stales
+# only when its own referenced evidence changed (or the PR-wide task input)
+# ---------------------------------------------------------------------------
+
+
+def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict:
+    """One canonical REST inline-comment dict for the fake router."""
+    return {"id": db_id, "node_id": f"DIFF_{db_id}", "user": {"login": "bot[bot]", "type": "Bot"},
+            "body": body, "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+            "path": "a.py", "line": line, "subject_type": "line", "side": "RIGHT",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "html_url": f"https://github.com/o/r/pull/101#discussion_r{db_id}"}
+
+
+def test_refresh_unrelated_new_comment_does_not_stale(tmp_path, fake_gh):
+    # PR 101 imported with one referenced comment (db 1) and curated ready; a NEW
+    # unrelated comment (db 99) must not stale the referenced case on refresh.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101/comments",
+        [_seed_discussion(1), {**_seed_discussion(99), "path": "b.py", "body": "unrelated nit"}],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"       # NOT staled by an unrelated new comment
+    assert case["curation"]["findings"]
+
+
+def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path, fake_gh):
+    # Same body, moved anchor on the REFERENCED comment (db 1) -> the case stales
+    # while its curated findings stay preserved.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1, line=7)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"
+    assert case["curation"]["findings"]               # curated findings preserved
+    assert case["curation"]["snapshot_attested"] is False

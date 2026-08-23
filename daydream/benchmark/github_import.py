@@ -1049,6 +1049,34 @@ def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
+    """The physical database_ids a curation references via its source_ids.
+
+    Derives each id from ``findings[].provenance.source_ids`` and
+    ``exclusions[].source_id`` by parsing the canonical
+    ``github:<kind>:<id>`` form to the trailing int. Used by the per-case
+    stale decision so a case stales only when evidence *it references*
+    changed; an unreferenced record never flips it.
+    """
+    ids: set[int] = set()
+    for finding in curation.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        provenance = finding.get("provenance") or {}
+        for sid in provenance.get("source_ids", []):
+            match = schema._SOURCE_ID_RE.fullmatch(str(sid))
+            if match:
+                ids.add(int(str(sid).rsplit(":", 1)[-1]))
+    for exclusion in curation.get("exclusions", []):
+        if not isinstance(exclusion, dict):
+            continue
+        sid = exclusion.get("source_id")
+        match = schema._SOURCE_ID_RE.fullmatch(str(sid or ""))
+        if match:
+            ids.add(int(str(sid).rsplit(":", 1)[-1]))
+    return ids
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
@@ -1060,16 +1088,20 @@ def _case_materialize(
     repo_slug: str = "",
     origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
-    changed: bool = False,
+    changed_ids: set[int] | None = None,
+    task_input_changed: bool = False,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
     """One materialized case document per requested head.
 
     When *root*/origin are provided the case ``snapshot`` is frozen via
     :func:`daydream.benchmark.snapshot.freeze_one` (a ``ready|unreplayable``
     dict) and any produced bundle is returned in the second element for the
-    caller to stage atomically. When *changed* is True and a prior curated
-    case exists, its curation is carried over and flipped to ``stale`` with
-    attestation cleared — findings/exclusions are never overwritten by refresh.
+    caller to stage atomically. When a prior curated case exists, its curation
+    is carried over; it is flipped to ``stale`` with attestation cleared iff
+    *task_input_changed* (PR-wide) or its own referenced evidence ids
+    intersect *changed_ids* (a referenced record changed or disappeared).
+    An unreferenced evidence change never stales it and an untouched PR keeps
+    it ready — findings/exclusions are never overwritten by refresh.
     """
     pull_request = doc.pull_request
     base_sha = pull_request.base.sha
@@ -1095,7 +1127,11 @@ def _case_materialize(
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             curation = dict(prior)
-            if changed and prior.get("state") in ("ready", "stale"):
+            should_stale = task_input_changed or (
+                changed_ids is not None
+                and bool(_referenced_evidence_ids(prior) & changed_ids)
+            )
+            if should_stale and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
         if root is not None and origin_url is not None and base_sha and head_sha:
@@ -1299,26 +1335,31 @@ def _import_one_pr(
     prior_sig, prior_task_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
-        # stale only on an evidence change OR a task-input-contract change
-        # (the title/body/base/head a reviewer was shown); a metadata-only change
-        # updates checksums without staling gold.
-        changed = (
+        # Two independent stale signals: the per-case referenced-evidence arm
+        # (database_ids whose projection hash changed or disappeared) and the
+        # PR-wide task-input arm (the title/body/base/head a reviewer was
+        # shown). A metadata-only change updates checksums without staling.
+        task_input_changed = (
             refresh
-            and prior_sig is not None
-            and (
-                prior_sig != _evidence_signature_from_doc(doc)
-                or (
-                    prior_task_sig is not None
-                    and prior_task_sig != _task_input_signature_from_doc(doc)
-                )
-            )
+            and prior_task_sig is not None
+            and prior_task_sig != _task_input_signature_from_doc(doc)
         )
+        changed_ids: set[int] | None = None
+        if refresh and prior_sig is not None:
+            prior_by_id = dict(prior_sig)
+            new_by_id = dict(_evidence_signature_from_doc(doc))
+            changed_ids = {
+                db_id
+                for db_id in set(prior_by_id) | set(new_by_id)
+                if new_by_id.get(db_id) != prior_by_id.get(db_id)
+            }
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
         cases, bundle_rels = _case_materialize(
             doc, number, requested_heads, import_file, import_sha256,
             root=root, repo_slug=repo, origin_url=origin_url,
-            prior_curations=prior_curations, changed=changed,
+            prior_curations=prior_curations,
+            changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
