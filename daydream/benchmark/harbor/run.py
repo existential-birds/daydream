@@ -20,10 +20,12 @@ handler maps them to exit ``1`` — never a bare traceback.
 from __future__ import annotations
 
 import hashlib
-import sys
+import json
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
+
+import yaml
 
 from daydream.benchmark import storage
 from daydream.benchmark.harbor import calibrate, package
@@ -82,6 +84,89 @@ def _reviewer_host_from_env(env: dict[str, Any]) -> str:
     if not base:
         return "api.anthropic.com"
     return str(urllib.parse.urlsplit(base).hostname or "").lower()
+
+
+def _compiled_job_config(workspace: Path) -> dict[str, Any]:
+    """Read the compiled ``harbor/harbor-job.yaml`` config as a dict.
+
+    Fallible: ``OSError``/``YAML`` errors surface a ``RunError`` (a malformed
+    config is a block, not a best-effort summary).
+    """
+    path = workspace / "harbor" / "harbor-job.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise RunError(f"cannot parse compiled Harbor job config at {path}: {exc}") from exc
+    except OSError as exc:
+        raise RunError(f"cannot read compiled Harbor job config at {path}: {exc}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise RunError(f"compiled Harbor job config at {path} must be a mapping")
+    return data
+
+
+def _compiled_cases(workspace: Path) -> list[dict[str, Any]]:
+    """Return the compiled lock's case entries (defensive over dict/list)."""
+    path = workspace / "harbor" / "benchmark.lock.json"
+    try:
+        lock = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+    cases = lock.get("cases") if isinstance(lock, dict) else None
+    if isinstance(cases, dict):
+        return list(cases.values())
+    if isinstance(cases, list):
+        return list(cases)
+    return []
+
+
+def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
+    """Human-readable pre-run spend summary over validated inputs only.
+
+    Pure string-building (never reads Harbor output / never makes a network
+    call). Missing env values render as ``unset``; a broken lock/config raises
+    ``RunError``.
+    """
+    config = _compiled_job_config(workspace)
+    cases = _compiled_cases(workspace)
+
+    gold_candidate_pairs = sum(
+        1 for c in cases if isinstance(c, dict)
+    )
+    oracle_pairs = sum(
+        int(c.get("oracle_count", 0) or 0) for c in cases if isinstance(c, dict)
+    )
+
+    attempts = config.get("n_attempts")
+    concurrency = config.get("n_concurrent_trials")
+    first_case = cases[0] if cases else {}
+    timeout_sec = None
+    if isinstance(first_case, dict):
+        timeout_sec = first_case.get("timeout_sec")
+    if timeout_sec is None:
+        timeout_sec = config.get("timeout_sec")
+
+    def _or(value: Any, default: str = "unset") -> str:
+        return default if value is None else str(value)
+
+    judge_host = _judge_host_from_env(env)
+    return "\n".join(
+        [
+            "Pre-run Harbor spend summary",
+            f"  task count:       {len(cases)}",
+            f"  reviewer model:   {env.get('DAYDREAM_REVIEW_MODEL', '') or 'unset'}",
+            f"  judge provider:   {env.get('DAYDREAM_JUDGE_PROVIDER', '') or 'unset'}",
+            f"  judge model:      {env.get('DAYDREAM_JUDGE_MODEL', '') or 'unset'}",
+            f"  judge host:       {judge_host or 'unset'}",
+            f"  attempts:         {_or(attempts)}",
+            f"  concurrency:      {_or(concurrency)}",
+            f"  timeouts:         {_or(timeout_sec)}",
+            f"  oracle pair:      {_or(oracle_pairs, '0')}",
+            f"  benchmark judge pair: {_or(gold_candidate_pairs, '0')}",
+            "reviewer spend is time-bounded (a per-turn timeout), not a strict dollar cap",
+        ]
+    )
 
 
 def _compiled_lock_sha256(workspace: Path) -> str:
