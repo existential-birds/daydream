@@ -605,12 +605,13 @@ def _handle_benchmark_status(dir_path: Path) -> int:
 def _handle_benchmark_validate(args) -> int:
     """Print the human-readable classification and return the numeric code."""
     if args.compiled:
-        from daydream.benchmark.harbor.package import PackageError, validate_compiled
+        from daydream.benchmark.harbor.build import CompileError
+        from daydream.benchmark.harbor.package import validate_compiled
         from daydream.benchmark.workspace import WorkspaceCorrupt
 
         try:
             code = validate_compiled(args.dir)
-        except (PackageError, WorkspaceCorrupt) as exc:
+        except (CompileError, WorkspaceCorrupt) as exc:
             print(str(exc), file=sys.stderr)
             return 1
         print("validation: compiled-ready")
@@ -624,12 +625,13 @@ def _handle_benchmark_validate(args) -> int:
 
 def _handle_benchmark_build_harbor(args) -> int:
     """Package a validated authoring workspace as a runnable Harbor dataset."""
-    from daydream.benchmark.harbor.package import PackageError, build_harbor
+    from daydream.benchmark.harbor.build import CompileError
+    from daydream.benchmark.harbor.package import build_harbor
     from daydream.benchmark.workspace import WorkspaceCorrupt
 
     try:
         lock = build_harbor(args.dir, wheel=args.daydream_wheel)
-    except (PackageError, WorkspaceCorrupt) as exc:
+    except (CompileError, WorkspaceCorrupt) as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"built Harbor dataset with {len(lock.get('cases', {}))} case(s)")

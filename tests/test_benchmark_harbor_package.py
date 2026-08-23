@@ -308,6 +308,26 @@ def test_templates_and_lock_readable_via_importlib_resources():
     assert "FROM" in resource.read_text()
 
 
+def test_daydream_review_agent_resolves_as_harbor_agent(tmp_path):
+    """The job config's import_path resolves to a real Harbor 0.21 agent."""
+    import pytest
+
+    pytest.importorskip("harbor")
+    from harbor.agents.factory import AgentFactory
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+
+    assert (
+        DaydreamReviewAgent.import_path()
+        == "daydream.benchmark.harbor.agent:DaydreamReviewAgent"
+    )
+    agent = AgentFactory.create_agent_from_import_path(
+        "daydream.benchmark.harbor.agent:DaydreamReviewAgent",
+        logs_dir=tmp_path,
+    )
+    assert agent.name() == "daydream-review"
+
+
 def test_audit_execution_proofs_harbor_gated(tmp_path, fake_gh):
     import importlib.metadata
     import json

@@ -8,6 +8,7 @@ import importlib.resources
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,19 +101,36 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
-def template_text(rel: str) -> str:
-    """Read a packaged template through the installed-release resource seam."""
+def _read_packaged_resource(
+    module: str, rel: str, fallback: Path, label: str
+) -> str:
+    """Read a packaged resource through the installed-release resource seam.
+
+    Reads *rel* from the installed package *module*, falling back to the local
+    source-tree *fallback* and raising ``PackageError`` when neither resolves.
+    """
     try:
-        resource = importlib.resources.files("daydream.benchmark.harbor.templates")
+        resource = importlib.resources.files(module)
         for part in Path(rel).parts:
             resource = resource.joinpath(part)
         return resource.read_text(encoding="utf-8")
     except (FileNotFoundError, ModuleNotFoundError, TypeError) as resource_error:
-        fallback = Path(__file__).parent / "templates" / rel
         try:
             return fallback.read_text(encoding="utf-8")
         except OSError as exc:
-            raise PackageError(f"missing packaged template resource {rel}: {resource_error}; {exc}") from exc
+            raise PackageError(
+                f"missing packaged {label} {rel}: {resource_error}; {exc}"
+            ) from exc
+
+
+def template_text(rel: str) -> str:
+    """Read a packaged template through the installed-release resource seam."""
+    return _read_packaged_resource(
+        "daydream.benchmark.harbor.templates",
+        rel,
+        Path(__file__).parent / "templates" / rel,
+        label="template resource",
+    )
 
 
 def build_harbor(root: Path, *, wheel: Path) -> dict:
@@ -229,18 +247,12 @@ def validate_compiled(root: Path | None) -> int:
 
 def lock_text() -> str:
     """Read the packaged runtime lock through the installed-release resource seam."""
-    try:
-        return importlib.resources.files("daydream.benchmark.harbor").joinpath(
-            "runtime-requirements.lock"
-        ).read_text(encoding="utf-8")
-    except (FileNotFoundError, ModuleNotFoundError, TypeError) as resource_error:
-        path = Path(__file__).parent / "runtime-requirements.lock"
-        try:
-            return path.read_text()
-        except OSError as exc:
-            raise PackageError(
-                f"cannot read packaged runtime lock {path}: {resource_error}; {exc}"
-            ) from exc
+    return _read_packaged_resource(
+        "daydream.benchmark.harbor",
+        "runtime-requirements.lock",
+        Path(__file__).parent / "runtime-requirements.lock",
+        label="runtime lock",
+    )
 
 
 def runtime_lock_header_fields(text: str) -> dict[str, str]:
@@ -292,15 +304,38 @@ def render_job_config(*, oracle: bool) -> bytes:
 
 def render_verifier_dockerfile(*, base_image: str) -> bytes:
     """Render and validate the entrypoint-free separate verifier image."""
-    template = template_text("tests/Dockerfile")
-    text = template.replace("__BASE_IMAGE__", base_image)
-    forbidden = ("ENTRYPOINT", "CMD", "/verifier", "httpx>=")
-    violations = [token for token in forbidden if token in text]
-    if violations or "httpx==0.28.1" not in text:
-        raise PackageError(
-            f"verifier Dockerfile template violates pinned entrypoint-free contract: {violations}"
-        )
+    text = _render_and_check(
+        "tests/Dockerfile",
+        replaces={"__BASE_IMAGE__": base_image},
+        required=("httpx==0.28.1",),
+        forbidden=("ENTRYPOINT", "CMD", "/verifier", "httpx>="),
+        error_label="verifier Dockerfile template",
+    )
     return text.encode("utf-8")
+
+
+_ENV_REQUIRED: tuple[str, ...] = (
+    "git clone",
+    "repository.bundle",
+    "/workspace/repo",
+    "checkout head",
+    "rev-parse --verify base",
+    "rev-parse --verify head",
+    "remote remove",
+    "WORKDIR /workspace/repo",
+    "--require-hashes",
+)
+
+
+def _strip_wheel_block(text: str, *, wheel: bool) -> str:
+    """Strip/keep the delimited wheel-install block of the environment template."""
+    if _WHEEL_BEGIN not in text or _WHEEL_END not in text:
+        raise PackageError("environment Dockerfile template is missing the wheel block markers")
+    if wheel:
+        return text.replace(_WHEEL_BEGIN, "").replace(_WHEEL_END, "")
+    start = text.index(_WHEEL_BEGIN)
+    end = text.index(_WHEEL_END) + len(_WHEEL_END)
+    return text[:start] + text[end:]
 
 
 def render_environment_dockerfile(*, base_image: str, daydream_version: str, wheel: bool = False) -> bytes:
@@ -312,33 +347,45 @@ def render_environment_dockerfile(*, base_image: str, daydream_version: str, whe
     compile cannot emit a self-referential ``COPY`` of a wheel that is never
     written into the environment.
     """
-    text = template_text("environment/Dockerfile")
-    text = text.replace("__BASE_IMAGE__", base_image).replace(
-        "__DAYDREAM_VERSION__", daydream_version
+    text = _render_and_check(
+        "environment/Dockerfile",
+        replaces={"__BASE_IMAGE__": base_image, "__DAYDREAM_VERSION__": daydream_version},
+        required=_ENV_REQUIRED + (("--no-deps",) if wheel else ()),
+        error_label="environment Dockerfile template",
+        transform=lambda rendered: _strip_wheel_block(rendered, wheel=wheel),
     )
-    if _WHEEL_BEGIN not in text or _WHEEL_END not in text:
-        raise PackageError("environment Dockerfile template is missing the wheel block markers")
-    if wheel:
-        text = text.replace(_WHEEL_BEGIN, "").replace(_WHEEL_END, "")
-    else:
-        start = text.index(_WHEEL_BEGIN)
-        end = text.index(_WHEEL_END) + len(_WHEEL_END)
-        text = text[:start] + text[end:]
-    required = (
-        "git clone",
-        "repository.bundle",
-        "/workspace/repo",
-        "checkout head",
-        "rev-parse --verify base",
-        "rev-parse --verify head",
-        "remote remove",
-        "WORKDIR /workspace/repo",
-        "--require-hashes",
-    ) + (("--no-deps",) if wheel else ())
-    missing = [directive for directive in required if directive not in text]
-    if missing:
-        raise PackageError(f"environment Dockerfile template is missing directives: {missing}")
     return text.encode("utf-8")
+
+
+def _render_and_check(
+    rel: str,
+    *,
+    replaces: dict[str, str],
+    required: Sequence[str],
+    forbidden: Sequence[str] = (),
+    error_label: str,
+    transform: Callable[[str], str] | None = None,
+) -> str:
+    """Read a Dockerfile template, substitute placeholders, then guard output.
+
+    Every rendered Dockerfile surface goes through this one render+validate
+    seam so their required/forbidden guard sets stay consistent: read the
+    packaged template, apply the *replaces*, run the optional *transform*
+    (e.g. wheel-block stripping), then assert the *required* and *forbidden*
+    tokens are present/absent, raising ``PackageError`` on violation.
+    """
+    text = template_text(rel)
+    for marker, value in replaces.items():
+        text = text.replace(marker, value)
+    if transform is not None:
+        text = transform(text)
+    missing = [token for token in required if token not in text]
+    if missing:
+        raise PackageError(f"{error_label} is missing directives: {missing}")
+    violations = [token for token in forbidden if token in text]
+    if violations:
+        raise PackageError(f"{error_label} violates pinned contract: {violations}")
+    return text
 
 
 def render_task_toml(opaque_key: str) -> bytes:
