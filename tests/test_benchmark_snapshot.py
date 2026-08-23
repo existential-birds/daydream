@@ -319,6 +319,25 @@ def test_freeze_one_base_advanced_two_sha(tmp_path):
     assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
 
 
+def test_freeze_distinct_base_vs_head_unreachable(tmp_path):
+    """A base-tip fetch failure classifies ``base_unreachable``; a PR-head fetch
+    failure classifies ``head_unreachable`` — never collapsed to one reason."""
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    # base-tip ref absent on the origin (only base1..3 + refs/pull/1/head exist)
+    ur, b = sn.freeze_one(tmp_path, "o/r", 1, base_tip="0" * 40, head_sha=_SHA_HEAD,
+                          policy="final_pr_head", requested_head="final", origin_url=origin)
+    assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "base_unreachable"
+    assert b is None
+    assert ur["requested_base_sha"] == "0" * 40
+    # PR-head ref absent (origin has only refs/pull/1/head, not 999)
+    ur2, b2 = sn.freeze_one(tmp_path, "o/r", 999, base_tip=_SHA_BASE2, head_sha="0" * 40,
+                            policy="final_pr_head", requested_head="final", origin_url=origin)
+    assert ur2["error"]["reason"] == "head_unreachable" and b2 is None
+    assert ur2["requested_base_sha"] == _SHA_BASE2
+
+
 # ---------------------------------------------------------------------------
 # Task 10: crash injection at case/bundle/manifest transaction boundaries
 # ---------------------------------------------------------------------------

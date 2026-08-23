@@ -85,6 +85,50 @@ def _git_fetch(mirror_repo: Path, url: str, refspecs: list[str]) -> None:
         )
 
 
+def fetch_base_tip(
+    root: Path,
+    repo_slug: str,
+    base_tip: str,
+    origin_url: str | None = None,
+) -> Path:
+    """Fetch the selected base-branch tip into the mirror as ``refs/heads/base_tip``.
+
+    A missing/unfetchable base tip raises :class:`GitError` — the caller
+    classifies it ``base_unreachable``. The ref is force-updated (``+``
+    refspec): the mirror ref is derived state that must re-point to the
+    caller's selected tip even when a later freeze selects an ancestor (a
+    plain fetch would reject the non-fast-forward update). Returns the mirror
+    path. Idempotent.
+    """
+    root = Path(root)
+    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
+    m = ensure_mirror(root, repo_slug, origin_url)
+    _git_fetch(m, origin_url, [f"+{base_tip}:refs/heads/base_tip"])
+    return m
+
+
+def fetch_head_refs(
+    root: Path,
+    repo_slug: str,
+    pr_number: int,
+    explicit_shas: list[str] | tuple[str, ...] = (),
+    origin_url: str | None = None,
+) -> Path:
+    """Fetch ``refs/pull/N/head`` + explicit heads into the mirror.
+
+    A missing/unfetchable PR-head ref raises :class:`GitError` — the caller
+    classifies it ``head_unreachable``. Returns the mirror path. Idempotent.
+    """
+    root = Path(root)
+    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
+    m = ensure_mirror(root, repo_slug, origin_url)
+    refspecs = [f"refs/pull/{pr_number}/head:refs/pull/{pr_number}/head"]
+    for sha in explicit_shas:
+        refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
+    _git_fetch(m, origin_url, refspecs)
+    return m
+
+
 def fetch_pr_refs(
     root: Path,
     repo_slug: str,
@@ -95,17 +139,15 @@ def fetch_pr_refs(
 ) -> Path:
     """Fetch base tip + ``refs/pull/N/head`` + explicit heads into the mirror.
 
-    The base tip and PR-head ref are fetched by name; the PR-head SHA is then
-    resolvable from ``refs/pull/N/head``. Returns the mirror path. Idempotent.
+    Backward-compatible wrapper over :func:`fetch_base_tip` +
+    :func:`fetch_head_refs` for callers that do not need distinct failure
+    reasons; ``freeze_one`` uses the individual fetches so a base-tip failure
+    classifies ``base_unreachable`` and a PR-head failure ``head_unreachable``.
+    Returns the mirror path. Idempotent.
     """
-    root = Path(root)
-    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
-    m = ensure_mirror(root, repo_slug, origin_url)
-    refspecs = [f"{base_tip}:refs/heads/base_tip", f"refs/pull/{pr_number}/head:refs/pull/{pr_number}/head"]
-    for sha in explicit_shas:
-        refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
-    _git_fetch(m, origin_url, refspecs)
-    return m
+    fetch_base_tip(root, repo_slug, base_tip, origin_url)
+    fetch_head_refs(root, repo_slug, pr_number, explicit_shas, origin_url)
+    return mirror(root)
 
 
 def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
@@ -347,17 +389,26 @@ def freeze_one(
             "error": {"reason": reason, "detail": detail},
         }, None)
 
-    # 1) establish the shared bare mirror (local-only, no network).
+    # 1) establish the shared bare mirror (local-only, no network). A failure
+    #    here is a base-side (environment) problem: no ref on either side can be
+    #    sourced, so it classifies ``base_unreachable``.
     try:
         m = ensure_mirror(root, repo_slug, origin_url)
     except git_ops.GitError as exc:
         return unreplayable(
-            "head_unreachable", f"could not establish the shared bare mirror: {exc}"
+            "base_unreachable", f"could not establish the shared bare mirror: {exc}"
         )
-    # 2) fetch the base tip, the PR head ref, and the requested head into the
-    #    mirror (credential/network/timeout or a missing refspec on the remote).
+    # 2) fetch the selected base tip (its own failure reason) and then the PR
+    #    head + explicit heads (their own failure reason) into the mirror
+    #    (credential/network/timeout or a missing refspec on the remote).
     try:
-        fetch_pr_refs(root, repo_slug, pr_number, base_tip, [head_sha], origin_url)
+        fetch_base_tip(root, repo_slug, base_tip, origin_url)
+    except git_ops.GitError as exc:
+        return unreplayable(
+            "base_unreachable", f"could not fetch the base tip from the origin: {exc}"
+        )
+    try:
+        fetch_head_refs(root, repo_slug, pr_number, [head_sha], origin_url)
     except git_ops.GitError as exc:
         return unreplayable(
             "head_unreachable", f"could not fetch the PR head refs from the origin: {exc}"
