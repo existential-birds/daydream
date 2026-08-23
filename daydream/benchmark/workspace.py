@@ -314,6 +314,7 @@ def _derived_state(
     )
     _verify_import_checksums(root, manifest)
     _verify_snapshot_checksums(root, manifest, docs)
+    _verify_cross_document(root, manifest, docs)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
 
@@ -406,6 +407,64 @@ def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
             raise WorkspaceCorrupt(
                 f"{root}: import {pr.import_file} is not a valid import document: {exc}"
             ) from exc
+
+
+def _verify_cross_document(root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> None:
+    """Verify every cross-document identity link and exact index membership.
+
+    Each ``cases[]`` row must reference exactly ``cases/<case_id>.yaml`` and
+    agree with its case document's ``pull_request.number``; every case must
+    appear in the ``pull_requests[]`` ledger; every ``fetched`` ledger entry's
+    ``case_ids`` must cover its cases; and each fetched import document must
+    name the same PR number and repository as its ledger entry. Any mismatch
+    is :class:`WorkspaceCorrupt` — never a logged skip.
+    """
+    ledger = {pr.number: pr for pr in manifest.pull_requests}
+    for case in manifest.cases:
+        exact = f"cases/{case.case_id}.yaml"
+        if case.case_file != exact:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} case_file {case.case_file!r} is not the "
+                f"exact index path {exact!r}"
+            )
+        doc = docs[case.case_file]
+        if doc.pull_request.number != case.pr_number:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} pull_request.number {doc.pull_request.number} "
+                f"mismatches cases[] pr_number {case.pr_number}"
+            )
+        pr = ledger.get(case.pr_number)
+        if pr is None:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} PR {case.pr_number} is absent from "
+                f"the pull_requests ledger"
+            )
+        if case.case_id not in pr.case_ids:
+            raise WorkspaceCorrupt(
+                f"{root}: ledger PR {case.pr_number} case_ids {pr.case_ids!r} does not "
+                f"contain indexed case {case.case_id}"
+            )
+    for pr in manifest.pull_requests:
+        if pr.import_state != "fetched" or pr.import_file is None:
+            continue
+        path = resolve_authoring_path(root, pr.import_file)
+        try:
+            imp = ImportDocument.model_validate(load_json_strict(path))
+        except Exception as exc:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} is not a valid import document: {exc}"
+            ) from exc
+        if imp.pull_request.number != pr.number:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} pull_request.number "
+                f"{imp.pull_request.number} mismatches ledger PR {pr.number}"
+            )
+        if imp.repository.name_with_owner != manifest.source.repository:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} repository "
+                f"{imp.repository.name_with_owner!r} mismatches manifest source "
+                f"{manifest.source.repository!r}"
+            )
 
 
 def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:

@@ -137,6 +137,7 @@ def _write_case_docs(root, curation_state):
     raw = yaml.safe_load((root / "benchmark.yaml").read_text())
     raw["source"]["repository_id"] = "R_kgDOABC123"
     raw["source"]["visibility"] = "private"
+    repo_slug = raw["source"]["repository"]
 
     head_sha = "0123456789ab" + "0" * 28
     base_sha = "b" * 40
@@ -147,7 +148,7 @@ def _write_case_docs(root, curation_state):
 
     pr_meta = PullRequestMeta(
         number=101,
-        url="https://github.com/O/R/pull/101",
+        url=f"https://github.com/{repo_slug}/pull/101",
         title="Fix cache",
         state="open",
         base={"ref": "main", "sha": base_sha},
@@ -159,7 +160,11 @@ def _write_case_docs(root, curation_state):
     )
     import_doc = ImportDocument(
         schema_version=1,
-        repository={"id": "R_kgDOABC123", "name_with_owner": "O/R", "visibility": "private"},
+        repository={
+            "id": "R_kgDOABC123",
+            "name_with_owner": repo_slug,
+            "visibility": "private",
+        },
         pull_request=pr_meta,
         evidence=[],
         fetch={
@@ -418,3 +423,58 @@ def test_status_rejects_minimal_invalid_case(tmp_path):
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
+
+
+def _mutate_manifest_case(tmp_path, pr_number=None, case_file=None):
+    """Rewrite the manifest cases[] entry (pr_number and/or case_file)."""
+    import yaml
+
+    root = tmp_path / "ws"
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    row = raw["cases"][0]
+    if pr_number is not None:
+        row["pr_number"] = pr_number
+    if case_file is not None:
+        row["case_file"] = case_file
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def _drop_ledger_entry(tmp_path):
+    """Remove the pull_requests[] entry for PR 101."""
+    import yaml
+
+    root = tmp_path / "ws"
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw["pull_requests"] = [
+        pr for pr in raw["pull_requests"] if pr.get("number") != 101
+    ]
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # manifest cases[] pr_number disagrees with the case doc's pull_request.number
+    _mutate_manifest_case(tmp_path, pr_number=999)
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_case_file_not_exact_index_path_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # manifest case_file is not exactly cases/<case_id>.yaml
+    _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_case_pr_absent_from_ledger_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
