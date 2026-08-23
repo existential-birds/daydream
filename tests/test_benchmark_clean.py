@@ -277,3 +277,45 @@ def test_clean_jobs_removed_true_env_skipped(tmp_path):
     assert called == []                                 # already-removed image not re-attempted
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
     assert ledger["runs"][0]["state"] == "cleaned"
+
+
+# ---------------------------------------------------------------------------
+# Task 7: partial Docker failure tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_job_dir_kept_when_image_removal_fails(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000d1"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("c", removed=False)])
+
+    def fail_docker_rm(refs):
+        return {"returncode": 1}
+
+    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=fail_docker_rm)
+    assert report.exit_code == 1 and report.images_failed == 1
+    assert job.exists()                                # job dir preserved on image failure
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["environments"][0]["removed"] is False
+    assert ledger["runs"][0]["state"] == "complete"    # not transitioned to cleaned
+
+
+def test_partial_failure_continues_to_other_runs(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    for i, (rid, img) in enumerate([("a", "hb__x-a"), ("b", "hb__x-b")]):
+        job = ws / "harbor" / "jobs" / rid
+        (job / "t").mkdir(parents=True)
+        _append_ledger_run(
+            ws, rid, state="complete",
+            environments=[_docker_env(f"c{i}", removed=False, image_id=img)],
+        )
+
+    def selective(refs):
+        return {"returncode": 1 if refs == ["hb__x-a"] else 0}
+
+    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=selective)
+    assert report.images_failed == 1 and report.images_removed == 1
+    assert report.job_dirs_deleted == 1                 # successful run's dir removed
