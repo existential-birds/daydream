@@ -275,6 +275,7 @@ def test_freeze_one_ready_and_reasons(tmp_path):
                            policy="final_pr_head", requested_head="final", origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
+    assert ready["requested_base_sha"] == _SHA_BASE2
     assert ready["base_tree_sha"] == _seed_base_tree() and ready["head_tree_sha"] == _seed_head_tree()
     assert re.fullmatch(r"[0-9a-f]{64}", ready["diff_sha256"])
     assert re.fullmatch(r"[0-9a-f]{64}", ready["bundle_sha256"])
@@ -296,6 +297,26 @@ def test_freeze_one_ready_and_reasons(tmp_path):
     assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
     assert bundle2 is None
     assert ur2["bundle_file"] is None
+
+
+def test_freeze_one_base_advanced_two_sha(tmp_path):
+    """Acceptance (a): a base branch advanced past the PR fork records the true
+    merge base as original_base_sha and the selected base tip as
+    requested_base_sha — two distinct SHAs."""
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    # PR head is forked from base2; main has advanced to base3.
+    ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
+                           policy="final_pr_head", requested_head="final", origin_url=origin)
+    assert ready["status"] == "ready"
+    assert ready["original_base_sha"] == _SHA_BASE2      # the true merge base
+    assert ready["requested_base_sha"] == _SHA_BASE3      # the selected base-branch tip
+    assert ready["original_base_sha"] != ready["requested_base_sha"]
+    assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
 
 
 # ---------------------------------------------------------------------------

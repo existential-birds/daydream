@@ -670,6 +670,7 @@ def test_import_freezes_cases_ready_with_bundle(tmp_path, fake_gh):
     case = load_yaml_strict(ws / f"cases/{case_id}.yaml")
     assert case["snapshot"]["status"] == "ready"
     assert case["snapshot"]["original_base_sha"] == base_sha
+    assert case["snapshot"]["requested_base_sha"] == base_sha
     assert case["snapshot"]["original_head_sha"] == head_sha
     bundle = ws / case["snapshot"]["bundle_file"]
     assert bundle.exists()

@@ -327,12 +327,17 @@ def freeze_one(
     case_id = schema.case_id_for(pr_number, head_sha)
     bundle_rel = f"snapshots/{case_id}.bundle"
 
+    # The resolved merge base, recorded on any unreplayable dict produced after
+    # merge-base resolution (None for the earlier fetch/ancestry failures).
+    resolved_base: dict[str, str | None] = {"base": None}
+
     def unreplayable(reason: str, detail: str) -> tuple[dict, None]:
         return ({
             "status": "unreplayable",
             "policy": policy,
             "requested_head": requested_head,
-            "original_base_sha": base_tip,
+            "original_base_sha": resolved_base["base"],
+            "requested_base_sha": base_tip,
             "original_head_sha": head_sha,
             "base_tree_sha": None,
             "head_tree_sha": None,
@@ -377,6 +382,7 @@ def freeze_one(
 
     # 5) resolve the merge base and both trees.
     base = resolve_original_base(m, "refs/heads/base_tip", head_sha)
+    resolved_base["base"] = base
     if base is None:
         return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
     trees = resolve_trees(m, base, head_sha)
@@ -411,7 +417,10 @@ def freeze_one(
         "status": "ready",
         "policy": policy,
         "requested_head": requested_head,
-        "original_base_sha": base_tip,
+        # original_base_sha is the true merge base of the selected base tip and
+        # the head; requested_base_sha is the selected base-branch tip.
+        "original_base_sha": base,
+        "requested_base_sha": base_tip,
         "original_head_sha": head_sha,
         "base_tree_sha": base_tree,
         "head_tree_sha": head_tree,
