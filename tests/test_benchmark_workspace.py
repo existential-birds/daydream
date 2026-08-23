@@ -300,6 +300,7 @@ def _write_case_docs(root, curation_state):
             "findings": [finding],
             "exclusions": [],
             "case_exclusion": None,
+            "task_spec_sha256": "d" * 64,
         }
     elif curation_state == "clean":
         curation = {
@@ -310,6 +311,7 @@ def _write_case_docs(root, curation_state):
             "findings": [],
             "exclusions": [],
             "case_exclusion": None,
+            "task_spec_sha256": "d" * 64,
         }
     else:  # draft
         curation = {

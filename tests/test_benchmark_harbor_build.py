@@ -142,6 +142,21 @@ def _seed_candidate(fake_gh, *, number: int = 101, head_sha: str) -> None:
 _SEED_SEQ = {"n": 0}
 
 
+def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
+    """Mark *case_id* ready with the freshly-rendered task-spec digest."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import load_yaml_strict
+
+    task_spec_sha256 = hashlib.sha256(
+        build.render_task_spec(
+            load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+            instruction=build.ASSIGNMENT_TEXT,
+        )
+    ).hexdigest()
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
+
+
 def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[Path, str, str]:
     """Seed a genuine frozen ``ready`` workspace for one imported PR.
 
@@ -168,7 +183,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
         if c["exact_acceptable"]
     )
     cu.accept_candidate(ws, case_id, candidate["source_id"])
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    _mark_ready(ws, case_id, head_sha)
     return ws, case_id, head_sha
 
 
@@ -193,7 +208,7 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tup
     case_id = raw["cases"][0]["case_id"]
     cu.attest_clean(ws, case_id)
     if ready:
-        cu.mark_ready(ws, case_id, head_sha=head_sha)
+        _mark_ready(ws, case_id, head_sha)
     return ws, case_id, head_sha
 
 
@@ -217,7 +232,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
         if c["exact_acceptable"]
     )
     cu.accept_candidate(ws, case_id, candidate["source_id"])
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    _mark_ready(ws, case_id, head_sha)
     return case_id
 
 
@@ -721,6 +736,7 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path, f
     curation["snapshot_attested"] = True
     curation["clean_attested"] = False     # never clean-attested
     curation["gold_status"] = None         # no clean label without attestation
+    curation["task_spec_sha256"] = "d" * 64  # carry a digest so the clean gate is reached
     raw["curation"] = curation
     storage.atomic_write_yaml(path, raw)
     with pytest.raises(build.CompileError):
@@ -1024,3 +1040,122 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
     assert (case / "instruction.md").exists()
     assert (case / "tests" / "golden-review.json").exists()
     assert lock["cases"][key]["case_id"] == case_id
+
+
+def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    b1 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+    b2 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+    assert b1 == b2                                          # R3 byte determinism
+    text = b1.decode("utf-8")
+    for label in ("Purpose", "Input and conditions", "Environment and access boundary",
+                  "Scoring contract", "Accepted semantic alternatives", "Invalid-run rules",
+                  "Fairness analysis", "Leakage analysis", "Historical source provenance"):
+        assert label in text, label                         # R2 exact sections
+    assert build.ASSIGNMENT_TEXT.split()[0] in text          # exact fixed instruction present
+    assert raw["pull_request"]["title"] in text              # case-specific input present
+    assert "task_spec_approved_at" not in text               # R4 audit timestamp never in bytes
+    import re
+    assert not re.search(r"\b[0-9a-f]{40}\b", text)          # no raw SHAs (R13 identifiers)
+    assert not re.search(r"\bpr-\d{6}-[0-9a-f]{12}\b", text) # no authoring case id
+    assert "2026-" not in text                               # no timestamps anywhere
+    # a different case renders different bytes
+    raw2 = dict(raw)
+    raw2["pull_request"] = dict(raw["pull_request"])
+    raw2["pull_request"]["title"] = "Other"
+    assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
+
+
+def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
+    import hashlib
+
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # ready with a rendered digest (Task 4)
+    key = build.derive_task_key(case_id)
+    lock = build.compile_workspace(ws)
+    tm = ws / "harbor" / key / "Task.md"
+    assert tm.exists()                                          # R10 written
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    expected = hashlib.sha256(build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    actual = hashlib.sha256(tm.read_bytes()).hexdigest()
+    assert actual == expected                                   # R10: compiled == approved bytes
+    assert actual == lock["cases"][key]["task_spec_sha256"]     # R10/R11: lock inventory matches
+    assert actual == raw["curation"]["task_spec_sha256"]        # matches the approved curation digest
+    assert lock["cases"][key]["files"]["Task.md"] == actual     # per-case files{} inventory (R11)
+    assert lock["files"][f"{key}/Task.md"] == actual            # root files{} inventory
+    # Task.md is the only hidden-truth surface; it must not be copied into tests/ or environment/
+    rels = {str(p.relative_to(ws / "harbor" / key)) for p in (ws / "harbor" / key).rglob("*") if p.is_file()}
+    assert "Task.md" in rels
+    assert not any(r.startswith("tests/") and r.endswith("Task.md") for r in rels)
+    assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
+
+
+def test_spec_change_forces_recompile(tmp_path, fake_gh):
+    import hashlib
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    lock1 = build.compile_workspace(ws)
+    # mutate the instruction-relevant input (PR title), re-render, re-approve, recompile
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(path)
+    head_sha = raw["snapshot"]["original_head_sha"]
+    raw["pull_request"] = dict(raw["pull_request"])
+    raw["pull_request"]["title"] = "Changed title"
+    # the case doc is model-validated on every read, so ship the truthful digest
+    raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed title").hexdigest()
+    storage.atomic_write_yaml(path, raw)
+    new_digest = hashlib.sha256(
+        build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    raw2 = storage.load_yaml_strict(path)
+    raw2["curation"] = dict(raw2["curation"])
+    raw2["curation"]["state"] = "draft"
+    raw2["curation"]["snapshot_attested"] = False
+    storage.atomic_write_yaml(path, raw2)
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
+    lock2 = build.compile_workspace(ws)
+    assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
+    # the task-spec digest itself must have changed (not merely the title member,
+    # which is already a direct authoring-input), proving the task_spec_sha256
+    # member's change-sensitivity is what forces the recompile
+    key = build.derive_task_key(case_id)
+    assert lock2["cases"][key]["task_spec_sha256"] != lock1["cases"][key]["task_spec_sha256"]
+
+
+def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    prose = ("## Purpose\nreview the change\n## Scoring contract\n"
+             "The gold_status and clean_attested markers and the curation flow "
+             "and any evidence exclusions are described here, with provenance notes.\n")
+    build.leakage_scan({"case-x/Task.md": prose}, repository_slug="o/r")   # must NOT raise (R13)
+    leaky = prose + " see https://github.com/o/r/pull/101 and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+    try:
+        build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
+        assert False, "expected CompileError for leaked identifier"
+    except CompileError as exc:
+        assert "Task.md" in str(exc)
+
+
+def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    build.compile_workspace(ws)
+    key = build.derive_task_key(case_id)
+    case = ws / "harbor" / key
+    # Task.md lives only at the case root; never under tests/ (verifier) or environment/ (agent)
+    assert (case / "Task.md").is_file()
+    for sub in ("tests", "environment"):
+        rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
+        assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
+    # agent task surface is instruction.md; the environment is ONLY the repository
+    # bundle (no Dockerfile or other file that could embed Task.md), so assert the
+    # environment surface is exactly that and Task.md never reaches it.
+    env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
+    assert env_files == {"repository.bundle"}, f"unexpected environment files: {env_files}"

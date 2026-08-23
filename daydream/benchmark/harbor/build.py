@@ -190,6 +190,107 @@ def bounded_pr_context(
     )
 
 
+def render_task_spec(case_doc: dict, *, instruction: str) -> bytes:
+    """Deterministic per-case Task.md render; the single source shared by [r] approval and compile (D3)."""
+    pull_request = case_doc.get("pull_request") or {}
+    title = str(pull_request.get("title") or "")
+    curation = case_doc.get("curation") or {}
+    findings = curation.get("findings") or []
+    if findings:
+        counts: dict[str, int] = {}
+        for finding in findings:
+            severity = str(finding.get("severity") or "unknown")
+            counts[severity] = counts.get(severity, 0) + 1
+        severity_summary = ", ".join(
+            f"{count} {severity}" for severity, count in sorted(counts.items())
+        )
+        scoring = (
+            f"The gold set contains {len(findings)} verified findings "
+            f"({severity_summary}). A candidate finding scores when its content "
+            "semantically matches a gold finding; severity, location, and content "
+            "are graded, never the raw review-thread text."
+        )
+        stable_summary = "\n".join(
+            f"- {f.get('severity') or 'unknown'}: {f.get('title') or ''}"
+            for f in findings
+        )
+    else:
+        scoring = (
+            "The gold set is empty: the reviewed change was reviewed-clean with "
+            "zero expected findings. A candidate review that reports any finding "
+            "on this task scores as a false positive."
+        )
+        stable_summary = "clean (zero expected findings)"
+    parts = [
+        f"# Task Spec - {title}",
+        "",
+        "## Purpose",
+        "This document is the hidden evaluation contract for one private Harbor "
+        "task. It fully describes the task's grading conditions so the task can "
+        "be reproduced and scored without the raw authoring record.",
+        "",
+        "## Input and conditions",
+        "The agent reviews the code change between the local `base` ref and the "
+        "local `head` ref of the bundled repository. The instruction for the "
+        "task is:",
+        "",
+        instruction,
+        "",
+        "## Environment and access boundary",
+        "The task runs in a self-contained environment holding a repository "
+        "bundle and no network access, credentials, or references to the original "
+        "authoring host. The agent surface is exactly the compiled task tree.",
+        "",
+        "## Scoring contract",
+        scoring,
+        "",
+        "Stable per-case findings summary:",
+        stable_summary,
+        "",
+        "## Accepted semantic alternatives",
+        "A candidate finding matches gold when its content and intended defect "
+        "align with the gold finding; rewordings that preserve meaning are "
+        "accepted by the semantic judge.",
+        "",
+        "## Invalid-run rules",
+        "A run is invalid when the agent task tree is altered, the repository "
+        "bundle refs are changed, or the candidate artifact is not produced by "
+        "the agent. Invalid runs receive no score.",
+        "",
+        "## Fairness analysis",
+        "Tasks are compiled from private historical reviews; the hidden gold is "
+        "never visible to the agent at runtime. Scoring applies uniformly to "
+        "every candidate review regardless of order or length.",
+        "",
+        "## Leakage analysis",
+        "This contract deliberately omits every authoring identifier: commit "
+        "SHAs, the authoring case id, review comment ids, pull request numbers, "
+        "URLs, and timestamps. Nothing in this document can locate the original "
+        "review record.",
+        "",
+        "## Historical source provenance",
+        "The gold content is grounded in the change's own historical review "
+        "threads. Individual source comment identifiers are not part of this "
+        "contract and are never graded.",
+        "",
+    ]
+    return "\n".join(parts).encode("utf-8")
+
+
+def task_spec_digest(case_doc: dict) -> str:
+    """Canonical sha256 hexdigest of the rendered ``Task.md`` for *case_doc*.
+
+    Single source for the task-spec invariant (sha256 over the deterministic
+    render under the fixed ``ASSIGNMENT_TEXT``), shared by the approve,
+    compile-verify, authoring-digest, and legacy-backfill derivations so a
+    change to render_task_spec, its inputs, or the hash algorithm cannot drift
+    between call sites.
+    """
+    return hashlib.sha256(
+        render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
+    ).hexdigest()
+
+
 def _flatten_finding(finding: dict) -> dict:
     """Map a curated finding to its provenance-free gold/artifact shape.
 
@@ -364,6 +465,17 @@ _LEAK_RULES = [
 
 _BLOCK_PATTERN = re.compile(r"<historical_pr_context>.*?</historical_pr_context>", re.DOTALL)
 
+# Task.md is control-plane content too, but its own prose legitimately talks
+# about the gold shape (provenance/curation/exclusions/clean attestation), so
+# it is scanned with an identifiers-only subset (R13): never the prose tokens.
+_TASK_SPEC_IDENTIFIER_RULES = [
+    rule
+    for rule in _LEAK_RULES
+    if rule[0]
+    in ("original-git-sha", "authoring-case-id", "source-comment-id",
+        "credential", "authenticated-url", "pull-number")
+]
+
 
 def _bounded_block_strip(text: str) -> str:
     """Remove the exact emitted bounded block (instruction.md scan exemption)."""
@@ -380,10 +492,11 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     """
     for rel, text in control_plane.items():
         scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
+        rules = _TASK_SPEC_IDENTIFIER_RULES if rel.endswith("Task.md") else _LEAK_RULES
         hits: list[str] = []
         if repository_slug and repository_slug in scanned:
             hits.append(repository_slug)
-        for label, pattern in _LEAK_RULES:
+        for label, pattern in rules:
             m = pattern.search(scanned)
             if m is not None:
                 hits.append(m.group(0))
@@ -464,8 +577,31 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
             "requested_base_sha": snapshot.get("requested_base_sha"),
             "head": snapshot.get("original_head_sha"),
             "bundle_sha256": snapshot.get("bundle_sha256"),
+            "task_spec_sha256": task_spec_digest(raw),
         }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _write_task_spec(stage: Path, case_doc: dict) -> str:
+    """Render one case's hidden ``Task.md``, verify it, and write it to *stage*.
+
+    The task spec is the byte-deterministic hidden evaluation contract (R10/
+    R8): its sha256 must equal the ``task_spec_sha256`` persisted when the
+    case was marked ready, else the compiled bytes no longer reflect what the
+    curator approved and the case's whole compile aborts rather than silently
+    shipping the stale contract. Returns the derived digest for the case lock
+    row.
+    """
+    task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
+    task_spec_sha256 = task_spec_digest(case_doc)
+    approved = (case_doc.get("curation") or {}).get("task_spec_sha256")
+    if task_spec_sha256 != approved:
+        raise CompileError(
+            f"case {case_doc.get('case_id')} task spec digest "
+            f"{task_spec_sha256} != approved {approved}"
+        )
+    (stage / "Task.md").write_bytes(task_spec_bytes)
+    return task_spec_sha256
 
 
 def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict:
@@ -478,6 +614,10 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     snapshot = case_doc.get("snapshot") or {}
     curation = case_doc.get("curation") or {}
     findings = curation.get("findings") or []
+
+    # The hidden evaluation contract: byte-deterministic render, verified
+    # against the human-approved digest before any bytes are written (R10/R8).
+    task_spec_sha256 = _write_task_spec(case_stage, case_doc)
 
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)
@@ -534,7 +674,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
 
     files: dict[str, str] = {}
     for rel in (
-        "README.md", "instruction.md", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "environment/repository.bundle",
         "tests/golden-review.json", "tests/verifier-metadata.json",
         "solution/golden-review.json",
     ):
@@ -557,6 +697,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
         "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
         "oracle_sha256": hashlib.sha256(oracle_bytes).hexdigest(),
+        "task_spec_sha256": task_spec_sha256,
         "verifier_script_sha256": hashlib.sha256(
             (case_stage / "tests" / "score_review.py").read_bytes()
             + (case_stage / "tests" / "verifier_core.py").read_bytes()
@@ -648,6 +789,7 @@ def compile_workspace(root: Path) -> dict:
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
                 control_plane[f"{key}/README.md"] = _CASE_README
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
+                control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
                 control_plane[f"{key}/tests/verifier-metadata.json"] = (
                     stage / key / "tests" / "verifier-metadata.json"
                 ).read_text()

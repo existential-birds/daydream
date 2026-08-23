@@ -409,6 +409,7 @@ def _valid_case_dict():
             ],
             "exclusions": [],
             "case_exclusion": None,
+            "task_spec_sha256": "d" * 64,
         },
     }
 
@@ -626,6 +627,26 @@ def test_historical_daydream_marker_cannot_be_gold():
     raw["curation"]["findings"][0] = finding
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
+
+
+def test_legacy_ready_without_task_spec_digest_backfills_and_validates():
+    """A pre-approval ready case is backfilled with its spec digest by _schema_ready.
+
+    A ready curation persisted before the task-spec approval field existed
+    carries no ``task_spec_sha256``; the strict-load preprocessor backfills the
+    deterministic render digest so the legacy case validates (and later
+    compiles) instead of surfacing as corrupt.
+    """
+    import daydream.benchmark.schema as schema
+    from daydream.benchmark.harbor.build import ASSIGNMENT_TEXT, render_task_spec
+
+    raw = _valid_case_dict()
+    del raw["curation"]["task_spec_sha256"]                # legacy pre-approval workspace
+    prepared = schema._schema_ready(raw)
+    digest = prepared["curation"]["task_spec_sha256"]
+    expected = hashlib.sha256(render_task_spec(raw, instruction=ASSIGNMENT_TEXT)).hexdigest()
+    assert digest == expected
+    assert CaseDocument.model_validate(prepared).curation.task_spec_sha256 == digest
 
 
 def test_gold_status_and_mode_derived():

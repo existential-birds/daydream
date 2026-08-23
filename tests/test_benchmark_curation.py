@@ -443,8 +443,8 @@ def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path, fake_gh)
 
     # wrong SHA is rejected; correct SHA attests
     with pytest.raises(cu.CurationError):
-        cu.mark_ready(ws, case_id, head_sha="f" * 40)
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
@@ -463,7 +463,7 @@ def test_mark_ready_clean_attested_empty_yields_ready(tmp_path, fake_gh):
     from daydream.benchmark.workspace import validate_workspace
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold
     cu.attest_clean(ws, case_id)
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
     assert cur["clean_attested"] is True
@@ -477,7 +477,7 @@ def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path, fake_gh):
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold, NOT attested
     with pytest.raises(cu.CurationError):
-        cu.mark_ready(ws, case_id, head_sha=head_sha)
+        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
 
@@ -488,7 +488,7 @@ def test_mark_ready_clean_wrong_sha_is_non_mutating(tmp_path, fake_gh):
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     cu.attest_clean(ws, case_id)
     with pytest.raises(cu.StaleStateError):
-        cu.mark_ready(ws, case_id, head_sha="f" * 40)
+        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert cur["clean_attested"] is True        # attestation preserved; only readiness failed
@@ -500,7 +500,7 @@ def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
     # put the case in ready + attested with one historical finding
     cu.accept_candidate(ws, case_id,
         next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
@@ -588,7 +588,7 @@ def test_stale_case_edit_stays_stale_and_re_attests(tmp_path, fake_gh):
     assert raw["curation"]["state"] == "stale"
     assert raw["curation"]["snapshot_attested"] is False
 
-    cu.mark_ready(ws, case_id, head_sha=head_sha)                # stale -> ready
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)                # stale -> ready
     raw = load_yaml_strict(path)
     assert raw["curation"]["state"] == "ready" and raw["curation"]["snapshot_attested"] is True
 
@@ -729,7 +729,7 @@ def test_curate_and_validate_after_mirror_removal(tmp_path, fake_gh):
     assert rows[0]["changed_files"] == 2 and rows[0]["changed_lines"] == 6
     # attest ready (re-exercises location-vs-head from the bundle), so the
     # workspace reaches the ``ready`` exit-0 state on validation
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)
     # validate_workspace still passes (fidelity is bundle-based)
     code, label = validate_workspace(ws)
     assert code == 0 and label == "ready"
@@ -928,7 +928,7 @@ def test_concurrent_adds_then_final_readiness_lands(tmp_path, fake_gh):
     for p in procs:
         out, err = p.communicate(timeout=120)
         assert p.returncode == 0, (out, err)
-    cu.mark_ready(ws, case_id, head_sha=head_sha)                 # final readiness on top of the concurrent adds
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)  # readiness on top of concurrent adds
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     # All three concurrent adds land before readiness (order is lock-acquisition
     # order, so title order is nondeterministic — assert the set, not the order).
@@ -1016,6 +1016,143 @@ def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_pat
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
     with pytest.raises(cu.StaleStateError):
-        cu.mark_ready(ws, case_id, head_sha="f" * 40)   # stale attestation SHA
+        cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha="f" * 40)   # stale attestation SHA
     assert path.read_bytes() == before                    # a rejected mutation writes nothing
 
+
+
+def test_curation_ready_requires_task_spec_sha256():
+    import pydantic
+
+    from daydream.benchmark.schema import Curation
+    base = dict(state="ready", snapshot_attested=True, gold_status="findings",
+                clean_attested=False, exclusions=[], case_exclusion=None)
+    f = {"finding_id": "f" * 64, "title": "t", "body": "b", "severity": "low",
+         "location": None, "provenance": {"kind": "historical", "source_ids": ["s"]}}
+    # ready with a digest validates; ready without a digest is rejected
+    assert Curation(**base, findings=[f], task_spec_sha256="d" * 64).task_spec_sha256 == "d" * 64
+    with pytest.raises(pydantic.ValidationError):
+        Curation(**base, findings=[f], task_spec_sha256=None)
+    # non-ready states (draft/stale) may be unset
+    draft = Curation(state="draft", snapshot_attested=False, clean_attested=False,
+                     gold_status=None, findings=[], exclusions=[], case_exclusion=None,
+                     task_spec_sha256=None)
+    assert draft.task_spec_sha256 is None
+
+
+def test_task_spec_approved_at_is_stripped_before_validation():
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.schema import Curation, _schema_ready
+    raw = {"curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
+                        "gold_status": None, "findings": [], "exclusions": [],
+                        "case_exclusion": None, "gold_mode": "clean",
+                        "task_spec_approved_at": "2026-08-23T00:00:00+00:00"}}
+    ready = _schema_ready(raw)
+    assert "task_spec_approved_at" not in ready["curation"]
+    assert "gold_mode" not in ready["curation"]            # existing behaviour preserved
+    # curation service path also drops it
+    model = cu._curation_model(raw["curation"])
+    assert isinstance(model, Curation)
+    assert not hasattr(model, "task_spec_approved_at")
+
+
+def test_mark_ready_records_task_spec_digest_and_approved_at(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    digest = "d" * 64
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=digest)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["task_spec_sha256"] == digest
+    assert cur.get("task_spec_approved_at")                # audit field persisted
+
+
+def test_mark_ready_derives_task_spec_digest_when_omitted(tmp_path, fake_gh):
+    """Digest omitted: mark_ready derives it under the lock from the written case.
+
+    The task-spec digest is derived from the exact case persisted at approve
+    time (never a stale pre-lock render), so the approval can never diverge
+    from what the compile path re-derives and abort a later
+    whole-workspace compile.
+    """
+    import hashlib
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha)          # digest omitted -> derive in-lock
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    expected = hashlib.sha256(build.render_task_spec(
+        load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+        instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["task_spec_sha256"] == expected
+
+def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    with pytest.raises(cu.StaleStateError):                 # wrong SHA is a no-op
+        cu.mark_ready(ws, case_id, head_sha="f" * 40, task_spec_sha256="d" * 64)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
+
+
+def test_mutation_invalidates_task_spec_approval(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="d" * 64)
+    # a gold/provenance/evidence mutation on a ready case demotes to draft AND clears approval
+    src = next(c["source_id"] for c in load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
+
+
+def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path, fake_gh):
+    """R14: approve, decline, wrong-SHA no-op, mutation invalidation, stale recovery, clean."""
+    import yaml
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    # findings case: approve
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="d" * 64)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["task_spec_sha256"] == "d" * 64
+    # mutation invalidation
+    src = next(c["source_id"] for c in load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and "task_spec_sha256" not in cur
+    # stale recovery: force stale then re-approve
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["curation"]["state"] = "stale"
+    raw["curation"]["snapshot_attested"] = False   # the stale contract (model-enforced)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="e" * 64)
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "ready" and cur["task_spec_sha256"] == "e" * 64
+    # clean case: approve
+    ws2, case_id2, head2 = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    cu.attest_clean(ws2, case_id2)
+    cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
+    cur2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["curation"]
+    assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64

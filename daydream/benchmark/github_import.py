@@ -32,6 +32,7 @@ from typing import Any, Literal, cast
 import yaml
 
 from daydream import git_ops
+from daydream.benchmark import curation as cu
 from daydream.benchmark import schema, snapshot, storage
 
 
@@ -1170,6 +1171,7 @@ def _case_materialize(
             if should_stale and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
+                cu._invalidate_task_spec_approval(curation)
         if root is not None and origin_url is not None and base_sha and head_sha:
             policy = "final_pr_head" if head_token == "final" else "explicit_head"
             snapshot_doc, bundle_bytes = snapshot.freeze_one(
