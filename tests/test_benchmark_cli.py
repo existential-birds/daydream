@@ -10,7 +10,21 @@ from pathlib import Path
 
 import pytest
 
-from daydream.benchmark.cli import _bench_config_from_argv, _format_elapsed, _load_bench_dotenv
+from daydream.benchmark.cli import (
+    _bench_config_from_argv,
+    _build_benchmark_parser,
+    _format_elapsed,
+    _load_bench_dotenv,
+)
+
+
+def test_benchmark_parser_has_build_harbor_and_compiled():
+    parser = _build_benchmark_parser()
+    build_args = parser.parse_args(["build-harbor", "/workspace", "--daydream-wheel", "/d.whl"])
+    assert build_args.subcommand == "build-harbor"
+    assert build_args.daydream_wheel == Path("/d.whl")
+    validate_args = parser.parse_args(["validate", "/workspace", "--compiled"])
+    assert validate_args.compiled is True
 
 
 def test_format_elapsed():

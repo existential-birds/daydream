@@ -453,11 +453,11 @@ def _handle_bench_command(argv: list[str]) -> int:
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
-    Sub-verbs: ``init``, ``status``, ``validate``, ``upgrade``, ``import-prs``, ``curate``.
+    Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``, ``curate``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
-        description="Private PR benchmark workspace: init/status/validate/upgrade/import-prs/curate.",
+        description="Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/import-prs/curate.",
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -476,6 +476,11 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
 
     validate_p = sub.add_parser("validate", help="validate the workspace (0/2/1 exit codes)")
     validate_p.add_argument("dir", type=Path, help="workspace directory")
+    validate_p.add_argument("--compiled", action="store_true", help="validate emitted tasks with Harbor 0.21")
+
+    build_p = sub.add_parser("build-harbor", help="package a validated workspace for Harbor 0.21")
+    build_p.add_argument("dir", type=Path, help="workspace directory")
+    build_p.add_argument("--daydream-wheel", required=True, type=Path, help="wheel for this Daydream version")
 
     upgrade_p = sub.add_parser(
         "upgrade", help="deterministically upgrade legacy case documents (finding_id + schema_version)"
@@ -597,13 +602,38 @@ def _handle_benchmark_status(dir_path: Path) -> int:
     return 0
 
 
-def _handle_benchmark_validate(dir_path: Path) -> int:
+def _handle_benchmark_validate(args) -> int:
     """Print the human-readable classification and return the numeric code."""
+    if args.compiled:
+        from daydream.benchmark.harbor.package import PackageError, validate_compiled
+        from daydream.benchmark.workspace import WorkspaceCorrupt
+
+        try:
+            code = validate_compiled(args.dir)
+        except (PackageError, WorkspaceCorrupt) as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        print("validation: compiled-ready")
+        return code
     from daydream.benchmark.workspace import validate_workspace
 
-    code, label = validate_workspace(dir_path)
+    code, label = validate_workspace(args.dir)
     print(f"validation: {label}")
     return code
+
+
+def _handle_benchmark_build_harbor(args) -> int:
+    """Package a validated authoring workspace as a runnable Harbor dataset."""
+    from daydream.benchmark.harbor.package import PackageError, build_harbor
+    from daydream.benchmark.workspace import WorkspaceCorrupt
+
+    try:
+        lock = build_harbor(args.dir, wheel=args.daydream_wheel)
+    except (PackageError, WorkspaceCorrupt) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"built Harbor dataset with {len(lock.get('cases', {}))} case(s)")
+    return 0
 
 
 def _handle_benchmark_upgrade(args) -> int:
@@ -668,7 +698,7 @@ def _handle_benchmark_curate(args) -> int:
 
 
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle ``daydream benchmark init|status|validate|upgrade|import-prs|curate``.
+    """Handle ``daydream benchmark init|status|validate|build-harbor|upgrade|import-prs|curate``.
 
     Returns an exit code; ``daydream.cli.main`` translates it to a
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
@@ -687,7 +717,9 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     if sub == "status":
         return _handle_benchmark_status(args.dir)
     if sub == "validate":
-        return _handle_benchmark_validate(args.dir)
+        return _handle_benchmark_validate(args)
+    if sub == "build-harbor":
+        return _handle_benchmark_build_harbor(args)
     if sub == "upgrade":
         return _handle_benchmark_upgrade(args)
     if sub == "import-prs":
