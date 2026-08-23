@@ -52,14 +52,14 @@ VerifierError = verifier_core.VerifierError
 
 
 class _InputFileNotFound(verifier_core.VerifierError):
-    """A required input file is absent — an infrastructure problem, not agent output.
+    """A required input file is absent or unreadable — an infrastructure problem, not agent output.
 
     Subclass of ``VerifierError`` so the candidate-zone handler can route a
-    missing candidate-artifact file to the unscored infra zone (reward-details
-    only) instead of treating it as a scored-zero agent failure. A missing
-    artifact file almost always means a wrong ``DAYDREAM_JUDGE_ARTIFACT_PATH``
-    or a missing mount reaching the entrypoint — infrastructure, never a real
-    score of zero.
+    missing or unreadable candidate-artifact file (EACCES/EISDIR/ENOTDIR and
+    friends) to the unscored infra zone (reward-details only) instead of
+    treating it as a scored-zero agent failure. A missing artifact file almost
+    always means a wrong ``DAYDREAM_JUDGE_ARTIFACT_PATH`` or a missing mount
+    reaching the entrypoint — infrastructure, never a real score of zero.
     """
 
 JUDGE_PROMPT_TEMPLATE = (
@@ -753,7 +753,11 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
     except FileNotFoundError:
         raise _InputFileNotFound(f"input file not found: {Path(path)}") from None
     except OSError as exc:
-        raise VerifierError(f"could not read {Path(path)}: {exc}") from exc
+        # An unreadable candidate-artifact file is the same infrastructure
+        # problem as a missing one (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, a
+        # broken mount, bad permissions) -- unscored infra zone, never a
+        # scored-zero agent failure.
+        raise _InputFileNotFound(f"could not read {Path(path)}: {exc}") from exc
     if len(raw) > verifier_core.MAX_ARTIFACT_BYTES:
         raise VerifierError("candidate artifact exceeds 1 MiB (raw bytes)")
     try:
@@ -912,8 +916,6 @@ def _write_error_artifact(
     error_reward = verifier_core.Reward(
         reward=0.0, gold_count=gold_count, verifier_error=1
     )
-    details = _error_details(provider, model, request_counts, errors)
-    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
     return error_reward
 
 
@@ -936,6 +938,29 @@ def _scored_zero_reward(
     """
     errors.insert(0, _bounded_error(str(exc)))
     return _write_scored_zero_artifact(
+        out_dir, provider, model, request_counts, errors, gold_count=0
+    )
+
+
+def _infra_error_reward(
+    exc: Exception,
+    *,
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+) -> verifier_core.Reward:
+    """Record a bounded infra-zone diagnostic and return the unscored error reward.
+
+    Shared by the infra-zone branches in ``run_verifier``: a failure about the
+    environment (a missing/unreadable candidate-artifact file) is unscored
+    (reward-details only, verifier_error=1, never a numeric zero) with the
+    bounded error prepended before writing. A single helper keeps the zones
+    from growing more verbatim copies of the guard.
+    """
+    errors.insert(0, _bounded_error(str(exc)))
+    return _write_error_artifact(
         out_dir, provider, model, request_counts, errors, gold_count=0
     )
 
@@ -982,15 +1007,15 @@ def run_verifier(
             artifact_raw = _read_artifact_bytes(artifact_path)
             candidates = verifier_core.validate_candidate_artifact(artifact_raw)
         except _InputFileNotFound as exc:
-            # Infra zone: a missing candidate-artifact file (wrong
-            # DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount reaching the
-            # entrypoint that skips test.sh's existence pre-check) is
-            # infrastructure trouble, not the agent's output -- unscored
-            # (reward-details only), never a scored-zero that drags down the
-            # mean with no infra_error_task_count signal.
-            errors.insert(0, _bounded_error(str(exc)))
-            return _write_error_artifact(
-                out_dir, provider, model, request_counts, errors, gold_count=0
+            # Infra zone: a missing or unreadable candidate-artifact file
+            # (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount reaching the
+            # entrypoint that skips test.sh's existence pre-check, EACCES/
+            # EISDIR/ENOTDIR) is infrastructure trouble, not the agent's
+            # output -- unscored (reward-details only), never a scored-zero
+            # that drags down the mean with no infra_error_task_count signal.
+            return _infra_error_reward(
+                exc, out_dir=out_dir, provider=provider, model=model,
+                request_counts=request_counts, errors=errors,
             )
         except VerifierError as exc:
             # Candidate zone: reading/validating the agent's own artifact is a

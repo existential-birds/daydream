@@ -4,7 +4,7 @@
 Stdlib only, never imports daydream (or the bundled verifier_core): the
 aggregation body is inlined at build time so a compiled task's ``metric.py``
 needs nothing but the stdlib. Reads one JSONL line per task — a reward dict or
-``null`` (failed task) — and writes the pooled micro metrics to the ``-o`` path.
+``null`` (unscored infrastructure failure) — and writes the pooled micro metrics to the ``-o`` path.
 Invocation matches Harbor 0.21's ``uv run metric.py -i <rewards.jsonl> -o
 <metric.json>``; a missing input raises ``FileNotFoundError`` (uncaught ->
 nonzero exit, no output written — fail-closed, never partial).
@@ -62,8 +62,9 @@ def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float |
 def aggregate_rewards_file(path: str) -> dict[str, float | int]:
     """Read a JSONL rewards file (reward dict or null per line) and aggregate.
 
-    A malformed/non-dict line is a failed-task ``None`` row, never an aborting
-    exception. An empty file aggregates to ``task_count == 0`` / score 1.0.
+    A malformed/non-dict line is an unscored infrastructure ``None`` row, never
+    an aborting exception. An empty file aggregates to ``task_count == 0`` /
+    score 1.0.
     """
     rows: list[dict[str, object] | None] = []
     for line in Path(path).read_text(encoding="utf-8").splitlines():

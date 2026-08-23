@@ -10,12 +10,35 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _run_metric_subprocess(tmp_path: Path, rows: str, out: Path | None = None) -> tuple[Path, dict[str, Any]]:
+    """Compile the metric entrypoint, feed it ``rows`` JSONL, and run it via ``uv run --script``.
+
+    Keeps the subprocess contract/flag surface (``-i``/``-o``, timeout, returncode
+    assertion) in one place; returns ``(out, parsed_result)``.
+    """
+    from daydream.benchmark.harbor import build
+
+    metric_path = tmp_path / "metric.py"
+    metric_path.write_bytes(build.render_metric())
+    inp = tmp_path / "rewards.jsonl"
+    inp.write_text(rows)
+    if out is None:
+        out = tmp_path / "metric.json"
+    proc = subprocess.run(
+        ["uv", "run", "--script", str(metric_path), "-i", str(inp), "-o", str(out)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return out, json.loads(out.read_text())
 
 
 def test_verifier_core_template_is_byte_identical_to_source() -> None:
@@ -82,23 +105,13 @@ def test_metric_entry_aggregates_as_identically_to_verifier_core(sr_metric, tmp_
 
 
 def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> None:
-    from daydream.benchmark.harbor import build
-
-    metric_path = tmp_path / "metric.py"
-    metric_path.write_bytes(build.render_metric())
-    inp = tmp_path / "rewards.jsonl"
-    inp.write_text(
+    out, result = _run_metric_subprocess(
+        tmp_path,
         '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'
         'null\n'
-        '{"reward":1.0,"tp":0,"fp":0,"fn":0,"clean_task":1}\n'
+        '{"reward":1.0,"tp":0,"fp":0,"fn":0,"clean_task":1}\n',
+        out=tmp_path / "out" / "metric.json",
     )
-    out = tmp_path / "out" / "metric.json"
-    proc = subprocess.run(
-        ["uv", "run", "--script", str(metric_path), "-i", str(inp), "-o", str(out)],
-        capture_output=True, text=True, timeout=120,
-    )
-    assert proc.returncode == 0, proc.stderr
-    result = json.loads(out.read_text())
     assert result["task_count"] == 3  # attempted = all rows (stable across old/new aggregation)
     # atomic write leaves no temp leftover: metric.py names its temp
     # ".{out.name}.{pid}.tmp", so glob the pid-suffixed pattern the write
@@ -107,23 +120,13 @@ def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> 
 
 
 def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path) -> None:
-    from daydream.benchmark.harbor import build
-
-    metric_path = tmp_path / "metric.py"
-    metric_path.write_bytes(build.render_metric())
-    inp = tmp_path / "rewards.jsonl"
-    inp.write_text(
+    _, m = _run_metric_subprocess(
+        tmp_path,
         '{"reward":0.8,"tp":2,"fp":0,"fn":1}\n'
         'null\n'
         '{"reward":1.0,"tp":0,"fp":0,"fn":0,"clean_task":1}\n'
-        '{"reward":0.0,"tp":0,"fp":5,"fn":5,"verifier_error":1}\n')
-    out = tmp_path / "metric.json"
-    proc = subprocess.run(
-        ["uv", "run", "--script", str(metric_path), "-i", str(inp), "-o", str(out)],
-        capture_output=True, text=True, timeout=120,
+        '{"reward":0.0,"tp":0,"fp":5,"fn":5,"verifier_error":1}\n',
     )
-    assert proc.returncode == 0, proc.stderr
-    m = json.loads(out.read_text())
     assert m["task_count"] == 4
     assert m["scored_task_count"] == 2 and m["infra_error_task_count"] == 2
     assert (m["total_tp"], m["total_fp"], m["total_fn"]) == (2, 0, 1)  # unscored rows contribute nothing
