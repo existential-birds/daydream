@@ -47,7 +47,9 @@ def render_metric() -> bytes:
     aggregate_metrics)`` so the compiled metric and the in-repo corpus pool
     share one aggregation contract and cannot drift.
     """
-    text = (_TEMPLATE_DIR / "metric.py").read_text(encoding="utf-8")
+    from daydream.benchmark.harbor.package import template_text
+
+    text = template_text("metric.py")
     if _METRIC_AGG_BEGIN not in text or _METRIC_AGG_END not in text:
         raise CompileError(
             "metric.py template is missing the aggregation markers "
@@ -432,15 +434,15 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
     Returns ``[(rel, sha256), ...]`` for inventory. A missing template asset
     raises :class:`CompileError` -- never a silent skip or fabricated file.
     """
+    from daydream.benchmark.harbor.package import template_text
+
     out: list[tuple[str, str]] = []
     for rel in _COPY_ASSETS:
-        src = _TEMPLATE_DIR / rel
-        if not src.is_file():
-            raise CompileError(f"missing template asset: {rel}")
+        data = template_text(rel).encode("utf-8")
         dst = case_stage / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-        out.append((rel, hashlib.sha256(src.read_bytes()).hexdigest()))
+        dst.write_bytes(data)
+        out.append((rel, hashlib.sha256(data).hexdigest()))
     return out
 
 

@@ -290,3 +290,17 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path, f
     with pytest.raises(pkg.PackageError) as rejected:
         pkg.validate_compiled(ws)
     assert "harbor-job.yaml" in str(rejected.value)
+
+
+def test_templates_and_lock_readable_via_importlib_resources():
+    import importlib.resources
+
+    from daydream.benchmark.harbor import package as pkg
+
+    assert pkg.template_text("tests/Dockerfile")
+    assert pkg.template_text("environment/Dockerfile")
+    assert pkg.lock_text()
+    resource = importlib.resources.files("daydream.benchmark.harbor.templates").joinpath(
+        "tests/Dockerfile"
+    )
+    assert "FROM" in resource.read_text()

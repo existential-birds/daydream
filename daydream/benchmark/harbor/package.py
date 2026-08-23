@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import importlib.resources
 import re
 import subprocess
 import sys
@@ -91,6 +92,21 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
+def template_text(rel: str) -> str:
+    """Read a packaged template through the installed-release resource seam."""
+    try:
+        resource = importlib.resources.files("daydream.benchmark.harbor.templates")
+        for part in Path(rel).parts:
+            resource = resource.joinpath(part)
+        return resource.read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, TypeError) as resource_error:
+        fallback = Path(__file__).parent / "templates" / rel
+        try:
+            return fallback.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise PackageError(f"missing packaged template resource {rel}: {resource_error}; {exc}") from exc
+
+
 def build_harbor(root: Path, *, wheel: Path) -> dict:
     """Validate all preconditions, then atomically compile a runnable dataset."""
     from daydream.benchmark.harbor import build
@@ -149,12 +165,19 @@ def validate_compiled(root: Path | None) -> int:
 
 
 def lock_text() -> str:
-    """Read the packaged runtime lock (resource routing is finalized in Task 14)."""
-    path = Path(__file__).parent / "runtime-requirements.lock"
+    """Read the packaged runtime lock through the installed-release resource seam."""
     try:
-        return path.read_text()
-    except OSError as exc:
-        raise PackageError(f"cannot read packaged runtime lock {path}: {exc}") from exc
+        return importlib.resources.files("daydream.benchmark.harbor").joinpath(
+            "runtime-requirements.lock"
+        ).read_text(encoding="utf-8")
+    except (FileNotFoundError, ModuleNotFoundError, TypeError) as resource_error:
+        path = Path(__file__).parent / "runtime-requirements.lock"
+        try:
+            return path.read_text()
+        except OSError as exc:
+            raise PackageError(
+                f"cannot read packaged runtime lock {path}: {resource_error}; {exc}"
+            ) from exc
 
 
 def runtime_lock_header_fields(text: str) -> dict[str, str]:
@@ -206,7 +229,7 @@ def render_job_config(*, oracle: bool) -> bytes:
 
 def render_verifier_dockerfile(*, base_image: str) -> bytes:
     """Render and validate the entrypoint-free separate verifier image."""
-    template = Path(__file__).parent.joinpath("templates/tests/Dockerfile").read_text()
+    template = template_text("tests/Dockerfile")
     text = template.replace("__BASE_IMAGE__", base_image)
     forbidden = ("ENTRYPOINT", "CMD", "/verifier", "httpx>=")
     violations = [token for token in forbidden if token in text]
@@ -219,7 +242,7 @@ def render_verifier_dockerfile(*, base_image: str) -> bytes:
 
 def render_environment_dockerfile(*, base_image: str, daydream_version: str) -> bytes:
     """Render and validate the isolated agent environment image."""
-    template = Path(__file__).parent.joinpath("templates/environment/Dockerfile").read_text()
+    template = template_text("environment/Dockerfile")
     text = template.replace("__BASE_IMAGE__", base_image).replace(
         "__DAYDREAM_VERSION__", daydream_version
     )
