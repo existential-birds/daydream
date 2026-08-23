@@ -50,6 +50,18 @@ class _AsyncHttpClient(Protocol):
 
 VerifierError = verifier_core.VerifierError
 
+
+class _InputFileNotFound(verifier_core.VerifierError):
+    """A required input file is absent — an infrastructure problem, not agent output.
+
+    Subclass of ``VerifierError`` so the candidate-zone handler can route a
+    missing candidate-artifact file to the unscored infra zone (reward-details
+    only) instead of treating it as a scored-zero agent failure. A missing
+    artifact file almost always means a wrong ``DAYDREAM_JUDGE_ARTIFACT_PATH``
+    or a missing mount reaching the entrypoint — infrastructure, never a real
+    score of zero.
+    """
+
 JUDGE_PROMPT_TEMPLATE = (
     Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8")
 )
@@ -739,7 +751,7 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
     try:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
-        raise VerifierError(f"input file not found: {Path(path)}") from None
+        raise _InputFileNotFound(f"input file not found: {Path(path)}") from None
     except OSError as exc:
         raise VerifierError(f"could not read {Path(path)}: {exc}") from exc
     if len(raw) > verifier_core.MAX_ARTIFACT_BYTES:
@@ -832,6 +844,27 @@ def _error_details(provider: str, model: str, request_counts: dict[str, int], er
     }
 
 
+def _write_details(
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+) -> Path:
+    """Normalize/mkdir ``out_dir`` and atomically write the shared reward-details.json.
+
+    Shared by both the scored-zero and unscored-error artifact writers so the
+    mkdir + details-build + atomic-write lines cannot drift between the two
+    zones. Returns the normalized ``out_dir`` for the caller's ``reward.json``
+    write (scored zone only).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    details = _error_details(provider, model, request_counts, errors)
+    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
+    return out_dir
+
+
 def _write_scored_zero_artifact(
     out_dir: str | Path,
     provider: str,
@@ -849,14 +882,11 @@ def _write_scored_zero_artifact(
     zero rather than being unscored. ``errors`` must already be
     bounded/redacted before the call.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _write_details(out_dir, provider, model, request_counts, errors)
     scored_zero = verifier_core.Reward(
         reward=0.0, gold_count=gold_count, verifier_error=0
     )
-    details = _error_details(provider, model, request_counts, errors)
     _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(scored_zero))
-    _atomic_write(out_dir, "reward-details.json", json.dumps(details))
     return scored_zero
 
 
@@ -871,21 +901,43 @@ def _write_error_artifact(
     """Write the unscored error artifacts and return the error reward.
 
     Every infrastructure failure path -- metadata load, gold read/digest/
-    validate, judging, exhausted retries, a missing client, or an unexpected
-    runtime exception -- funnels through here so ``reward-details.json`` is
-    always written with typed bounded diagnostics, never a bare exit. Only
-    ``reward-details.json`` is written: no ``reward.json`` on an infra path,
-    so the trial is unscored (never a numeric zero). ``errors`` must already
-    be bounded/redacted before the call.
+    validate, judging, exhausted retries, a missing client, an unexpected
+    runtime exception, or a missing candidate-artifact file -- funnels through
+    here so ``reward-details.json`` is always written with typed bounded
+    diagnostics, never a bare exit. Only ``reward-details.json`` is written: no
+    ``reward.json`` on an infra path, so the trial is unscored (never a numeric
+    zero). ``errors`` must already be bounded/redacted before the call.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = _write_details(out_dir, provider, model, request_counts, errors)
     error_reward = verifier_core.Reward(
         reward=0.0, gold_count=gold_count, verifier_error=1
     )
     details = _error_details(provider, model, request_counts, errors)
     _atomic_write(out_dir, "reward-details.json", json.dumps(details))
     return error_reward
+
+
+def _scored_zero_reward(
+    exc: Exception,
+    *,
+    out_dir: str | Path,
+    provider: str,
+    model: str,
+    request_counts: dict[str, int],
+    errors: list[str],
+) -> verifier_core.Reward:
+    """Record a bounded candidate-zone diagnostic and return the scored-zero reward.
+
+    Shared by the candidate and binding zones in ``run_verifier``: both treat a
+    failure about the agent's own artifact as a scored outcome (reward=0,
+    verifier_error=0) and both prepend the bounded error before writing. A
+    single helper keeps the two zones from growing more verbatim copies of the
+    guard.
+    """
+    errors.insert(0, _bounded_error(str(exc)))
+    return _write_scored_zero_artifact(
+        out_dir, provider, model, request_counts, errors, gold_count=0
+    )
 
 
 def run_verifier(
@@ -929,12 +981,23 @@ def run_verifier(
         try:
             artifact_raw = _read_artifact_bytes(artifact_path)
             candidates = verifier_core.validate_candidate_artifact(artifact_raw)
+        except _InputFileNotFound as exc:
+            # Infra zone: a missing candidate-artifact file (wrong
+            # DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount reaching the
+            # entrypoint that skips test.sh's existence pre-check) is
+            # infrastructure trouble, not the agent's output -- unscored
+            # (reward-details only), never a scored-zero that drags down the
+            # mean with no infra_error_task_count signal.
+            errors.insert(0, _bounded_error(str(exc)))
+            return _write_error_artifact(
+                out_dir, provider, model, request_counts, errors, gold_count=0
+            )
         except VerifierError as exc:
             # Candidate zone: reading/validating the agent's own artifact is a
             # scored outcome -- a scored-zero reward, never an infra error.
-            errors.insert(0, _bounded_error(str(exc)))
-            return _write_scored_zero_artifact(
-                out_dir, provider, model, request_counts, errors, gold_count=0
+            return _scored_zero_reward(
+                exc, out_dir=out_dir, provider=provider, model=model,
+                request_counts=request_counts, errors=errors,
             )
 
         metadata = _load_verifier_metadata(Path(gold_path))
@@ -948,9 +1011,9 @@ def run_verifier(
         except VerifierError as exc:
             # Binding zone: a candidate pointing at the wrong task is still the
             # agent's own output -- scored zero, not unscored.
-            errors.insert(0, _bounded_error(str(exc)))
-            return _write_scored_zero_artifact(
-                out_dir, provider, model, request_counts, errors, gold_count=0
+            return _scored_zero_reward(
+                exc, out_dir=out_dir, provider=provider, model=model,
+                request_counts=request_counts, errors=errors,
             )
 
         gold_raw = _read_gold_bytes(Path(gold_path), metadata["gold_sha256"])

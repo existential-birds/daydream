@@ -100,7 +100,10 @@ def test_metric_subprocess_runs_with_harbor_args_and_writes_output(tmp_path) -> 
     assert proc.returncode == 0, proc.stderr
     result = json.loads(out.read_text())
     assert result["task_count"] == 3  # attempted = all rows (stable across old/new aggregation)
-    assert not (out.parent / ".metric.json.tmp").exists()  # atomic write leaves no temp leftover
+    # atomic write leaves no temp leftover: metric.py names its temp
+    # ".{out.name}.{pid}.tmp", so glob the pid-suffixed pattern the write
+    # actually uses (the old ".metric.json.tmp" literal could never match).
+    assert not list(out.parent.glob(f".{out.name}.*.tmp"))
 
 
 def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path) -> None:
@@ -126,3 +129,23 @@ def test_metric_subprocess_unscored_rows_not_turned_into_zeros(tmp_path) -> None
     assert (m["total_tp"], m["total_fp"], m["total_fn"]) == (2, 0, 1)  # unscored rows contribute nothing
     assert abs(m["mean_task_score"] - 0.9) < 1e-9                       # (0.8+1.0)/2, never over 4
     assert m["micro_precision"] == 1.0 and m["micro_recall"] == 2.0 / 3.0
+
+
+def test_metric_helper_functions_cannot_drift_from_verifier_core() -> None:
+    """The metric.py template's helper functions must stay byte-identical to verifier_core.
+
+    ``render_metric()`` splices only ``aggregate_metrics`` into the compiled
+    metric; the ``_as_int/_as_float/_f1`` helpers it resolves at runtime are the
+    template-local copies. They must not drift from the in-repo verifier_core
+    copies (which the corpus pool uses), or the compiled metric and the pool
+    would disagree on row coercion / f1. This gate makes any drift fail loudly
+    instead of silently diverging.
+    """
+    import inspect
+
+    from daydream.benchmark.harbor import verifier_core as vc
+
+    tmpl = (REPO / "daydream" / "benchmark" / "harbor" / "templates" / "metric.py").read_text(encoding="utf-8")
+    for name in ("_as_int", "_as_float", "_f1"):
+        src = inspect.getsource(getattr(vc, name))
+        assert src in tmpl, f"metric.py template's {name} drifted from verifier_core.py"

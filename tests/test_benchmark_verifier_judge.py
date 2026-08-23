@@ -1297,6 +1297,33 @@ def test_run_verifier_missing_gold_file_is_unscored(sr_module, tmp_path) -> None
     assert any("not found" in e for e in details["errors"])
 
 
+def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module, tmp_path) -> None:
+    """A missing candidate-artifact file is infra, not a scored-zero agent failure.
+
+    The FileNotFoundError branch is routed to the unscored infra zone
+    (reward-details only, verifier_error=1) so an infra path misconfiguration
+    (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount) never drags down the
+    mean with no infra_error_task_count signal. This pins finding #820's
+    file-absent vs file-invalid distinction.
+    """
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    artifact_path.unlink()                                 # artifact missing
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+    assert reward.verifier_error == 1
+    assert reward.reward == 0.0
+    assert not (out / "reward.json").exists()              # unscored: no numeric reward
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("not found" in e for e in details["errors"])
+
+
 def test_run_verifier_malformed_judge_output_is_unscored(sr_module, tmp_path) -> None:
     sr = sr_module
     gold_path = tmp_path / "golden-review.json"

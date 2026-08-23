@@ -46,7 +46,11 @@ def render_metric() -> bytes:
     share one aggregation contract and cannot drift.
     """
     text = (_TEMPLATE_DIR / "metric.py").read_text(encoding="utf-8")
-    assert _METRIC_AGG_BEGIN in text and _METRIC_AGG_END in text
+    if _METRIC_AGG_BEGIN not in text or _METRIC_AGG_END not in text:
+        raise CompileError(
+            "metric.py template is missing the aggregation markers "
+            f"({_METRIC_AGG_BEGIN!r} / {_METRIC_AGG_END!r}); cannot render compiled metric"
+        )
     start = text.index(_METRIC_AGG_BEGIN)
     stop = text.index(_METRIC_AGG_END) + len(_METRIC_AGG_END)
     body = inspect.getsource(vc.aggregate_metrics)
