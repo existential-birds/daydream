@@ -389,3 +389,68 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
     assert cwd == "/workspace/repo"
     assert "ANTHROPIC_API_KEY" not in child and "DAYDREAM_REVIEW_API_KEY" in child
     assert "--findings-out" not in cmd                     # no live-PR emission path
+
+
+# ---------------------------------------------------------------------------
+# Task 8: populate_context_post_run — trajectory metrics -> AgentContext
+# ---------------------------------------------------------------------------
+
+
+def test_populate_context_from_trajectory_final_metrics(tmp_path):
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+    from harbor.models.agent.context import AgentContext
+
+    traj_dir = tmp_path / "agent"
+    traj_dir.mkdir(parents=True)
+    (traj_dir / "trajectory.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "final_metrics": {
+                    "total_prompt_tokens": 1200,
+                    "total_cached_tokens": 300,
+                    "total_completion_tokens": 800,
+                    "total_cost_usd": 0.42,
+                },
+            }
+        )
+    )
+    agent = DaydreamReviewAgent(logs_dir=tmp_path)
+    ctx = AgentContext()
+    agent.populate_context_post_run(ctx)
+    assert ctx.n_input_tokens == 1200
+    assert ctx.n_cache_tokens == 300
+    assert ctx.n_output_tokens == 800
+    assert ctx.cost_usd == 0.42
+
+
+def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path):
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+    from harbor.models.agent.context import AgentContext
+
+    agent = DaydreamReviewAgent(logs_dir=tmp_path)  # no agent/trajectory.json
+    ctx = AgentContext()
+    agent.populate_context_post_run(ctx)
+    assert ctx.is_empty()  # metrics stay unset; no fabricated values
+
+
+def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path):
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+    from harbor.models.agent.context import AgentContext
+
+    traj_dir = tmp_path / "agent"
+    traj_dir.mkdir(parents=True)
+    (traj_dir / "trajectory.json").write_text("not json at all")
+    agent = DaydreamReviewAgent(logs_dir=tmp_path)
+    ctx = AgentContext()
+    agent.populate_context_post_run(ctx)
+    assert ctx.is_empty()
