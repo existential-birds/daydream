@@ -857,11 +857,30 @@ class Curation(BaseModel):
 
 
 def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
-    """A schema-valid copy of a raw case doc (persisted audit fields stripped)."""
+    """A schema-valid copy of a raw case doc (persisted audit fields stripped).
+
+    Backfills a ``task_spec_sha256`` that a pre-existing ``ready`` curation
+    lacks (a legacy workspace persisted before the approval field existed): the
+    digest is re-rendered from *raw* — the same deterministic bytes the
+    ``harbor`` compile path derives — so a legacy-ready case validates through
+    :class:`CaseDocument` (R7/R8) instead of surfacing as corrupt. This is the
+    migration-equivalent point: it runs on every strict load (workspace
+    validate/status and migrate) and its backfill is what a subsequent compile
+    inventories, so no per-legacy-case rewrite is required.
+    """
     doc = dict(raw)
     curation = dict(raw.get("curation") or {})
     curation.pop("gold_mode", None)
     curation.pop("task_spec_approved_at", None)
+    if curation.get("state") == "ready" and curation.get("task_spec_sha256") is None:
+        from daydream.benchmark.harbor.build import (
+            ASSIGNMENT_TEXT,
+            render_task_spec,
+        )
+
+        curation["task_spec_sha256"] = hashlib.sha256(
+            render_task_spec(doc, instruction=ASSIGNMENT_TEXT)
+        ).hexdigest()
     doc["curation"] = curation
     return doc
 

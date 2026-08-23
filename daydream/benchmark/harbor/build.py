@@ -570,6 +570,28 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _write_task_spec(stage: Path, case_doc: dict) -> str:
+    """Render one case's hidden ``Task.md``, verify it, and write it to *stage*.
+
+    The task spec is the byte-deterministic hidden evaluation contract (R10/
+    R8): its sha256 must equal the ``task_spec_sha256`` persisted when the
+    case was marked ready, else the compiled bytes no longer reflect what the
+    curator approved and the case's whole compile aborts rather than silently
+    shipping the stale contract. Returns the derived digest for the case lock
+    row.
+    """
+    task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
+    task_spec_sha256 = hashlib.sha256(task_spec_bytes).hexdigest()
+    approved = (case_doc.get("curation") or {}).get("task_spec_sha256")
+    if task_spec_sha256 != approved:
+        raise CompileError(
+            f"case {case_doc.get('case_id')} task spec digest "
+            f"{task_spec_sha256} != approved {approved}"
+        )
+    (stage / "Task.md").write_bytes(task_spec_bytes)
+    return task_spec_sha256
+
+
 def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict:
     """Compile one case tree into ``stage/<key>/`` and return its lock row."""
     case_id = case_doc["case_id"]
@@ -583,14 +605,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
 
     # The hidden evaluation contract: byte-deterministic render, verified
     # against the human-approved digest before any bytes are written (R10/R8).
-    task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
-    task_spec_sha256 = hashlib.sha256(task_spec_bytes).hexdigest()
-    approved = curation.get("task_spec_sha256")
-    if task_spec_sha256 != approved:
-        raise CompileError(
-            f"case {case_id} task spec digest {task_spec_sha256} != approved {approved}"
-        )
-    (case_stage / "Task.md").write_bytes(task_spec_bytes)
+    task_spec_sha256 = _write_task_spec(case_stage, case_doc)
 
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)

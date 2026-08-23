@@ -37,6 +37,7 @@ clone, and ``git_ops``."""
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import tempfile
 import threading
@@ -749,6 +750,22 @@ def _validate_transition(frm: str | None, to: str) -> None:
         raise CurationError(str(exc)) from exc
 
 
+def _invalidate_task_spec_approval(curation: dict[str, Any]) -> None:
+    """Clear a persisted task-spec approval (approved digest + audit stamp).
+
+    ``mark_ready`` persists the pair together and every gold/provenance/
+    evidence mutation (or a ready demotion, case (re)import, or case
+    exclusion) that makes a previously-approved spec no longer reflect the
+    case must clear both together so they can never diverge. Shared by
+    :func:`_demote_ready`, the stale branch of :func:`_reopen_for_mutation`,
+    :func:`_apply_case_exclusion`, and the re-import path in ``github_import``
+    — the exact four call sites that previously inlined the identical
+    two-pop pair.
+    """
+    curation.pop("task_spec_sha256", None)
+    curation.pop("task_spec_approved_at", None)
+
+
 def _demote_ready(curation: dict[str, Any]) -> str | None:
     """Demote a ``ready`` case to ``draft``, clearing attestation.
 
@@ -761,8 +778,7 @@ def _demote_ready(curation: dict[str, Any]) -> str | None:
         _validate_transition("ready", "draft")
         curation["state"] = "draft"
         curation["snapshot_attested"] = False
-        curation.pop("task_spec_sha256", None)
-        curation.pop("task_spec_approved_at", None)
+        _invalidate_task_spec_approval(curation)
         return "draft"
     return state
 
@@ -781,8 +797,7 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
         _demote_ready(curation)
     elif state == "stale":
         curation["snapshot_attested"] = False
-        curation.pop("task_spec_sha256", None)
-        curation.pop("task_spec_approved_at", None)
+        _invalidate_task_spec_approval(curation)
     elif state in ("excluded", "unreplayable"):
         raise CurationError(
             f"gold mutations are rejected on a {state} case (re-include or case-exclude it first)"
@@ -790,15 +805,19 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
     return curation
 
 
-def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str) -> None:
+def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str | None = None) -> None:
     """The final-attest operation: the one path that sets a case ready + attested.
 
     SHA-specific confirmation: *head_sha* must equal the snapshot's original
     head SHA, and the current state must move to ``ready`` (draft -> ready or
     stale -> ready). Sets ``snapshot_attested=True`` and ``state=ready`` after
     the full case revalidates. Records the human-approved Task.md digest
-    (*task_spec_sha256*) plus a persisted-but-stripped ``task_spec_approved_at``
-    audit timestamp -- there is no approval without a digest (R7).
+    (*task_spec_sha256*); when *task_spec_sha256* is omitted the digest is
+    derived under the workspace lock from the exact case state that is about
+    to be persisted, so the approved digest can never go stale and abort a
+    later whole-workspace compile. Also records a persisted-but-stripped
+    ``task_spec_approved_at`` audit timestamp -- there is no approval without
+    a digest (R7).
     """
 
     def mutate(raw: dict[str, Any]) -> None:
@@ -818,9 +837,16 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str
                 "and no clean attestation (clean-attest first)"
             )
         _validate_transition(curation.get("state"), "ready")
+        stored_task_spec_sha256 = task_spec_sha256
+        if stored_task_spec_sha256 is None:
+            from daydream.benchmark.harbor import build
+
+            stored_task_spec_sha256 = hashlib.sha256(
+                build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+            ).hexdigest()
         curation["state"] = "ready"
         curation["snapshot_attested"] = True
-        curation["task_spec_sha256"] = task_spec_sha256
+        curation["task_spec_sha256"] = stored_task_spec_sha256
         curation["task_spec_approved_at"] = datetime.now(timezone.utc).isoformat()
         _derive_content(raw)
 
@@ -869,8 +895,8 @@ def _apply_case_exclusion(
     _validate_transition(state, "excluded")
     curation["state"] = "excluded"
     curation["snapshot_attested"] = False
-    curation.pop("task_spec_sha256", None)
-    curation.pop("task_spec_approved_at", None)
+    # A ready case's task-spec approval was already invalidated by
+    # _demote_ready's ready->draft step; no non-ready state carries one.
     curation["case_exclusion"] = {"reason": reason, "note": note}
 
 

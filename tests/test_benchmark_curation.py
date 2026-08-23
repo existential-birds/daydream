@@ -897,6 +897,32 @@ def test_mark_ready_records_task_spec_digest_and_approved_at(tmp_path, fake_gh):
     assert cur["task_spec_sha256"] == digest
     assert cur.get("task_spec_approved_at")                # audit field persisted
 
+
+def test_mark_ready_derives_task_spec_digest_when_omitted(tmp_path, fake_gh):
+    """Digest omitted: mark_ready derives it under the lock from the written case.
+
+    The task-spec digest is derived from the exact case persisted at approve
+    time (never a stale pre-lock render), so the approval can never diverge
+    from what the compile path re-derives and abort a later
+    whole-workspace compile.
+    """
+    import hashlib
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha)          # digest omitted -> derive in-lock
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    expected = hashlib.sha256(build.render_task_spec(
+        load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+        instruction=build.ASSIGNMENT_TEXT)).hexdigest()
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["task_spec_sha256"] == expected
+
 def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     from daydream.benchmark.storage import load_yaml_strict

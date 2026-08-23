@@ -6,7 +6,6 @@ mutates the case YAML/model directly. Rendering is plain-string builders for
 deterministic tests; Rich stays available for live styling.
 """
 
-import hashlib
 import os
 import shlex
 import subprocess
@@ -363,8 +362,10 @@ def _action_ready(
     Renders the byte-deterministic Task.md for the case (the same bytes the
     compiler verifies and writes), prints it, then asks the single combined
     approve-spec + attest-review question. Only a literal ``y`` proceeds: the
-    freshly-rendered digest is recorded via :func:`mark_ready`; anything else is
-    a no-op leaving the case ``draft``.
+    digest is derived by :func:`mark_ready` **under the workspace lock** from
+    the exact case being marked ready, so the approved digest is never a stale
+    pre-lock render and cannot abort a later whole-workspace compile. Anything
+    else is a no-op leaving the case ``draft``.
     """
     head = (view.get("snapshot") or {}).get("original_head_sha") or ""
     raw = load_yaml_strict(Path(root) / "cases" / f"{case_id}.yaml")
@@ -378,8 +379,7 @@ def _action_ready(
     if answer.lower() != "y":
         return "continue"
     try:
-        digest = hashlib.sha256(spec_bytes).hexdigest()
-        cu.mark_ready(root, case_id, head_sha=head, task_spec_sha256=digest)
+        cu.mark_ready(root, case_id, head_sha=head)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"marked {case_id} ready")
