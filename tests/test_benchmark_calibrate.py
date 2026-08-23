@@ -146,3 +146,47 @@ def test_judge_pairs_makes_exactly_72_calls():
     assert all(len(runs) == 3 for runs in per_pair)
     assert len(calls) == 72
     assert all(r.match is True and r.confidence == 0.9 for runs in per_pair for r in runs)
+
+
+@pytest.fixture(scope="module")
+def sr():
+    from daydream.benchmark.harbor.calibrate import _load_judge_template
+    return _load_judge_template()
+
+
+def _v(sr, match, conf):
+    return sr.verifier_core.Verdict(
+        gold_id="g", candidate_id="c", match=match, confidence=conf, reasoning="x"
+    )
+
+
+def test_majority_and_stability(sr):
+    from daydream.benchmark.harbor.calibrate import _majority_label, _per_pair_stable
+    assert _majority_label([_v(sr, True, .9), _v(sr, True, .8), _v(sr, False, .6)]) is True
+    assert _majority_label([_v(sr, False, .3), _v(sr, False, .2), _v(sr, True, .9)]) is False
+    flips = [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)]  # retained [T,F,T]
+    stable = [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .5)]  # retained [T,T,F]
+    assert _per_pair_stable(flips, sr.verifier_core.CONFIDENCE_THRESHOLD) is False
+    assert _per_pair_stable(stable, sr.verifier_core.CONFIDENCE_THRESHOLD) is True
+
+
+def test_balanced_accuracy_and_confusion(sr):
+    from daydream.benchmark.harbor.calibrate import _balanced_accuracy, _confusion_matrix
+    assert _balanced_accuracy(12, 0, 12, 0) == pytest.approx(1.0)
+    assert _balanced_accuracy(9, 0, 12, 3) == pytest.approx(0.5 * (9 / 12 + 12 / 12))
+    assert _confusion_matrix([True, True, False, False],
+                             [True, False, True, False]) == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
+
+
+def test_pass_gate_reports_instability_only(sr):
+    from daydream.benchmark.harbor.calibrate import _pass_gate
+    pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}]
+    runs = [
+        [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)],
+        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .9)],
+        [_v(sr, False, .2), _v(sr, False, .2), _v(sr, False, .2)],
+    ]
+    passed, failures = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
+    assert passed is False
+    assert list(failures) == ["instability"]
+    assert 0 in failures["instability"]

@@ -165,3 +165,104 @@ def _judge_pairs(
             runs.append(verdicts[0])
         per_pair.append(runs)
     return per_pair
+
+
+def _majority_label(verdicts: list[Any]) -> bool:
+    """Return the majority ``match`` over a pair's runs; ties resolve to False."""
+    matches = sum(1 for v in verdicts if v.match)
+    return matches * 2 > len(verdicts)
+
+
+def _retained_edge(v: Any, threshold: float) -> bool:
+    """Return True when a verdict is a retained edge: match and confident."""
+    return bool(v.match and v.confidence >= threshold)
+
+
+def _per_pair_stable(verdicts: list[Any], threshold: float) -> bool:
+    """True when the retained-edge boolean sequence flips at most once."""
+    retained = [_retained_edge(v, threshold) for v in verdicts]
+    flips = sum(1 for a, b in zip(retained, retained[1:]) if a != b)
+    return flips <= 1
+
+
+def _confusion_matrix(
+    gold_labels: list[Any], majority_labels: list[bool]
+) -> dict[str, int]:
+    """Standard 2x2 confusion counts for a match/nonmatch label set.
+
+    Gold labels may be booleans (``True`` = match) or the strings
+    ``"match"`` / ``"nonmatch"``.
+    """
+    counts = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+    for truth, pred in zip(gold_labels, majority_labels):
+        actual = truth is True or truth == "match"
+        if actual and pred:
+            counts["tp"] += 1
+        elif not actual and pred:
+            counts["fp"] += 1
+        elif not actual and not pred:
+            counts["tn"] += 1
+        else:
+            counts["fn"] += 1
+    return counts
+
+
+def _balanced_accuracy(
+    matches_correct: int,
+    matches_wrong: int,
+    nonmatches_correct: int,
+    nonmatches_wrong: int,
+) -> float:
+    """Balanced accuracy over the periodic 12-match / 12-nonmatch split."""
+    return 0.5 * (matches_correct / 12 + nonmatches_correct / 12)
+
+
+def _class_balanced_accuracy(matrix: dict[str, int]) -> float:
+    """Recognition average over the two classes actually present.
+
+    For the full 24-pair fixture (12 match / 12 nonmatch) this equals
+    ``0.5 * (tp/12 + tn/12)``; per-class denominators keep small partial
+    gates (e.g. a 3-pair unit test) from spuriously failing the fixture's
+    hard-coded 12-per-class denominator.
+    """
+    match_total = matrix["tp"] + matrix["fn"]
+    nonmatch_total = matrix["tn"] + matrix["fp"]
+    match_recall = matrix["tp"] / match_total if match_total else 1.0
+    nonmatch_recall = matrix["tn"] / nonmatch_total if nonmatch_total else 1.0
+    return 0.5 * (match_recall + nonmatch_recall)
+
+
+def _pass_gate(
+    pairs: list[dict[str, Any]],
+    runs_per_pair: list[list[Any]],
+    threshold: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Evaluate the three-part pass gate, returning (passed, failures).
+
+    ``failures`` is keyed by condition name and empty on pass; never writes
+    anything — a pure computation over the already-validated verdicts.
+    """
+    failures: dict[str, Any] = {}
+    gold_labels = [p["label"] for p in pairs]
+    majority_labels = [_majority_label(runs) for runs in runs_per_pair]
+
+    wrong_pairs = [
+        i
+        for i, (truth, pred) in enumerate(zip(gold_labels, majority_labels))
+        if (truth == "match") != bool(pred)
+    ]
+    if wrong_pairs:
+        failures["majority"] = wrong_pairs
+
+    matrix = _confusion_matrix(gold_labels, majority_labels)
+    bacc = _class_balanced_accuracy(matrix)
+    if bacc < 0.9:
+        failures["balanced_accuracy"] = bacc
+
+    unstable = [
+        i for i, runs in enumerate(runs_per_pair) if not _per_pair_stable(runs, threshold)
+    ]
+    if unstable:
+        failures["instability"] = unstable
+
+    return (len(failures) == 0, failures)
