@@ -20,10 +20,11 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from daydream.benchmark.harbor.run import (
     RunError,
+    _ledger_path,
     _load_ledger,
     _validate_job_dir,
 )
@@ -140,6 +141,37 @@ def _clean_trajectories(root: Path, report: CleanReport) -> None:
             report.trajectory_deleted += 1
 
 
+def _clean_jobs(
+    root: Path, report: CleanReport, *, docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
+) -> None:
+    """Remove ledgered job dirs and (Task 6+) their recorded images.
+
+    Ledger-driven: each run's ``job_dir`` is validated under ``<ws>/harbor/jobs/``
+    (``RunError`` on escape) and only removed when present; a run transitions to
+    ``cleaned`` only when its job dir is gone/absent. The whole load-mutate-write
+    runs under one ``WorkspaceLock``.
+    """
+    with WorkspaceLock(root):
+        doc = _load_ledger(root)
+        changed = False
+        for entry in doc["runs"]:
+            if entry.get("state") == "cleaned":
+                report.runs_already_clean += 1
+                continue
+            validated = _validate_job_dir(root, entry["job_dir"])
+            run_path = Path(validated)
+            if run_path.is_dir():
+                _delete_path(run_path)
+                report.job_dirs_deleted += 1
+            else:
+                report.job_dirs_absent += 1
+            entry["state"] = "cleaned"
+            report.runs_cleaned += 1
+            changed = True
+        if changed:
+            atomic_write_json(_ledger_path(root), doc, mode=0o600)
+
+
 def clean_workspace(
     root,
     *,
@@ -156,4 +188,6 @@ def clean_workspace(
         _clean_cache(root, report)
     if trajectories:
         _clean_trajectories(root, report)
+    if jobs:
+        _clean_jobs(root, report)
     return report

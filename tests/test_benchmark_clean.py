@@ -207,3 +207,34 @@ def test_clean_trajectories_absent_dir_is_already_clean(tmp_path):
     report = clean_mod.clean_workspace(ws, trajectories=True)
     assert report.exit_code == 0 and report.trajectory_absent == 1
     assert report.job_dirs_deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 5: --jobs (ledger-driven job-dir deletion + cleaned state)
+# ---------------------------------------------------------------------------
+
+
+def test_clean_jobs_deletes_ledgered_job_dir_and_marks_cleaned(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000b1"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "case-abc" / "verifier").mkdir(parents=True)
+    (job / "case-abc" / "verifier" / "reward.json").write_text("{}")
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("case-abc__1", removed=False)])
+    report = clean_mod.clean_workspace(ws, jobs=True)
+    assert report.exit_code == 0 and report.job_dirs_deleted == 1
+    assert not job.exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleaned"
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists()
+
+
+def test_clean_jobs_already_cleaned_run_is_noop(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000b2"
+    _append_ledger_run(ws, run_id, state="cleaned", environments=[])
+    report = clean_mod.clean_workspace(ws, jobs=True)
+    assert report.exit_code == 0 and report.runs_already_clean == 1
+    assert report.job_dirs_deleted == 0
