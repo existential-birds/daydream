@@ -622,6 +622,9 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)
     (case_stage / "README.md").write_text(_CASE_README)
+    from daydream.benchmark.harbor.package import render_task_toml
+
+    (case_stage / "task.toml").write_bytes(render_task_toml(key))
 
     bundle_rel = snapshot.get("bundle_file")
     expected = snapshot.get("bundle_sha256")
@@ -674,7 +677,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
 
     files: dict[str, str] = {}
     for rel in (
-        "README.md", "instruction.md", "Task.md", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "task.toml", "environment/repository.bundle",
         "tests/golden-review.json", "tests/verifier-metadata.json",
         "solution/golden-review.json",
     ):
@@ -790,6 +793,7 @@ def compile_workspace(root: Path) -> dict:
                 control_plane[f"{key}/README.md"] = _CASE_README
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
                 control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
+                control_plane[f"{key}/task.toml"] = (stage / key / "task.toml").read_text()
                 control_plane[f"{key}/tests/verifier-metadata.json"] = (
                     stage / key / "tests" / "verifier-metadata.json"
                 ).read_text()

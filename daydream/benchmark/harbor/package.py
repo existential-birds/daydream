@@ -86,6 +86,43 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
+def render_task_toml(opaque_key: str) -> bytes:
+    """Render the fixed Harbor schema-1.4 task configuration."""
+    # TOML is intentionally rendered directly: fixed ordering and no timestamp
+    # make these bytes part of the deterministic compiled-tree contract.
+    return f'''schema_version = "1.4"
+
+[metadata]
+benchmark_case_key = "{opaque_key}"
+source_kind = "historic-github-pr"
+
+[agent]
+timeout_sec = 1800.0
+network_mode = "allowlist"
+allowed_hosts = ["api.anthropic.com"]
+
+[environment]
+network_mode = "no-network"
+build_timeout_sec = 1200.0
+workdir = "/workspace/repo"
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+
+[verifier]
+timeout_sec = 900.0
+environment_mode = "separate"
+
+[verifier.environment]
+network_mode = "allowlist"
+allowed_hosts = ["api.anthropic.com"]
+build_timeout_sec = 1200.0
+cpus = 1
+memory_mb = 2048
+storage_mb = 4096
+'''.encode("utf-8")
+
+
 def render_lock_header(
     daydream_version: str,
     source_sha256: str,

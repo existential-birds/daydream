@@ -107,3 +107,42 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
     with pytest.raises(pkg.PackageError) as wrong:
         pkg.resolve_harbor()
     assert "[0.21, 0.22)" in str(wrong.value)
+
+
+def test_render_task_toml_matches_plan_s8():
+    import tomllib
+
+    from daydream.benchmark.harbor import package as pkg
+
+    text = pkg.render_task_toml("case-4f7c81d922a0").decode()
+    doc = tomllib.loads(text)
+    assert doc["schema_version"] == "1.4"
+    assert doc["metadata"] == {
+        "benchmark_case_key": "case-4f7c81d922a0",
+        "source_kind": "historic-github-pr",
+    }
+    assert doc["agent"] == {
+        "timeout_sec": 1800.0,
+        "network_mode": "allowlist",
+        "allowed_hosts": ["api.anthropic.com"],
+    }
+    env = doc["environment"]
+    assert env == {
+        "network_mode": "no-network",
+        "build_timeout_sec": 1200.0,
+        "workdir": "/workspace/repo",
+        "cpus": 2,
+        "memory_mb": 4096,
+        "storage_mb": 10240,
+    }
+    assert doc["verifier"]["timeout_sec"] == 900.0
+    assert doc["verifier"]["environment_mode"] == "separate"
+    assert doc["verifier"]["environment"] == {
+        "network_mode": "allowlist",
+        "allowed_hosts": ["api.anthropic.com"],
+        "build_timeout_sec": 1200.0,
+        "cpus": 1,
+        "memory_mb": 2048,
+        "storage_mb": 4096,
+    }
+    assert "dataset.toml" not in text and "registry" not in text
