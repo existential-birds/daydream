@@ -861,6 +861,7 @@ def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
     doc = dict(raw)
     curation = dict(raw.get("curation") or {})
     curation.pop("gold_mode", None)
+    curation.pop("task_spec_approved_at", None)
     doc["curation"] = curation
     return doc
 

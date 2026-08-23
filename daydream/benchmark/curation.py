@@ -354,9 +354,13 @@ def _curation_model(curation: dict[str, Any]) -> schema.Curation:
     """Build the fixed Curation model from a raw dict.
 
     The persisted ``gold_mode`` audit field is not schema field, so it is
-    dropped here (it is recomputed by ``derive_gold_mode`` when read).
+    dropped here (it is recomputed by ``derive_gold_mode`` when read); the
+    ``task_spec_approved_at`` audit timestamp is stripped the same way (it
+    never reaches the model, the compiled digest, or the recompile gate).
     """
-    return schema.Curation(**{k: v for k, v in curation.items() if k != "gold_mode"})
+    return schema.Curation(
+        **{k: v for k, v in curation.items() if k not in ("gold_mode", "task_spec_approved_at")}
+    )
 
 
 def _snapshot_head(raw: dict[str, Any]) -> str | None:

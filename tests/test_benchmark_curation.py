@@ -865,3 +865,20 @@ def test_curation_ready_requires_task_spec_sha256():
                      gold_status=None, findings=[], exclusions=[], case_exclusion=None,
                      task_spec_sha256=None)
     assert draft.task_spec_sha256 is None
+
+
+def test_task_spec_approved_at_is_stripped_before_validation():
+    from daydream.benchmark import schema
+    from daydream.benchmark.schema import Curation, _schema_ready
+    from daydream.benchmark import curation as cu
+    raw = {"curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
+                        "gold_status": None, "findings": [], "exclusions": [],
+                        "case_exclusion": None, "gold_mode": "clean",
+                        "task_spec_approved_at": "2026-08-23T00:00:00+00:00"}}
+    ready = _schema_ready(raw)
+    assert "task_spec_approved_at" not in ready["curation"]
+    assert "gold_mode" not in ready["curation"]            # existing behaviour preserved
+    # curation service path also drops it
+    model = cu._curation_model(raw["curation"])
+    assert isinstance(model, Curation)
+    assert not hasattr(model, "task_spec_approved_at")
