@@ -250,7 +250,7 @@ def ledger_append_running(
     contained = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
         doc = _load_ledger(workspace)
-        entry = {
+        entry: dict[str, Any] = {
             "run_id": run_id,
             "mode": mode,
             "state": "running",
@@ -574,10 +574,12 @@ def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[st
 
 
 def _calibration_digest(workspace: Path) -> str:
-    """sha256 of the current ``runtime/calibration-receipt.json`` bytes."""
-    return hashlib.sha256(
-        (workspace / "runtime" / "calibration-receipt.json").read_bytes()
-    ).hexdigest()
+    """sha256 of ``runtime/calibration-receipt.json`` bytes (empty when absent)."""
+    path = workspace / "runtime" / "calibration-receipt.json"
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def _latest_job_dir(workspace: Path) -> Path | None:
@@ -671,6 +673,7 @@ def run_run(
                     )
                 ledger_mark(workspace, run_id, state="cleanup_pending")
                 return returncode or 1
+            assert actual_dir is not None
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
                 env=env, calibration_digest=_calibration_digest(workspace),

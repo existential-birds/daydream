@@ -336,3 +336,156 @@ def test_gate_passes_when_inputs_match(tmp_path):
         ws, env=_env(), compiled_lock_sha256=lock_sha, calibration_digest="c" * 64,
     )
     assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# Task 7: run_run orchestrator + unrelated-CWD acceptance
+# ---------------------------------------------------------------------------
+
+
+def test_run_oracle_writes_receipt_and_running_to_complete(tmp_path):
+    import stat
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_calibration_receipt(ws)
+    captures = {}
+    job_dir = (ws / "harbor" / "jobs" / "run-1").resolve()
+
+    def spawn(cmd, *, cwd, env):
+        captures["cwd"] = str(cwd)
+        captures["args"] = cmd
+        captures["env"] = env
+        verifier = job_dir / "case-abc" / "verifier"
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.json").write_text(json.dumps(
+            {"reward": 1.0, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}))
+        return {"returncode": 0}
+
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=lambda: True,
+    )
+    assert code == 0
+    assert (ws / "harbor" / "oracle-receipt.json").exists()
+    assert stat.S_IMODE((ws / "harbor" / "oracle-receipt.json").stat().st_mode) == 0o600
+    assert str(captures["cwd"]) == str((ws / "harbor").resolve())
+    assert "HARBOR_TELEMETRY" in captures["env"] and captures["env"]["HARBOR_TELEMETRY"] == "off"
+    assert "--upload" not in captures["args"] and "--publish" not in captures["args"]
+    assert any("harbor-oracle.yaml" in str(a) for a in captures["args"])  # selects oracle config
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "complete"
+
+
+def test_run_oracle_from_unrelated_cwd_resolves_harbor_cwd(tmp_path, monkeypatch):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_calibration_receipt(ws)
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    monkeypatch.chdir(unrelated)
+    captured = {}
+    job_dir = (ws / "harbor" / "jobs" / "run-2").resolve()
+
+    def spawn(cmd, *, cwd, env):
+        captured["cwd"] = str(cwd)
+        verifier = job_dir / "case-abc" / "verifier"
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.json").write_text(json.dumps(
+            {"reward": 1.0, "verifier_error": 0, "gold_count": 1, "candidate_count": 1}))
+        return {"returncode": 0}
+
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=lambda: True,
+    )
+    assert code == 0
+    assert captured["cwd"] == str((ws / "harbor").resolve())
+
+
+def test_run_refuses_without_yes_and_no_confirm(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    code = run_mod.run_run(
+        ws, oracle=True, yes=False, env=_env(), spawn=None, docker_ok=lambda: True,
+        confirm=lambda _: False,
+    )
+    assert code == 1
+    assert not (ws / "runtime" / "harbor.json").exists()  # no running entry on block
+
+
+# ---------------------------------------------------------------------------
+# Task 8: full acceptance matrix
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_fails_writes_no_receipt_and_ledger_cleanup_pending(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_calibration_receipt(ws)
+    job_dir = (ws / "harbor" / "jobs" / "run-3").resolve()
+
+    def spawn(cmd, *, cwd, env):
+        verifier = job_dir / "case-abc" / "verifier"
+        verifier.mkdir(parents=True, exist_ok=True)
+        (verifier / "reward.json").write_text(json.dumps(
+            {"reward": 0.5, "verifier_error": 0, "gold_count": 1, "candidate_count": 2}))
+        return {"returncode": 0}
+
+    code = run_mod.run_run(
+        ws, oracle=True, yes=True, env=_env(), spawn=spawn, docker_ok=lambda: True,
+    )
+    assert code == 1
+    assert not (ws / "harbor" / "oracle-receipt.json").exists()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleanup_pending"
+
+
+def test_default_run_propagates_harbor_exit_code(tmp_path):
+    import hashlib
+
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    lock = {"schema_version": 1, "cases": {}}
+    lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
+    job_dir = ws / "harbor" / "jobs" / "x"
+    verifier = job_dir / "case-abc" / "verifier"
+    verifier.mkdir(parents=True)
+    (verifier / "reward.json").write_text(json.dumps(_score(1.0)))
+    (ws / "runtime" / "calibration-receipt.json").write_bytes(b"cal")
+    cal_digest = hashlib.sha256(b"cal").hexdigest()
+    # seed a matching oracle receipt the gate will accept
+    assert run_mod._write_oracle_receipt(
+        ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env(),
+        calibration_digest=cal_digest,
+    ) == 0
+
+    def spawn(cmd, *, cwd, env):
+        return {"returncode": 3}
+
+    code = run_mod.run_run(
+        ws, oracle=False, yes=True, env=_env(), spawn=spawn, docker_ok=lambda: True,
+    )
+    assert code == 3  # Harbor's own exit code preserved
+
+
+def test_default_gate_blocks_before_any_harbor_call(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    called = []
+
+    def spawn(cmd, *, cwd, env):
+        called.append(cmd)
+        return {"returncode": 0}
+
+    code = run_mod.run_run(
+        ws, oracle=False, yes=True, env=_env(), spawn=spawn, docker_ok=lambda: True,
+    )
+    assert code == 1            # no matching receipt -> gate blocks
+    assert called == []         # Harbor never spawned, no reviewer call
+    assert not (ws / "runtime" / "harbor.json").exists()  # blocked run leaves no running entry
