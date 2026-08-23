@@ -21,6 +21,13 @@ _BASE_DIGEST = "sha256:876416ecde9aca2bcc90e1fb0c7a9500bbf749f5788b70f82d4c5a5c2
 ENV_BASE_IMAGE = f"python:3.12-slim@{_BASE_DIGEST}"
 VERIFIER_BASE_IMAGE = ENV_BASE_IMAGE
 
+# Marker comment pair delimiting the wheel-install block of the environment
+# Dockerfile template. render_environment_dockerfile strips the delimited block
+# verbatim when a wheel is not baked, so a wheel-less compile never emits a
+# COPY/install referencing a wheel that was never written into environment/.
+_WHEEL_BEGIN = "# __ENV_WHEEL_BEGIN__"
+_WHEEL_END = "# __ENV_WHEEL_END__"
+
 
 class PackageError(CompileError):
     """Raised when a compiled Harbor package cannot be produced or validated."""
@@ -119,9 +126,9 @@ def build_harbor(root: Path, *, wheel: Path) -> dict:
             f"workspace must validate ready before build-harbor (validation: {label})",
             remediation="run `daydream benchmark validate <workspace>` and resolve every finding",
         )
-    version = importlib.metadata.version("daydream")
-    validate_wheel(Path(wheel), daydream_version=version)
     resolve_harbor()
+    # compile_workspace validates the wheel up front on its own; there is no
+    # preflight-benefit to hashing the (large) wheel twice in one build.
     return build.compile_workspace(Path(root), wheel=Path(wheel))
 
 
@@ -296,12 +303,27 @@ def render_verifier_dockerfile(*, base_image: str) -> bytes:
     return text.encode("utf-8")
 
 
-def render_environment_dockerfile(*, base_image: str, daydream_version: str) -> bytes:
-    """Render and validate the isolated agent environment image."""
-    template = template_text("environment/Dockerfile")
-    text = template.replace("__BASE_IMAGE__", base_image).replace(
+def render_environment_dockerfile(*, base_image: str, daydream_version: str, wheel: bool = False) -> bytes:
+    """Render and validate the isolated agent environment image.
+
+    *wheel* selects whether the image installs the packaged Daydream wheel:
+    True keeps the ``COPY``/install block (with the wheel copied into
+    ``environment/`` by the compile path), False strips it so a wheel-less
+    compile cannot emit a self-referential ``COPY`` of a wheel that is never
+    written into the environment.
+    """
+    text = template_text("environment/Dockerfile")
+    text = text.replace("__BASE_IMAGE__", base_image).replace(
         "__DAYDREAM_VERSION__", daydream_version
     )
+    if _WHEEL_BEGIN not in text or _WHEEL_END not in text:
+        raise PackageError("environment Dockerfile template is missing the wheel block markers")
+    if wheel:
+        text = text.replace(_WHEEL_BEGIN, "").replace(_WHEEL_END, "")
+    else:
+        start = text.index(_WHEEL_BEGIN)
+        end = text.index(_WHEEL_END) + len(_WHEEL_END)
+        text = text[:start] + text[end:]
     required = (
         "git clone",
         "repository.bundle",
@@ -312,8 +334,7 @@ def render_environment_dockerfile(*, base_image: str, daydream_version: str) -> 
         "remote remove",
         "WORKDIR /workspace/repo",
         "--require-hashes",
-        "--no-deps",
-    )
+    ) + (("--no-deps",) if wheel else ())
     missing = [directive for directive in required if directive not in text]
     if missing:
         raise PackageError(f"environment Dockerfile template is missing directives: {missing}")

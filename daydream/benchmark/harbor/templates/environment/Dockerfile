@@ -7,9 +7,11 @@ RUN apt-get update \
 COPY runtime-requirements.lock /tmp/runtime-requirements.lock
 RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/runtime-requirements.lock \
     && rm /tmp/runtime-requirements.lock
+# __ENV_WHEEL_BEGIN__
 COPY daydream-__DAYDREAM_VERSION__-py3-none-any.whl /tmp/daydream-__DAYDREAM_VERSION__-py3-none-any.whl
 RUN python -m pip install --no-cache-dir --no-deps /tmp/daydream-__DAYDREAM_VERSION__-py3-none-any.whl \
     && rm /tmp/daydream-__DAYDREAM_VERSION__-py3-none-any.whl
+# __ENV_WHEEL_END__
 
 COPY repository.bundle /tmp/repository.bundle
 RUN git clone --no-checkout /tmp/repository.bundle /workspace/repo \

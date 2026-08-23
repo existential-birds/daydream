@@ -89,6 +89,8 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
 
     import pytest
 
+    pytest.importorskip("harbor")
+
     from daydream.benchmark.harbor import package as pkg
 
     monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.21.0")
@@ -152,7 +154,7 @@ def test_render_environment_dockerfile_clones_bundle_no_remote():
     from daydream.benchmark.harbor import package as pkg
 
     dockerfile = pkg.render_environment_dockerfile(
-        base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0"
+        base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0", wheel=True
     ).decode()
     assert dockerfile.startswith("FROM " + pkg.ENV_BASE_IMAGE)
     assert "git clone" in dockerfile and "repository.bundle" in dockerfile

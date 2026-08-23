@@ -434,11 +434,21 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
     Returns ``[(rel, sha256), ...]`` for inventory. A missing template asset
     raises :class:`CompileError` -- never a silent skip or fabricated file.
     """
-    from daydream.benchmark.harbor.package import template_text
+    from daydream.benchmark.harbor.package import (
+        VERIFIER_BASE_IMAGE,
+        render_verifier_dockerfile,
+        template_text,
+    )
 
     out: list[tuple[str, str]] = []
     for rel in _COPY_ASSETS:
-        data = template_text(rel).encode("utf-8")
+        if rel == "tests/Dockerfile":
+            # The verifier image is rendered (not copied verbatim) so the
+            # packaged base-image digest and the entrypoint-free/hash-locked
+            # validation actually run in the compile path, not just in tests.
+            data = render_verifier_dockerfile(base_image=VERIFIER_BASE_IMAGE)
+        else:
+            data = template_text(rel).encode("utf-8")
         dst = case_stage / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(data)
@@ -487,11 +497,12 @@ def _bounded_block_strip(text: str) -> str:
 
 
 def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None:
-    """Fail-fast control-plane leak scan over compiler-generated text only.
+    """Control-plane leak scan over compiler-generated text only.
 
     Each ``instruction.md`` is scanned with its bounded block stripped; every
-    other file as-is. Also scans for the literal *repository_slug*. On the first
-    match of any rule raises :class:`CompileError` naming the file and matched
+    other file as-is. Also scans for the literal *repository_slug*. All
+    violations across every scanned file are accumulated and raised as a single
+    :class:`CompileError`, with each violation naming its file and matched
     token. Returns ``None`` when clean.
     """
     violations: list[str] = []
@@ -649,6 +660,10 @@ def _compile_case(
         render_environment_dockerfile(
             base_image=ENV_BASE_IMAGE,
             daydream_version=importlib.metadata.version("daydream"),
+            # The emitted environment image installs the wheel only when one is
+            # actually baked into environment/; a wheel-less compile strips the
+            # COPY/install block so the image never references an absent file.
+            wheel=wheel is not None,
         )
     )
     (case_stage / "environment" / "runtime-requirements.lock").write_bytes(runtime_lock)
