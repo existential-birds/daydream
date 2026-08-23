@@ -18,7 +18,6 @@ import os
 import re
 import shutil
 import tempfile
-import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
@@ -158,7 +157,7 @@ def sha256_file(path: Path) -> str:
 
 @dataclass
 class _HeldLock:
-    """A workspace lock currently held by one thread (fd + reuse depth)."""
+    """A workspace lock currently held by this process (fd + reuse depth)."""
 
     fd: int
     depth: int
@@ -168,24 +167,21 @@ class WorkspaceLock:
     """An ``fcntl``-backed exclusive lock scoped to a workspace root directory.
 
     Holds ``LOCK_EX`` (blocking) or ``LOCK_EX | LOCK_NB`` on a sibling
-    ``<root>/.benchmark.lock`` file. The lock is reentrant per thread per root:
-    nested acquisitions within the same thread share the same open fd and only
-    bump a depth counter, so a command that holds the lock across its own
-    journal writes cannot deadlock against itself. A different thread of the
-    same process opens its own fd, and the kernel ``fcntl.flock`` byte-range
-    lock excludes it (flock conflicts across open file descriptions even
-    within one process), so concurrent curators — threads or separate
-    processes — serialize instead of losing updates. The curation service
+    ``<root>/.benchmark.lock`` file. The lock is process-reentrant per root:
+    nested acquisitions within the same process share the same open fd and
+    only bump a depth counter, so a command that holds the lock across its own
+    journal writes cannot deadlock against itself. The curation service
     (``daydream/benchmark/curation.py``) relies on this blocking,
-    per-thread-reentrant semantics for every mutation: each locked mutation
-    runs its whole read -> validate -> mutate -> commit sequence under one
+    process-reentrant semantics for every mutation: each locked mutation runs
+    its whole read -> validate -> mutate -> commit sequence under one
     acquisition, so concurrent curators serialize instead of losing updates.
 
     The ``.benchmark.lock`` file itself is left on disk after release (removal
-    races are unsafe).
+    races are unsafe), and mutual-exclusion among separate OS processes is
+    provided by the kernel ``fcntl.flock`` byte-range lock.
     """
 
-    _held: dict[tuple[Path, int], _HeldLock] = {}
+    _held: dict[Path, _HeldLock] = {}
 
     def __init__(self, root: Path, *, blocking: bool = True) -> None:
         self._root = Path(root)
@@ -193,10 +189,9 @@ class WorkspaceLock:
         self._acquired = False
 
     def __enter__(self) -> "WorkspaceLock":
-        key = (self._root, threading.get_ident())
-        held = WorkspaceLock._held.get(key)
+        held = WorkspaceLock._held.get(self._root)
         if held is not None:
-            # Already holding the lock for this root in this thread — reentrant
+            # Already holding the lock for this root in this process — reentrant
             # on the same open file description. Bump the depth and reuse the fd.
             held.depth += 1
             self._acquired = False
@@ -211,22 +206,21 @@ class WorkspaceLock:
         except BlockingIOError:
             os.close(fd)
             raise LockContentionError(
-                f"workspace is locked by another process or thread: {self._root}"
+                f"workspace is locked by another process: {self._root}"
             ) from None
-        WorkspaceLock._held[key] = _HeldLock(fd=fd, depth=1)
+        WorkspaceLock._held[self._root] = _HeldLock(fd=fd, depth=1)
         self._acquired = True
         return self
 
     def __exit__(self, *_exc: object) -> Literal[False]:
-        key = (self._root, threading.get_ident())
-        held = WorkspaceLock._held.get(key)
+        held = WorkspaceLock._held.get(self._root)
         if held is None:
             return False
         held.depth -= 1
         if held.depth <= 0:
             fcntl.flock(held.fd, fcntl.LOCK_UN)
             os.close(held.fd)
-            WorkspaceLock._held.pop(key, None)
+            WorkspaceLock._held.pop(self._root, None)
         return False
 
 

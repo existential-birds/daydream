@@ -8,9 +8,9 @@ through. Every mutating operation (``accept_candidate``, ``add_finding``,
 runs its complete read -> validate -> mutate -> commit sequence under the
 workspace lock:
 
-1. acquires the blocking :class:`storage.WorkspaceLock` (per-thread reentrant per
-   root, so concurrent curators — threads or separate processes — serialize and
-   can never silently lose an update),
+1. acquires the blocking :class:`storage.WorkspaceLock` (process-reentrant per
+   root), so concurrent curators/processes serialize and can never silently
+   lose an update,
 2. heals any prior interrupted journal via :func:`storage.recover_startup`
    under the lock, so a crashed earlier process's leftover ``committing``
    journal is rolled back before a new write,
