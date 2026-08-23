@@ -321,6 +321,59 @@ def test_partial_failure_continues_to_other_runs(tmp_path):
     assert report.job_dirs_deleted == 1                 # successful run's dir removed
 
 
+def test_partial_failure_persists_removed_flags(tmp_path):
+    """A partially-removed run keeps its successfully-removed ``removed`` true.
+
+    Without the fix, a run where one image removal succeeds and another fails
+    never writes the ledger, so the successful removal flag is lost and the
+    next pass re-attempts (and re-fails) an already-removed image.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000d2"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(
+        ws, run_id, state="complete",
+        environments=[
+            _docker_env("a", removed=False, image_id="hb__a"),
+            _docker_env("b", removed=False, image_id="hb__b"),
+        ],
+    )
+
+    def selective(refs):
+        return {"returncode": 1 if refs == ["hb__a"] else 0}
+
+    report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=selective)
+    assert report.images_failed == 1 and report.images_removed == 1
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    row = ledger["runs"][0]
+    assert row["state"] == "complete"               # not cleaned on partial failure
+    assert row["environments"][0]["removed"] is False
+    assert row["environments"][1]["removed"] is True  # persisted, not dropped
+
+
+def test_clean_jobs_keeps_dir_when_environments_empty(tmp_path):
+    """A ledger row with no recorded environments cannot be cleaned: deleting
+    its job dir would permanently orphan the images that run spawned. Keep the
+    dir and the run's prior state, and surface the incomplete cleanup.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000d3"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(ws, run_id, state="complete", environments=[])
+    called = []
+    report = clean_mod.clean_workspace(
+        ws, jobs=True,
+        docker_rm=lambda refs: called.append(refs) or {"returncode": 0},
+    )
+    assert called == []                              # no image refs to address
+    assert report.exit_code == 1 and report.images_failed == 1
+    assert job.is_dir()
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "complete"  # never marked cleaned
+
+
 # ---------------------------------------------------------------------------
 # Task 8: containment + symlink-escape rejection (fails closed)
 # ---------------------------------------------------------------------------
@@ -371,6 +424,27 @@ def test_clean_all_yes_deletes_curated_and_derived(tmp_path):
     assert not (ws / "imports").exists() and not (ws / "cases").exists()
     assert not (ws / "snapshots").exists()
     assert report.recoverable is False        # curated deletion is unrecoverable
+
+
+def test_clean_all_preserves_curated_when_derived_stage_raises(tmp_path):
+    """Curated source/gold is unrecoverable, so it must be deleted last: a
+    failure in a derived stage (here the jobs image-removal seam) must not have
+    already destroyed the irreplaceable workspace when the stage raises.
+    """
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000f1"
+    job = ws / "harbor" / "jobs" / run_id
+    (job / "t").mkdir(parents=True)
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("c", removed=False)])
+
+    def boom(refs):
+        raise RuntimeError("derived selection failed")
+
+    with pytest.raises(RuntimeError):
+        clean_mod.clean_workspace(ws, all_=True, yes=True, docker_rm=boom)
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists(), f"curated {name} must survive a derived-stage failure"
 
 
 # ---------------------------------------------------------------------------

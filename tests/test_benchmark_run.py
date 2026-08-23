@@ -576,3 +576,22 @@ def test_run_failed_path_persists_environments_cleanup_pending(tmp_path):
     ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
     assert ledger["runs"][0]["state"] == "cleanup_pending"
     assert ledger["runs"][0]["environments"][0]["image_id"]   # not [] on failure either
+
+
+def test_parse_job_results_records_env_when_reward_missing(tmp_path):
+    """An aborted run (trial present but no score evidence) must still record
+    the environment it spawned, so ``clean --jobs`` can address the Docker
+    image it left behind instead of orphaning it by deleting the job dir.
+    """
+    import daydream.benchmark.harbor.run as run_mod
+
+    job_dir = tmp_path / "jobs" / "r"
+    trial = job_dir / "case-abc"
+    env_root = trial / "environment"
+    env_root.mkdir(parents=True)
+    (env_root / "env.txt").write_text("x", encoding="utf-8")
+    (trial / "task.toml").write_text("[environment]\n", encoding="utf-8")
+    ok, envs = run_mod._parse_job_results(job_dir)
+    assert ok is False
+    assert envs and envs[0]["image_id"].startswith("hb__")   # was [] before the fix
+    assert envs[0]["backend"] == "docker"

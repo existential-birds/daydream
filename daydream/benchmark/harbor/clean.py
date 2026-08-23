@@ -174,6 +174,13 @@ def _clean_jobs(
                 continue
             validated = _validate_job_dir(root, entry["job_dir"])
             envs = entry.get("environments") or []
+            if not envs:
+                # No recorded image refs, so the run's spawned Docker images
+                # cannot be addressed. Keep the job dir and prior state rather
+                # than deleting an irreconcileable run and silently orphaning
+                # the images it spawned.
+                report.images_failed += 1
+                continue
             all_removed = True
             for env in envs:
                 if env.get("removed") is True:
@@ -181,11 +188,15 @@ def _clean_jobs(
                 result = docker_rm(_image_refs(env))
                 if result.get("returncode") == 0:
                     env["removed"] = True
+                    changed = True
                     report.images_removed += 1
                 else:
                     report.images_failed += 1
                     all_removed = False
             if not all_removed:
+                # Partial failure: persist any images actually removed so a
+                # later pass does not re-attempt (and re-fail) already-removed
+                # images, but keep the job dir and the run's pre-clean state.
                 continue
             run_path = Path(validated)
             if run_path.is_dir():
@@ -247,10 +258,13 @@ def clean_workspace(
         return report
     if cache or all_:
         _clean_cache(root, report)
-    if all_:
-        _clean_curated(root, report)
     if trajectories or all_:
         _clean_trajectories(root, report)
     if jobs or all_:
         _clean_jobs(root, report, docker_rm=docker_rm)
+    # Curated source/gold is unrecoverable, so it is deleted only after every
+    # derived stage has completed; a later-stage error must not have already
+    # destroyed an irreplaceable workspace.
+    if all_:
+        _clean_curated(root, report)
     return report

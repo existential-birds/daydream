@@ -406,15 +406,16 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
             continue  # a non-directory sibling is not a task trial
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
+        # Resolve the trial environment even when the trial carries no claimable
+        # score evidence, so a failed/aborted run still records the Docker
+        # images it spawned: ``clean --jobs`` can address them rather than
+        # deleting the job dir and permanently stranding the images.
         if not reward_path.is_file():
-            # No score evidence at all — not even reward-details.json: Harbor
-            # returned or wrote nothing for this trial (abort mid-write). Fail
-            # closed rather than silently skipping it as a clean task.
-            return (False, [])
+            return (False, [*environments, _environment_from_trial(trial)])
         env = _environment_from_trial(trial)
         reward = _parse_reward(reward_path)
         if reward is None:
-            return (False, [])
+            return (False, [*environments, env])
         environments.append(env)
         if not oracle_ok:
             continue
