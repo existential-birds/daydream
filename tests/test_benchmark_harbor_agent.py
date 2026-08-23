@@ -110,3 +110,23 @@ def test_artifact_write_failure_raises(tmp_path):
     with pytest.raises(candidate.CandidateError) as write_fail:
         candidate.write_candidate_artifact_atomic(dest, {"schema_version": 1, "findings": []})
     assert write_fail.value.kind == "write_failure"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: render_task_toml — reviewer-only host policy + case env threading
+# ---------------------------------------------------------------------------
+
+
+def test_render_task_toml_host_policy_and_case_env():
+    from daydream.benchmark.harbor import package as pkg
+
+    toml = pkg.render_task_toml("case-abc123def456").decode("utf-8")
+    assert 'allowed_hosts = ["api.anthropic.com"]' in toml       # reviewer-only host
+    assert '"github.com"' not in toml and '"huggingface.co"' not in toml
+    assert 'DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"' in toml
+    assert 'DAYDREAM_REVIEW_BASE_REF = "base"' in toml
+    assert 'DAYDREAM_REVIEW_HEAD_REF = "head"' in toml
+    # deterministic
+    assert pkg.render_task_toml("case-abc123def456") == pkg.render_task_toml("case-abc123def456")
+    # no judge vars or archive/target config reach the agent surface
+    assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
