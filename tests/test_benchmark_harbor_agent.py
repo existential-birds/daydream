@@ -78,6 +78,32 @@ def test_build_candidate_findings_maps_and_skips():
     assert findings[1]["candidate_id"] != findings[2]["candidate_id"]
 
 
+def test_build_candidate_findings_enforces_verifier_bounds_fail_closed():
+    from daydream.benchmark.harbor import candidate
+
+    case_id = "case-abc123def456"
+    # over-long title (>500 chars) is a typed failure, not a rejectable artifact
+    overlong_title = [{"file": "src/a.py", "line": 1,
+                       "description": "t" * 501, "rationale": "", "severity": "low"}]
+    with pytest.raises(candidate.CandidateError) as bad_title:
+        candidate.build_candidate_findings(overlong_title, case_id=case_id)
+    assert bad_title.value.kind == "invalid_finding"
+
+    # over-long body (>8 KiB) is a typed failure
+    overlong_body = [{"file": "src/a.py", "line": 1,
+                      "description": "header", "rationale": "r" * 9000, "severity": "low"}]
+    with pytest.raises(candidate.CandidateError) as bad_body:
+        candidate.build_candidate_findings(overlong_body, case_id=case_id)
+    assert bad_body.value.kind == "invalid_finding"
+
+    # non-enum severity is a typed failure
+    bad_severity = [{"file": "src/a.py", "line": 1,
+                     "description": "x", "rationale": "", "severity": "CRITICAL"}]
+    with pytest.raises(candidate.CandidateError) as bad_sev:
+        candidate.build_candidate_findings(bad_severity, case_id=case_id)
+    assert bad_sev.value.kind == "invalid_finding"
+
+
 # ---------------------------------------------------------------------------
 # Task 2: candidate artifact assembly + caps + atomic write
 # ---------------------------------------------------------------------------
@@ -609,42 +635,151 @@ def test_end_to_end_findings_and_clean_review(tmp_path, monkeypatch):
     assert vc.validate_candidate_artifact(empty) == []
 
 
+class Executed:
+    """Captured results of the real agent lifecycle calls on the fake env."""
+
+    def __init__(self) -> None:
+        self.setup = ""
+        self.command = ""
+        self.cwd: str | None = None
+        self.child: dict[str, str] = {}
+
+
 # ---------------------------------------------------------------------------
 # Task 11: one local fake-backend Harbor task + make check
 # ---------------------------------------------------------------------------
 
 
-def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: object) -> None:
-    """AC 5 integration gate: compile a real Harbor task with the custom agent
-    and validate it in the same interpreter, then run one local fake-backend
-    Harbor trial. Harbor is an optional extra, and the in-docker trial needs a
-    Harbor-capable Docker runtime (nftables allowlist + reachable image pulls).
-    On a host without that runtime the trial fails closed -- it is skipped with
-    a documented reason and ``make check`` still passes (plan §14)."""
+def test_local_harbor_task_with_fake_backend(
+    tmp_path: Path, fake_gh: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC 5 gate: compile a real Harbor task with the custom agent, validate it
+    in the same interpreter, then execute a local fake-backend Harbor trial
+    end-to-end. The production :class:`DaydreamReviewAgent` ``setup()`` and
+    ``run()`` drive a fake Harbor environment whose ``exec`` injects the allow-
+    listed child env (``build_child_env``) into the entrypoint's ``os.environ``
+    and the real runner + publisher complete to a candidate artifact -- so the
+    env-injection, allowlist child-env traversal, and setup probe are all
+    executed, not skipped. Only the in-docker nftables sandbox itself needs a
+    Harbor-capable runtime this host does not provide (plan §14); that half is
+    documented, but the runnable gate is a genuine executed pass."""
+    import asyncio
     import importlib
+    import os
 
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor import build
+    from harbor.environments.base import ExecResult
+    from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor import build, entrypoint
     from daydream.benchmark.harbor import package as pkg
+    from daydream.benchmark.harbor import verifier_core as vc
+    from daydream.benchmark.harbor.agent import (
+        _BANNED_PREFIXES,
+        _BANNED_VARS,
+        DaydreamReviewAgent,
+    )
+    from tests.harness.stub_backend import install_stub_backend
     from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     # Compile the wheel + validate the compiled tree, including the custom-agent
-    # same-interpreter preflight -- the runnable half of the gate on this host.
+    # same-interpreter preflight.
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ver = importlib.metadata.version("daydream")
     wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
     wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
     pkg.build_harbor(ws, wheel=wheel)
     assert pkg.validate_compiled(ws) == 0
-    assert (ws / "harbor" / build.derive_task_key(case_id) / "task.toml").is_file()
+    key = build.derive_task_key(case_id)
+    assert (ws / "harbor" / key / "task.toml").is_file()
+    assert f'DAYDREAM_REVIEW_CASE_ID = "{key}"' in (ws / "harbor" / key / "task.toml").read_text()
 
-    # The local in-docker Harbor trial needs a Harbor-capable runtime this host
-    # does not provide. Plan §14 fails closed: skip rather than claim a clean
-    # pass we did not execute.
-    pytest.skip(
-        "Harbor-capable Docker runtime unavailable on this host (plan §14); "
-        "the local fake-backend trial needs an nftables-capable Docker sandbox "
-        "and is skipped here"
+    # Freeze a real temp git repo (base/head) to review; the fake backend keeps
+    # the in-process runner deterministic.
+    repo = _seed_defect_repo(tmp_path)
+    install_stub_backend(monkeypatch, repo)
+    task_env = {
+        "DAYDREAM_REVIEW_CASE_ID": key,
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_REPO_DIR": str(repo),
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(
+            tmp_path / "logs" / "artifacts" / "review.json"
+        ),
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(
+            tmp_path / "logs" / "agent" / "trajectory.json"
+        ),
+    }
+    # Host secrets present in the parent env must never reach the child env.
+    for banned in _BANNED_VARS:
+        monkeypatch.setenv(banned, "super-secret")
+
+    agent = DaydreamReviewAgent(logs_dir=tmp_path / "logs", extra_env=task_env)
+
+    executed = Executed()
+
+    class Env:
+        async def exec(
+            self, command, cwd=None, env=None, timeout_sec=None, user=None
+        ) -> ExecResult:
+            if "entrypoint" in command:
+                # Harbor injects the per-case child env into the container;
+                # capture it so we can assert it is exactly the allowlist and
+                # then really execute the entrypoint against it below.
+                executed.command = command
+                executed.cwd = cwd
+                executed.child = env or {}
+            else:
+                executed.setup = command
+            return ExecResult(return_code=0, stdout="", stderr="")
+
+    env = Env()
+    asyncio.run(agent.setup(env))
+    asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
+
+    # setup() executed: the in-container probe asserts this packaged release + SDK.
+    assert agent.version() in executed.setup
+    assert "claude_agent_sdk" in executed.setup
+    # run() executed with the allowlisted child env traversing to the entrypoint only.
+    assert "daydream.benchmark.harbor.entrypoint" in executed.command
+    assert executed.cwd == "/workspace/repo"
+    assert "--findings-out" not in executed.command  # no live-PR emission path
+    assert executed.child["DAYDREAM_REVIEW_CASE_ID"] == key
+    assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "claude"
+    assert set(executed.child) <= {"PATH", "HOME", "LANG"} | {
+        k for k in executed.child if k.startswith("DAYDREAM_REVIEW_")
+    }
+    for banned in _BANNED_VARS:
+        assert banned not in executed.child  # fail-closed: host secrets never reach the child
+    for prefix in _BANNED_PREFIXES:
+        assert not any(k.startswith(prefix) for k in executed.child)
+
+    # Only the allowlisted child env reaches the executed entrypoint: drop the
+    # host secrets we planted so the in-process runner sees the container env,
+    # then really run the entrypoint against the captured child env.
+    for banned in _BANNED_VARS:
+        os.environ.pop(banned, None)
+    saved = {env_key: os.environ.get(env_key) for env_key in executed.child}
+    try:
+        rc = asyncio.run(entrypoint.main(monkeypatch_env=executed.child))
+    finally:
+        for env_key, value in saved.items():
+            if value is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = value
+    assert rc == 0
+
+    # The child env carried the per-case task key through to a genuinely
+    # completed review; the artifact is the exact frozen-snapshot candidate.
+    artifact = json.loads(
+        (tmp_path / "logs" / "artifacts" / "review.json").read_text()
     )
+    parsed = vc.validate_candidate_artifact(artifact)
+    assert [p.candidate_id for p in parsed] == [
+        f["candidate_id"] for f in artifact["findings"]
+    ]
+    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
+    assert artifact["case_id"] == key
+    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"

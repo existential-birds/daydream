@@ -32,6 +32,8 @@ _DEFAULT_ARTIFACT_PATH = "/logs/artifacts/review.json"
 _DEFAULT_TRAJECTORY_PATH = Path("/logs/agent/trajectory.json")
 
 _CASE_ID_ENV = "DAYDREAM_REVIEW_CASE_ID"
+_BASE_REF_ENV = "DAYDREAM_REVIEW_BASE_REF"
+_HEAD_REF_ENV = "DAYDREAM_REVIEW_HEAD_REF"
 _BACKEND_ENV = "DAYDREAM_REVIEW_BACKEND"
 _API_KEY_ENV = "DAYDREAM_REVIEW_API_KEY"
 _BASE_URL_ENV = "DAYDREAM_REVIEW_BASE_URL"
@@ -55,6 +57,7 @@ def build_run_config(
     *,
     backend: str,
     model: str | None,
+    base_ref: str = "base",
 ) -> RunConfig:
     """Build the fully controlled in-process :class:`RunConfig`.
 
@@ -62,12 +65,13 @@ def build_run_config(
     evaluation disabled and a controlled-empty :class:`DaydreamFileConfig` so
     the target repository's ``.daydream.toml`` is never loaded. ``findings_out``
     stays ``None`` -- the ``--findings-out`` emission path performs a live PR
-    lookup and is forbidden for an offline snapshot.
+    lookup and must be forbidden for an offline snapshot. ``base_ref`` carries
+    the ``DAYDREAM_REVIEW_BASE_REF`` value rendered into the container env.
     """
     return RunConfig(
         target=str(repo_dir),
         output_mode="review",
-        base="base",
+        base=base_ref,
         non_interactive=True,
         archive=False,
         run_eval=False,
@@ -116,7 +120,14 @@ def _required_env(name: str) -> str:
     return value
 
 
-def publish_review(*, repo_dir: str | Path, artifact_path: str | Path, case_id: str) -> None:
+def publish_review(
+    *,
+    repo_dir: str | Path,
+    artifact_path: str | Path,
+    case_id: str,
+    base_ref: str = "base",
+    head_ref: str = "head",
+) -> None:
     """Publish the candidate artifact from the runner's merged-items output.
 
     Locates ``<repo_dir>/.daydream/deep/merged-items.json``; raises
@@ -145,7 +156,9 @@ def publish_review(*, repo_dir: str | Path, artifact_path: str | Path, case_id: 
             kind="corrupt_merged",
         )
     findings = candidate.build_candidate_findings(items, case_id=case_id)
-    artifact = candidate.build_candidate_artifact(case_id, findings)
+    artifact = candidate.build_candidate_artifact(
+        case_id, findings, base_ref=base_ref, head_ref=head_ref
+    )
     candidate.write_candidate_artifact_atomic(artifact_path, artifact)
 
 
@@ -167,17 +180,26 @@ async def main(*, monkeypatch_env: Mapping[str, str] | None = None) -> int:
         repo_dir = os.environ.get(_REPO_DIR_ENV, _DEFAULT_REPO_DIR)
         artifact_path = os.environ.get(_ARTIFACT_PATH_ENV, _DEFAULT_ARTIFACT_PATH)
         trajectory_path = os.environ.get(_TRAJECTORY_PATH_ENV, str(_DEFAULT_TRAJECTORY_PATH))
+        base_ref = os.environ.get(_BASE_REF_ENV, "base").strip() or "base"
+        head_ref = os.environ.get(_HEAD_REF_ENV, "head").strip() or "head"
         config = build_run_config(
             repo_dir=repo_dir,
             trajectory_path=trajectory_path,
             backend="claude",
             model=os.environ.get("DAYDREAM_REVIEW_MODEL"),
+            base_ref=base_ref,
         )
         from daydream import runner
 
         if await runner.run(config) != 0:
             raise EntrypointError("daydream runner exited non-zero")
-        publish_review(repo_dir=repo_dir, artifact_path=artifact_path, case_id=case_id)
+        publish_review(
+            repo_dir=repo_dir,
+            artifact_path=artifact_path,
+            case_id=case_id,
+            base_ref=base_ref,
+            head_ref=head_ref,
+        )
         return 0
     except (EntrypointError, candidate.CandidateError) as exc:
         print(

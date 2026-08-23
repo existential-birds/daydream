@@ -27,9 +27,9 @@ class CandidateError(Exception):
     """Typed agent-failure carrier for candidate artifact production.
 
     Attributes:
-        kind: The failure class -- ``"over_limit"`` or ``"write_failure"``
-            (``"missing_merged"`` / ``"corrupt_merged"`` are raised by the
-            entrypoint's publish step with the same carrier).
+        kind: The failure class -- ``"over_limit"``, ``"invalid_finding"`` or
+            ``"write_failure"`` (``"missing_merged"`` / ``"corrupt_merged"``
+            are raised by the entrypoint's publish step with the same carrier).
     """
 
     def __init__(self, message: str, *, kind: str) -> None:
@@ -93,6 +93,19 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
             "start_line": fields.line_int,
             "end_line": fields.line_int,
         }
+        # Enforce the verifier's per-finding bounds fail-closed, reusing the
+        # verifier's own validators so no drift surfaces as a verifier-rejected
+        # artifact after the builder already declared success: over-long title
+        # (>500 chars) or body (>8 KiB) and a non-enum severity are each a
+        # typed failure, never an artifact the verifier would reject.
+        try:
+            vc._validate_title(title)
+            vc._validate_body(body)
+            vc._validate_severity(entry["severity"])
+        except vc.VerifierError as exc:
+            raise CandidateError(
+                f"cannot build candidate finding: {exc}", kind="invalid_finding"
+            ) from exc
         canonical = (
             title or "",
             body or "",
@@ -108,21 +121,28 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
     return findings
 
 
-def build_candidate_artifact(case_id: str, findings: list[dict]) -> dict:
+def build_candidate_artifact(
+    case_id: str,
+    findings: list[dict],
+    *,
+    base_ref: str = "base",
+    head_ref: str = "head",
+) -> dict:
     """Assemble the strict §9 candidate artifact, enforcing the caps fail-closed.
 
-    Returns ``{"schema_version": 1, "case_id": case_id, "base_ref": "base",
-    "head_ref": "head", "findings": findings}`` -- an empty ``findings`` list
-    is a clean review. ``base_ref``/``head_ref`` are hardcoded ``"base"``/``"head"``
-    per the bound-task contract. Exceeding the 100-finding cap or the 1 MiB
+    Returns ``{"schema_version": 1, "case_id": case_id, "base_ref": base_ref,
+    "head_ref": head_ref, "findings": findings}`` -- an empty ``findings`` list
+    is a clean review. ``base_ref``/``head_ref`` default to ``"base"``/`"head"`
+    per the bound-task contract and are threaded from the container env key on
+    the entrypoint path. Exceeding the 100-finding cap or the 1 MiB
     serialized-artifact cap raises ``CandidateError(kind="over_limit")`` --
     never silently truncates to fit.
     """
     artifact = {
         "schema_version": 1,
         "case_id": case_id,
-        "base_ref": "base",
-        "head_ref": "head",
+        "base_ref": base_ref,
+        "head_ref": head_ref,
         "findings": findings,
     }
     if len(findings) > vc.MAX_CANDIDATE_FINDINGS:
