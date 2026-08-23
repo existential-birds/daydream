@@ -15,7 +15,8 @@ def test_spike_task_toml_env_carries_case_key(tmp_path, fake_gh):
     opaque case key through a real compile, stays byte-deterministic, and is
     accepted by Harbor's Task model (skip-guarded: Harbor is an optional extra)."""
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor import build, package as pkg
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import package as pkg
     from tests.test_benchmark_harbor_build import _seed_ready_workspace
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -48,11 +49,15 @@ def test_build_candidate_findings_maps_and_skips():
     from daydream.benchmark.harbor import verifier_core as vc
 
     items = [
-        {"file": "src/cache.py", "line": 42, "description": "Cache key not tenant-scoped",
+        {"file": "src/cache.py", "line": 42,
+         "description": "Cache key not tenant-scoped",
          "rationale": "Key can collide across tenants.", "severity": "high", "confidence": "HIGH"},
-        {"file": "", "line": 1, "description": "empty-file item is skipped", "rationale": "", "severity": "low"},
-        {"file": "src/a.py", "line": 3, "description": "Dup A", "rationale": "r", "severity": "medium", "confidence": "LOW"},
-        {"file": "src/a.py", "line": 9, "description": "Dup A", "rationale": "r", "severity": "medium", "confidence": "LOW"},
+        {"file": "", "line": 1, "description": "empty-file item is skipped",
+         "rationale": "", "severity": "low"},
+        {"file": "src/a.py", "line": 3, "description": "Dup A", "rationale": "r",
+         "severity": "medium", "confidence": "LOW"},
+        {"file": "src/a.py", "line": 9, "description": "Dup A", "rationale": "r",
+         "severity": "medium", "confidence": "LOW"},
     ]
     case_id = "case-abc123def456"
     findings = candidate.build_candidate_findings(items, case_id=case_id)
@@ -257,8 +262,9 @@ def test_agent_setup_confirms_version_and_backend(tmp_path):
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from harbor.environments.base import ExecResult
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(
         logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"}
@@ -353,9 +359,10 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
     from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(
         logs_dir=tmp_path,
@@ -400,8 +407,9 @@ def test_populate_context_from_trajectory_final_metrics(tmp_path):
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     traj_dir = tmp_path / "agent"
     traj_dir.mkdir(parents=True)
@@ -431,8 +439,9 @@ def test_populate_context_absent_trajectory_leaves_metrics_unset(tmp_path):
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path)  # no agent/trajectory.json
     ctx = AgentContext()
@@ -444,8 +453,9 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path):
     import pytest
 
     pytest.importorskip("harbor")
-    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
     from harbor.models.agent.context import AgentContext
+
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
 
     traj_dir = tmp_path / "agent"
     traj_dir.mkdir(parents=True)
@@ -491,3 +501,109 @@ def test_validate_compiled_imports_agent_path_same_interpreter(tmp_path, fake_gh
         pkg.validate_compiled(ws)
     assert "daydream.benchmark.harbor.agent" in str(rejected.value)
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
+
+
+# ---------------------------------------------------------------------------
+# Task 10: end-to-end real-path test — exact findings + explicit empty review
+# ---------------------------------------------------------------------------
+
+
+_KNOWN_ITEMS = [
+    {"id": 1, "lens": "per-stack", "file": "api.py", "line": 1,
+     "severity": "medium", "description": "Sample issue",
+     "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"},
+    {"id": 2, "lens": "per-stack", "file": "api.py", "line": 1,
+     "severity": "medium", "description": "Sample issue",
+     "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"},
+]
+
+# The stub-produced findings are the deterministic output of the real deep
+# pipeline over this single-python-file diff: one per-stack Record schema item,
+# normalized and rendered twice as duplicate-content findings.
+_EXPECTED_TITLES = ["Sample issue", "Sample issue"]
+
+
+def _seed_defect_repo(tmp_path: Path) -> Path:
+    """Build a real temp git repo with a ``base`` ref and a single-python diff.
+
+    Mirrors the deep-orchestrator's real-worktree fixtures, adding a ref literally
+    named ``base`` (what the entrypoint's ``RunConfig.base="base"`` resolves
+    against).
+    """
+    from tests.harness.git_helpers import commit as _commit
+    from tests.harness.git_helpers import git as _git
+    from tests.harness.git_helpers import init_repo as _init_repo
+
+    project = tmp_path / "fixture"
+    project.mkdir()
+    (project / "api.py").write_text("def hello():\n    return 'world'\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "prime")
+    _git(project, "branch", "base")
+    _git(project, "checkout", "-b", "feature")
+    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
+def _end_env(repo: Path, tmp: Path, case_id: str) -> dict[str, str]:
+    return {
+        "DAYDREAM_REVIEW_REPO_DIR": str(repo),
+        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(tmp / "logs" / "artifacts" / "review.json"),
+        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(tmp / "logs" / "agent" / "trajectory.json"),
+        "DAYDREAM_REVIEW_CASE_ID": case_id,
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+    }
+
+
+def test_end_to_end_findings_and_clean_review(tmp_path, monkeypatch):
+    """A real temp git repo/task plus a fake backend drives the production entrypoint
+    through the in-process runner and publishes the exact findings and an explicit
+    empty review (AC 3 / AC 5 gate)."""
+    import os
+
+    from daydream.benchmark.harbor import entrypoint
+    from daydream.benchmark.harbor import verifier_core as vc
+    from tests.harness.stub_backend import install_stub_backend
+
+    repo = _seed_defect_repo(tmp_path)
+    install_stub_backend(monkeypatch, repo)
+    case_id = "case-abc123def456"
+    env = _end_env(repo, tmp_path, case_id)
+
+    saved = {key: os.environ.get(key) for key in env}
+    try:
+        import asyncio
+
+        rc = asyncio.run(entrypoint.main(monkeypatch_env=env))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    assert rc == 0
+    artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
+    parsed = vc.validate_candidate_artifact(artifact)
+    assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
+    assert [f["title"] for f in artifact["findings"]] == _EXPECTED_TITLES
+    assert len({f["candidate_id"] for f in artifact["findings"]}) == len(artifact["findings"])
+    assert artifact["case_id"] == case_id
+    assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
+
+    # explicit empty review: a genuinely-empty deep review writes no merged output
+    # (it fail-closes), so the clean-review contract is exercised through the very
+    # same production publish step main() runs — a present, schema-valid artifact
+    # whose findings list is explicitly empty.
+    (repo / ".daydream" / "deep" / "merged-items.json").write_text(
+        json.dumps({"items": []})
+    )
+    dest = tmp_path / "logs" / "artifacts" / "review-clean.json"
+    entrypoint.publish_review(
+        repo_dir=repo, artifact_path=dest, case_id=case_id
+    )
+    empty = json.loads(dest.read_text())
+    assert empty["findings"] == []
+    assert vc.validate_candidate_artifact(empty) == []
