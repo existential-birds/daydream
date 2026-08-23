@@ -362,6 +362,46 @@ def test_non_candidate_evidence_is_citable_and_excludable(tmp_path, fake_gh):
         cu.exclude_evidence(ws, case_id, "github:review:999", reason="duplicate")
 
 
+def test_add_edited_findings_split_one_source_into_two(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    cu.add_edited_findings(ws, case_id, atoms=[
+        {"title": "Split A", "body": "first atom", "severity": "high",
+         "location": {"path": "feature.py", "start_line": 1, "end_line": 1},
+         "source_ids": ["github:inline_comment:1"]},
+        {"title": "Split B", "body": "second atom", "severity": None,
+         "location": None, "source_ids": ["github:inline_comment:1"]},
+    ])
+    fs = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
+    assert len(fs) == 2
+    assert {f["provenance"]["kind"] for f in fs} == {"edited"}
+    assert all(f["provenance"]["source_ids"] == ["github:inline_comment:1"] for f in fs)
+
+
+def test_add_edited_findings_merge_many_sources_into_one(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    cu.add_edited_findings(ws, case_id, atoms=[{
+        "title": "Merged", "body": "combined", "severity": "medium",
+        "location": {"path": "feature.py", "start_line": 2, "end_line": 2},
+        "source_ids": ["github:inline_comment:1", "github:review:100", "github:issue_comment:200"],
+    }])
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["provenance"]["kind"] == "edited"
+    assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100", "github:issue_comment:200"]
+
+
+def test_add_edited_findings_rejects_atom_without_sources_and_unknown(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    with pytest.raises(cu.CurationError):
+        cu.add_edited_findings(ws, case_id, atoms=[{"title": "X", "body": "y", "source_ids": []}])
+    with pytest.raises(cu.CurationError):
+        cu.add_edited_findings(ws, case_id, atoms=[{"title": "X", "body": "y",
+                                                    "source_ids": ["github:review:999"]}])
+    assert not (load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"].get("findings") or [])
+
+
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)

@@ -3,7 +3,7 @@
 This module is the issue-#5 browser/terminal seam: the fixed operation set a
 curator (or the future interactive client) drives every gold-curation action
 through. Every mutating operation (``accept_candidate``, ``add_finding``,
-``add_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
+``add_findings``, ``add_edited_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
 ``attest_clean``, ``exclude_case``, ``reinclude_case``, ``apply_gold_fragment``)
 runs its complete read -> validate -> mutate -> commit sequence under the
 workspace lock:
@@ -665,6 +665,41 @@ def add_findings(
         _derive_content(raw)
 
     _with_case_lock(root, case_id, "add", mutate)
+
+
+def add_edited_findings(
+    root: Path, case_id: str, *, atoms: list[dict[str, Any]]
+) -> None:
+    """Atomically add re-written (edited) findings in one transaction.
+
+    The split/merge/author-from-evidence engine: N atoms sharing one source
+    split it into N findings, one atom carrying M sources merges them into
+    one finding. Every atom must carry a non-empty ``source_ids`` list whose
+    members are import evidence of the case — an empty list is rejected with a
+    :class:`CurationError` naming the atom index (it would otherwise silently
+    derive ``authored``) — so the resulting findings are always ``edited``,
+    never ``historical`` and never ``authored``. Finding IDs are derived, never
+    caller-supplied. Like :func:`add_findings`, the whole batch validates
+    (sources checked up front), derives, and stages together: a mid-batch
+    invariant violation stages nothing.
+    """
+
+    def mutate(raw: dict[str, Any]) -> None:
+        for i, atom in enumerate(atoms):
+            source_ids = list(atom.get("source_ids") or [])
+            if not source_ids:
+                raise CurationError(
+                    f"edited-finding atom {i} carries no source_ids"
+                )
+            _check_evidence_sources(root, raw, source_ids, case_id)
+        curation = raw.setdefault("curation", {})
+        _reopen_for_mutation(curation)
+        for atom in atoms:
+            built = _build_replacement(root, raw, case_id, atom)
+            curation.setdefault("findings", []).append(built)
+        _derive_content(raw)
+
+    _with_case_lock(root, case_id, "add-edited", mutate)
 
 
 def _build_replacement(
