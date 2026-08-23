@@ -847,3 +847,21 @@ def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_pat
         cu.mark_ready(ws, case_id, head_sha="f" * 40)   # stale attestation SHA
     assert path.read_bytes() == before                    # a rejected mutation writes nothing
 
+
+
+def test_curation_ready_requires_task_spec_sha256():
+    from daydream.benchmark.schema import Curation
+    import pydantic
+    base = dict(state="ready", snapshot_attested=True, gold_status="findings",
+                clean_attested=False, exclusions=[], case_exclusion=None)
+    f = {"finding_id": "f" * 64, "title": "t", "body": "b", "severity": "low",
+         "location": None, "provenance": {"kind": "historical", "source_ids": ["s"]}}
+    # ready with a digest validates; ready without a digest is rejected
+    assert Curation(**base, findings=[f], task_spec_sha256="d" * 64).task_spec_sha256 == "d" * 64
+    with pytest.raises(pydantic.ValidationError):
+        Curation(**base, findings=[f], task_spec_sha256=None)
+    # non-ready states (draft/stale) may be unset
+    draft = Curation(state="draft", snapshot_attested=False, clean_attested=False,
+                     gold_status=None, findings=[], exclusions=[], case_exclusion=None,
+                     task_spec_sha256=None)
+    assert draft.task_spec_sha256 is None

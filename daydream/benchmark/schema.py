@@ -832,11 +832,14 @@ class Curation(BaseModel):
     findings: list[Finding] = []
     exclusions: list[EvidenceExclusion] = []
     case_exclusion: CaseExclusion | None = None
+    task_spec_sha256: str | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> "Curation":
         if self.case_exclusion is not None and self.state != "excluded":
             raise ValueError("case_exclusion is only valid when state == 'excluded'")
+        if self.state == "ready" and self.task_spec_sha256 is None:
+            raise ValueError("ready curation requires task_spec_sha256 (approved spec digest)")
         if self.state == "ready" and self.snapshot_attested is not True:
             raise ValueError("ready curation requires snapshot_attested=True")
         if self.state == "stale" and self.snapshot_attested is not False:
