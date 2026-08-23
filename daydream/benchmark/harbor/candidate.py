@@ -20,8 +20,6 @@ from typing import Any
 from daydream.benchmark.harbor import verifier_core as vc
 from daydream.pr_review import extract_item_fields
 
-_ARTIFACT_KEYS = ("schema_version", "case_id", "base_ref", "head_ref", "findings")
-
 
 class CandidateError(Exception):
     """Typed agent-failure carrier for candidate artifact production.
@@ -95,13 +93,17 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
         }
         # Enforce the verifier's per-finding bounds fail-closed, reusing the
         # verifier's own validators so no drift surfaces as a verifier-rejected
-        # artifact after the builder already declared success: over-long title
-        # (>500 chars) or body (>8 KiB) and a non-enum severity are each a
-        # typed failure, never an artifact the verifier would reject.
+        # artifact after the builder already declared success: an over-long
+        # title (>500 chars) or body (>8 KiB), a non-enum severity, a
+        # rooted/'..'-containing/NUL path, or a non-positive/non-ascending
+        # line range are each a typed failure, never an artifact the verifier
+        # would reject (``_validate_location`` re-checks path + lines on parse).
         try:
             vc._validate_title(title)
             vc._validate_body(body)
             vc._validate_severity(entry["severity"])
+            vc._validate_path(entry["path"])
+            vc._validate_lines(entry["start_line"], entry["end_line"])
         except vc.VerifierError as exc:
             raise CandidateError(
                 f"cannot build candidate finding: {exc}", kind="invalid_finding"

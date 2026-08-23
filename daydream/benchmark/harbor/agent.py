@@ -114,7 +114,7 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         child_env = build_child_env(parent)
         result = await environment.exec(
             "python -m daydream.benchmark.harbor.entrypoint",
-            cwd="/workspace/repo",
+            cwd=child_env.get("DAYDREAM_REVIEW_REPO_DIR", "/workspace/repo"),
             env=child_env,
             timeout_sec=1800,
         )

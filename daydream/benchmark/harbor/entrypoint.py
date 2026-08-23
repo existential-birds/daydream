@@ -102,9 +102,14 @@ def apply_reviewer_env(env: Mapping[str, str] | None = None) -> None:
 
     Propagates ``DAYDREAM_REVIEW_API_KEY``/``DAYDREAM_REVIEW_BASE_URL`` into
     ``ANTHROPIC_API_KEY``/``ANTHROPIC_BASE_URL`` on ``os.environ``; never
-    silently substitutes a default credential.
+    silently substitutes a default credential.  Any pre-existing raw
+    ``ANTHROPIC_*``/``DAYDREAM_JUDGE_*`` credential is cleared first so a
+    host-inherited secret cannot leak into the reviewed scope.
     """
     source = dict(os.environ if env is None else env)
+    for prefix in ("DAYDREAM_JUDGE_", "ANTHROPIC_"):
+        for key in [k for k in os.environ if k.startswith(prefix)]:
+            os.environ.pop(key, None)
     api_key = source.get(_API_KEY_ENV)
     if api_key:
         os.environ["ANTHROPIC_API_KEY"] = api_key

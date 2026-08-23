@@ -743,7 +743,7 @@ def test_local_harbor_task_with_fake_backend(
     assert "claude_agent_sdk" in executed.setup
     # run() executed with the allowlisted child env traversing to the entrypoint only.
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
-    assert executed.cwd == "/workspace/repo"
+    assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
     assert executed.child["DAYDREAM_REVIEW_CASE_ID"] == key
     assert executed.child["DAYDREAM_REVIEW_BACKEND"] == "claude"
