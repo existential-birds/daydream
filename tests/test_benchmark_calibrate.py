@@ -187,7 +187,9 @@ def test_pass_gate_reports_instability_only(sr):
         [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .9)],
         [_v(sr, False, .2), _v(sr, False, .2), _v(sr, False, .2)],
     ]
-    passed, failures = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
+    passed, failures, _, _ = _pass_gate(
+        pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD
+    )
     assert passed is False
     assert list(failures) == ["instability"]
     assert 0 in failures["instability"]
@@ -311,6 +313,24 @@ def _scripted_http(responses):
     return Fake(), i
 
 
+def _scripted_responses(pairs, *, mislabel_count=0):
+    """Build the 72-response scripted verdict list (3 calls per pair).
+
+    ``mislabel_count`` match pairs (from the front) are flipped to nonmatch.
+
+    """
+    responses = []
+    wrong = 0
+    for p in pairs:
+        m = p["label"] == "match"
+        if m and wrong < mislabel_count:
+            m = False
+            wrong += 1
+        verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
+        responses.extend([verdict] * 3)
+    return responses
+
+
 class TestCalibrateAcceptance:
     """The six acceptance-mandated fake-endpoint calibration cases.
 
@@ -320,12 +340,7 @@ class TestCalibrateAcceptance:
 
     def test_run_calibration_pass_writes_receipt(self, tmp_path, ws_factory):
         from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
-        pairs = _load_fixture()
-        responses = []
-        for p in pairs:
-            m = p["label"] == "match"
-            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-            responses.extend([verdict] * 3)  # one response per call: 72 total
+        responses = _scripted_responses(_load_fixture())
         assert len(responses) == 72
         fake, counter = _scripted_http(responses)
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
@@ -335,17 +350,8 @@ class TestCalibrateAcceptance:
 
     def test_accuracy_failure_no_receipt(self, tmp_path, ws_factory):
         from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
-        pairs = _load_fixture()
-        responses = []
-        wrong_seen = 0
-        for p in pairs:
-            m = p["label"] == "match"
-            if p["label"] == "match" and wrong_seen < 3:
-                m = False  # 3 match pairs judged as nonmatch -> majority failure
-                wrong_seen += 1
-            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-            responses.extend([verdict] * 3)
-        assert len(responses) == 72 and wrong_seen == 3
+        responses = _scripted_responses(_load_fixture(), mislabel_count=3)
+        assert len(responses) == 72
         fake, counter = _scripted_http(responses)
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
         assert code == 1
@@ -391,11 +397,7 @@ class TestCalibrateAcceptance:
             run_calibration,
         )
         pairs = _load_fixture()
-        responses = []
-        for p in pairs:
-            m = p["label"] == "match"
-            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-            responses.extend([verdict] * 3)
+        responses = _scripted_responses(pairs)
         fake, _ = _scripted_http(responses)
         assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
         receipt = tmp_path / "ws" / "runtime" / "calibration-receipt.json"
@@ -410,12 +412,7 @@ class TestCalibrateAcceptance:
 
     def test_acceptance_zero_source_leakage(self, tmp_path, ws_factory):
         from daydream.benchmark.harbor.calibrate import _load_fixture, run_calibration
-        pairs = _load_fixture()
-        responses = []
-        for p in pairs:
-            m = p["label"] == "match"
-            verdict = {"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"}
-            responses.extend([verdict] * 3)
+        responses = _scripted_responses(_load_fixture())
         fake, _ = _scripted_http(responses)
         assert run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake) == 0
         receipt = (tmp_path / "ws" / "runtime" / "calibration-receipt.json").read_text()

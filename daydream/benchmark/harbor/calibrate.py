@@ -231,11 +231,14 @@ def _pass_gate(
     pairs: list[dict[str, Any]],
     runs_per_pair: list[list[Any]],
     threshold: float,
-) -> tuple[bool, dict[str, Any]]:
-    """Evaluate the three-part pass gate, returning (passed, failures).
+) -> tuple[bool, dict[str, Any], dict[str, int], float]:
+    """Evaluate the three-part pass gate.
 
-    ``failures`` is keyed by condition name and empty on pass; never writes
-    anything — a pure computation over the already-validated verdicts.
+    Returns ``(passed, failures, matrix, bacc)`` where ``failures`` is keyed by
+    condition name and empty on pass; ``matrix`` and ``bacc`` are the confusion
+    matrix and class-balanced accuracy computed for the gate, so callers that
+    need them for the receipt do not recompute them. Never writes anything — a
+    pure computation over the already-validated verdicts.
     """
     failures: dict[str, Any] = {}
     gold_labels = [p["label"] for p in pairs]
@@ -260,7 +263,7 @@ def _pass_gate(
     if unstable:
         failures["instability"] = unstable
 
-    return (len(failures) == 0, failures)
+    return (len(failures) == 0, failures, matrix, bacc)
 
 
 def _label_sha256(pairs: list[dict[str, Any]]) -> str:
@@ -417,7 +420,7 @@ def run_calibration(
     try:
         client = _build_calibration_client(env, http=http)
         runs = _judge_pairs(sr, client, pairs, attempts=3)
-        passed, failures = _pass_gate(
+        passed, failures, matrix, bacc = _pass_gate(
             pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD
         )
     except sr.VerifierError as exc:
@@ -425,10 +428,6 @@ def run_calibration(
         return 1
 
     if passed:
-        matrix = _confusion_matrix(
-            [p["label"] for p in pairs], [_majority_label(runs) for runs in runs]
-        )
-        bacc = _class_balanced_accuracy(matrix)
         disagreements = [
             {
                 "pair_index": i,
