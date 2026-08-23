@@ -21,6 +21,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+benchmark = ["harbor>=0.21,<0.22"]
+
 [dependency-groups]
 dev = [
     "mypy>=1.14",
@@ -55,6 +58,8 @@ include = [
     "daydream/training/schema/**",
     "daydream/atif/LICENSE",
     "daydream/atif/NOTICE",
+    "daydream/benchmark/harbor/templates/**",
+    "daydream/benchmark/harbor/runtime-requirements.lock",
 ]
 
 [tool.mypy]

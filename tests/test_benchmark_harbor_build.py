@@ -893,6 +893,21 @@ def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
 
+def test_leakage_scan_covers_task_toml_and_job_configs():
+    from daydream.benchmark.harbor import build
+
+    cases = {
+        "case-abcdef123456/task.toml": (
+            'schema_version = "1.4"\n# leak: ghp_abcdefghijklmnopqrstuv\n'
+        ),
+        "harbor-job.yaml": "jobs_dir: jobs\n# leak: https://user:pass@github.com/o/r\n",
+    }
+    with pytest.raises(build.CompileError) as rejected:
+        build.leakage_scan(cases, repository_slug="o/r")
+    assert "case-abcdef123456/task.toml" in str(rejected.value)
+    assert "harbor-job.yaml" in str(rejected.value)
+
+
 def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token():
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError
@@ -977,7 +992,10 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path, fake_gh):
     forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
     assert not any(any(f in r for f in forbidden_substrs) for r in rels)
     # every compiled path lives under a case dir, root control files, or the metric
-    assert all(r.startswith("case-") or r in {"README.md", "benchmark.lock.json", "metric.py"} for r in rels)
+    root_files = {
+        "README.md", "benchmark.lock.json", "metric.py", "harbor-job.yaml", "harbor-oracle.yaml"
+    }
+    assert all(r.startswith("case-") or r in root_files for r in rels)
 
 
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path, fake_gh):
@@ -1154,8 +1172,9 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
     for sub in ("tests", "environment"):
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
-    # agent task surface is instruction.md; the environment is ONLY the repository
-    # bundle (no Dockerfile or other file that could embed Task.md), so assert the
-    # environment surface is exactly that and Task.md never reaches it.
+    # Agent task surface is instruction.md; environment packaging contains the
+    # repository bundle, agent-safe Dockerfile, and packaged runtime lock.
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {"repository.bundle"}, f"unexpected environment files: {env_files}"
+    assert env_files == {
+        "repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    }, f"unexpected environment files: {env_files}"

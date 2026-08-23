@@ -12,12 +12,14 @@ command surface.
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import inspect
 import json
 import os
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
@@ -45,7 +47,9 @@ def render_metric() -> bytes:
     aggregate_metrics)`` so the compiled metric and the in-repo corpus pool
     share one aggregation contract and cannot drift.
     """
-    text = (_TEMPLATE_DIR / "metric.py").read_text(encoding="utf-8")
+    from daydream.benchmark.harbor.package import template_text
+
+    text = template_text("metric.py")
     if _METRIC_AGG_BEGIN not in text or _METRIC_AGG_END not in text:
         raise CompileError(
             "metric.py template is missing the aggregation markers "
@@ -430,15 +434,25 @@ def _copy_assets(case_stage: Path) -> list[tuple[str, str]]:
     Returns ``[(rel, sha256), ...]`` for inventory. A missing template asset
     raises :class:`CompileError` -- never a silent skip or fabricated file.
     """
+    from daydream.benchmark.harbor.package import (
+        VERIFIER_BASE_IMAGE,
+        render_verifier_dockerfile,
+        template_text,
+    )
+
     out: list[tuple[str, str]] = []
     for rel in _COPY_ASSETS:
-        src = _TEMPLATE_DIR / rel
-        if not src.is_file():
-            raise CompileError(f"missing template asset: {rel}")
+        if rel == "tests/Dockerfile":
+            # The verifier image is rendered (not copied verbatim) so the
+            # packaged base-image digest and the entrypoint-free/hash-locked
+            # validation actually run in the compile path, not just in tests.
+            data = render_verifier_dockerfile(base_image=VERIFIER_BASE_IMAGE)
+        else:
+            data = template_text(rel).encode("utf-8")
         dst = case_stage / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
-        out.append((rel, hashlib.sha256(src.read_bytes()).hexdigest()))
+        dst.write_bytes(data)
+        out.append((rel, hashlib.sha256(data).hexdigest()))
     return out
 
 
@@ -483,25 +497,29 @@ def _bounded_block_strip(text: str) -> str:
 
 
 def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None:
-    """Fail-fast control-plane leak scan over compiler-generated text only.
+    """Control-plane leak scan over compiler-generated text only.
 
     Each ``instruction.md`` is scanned with its bounded block stripped; every
-    other file as-is. Also scans for the literal *repository_slug*. On the first
-    match of any rule raises :class:`CompileError` naming the file and matched
+    other file as-is. Also scans for the literal *repository_slug*. All
+    violations across every scanned file are accumulated and raised as a single
+    :class:`CompileError`, with each violation naming its file and matched
     token. Returns ``None`` when clean.
     """
+    violations: list[str] = []
     for rel, text in control_plane.items():
         scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
         rules = _TASK_SPEC_IDENTIFIER_RULES if rel.endswith("Task.md") else _LEAK_RULES
         hits: list[str] = []
         if repository_slug and repository_slug in scanned:
             hits.append(repository_slug)
-        for label, pattern in rules:
+        for _label, pattern in rules:
             m = pattern.search(scanned)
             if m is not None:
                 hits.append(m.group(0))
         if hits:
-            raise CompileError(f"{rel}: leakage tokens matched {hits!r}")
+            violations.append(f"{rel}: leakage tokens matched {hits!r}")
+    if violations:
+        raise CompileError("; ".join(violations))
     return None
 
 
@@ -604,7 +622,15 @@ def _write_task_spec(stage: Path, case_doc: dict) -> str:
     return task_spec_sha256
 
 
-def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict:
+def _compile_case(
+    stage: Path,
+    ws: Path,
+    case_doc: dict,
+    repo_slug: str,
+    *,
+    runtime_lock: bytes,
+    wheel: Path | None,
+) -> dict:
     """Compile one case tree into ``stage/<key>/`` and return its lock row."""
     case_id = case_doc["case_id"]
     key = derive_task_key(case_id)
@@ -622,6 +648,27 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     instruction = f"{ASSIGNMENT_TEXT}\n\n{bounded_pr_context(pull_request)}\n"
     (case_stage / "instruction.md").write_text(instruction)
     (case_stage / "README.md").write_text(_CASE_README)
+    from daydream.benchmark.harbor.package import (
+        ENV_BASE_IMAGE,
+        render_environment_dockerfile,
+        render_task_toml,
+    )
+
+    (case_stage / "task.toml").write_bytes(render_task_toml(key))
+    (case_stage / "environment").mkdir(exist_ok=True)
+    (case_stage / "environment" / "Dockerfile").write_bytes(
+        render_environment_dockerfile(
+            base_image=ENV_BASE_IMAGE,
+            daydream_version=importlib.metadata.version("daydream"),
+            # The emitted environment image installs the wheel only when one is
+            # actually baked into environment/; a wheel-less compile strips the
+            # COPY/install block so the image never references an absent file.
+            wheel=wheel is not None,
+        )
+    )
+    (case_stage / "environment" / "runtime-requirements.lock").write_bytes(runtime_lock)
+    if wheel is not None:
+        shutil.copyfile(wheel, case_stage / "environment" / wheel.name)
 
     bundle_rel = snapshot.get("bundle_file")
     expected = snapshot.get("bundle_sha256")
@@ -674,13 +721,16 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
 
     files: dict[str, str] = {}
     for rel in (
-        "README.md", "instruction.md", "Task.md", "environment/repository.bundle",
+        "README.md", "instruction.md", "Task.md", "task.toml", "environment/repository.bundle",
+        "environment/Dockerfile", "environment/runtime-requirements.lock",
         "tests/golden-review.json", "tests/verifier-metadata.json",
         "solution/golden-review.json",
     ):
         files[rel] = hashlib.sha256((case_stage / rel).read_bytes()).hexdigest()
     for rel, sha in assets:
         files[rel] = sha
+    if wheel is not None:
+        files[f"environment/{wheel.name}"] = hashlib.sha256(wheel.read_bytes()).hexdigest()
 
     number = pull_request.get("number")
     if type(number) is not int:
@@ -706,7 +756,14 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     }
 
 
-def _build_lock(case_rows: list[dict], authoring_digest: str, all_files: dict[str, str]) -> dict:
+def _build_lock(
+    case_rows: list[dict],
+    authoring_digest: str,
+    all_files: dict[str, str],
+    *,
+    wheel_info: Any | None = None,
+    runtime_lock_fields: dict[str, str] | None = None,
+) -> dict:
     """Assemble the deterministic private lock (no timestamps anywhere)."""
     lock: dict = {
         "schema_version": 1,
@@ -715,6 +772,14 @@ def _build_lock(case_rows: list[dict], authoring_digest: str, all_files: dict[st
         "cases": {},
         "files": dict(sorted(all_files.items())),
     }
+    if runtime_lock_fields is not None:
+        lock["runtime_lock"] = runtime_lock_fields
+    if wheel_info is not None:
+        lock["daydream"] = {
+            "distribution": wheel_info.distribution,
+            "version": wheel_info.version,
+            "sha256": wheel_info.sha256,
+        }
     for row in sorted(case_rows, key=lambda r: r["key"]):
         entry = dict(row)
         entry.pop("key", None)
@@ -722,7 +787,7 @@ def _build_lock(case_rows: list[dict], authoring_digest: str, all_files: dict[st
     return lock
 
 
-def compile_workspace(root: Path) -> dict:
+def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict:
     """Compile the whole workspace into ``root/harbor/`` atomically.
 
     Builds into ``root/cache/harbor-build-stage``, validates every indexed case,
@@ -731,6 +796,13 @@ def compile_workspace(root: Path) -> dict:
     re-raises and the prior ``harbor/`` is left untouched.
     """
     root = Path(root)
+    from daydream.benchmark.harbor import package as pkg
+
+    daydream_version = importlib.metadata.version("daydream")
+    wheel = Path(wheel) if wheel is not None else None
+    wheel_info = pkg.validate_wheel(wheel, daydream_version=daydream_version) if wheel else None
+    runtime_lock = pkg.lock_text().encode("utf-8")
+    runtime_lock_fields = pkg.runtime_lock_header_fields(runtime_lock.decode("utf-8"))
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
         manifest = storage.load_yaml_strict(root / "benchmark.yaml")
@@ -783,26 +855,54 @@ def compile_workspace(root: Path) -> dict:
                         f"case {case_id} index row has no matching case document "
                         "(row case_id disagrees with the case document's own case_id)"
                     )
-                row = _compile_case(stage, root, case_doc, repo_slug)
+                row = _compile_case(
+                    stage,
+                    root,
+                    case_doc,
+                    repo_slug,
+                    runtime_lock=runtime_lock,
+                    wheel=wheel,
+                )
                 case_rows.append(row)
                 key = row["key"]
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
                 control_plane[f"{key}/README.md"] = _CASE_README
                 control_plane[f"{key}/instruction.md"] = (stage / key / "instruction.md").read_text()
                 control_plane[f"{key}/Task.md"] = (stage / key / "Task.md").read_text()
+                control_plane[f"{key}/task.toml"] = (stage / key / "task.toml").read_text()
+                control_plane[f"{key}/environment/Dockerfile"] = (
+                    stage / key / "environment" / "Dockerfile"
+                ).read_text()
+                control_plane[f"{key}/environment/runtime-requirements.lock"] = runtime_lock.decode("utf-8")
                 control_plane[f"{key}/tests/verifier-metadata.json"] = (
                     stage / key / "tests" / "verifier-metadata.json"
                 ).read_text()
 
             (stage / "README.md").write_text(_ROOT_README)
+            from daydream.benchmark.harbor.package import render_job_config
+
+            job_bytes = render_job_config(oracle=False)
+            oracle_job_bytes = render_job_config(oracle=True)
+            (stage / "harbor-job.yaml").write_bytes(job_bytes)
+            (stage / "harbor-oracle.yaml").write_bytes(oracle_job_bytes)
             metric_bytes = render_metric()
             (stage / "metric.py").write_bytes(metric_bytes)
             (stage / "jobs").mkdir(exist_ok=True)
 
             all_files["README.md"] = hashlib.sha256(_ROOT_README.encode("utf-8")).hexdigest()
+            all_files["harbor-job.yaml"] = hashlib.sha256(job_bytes).hexdigest()
+            all_files["harbor-oracle.yaml"] = hashlib.sha256(oracle_job_bytes).hexdigest()
             all_files["metric.py"] = hashlib.sha256(metric_bytes).hexdigest()
+            control_plane["harbor-job.yaml"] = job_bytes.decode("utf-8")
+            control_plane["harbor-oracle.yaml"] = oracle_job_bytes.decode("utf-8")
 
-            lock = _build_lock(case_rows, _authoring_input_digest(case_docs, manifest), all_files)
+            lock = _build_lock(
+                case_rows,
+                _authoring_input_digest(case_docs, manifest),
+                all_files,
+                wheel_info=wheel_info,
+                runtime_lock_fields=runtime_lock_fields,
+            )
             lock_bytes = json.dumps(lock, sort_keys=True, indent=2).encode("utf-8")
             (stage / "benchmark.lock.json").write_bytes(lock_bytes)
 
