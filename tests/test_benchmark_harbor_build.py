@@ -1157,7 +1157,9 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
     for sub in ("tests", "environment"):
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
-    # Agent task surface is instruction.md; environment packaging contains only
-    # the repository bundle and its agent-safe Dockerfile at this stage.
+    # Agent task surface is instruction.md; environment packaging contains the
+    # repository bundle, agent-safe Dockerfile, and packaged runtime lock.
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {"repository.bundle", "Dockerfile"}, f"unexpected environment files: {env_files}"
+    assert env_files == {
+        "repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    }, f"unexpected environment files: {env_files}"

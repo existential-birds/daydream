@@ -91,6 +91,30 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
+def lock_text() -> str:
+    """Read the packaged runtime lock (resource routing is finalized in Task 14)."""
+    path = Path(__file__).parent / "runtime-requirements.lock"
+    try:
+        return path.read_text()
+    except OSError as exc:
+        raise PackageError(f"cannot read packaged runtime lock {path}: {exc}") from exc
+
+
+def runtime_lock_header_fields(text: str) -> dict[str, str]:
+    """Extract deterministic provenance fields from a packaged runtime lock."""
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith("# ") or ": " not in line:
+            continue
+        key, value = line[2:].split(": ", 1)
+        if key in {"daydream_version", "source_uv_lock_sha256", "template_version"}:
+            fields[key] = value
+    required = {"daydream_version", "source_uv_lock_sha256", "template_version"}
+    if fields.keys() != required:
+        raise PackageError(f"runtime lock header is missing fields: {sorted(required - fields.keys())}")
+    return fields
+
+
 def render_job_config(*, oracle: bool) -> bytes:
     """Render a deterministic Harbor job or Oracle configuration."""
     agents = [{"name": "oracle"}] if oracle else [{

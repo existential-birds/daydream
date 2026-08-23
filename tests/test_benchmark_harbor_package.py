@@ -197,3 +197,30 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs():
     assert oracle["agents"] == [{"name": "oracle"}]
     assert oracle["verifier"] == job["verifier"]
     assert oracle["metrics"] == job["metrics"]
+
+
+def test_compile_with_wheel_emits_full_packaged_tree(tmp_path, fake_gh):
+    import importlib.metadata
+
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import package as pkg
+    from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_ready_workspace
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ver = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    lock = build.compile_workspace(ws, wheel=wheel)
+    key = build.derive_task_key(case_id)
+    case = ws / "harbor" / key
+    assert (case / "task.toml").is_file()
+    assert (case / "environment/Dockerfile").is_file()
+    assert (case / "environment/runtime-requirements.lock").is_file()
+    assert (case / "environment" / wheel.name).read_bytes() == wheel.read_bytes()
+    assert (ws / "harbor/harbor-job.yaml").is_file()
+    assert (ws / "harbor/harbor-oracle.yaml").is_file()
+    assert lock["daydream"]["version"] == ver
+    assert lock["daydream"]["sha256"] == pkg.validate_wheel(wheel, daydream_version=ver).sha256
+    tree1 = _harbor_tree_bytes(ws)
+    build.compile_workspace(ws, wheel=wheel)
+    assert _harbor_tree_bytes(ws) == tree1
