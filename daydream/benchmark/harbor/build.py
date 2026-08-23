@@ -436,12 +436,11 @@ def _is_compilable(curation: dict) -> bool:
     """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
     if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
         return False
-    if not curation.get("findings"):
-        # An empty gold set is a genuine clean case only when clean-attested;
-        # mark_ready enforces the same guard on the authoring path, so a ready
-        # case that never received clean attestation must not compile as clean.
-        return bool(curation.get("clean_attested"))
-    return True
+    # Single-sourced empty-gold eligibility: derive_gold_status is None exactly
+    # when the gold set is empty and never clean-attested, the same derived
+    # status mark_ready's guard trusts, so a ready case that never received
+    # clean attestation must not compile as clean.
+    return schema.derive_gold_status(schema.Curation(**curation)) is not None
 
 
 def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:

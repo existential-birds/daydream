@@ -698,7 +698,10 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
                 f"attestation SHA mismatch: expected {original} got {head_sha}"
             )
         curation = raw.setdefault("curation", {})
-        if not curation.get("findings") and not curation.get("clean_attested"):
+        # Single-sourced empty-gold eligibility: derive_gold_status is None
+        # exactly when the gold set is empty and never clean-attested -- the
+        # same derived status harbor/build._is_compilable trusts.
+        if schema.derive_gold_status(_curation_model(curation)) is None:
             raise CurationError(
                 f"case {case_id} cannot be marked ready with an empty gold findings set "
                 "and no clean attestation (clean-attest first)"
