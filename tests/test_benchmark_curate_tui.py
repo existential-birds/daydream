@@ -8,7 +8,7 @@ YAML/state via service reads.
 
 from pathlib import Path
 
-from tests.test_benchmark_curation import _seed_ready_case
+from tests.test_benchmark_curation import _seed_ready_case, _seed_ready_case_mixed
 
 
 def _scripted(*lines):
@@ -61,6 +61,17 @@ def test_render_case_shows_header_and_numbered_evidence(tmp_path, fake_gh):
     assert "alice" in out and "inline_comment" in out          # evidence projection
     assert "feature.py:2" in out                                # path/line anchor
     assert "please fix" in out                                  # body preview
+
+
+def test_render_case_pages_all_evidence_kinds(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import render_case
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    out = render_case(cu.get_case(ws, case_id))
+    assert "APPROVED" in out and "carol" in out          # pure approval review paged
+    assert "issue_comment" in out and "dave" in out      # conversation comment paged
+    assert "reply text" in out and "bob" in out          # inline reply paged
+    assert "inline_comment" in out and "please fix" in out  # root candidate still visible
 
 
 def test_run_curate_tui_unknown_action_reprompts(tmp_path, fake_gh, capsys):

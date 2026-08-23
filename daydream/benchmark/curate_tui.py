@@ -99,42 +99,49 @@ def _prompt(read_line: Callable[[str], str], message: str) -> str:
 def render_case(case: dict[str, Any]) -> str:
     """Render a plain-text snapshot header + numbered evidence list.
 
-    Each evidence entry shows its number, kind, author login (+ ``[bot]`` for a
-    bot), commit prefix, ``path:line`` anchor, resolved/outdated markers, the
-    candidate title, and a body preview (first ~120 chars). Candidates without
-    an ``evidence`` projection render those fields as ``-``.
+    Every evidence entry shows its number, kind, author login (+ ``[bot]`` for a
+    bot), commit prefix, and — where the record carries one — its review
+    ``state`` (e.g. ``APPROVED``/``COMMENTED``/``CHANGES_REQUESTED``), the
+    ``path:line`` anchor, resolved/outdated markers, and a body preview (first
+    ~120 chars). Candidate records additionally show their title. Sources from
+    the full ordered evidence list; callers passing a minimal dict without an
+    ``evidence`` key fall back to ``candidates``.
     """
     snapshot = case.get("snapshot") or {}
     curation = case.get("curation") or {}
     head = snapshot.get("original_head_sha") or "-"
     policy = snapshot.get("policy") or "-"
     state = curation.get("state") or "-"
+    candidates = case.get("candidates") or []
+    entries = case.get("evidence") or candidates
     lines = [
         f"case {case.get('case_id')}: state={state} policy={policy} head={head}",
     ]
-    for i, cand in enumerate(case.get("candidates") or [], start=1):
-        ev = cand.get("evidence") or {}
+    for i, ev in enumerate(entries, start=1):
         author = ev.get("author") or {}
         login = author.get("login") or "-"
         if author.get("type") == "Bot":
             login = f"{login}[bot]"
         kind = ev.get("kind") or "-"
         commit = (ev.get("commit_id") or "")[:12] or "-"
-        location = cand.get("location") or {}
-        loc_path = location.get("path") or "-"
-        start = location.get("start_line")
+        rec_state = ev.get("state")
+        state_tag = f" {rec_state}" if rec_state else ""
+        loc_path = ev.get("path") or "-"
+        start = ev.get("start_line") or ev.get("line")
         anchor = f"{loc_path}:{start}" if loc_path != "-" and start else loc_path
         markers = ""
         if ev.get("resolved"):
             markers += " [resolved]"
         if ev.get("outdated"):
             markers += " [outdated]"
-        preview = (cand.get("body") or "").replace("\n", " ")[:120]
+        preview = (ev.get("body") or "").replace("\n", " ")[:120]
         line_parts = [
-            f"  {i}. [{kind}] {login} {commit} {anchor}{markers}",
-            f"      {cand.get('title') or '-'}",
+            f"  {i}. [{kind}] {login} {commit}{state_tag} {anchor}{markers}",
             f"      {preview or '-'}",
         ]
+        cand_index = ev.get("candidate_index")
+        if cand_index is not None and 0 <= cand_index < len(candidates):
+            line_parts.insert(1, f"      {candidates[cand_index].get('title') or '-'}")
         lines.append("\n".join(line_parts))
     return "\n".join(lines)
 
@@ -482,12 +489,13 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
             action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
             if action not in _ACTIONS:
                 if action.isdigit():
-                    candidates = cu.get_case(root, case_id).get("candidates") or []
+                    view = cu.get_case(root, case_id)
+                    entries = view.get("evidence") or view.get("candidates") or []
                     index = int(action) - 1
-                    if not (0 <= index < len(candidates)):
+                    if not (0 <= index < len(entries)):
                         print(f"no evidence number {action}")
                     else:
-                        _launch_pager(candidates[index].get("body") or "")
+                        _launch_pager(entries[index].get("body") or "")
                     continue
                 print(f"unknown action: {action}")
                 continue
