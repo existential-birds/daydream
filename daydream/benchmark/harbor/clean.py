@@ -141,16 +141,28 @@ def _clean_trajectories(root: Path, report: CleanReport) -> None:
             report.trajectory_deleted += 1
 
 
+def _image_refs(env: dict[str, Any]) -> list[str]:
+    """The exact recorded image refs for one environment (never guessed)."""
+    refs: list[str] = []
+    if env.get("image_id"):
+        refs.append(str(env["image_id"]))
+    refs.extend(str(t) for t in env.get("image_tags") or [])
+    return refs
+
+
 def _clean_jobs(
     root: Path, report: CleanReport, *, docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> None:
-    """Remove ledgered job dirs and (Task 6+) their recorded images.
+    """Remove ledgered job dirs + their recorded Docker images.
 
-    Ledger-driven: each run's ``job_dir`` is validated under ``<ws>/harbor/jobs/``
-    (``RunError`` on escape) and only removed when present; a run transitions to
-    ``cleaned`` only when its job dir is gone/absent. The whole load-mutate-write
-    runs under one ``WorkspaceLock``.
+    For each non-``cleaned`` run, every environment whose ``removed`` flag is
+    not already true is removed via the injectable ``docker_rm`` seam using only
+    the exact recorded ``image_id``/``image_tags`` refs. A failed removal leaves
+    the run's job dir and prior state intact (partial-failure rule); a run
+    transitions to ``cleaned`` only when its job dir is gone/absent *and* all of
+    its environments are removed. One locked load-mutate-write pass.
     """
+    docker_rm = docker_rm or _default_docker_rm
     with WorkspaceLock(root):
         doc = _load_ledger(root)
         changed = False
@@ -159,6 +171,20 @@ def _clean_jobs(
                 report.runs_already_clean += 1
                 continue
             validated = _validate_job_dir(root, entry["job_dir"])
+            envs = entry.get("environments") or []
+            all_removed = True
+            for env in envs:
+                if env.get("removed") is True:
+                    continue
+                result = docker_rm(_image_refs(env))
+                if result.get("returncode") == 0:
+                    env["removed"] = True
+                    report.images_removed += 1
+                else:
+                    report.images_failed += 1
+                    all_removed = False
+            if not all_removed:
+                continue
             run_path = Path(validated)
             if run_path.is_dir():
                 _delete_path(run_path)
@@ -180,6 +206,8 @@ def clean_workspace(
     trajectories: bool = False,
     all_: bool = False,
     yes: bool = False,
+    confirm: Callable[[str], bool] | None = None,
+    docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> CleanReport:
     """Delete only the requested ledger-derived artifacts (empty selection = no-op)."""
     root = Path(root).resolve()
@@ -189,5 +217,5 @@ def clean_workspace(
     if trajectories:
         _clean_trajectories(root, report)
     if jobs:
-        _clean_jobs(root, report)
+        _clean_jobs(root, report, docker_rm=docker_rm)
     return report

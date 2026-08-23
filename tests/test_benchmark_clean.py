@@ -238,3 +238,42 @@ def test_clean_jobs_already_cleaned_run_is_noop(tmp_path):
     report = clean_mod.clean_workspace(ws, jobs=True)
     assert report.exit_code == 0 and report.runs_already_clean == 1
     assert report.job_dirs_deleted == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 6: --jobs recorded-image removal via the docker_rm seam
+# ---------------------------------------------------------------------------
+
+
+def test_clean_jobs_removes_recorded_images_and_marks_removed(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000c1"
+    (ws / "harbor" / "jobs" / run_id / "t").mkdir(parents=True)
+    env = _docker_env("case-abc__1", removed=False, image_id="hb__deadbeef")
+    _append_ledger_run(ws, run_id, state="complete", environments=[env])
+    removed_refs = []
+
+    def fake_docker_rm(refs):
+        removed_refs.extend(refs)
+        return {"returncode": 0}
+
+    clean_mod.clean_workspace(ws, jobs=True, docker_rm=fake_docker_rm)
+    assert removed_refs == ["hb__deadbeef"]            # exact recorded ref, never guessed
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["environments"][0]["removed"] is True
+    assert ledger["runs"][0]["state"] == "cleaned"
+
+
+def test_clean_jobs_removed_true_env_skipped(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    run_id = "00000000-0000-0000-0000-0000000000c2"
+    (ws / "harbor" / "jobs" / run_id / "t").mkdir(parents=True)
+    _append_ledger_run(ws, run_id, state="complete",
+                       environments=[_docker_env("c", removed=True)])
+    called = []
+    clean_mod.clean_workspace(
+        ws, jobs=True, docker_rm=lambda refs: called.append(refs) or {"returncode": 0}
+    )
+    assert called == []                                 # already-removed image not re-attempted
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleaned"
