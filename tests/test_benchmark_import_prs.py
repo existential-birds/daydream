@@ -265,12 +265,22 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
     ws = tmp_path / "ws"
     (ws / "imports").mkdir(parents=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep, val in [
-        ("repos/o/r/pulls/101/reviews", []),
-        ("repos/o/r/pulls/101/comments", []),
-        ("repos/o/r/issues/101/comments", []),
-    ]:
-        fake_gh.set_response("GET", ep, val)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    # REST comments for db 10 (root) and 11 (reply to 10)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
+         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r10"},
+        {"id": 11, "node_id": "DIFF_11", "user": {"login": "eve", "type": "User"},
+         "body": "reply", "commit_id": "a" * 40, "path": "a.py", "line": 5,
+         "subject_type": "line", "side": "RIGHT", "in_reply_to_id": 10,
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r11"},
+    ])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([
         {"id": "thread_1", "isResolved": True,
          "isOutdated": True, "isResolvedBy": None,
@@ -285,14 +295,14 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
          ]}},
     ])
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    kinds = {e.kind for e in doc.evidence}
-    assert "thread_comment" in kinds
-    root = next(e for e in doc.evidence if e.database_id == 10)
-    reply = next(e for e in doc.evidence if e.database_id == 11)
+    by_db = {e.database_id: e for e in doc.evidence}
+    root, reply = by_db[10], by_db[11]
+    assert root.kind == "inline_comment" and root.source_id == "github:inline_comment:10"
     assert root.resolved is True and root.outdated is True
-    assert root.side == "RIGHT" and root.path == "a.py" and root.line == 4
-    assert reply.kind == "thread_comment" and reply.reply_to_id == "c1"
-    assert reply.thread_id == "thread_1"
+    assert root.thread_id == "thread_1" and root.side == "RIGHT" and root.path == "a.py"
+    assert reply.kind == "inline_comment" and reply.thread_id == "thread_1"
+    assert reply.reply_to_id == "10"          # REST in_reply_to_id (parent db id)
+    assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
 def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
@@ -981,7 +991,12 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
     assert [p["number"] for p in raw["pull_requests"]] == [101, 102]
     imp = load_json_strict(ws / "imports/pr-000101.json")
     kinds = {e["kind"] for e in imp["evidence"]}
-    assert kinds == {"review", "inline_comment", "issue_comment", "thread_comment"}
+    assert kinds == {"review", "inline_comment", "issue_comment"}
+    # overlapping root (db 10) appears exactly once as a canonical inline_comment
+    assert len([e for e in imp["evidence"] if e["database_id"] == 10]) == 1
+    db10 = next(e for e in imp["evidence"] if e["database_id"] == 10)
+    assert db10["kind"] == "inline_comment" and db10["source_id"] == "github:inline_comment:10"
+    assert db10["thread_id"] == "thread_1"
     assert any(e["is_bot"] for e in imp["evidence"])      # bot author retained
     assert any(not e["is_bot"] for e in imp["evidence"])  # human author retained
     assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
