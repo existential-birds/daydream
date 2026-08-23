@@ -586,3 +586,28 @@ def test_duplicate_inode_indexed_files_is_corruption(tmp_path):
     next((root / "cases").glob("*.yaml")).write_text(yaml.safe_dump(case_raw, sort_keys=False))
     code, label = validate_workspace(root)
     assert code == 1 and "corrupt" in label.lower()   # gated on Task 0 spike 4 verdict
+
+
+def test_status_surfaces_failed_refresh_with_good_linkage(tmp_path, fake_gh):
+    """A PR whose latest refresh failed but whose last import is intact: the
+    status surface reports the attempt failure distinctly and does NOT classify
+    the workspace as collecting.  Task 6 (issue #813)."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.workspace import workspace_status
+    from tests.test_benchmark_import_prs import _curate_case, _seed_preflight
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    # now make the REFRESH fetch fail (PR already fetched: last import is intact)
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"}
+    )
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0
+    st = workspace_status(ws)
+    pr = st.ledger.pull_requests[0]
+    assert pr.latest_error is not None and pr.latest_error["code"] == "rate_limit"
+    assert pr.import_state == "fetched"                # intact linkage, not collecting
+    assert st.workspace_state != "collecting"          # evidence is not missing
