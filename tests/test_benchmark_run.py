@@ -523,3 +523,75 @@ def test_default_gate_blocks_before_any_harbor_call(tmp_path):
     assert code == 1            # no matching receipt -> gate blocks
     assert called == []         # Harbor never spawned, no reviewer call
     assert not (ws / "runtime" / "harbor.json").exists()  # blocked run leaves no running entry
+
+# ---------------------------------------------------------------------------
+# Task 10: run supervisor persists trial environments into the cleanup ledger
+# ---------------------------------------------------------------------------
+
+
+def test_run_persists_trial_environments_to_ledger(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_calibration_receipt(ws)
+
+    def spawn(cmd, *, cwd, env):
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        job = Path(ledger["runs"][0]["job_dir"])
+        (job / "case-abc" / "verifier").mkdir(parents=True)
+        (job / "case-abc" / "verifier" / "reward.json").write_text(
+            json.dumps({"reward": 1.0, "verifier_error": 0,
+                        "gold_count": 1, "candidate_count": 1}))
+        return {"returncode": 0}
+
+    code = run_mod.run_run(ws, oracle=True, yes=True, env=_env(),
+                           spawn=spawn, docker_ok=lambda: True)
+    assert code == 0
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    envs = ledger["runs"][0]["environments"]
+    assert len(envs) == 1                                  # was [] before the fix
+    assert envs[0]["trial_name"] == "case-abc"
+    assert envs[0]["backend"] == "docker" and envs[0]["image_id"]  # exact ref present
+    assert envs[0]["removed"] is False
+
+
+def test_run_failed_path_persists_environments_cleanup_pending(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_calibration_receipt(ws)
+
+    def spawn(cmd, *, cwd, env):
+        ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+        job = Path(ledger["runs"][0]["job_dir"])
+        (job / "case-abc" / "verifier").mkdir(parents=True)
+        (job / "case-abc" / "verifier" / "reward.json").write_text(
+            json.dumps({"reward": 0.5, "verifier_error": 0,
+                        "gold_count": 1, "candidate_count": 2}))
+        return {"returncode": 0}
+
+    code = run_mod.run_run(ws, oracle=True, yes=True, env=_env(),
+                           spawn=spawn, docker_ok=lambda: True)
+    assert code == 1
+    ledger = json.loads((ws / "runtime" / "harbor.json").read_text())
+    assert ledger["runs"][0]["state"] == "cleanup_pending"
+    assert ledger["runs"][0]["environments"][0]["image_id"]   # not [] on failure either
+
+
+def test_parse_job_results_records_env_when_reward_missing(tmp_path):
+    """An aborted run (trial present but no score evidence) must still record
+    the environment it spawned, so ``clean --jobs`` can address the Docker
+    image it left behind instead of orphaning it by deleting the job dir.
+    """
+    import daydream.benchmark.harbor.run as run_mod
+
+    job_dir = tmp_path / "jobs" / "r"
+    trial = job_dir / "case-abc"
+    env_root = trial / "environment"
+    env_root.mkdir(parents=True)
+    (env_root / "env.txt").write_text("x", encoding="utf-8")
+    (trial / "task.toml").write_text("[environment]\n", encoding="utf-8")
+    ok, envs = run_mod._parse_job_results(job_dir)
+    assert ok is False
+    assert envs and envs[0]["image_id"].startswith("hb__")   # was [] before the fix
+    assert envs[0]["backend"] == "docker"

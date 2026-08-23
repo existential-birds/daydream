@@ -406,15 +406,16 @@ def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
             continue  # a non-directory sibling is not a task trial
         verifier = trial / "verifier"
         reward_path = verifier / "reward.json"
+        # Resolve the trial environment even when the trial carries no claimable
+        # score evidence, so a failed/aborted run still records the Docker
+        # images it spawned: ``clean --jobs`` can address them rather than
+        # deleting the job dir and permanently stranding the images.
         if not reward_path.is_file():
-            # No score evidence at all — not even reward-details.json: Harbor
-            # returned or wrote nothing for this trial (abort mid-write). Fail
-            # closed rather than silently skipping it as a clean task.
-            return (False, [])
+            return (False, [*environments, _environment_from_trial(trial)])
         env = _environment_from_trial(trial)
         reward = _parse_reward(reward_path)
         if reward is None:
-            return (False, [])
+            return (False, [*environments, env])
         environments.append(env)
         if not oracle_ok:
             continue
@@ -680,11 +681,13 @@ def run_run(
     )
     returncode = int(result.get("returncode", 0))
 
-    # 7. Post-run: parse results and reconcile the ledger / receipt.
+    # 7. Post-run: parse results and reconcile the ledger / receipt. The
+    #    exact resolved trial environments are persisted into the ledger on
+    #    every terminal mark so ``clean --jobs`` has recorded image refs.
     try:
         actual_dir = _ledger_job_dir(workspace, run_id)
         if oracle:
-            ok, _ = _parse_job_results(actual_dir)
+            ok, environments = _parse_job_results(actual_dir)
             if returncode != 0 or not ok:
                 if returncode == 0:
                     print(
@@ -692,19 +695,26 @@ def run_run(
                         "was written.",
                         file=sys.stderr,
                     )
-                ledger_mark(workspace, run_id, state="cleanup_pending")
+                ledger_mark(workspace, run_id, state="cleanup_pending",
+                            environments=environments)
                 return returncode or 1
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
                 env=env, calibration_digest=_calibration_digest(workspace),
             )
-            ledger_mark(workspace, run_id, state="complete")
+            ledger_mark(workspace, run_id, state="complete",
+                        environments=environments)
             return write_code or returncode
-        # Default real run: preserve Harbor's exact exit code.
-        if returncode != 0:
-            ledger_mark(workspace, run_id, state="cleanup_pending")
-        else:
-            ledger_mark(workspace, run_id, state="complete")
+        # Default real run: preserve Harbor's exact exit code. Failing and
+        # successful runs persist the same resolved trial environments;
+        # ``_parse_job_results`` already returns ``(False, [])`` for a missing
+        # job dir, so no is_dir() pre-check is needed.
+        _, environments = _parse_job_results(actual_dir)
+        ledger_mark(
+            workspace, run_id,
+            state="cleanup_pending" if returncode != 0 else "complete",
+            environments=environments,
+        )
         return returncode
     except Exception:
         print("unexpected error during supervised run", file=sys.stderr)
