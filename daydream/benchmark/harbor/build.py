@@ -18,7 +18,7 @@ import re
 import shutil
 from pathlib import Path
 
-from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
 TEMPLATE_VERSION = "1"
@@ -563,18 +563,31 @@ def compile_workspace(root: Path) -> dict:
         manifest = storage.load_yaml_strict(root / "benchmark.yaml")
         repo_slug = manifest.get("source", {}).get("repository") or ""
 
+        # Compile canonicalizes the manifest's ``cases[]`` row order to the
+        # schema's canonical (pr_number, head-sha, case_id) order before model
+        # validation, so compile output stays row-order-insensitive (the model
+        # requires the canonical order; reversed rows are not corruption here).
+        manifest["cases"] = sorted(
+            manifest.get("cases") or [],
+            key=lambda c: (c.get("pr_number", 0), schema.head_sha_from_case_id(c["case_id"]), c["case_id"]),
+        )
+        # Every indexed case is loaded through the shared model-gated loader
+        # (same ``_schema_ready`` + ``CaseDocument`` validation as the
+        # validate/status read path); a present-but-corrupt case raises
+        # ``WorkspaceCorrupt`` before any staging begins.
+        manifest_model = schema.BenchmarkManifest.model_validate(manifest)
         case_docs: dict[str, dict] = {}
-        for _case in manifest.get("cases") or []:
-            case_id = _case.get("case_id")
-            doc = storage.load_yaml_strict(root / _case["case_file"])
-            if not _is_compilable(doc.get("curation") or {}):
-                curation = doc.get("curation") or {}
+        for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
+            dumped = doc.model_dump(mode="json")
+            case_id = dumped["case_id"]
+            if not _is_compilable(dumped.get("curation") or {}):
+                curation = dumped.get("curation") or {}
                 raise CompileError(
                     f"case {case_id} is not compilable (state {curation.get('state')}, "
                     f"findings {len(curation.get('findings') or [])}, "
                     f"clean_attested {bool(curation.get('clean_attested'))})"
                 )
-            case_docs[case_id] = doc
+            case_docs[case_id] = dumped
 
         stage = root / "cache" / "harbor-build-stage"
         if stage.exists():
