@@ -258,6 +258,83 @@ def test_offline_clone_validates(tmp_path):
                                   workdir=tmp_path)
 
 
+def test_offline_clone_fidelity_rejects_tampering(tmp_path):
+    """Acceptance (b/c) at unit level: the offline-clone fidelity contract
+    rejects every structurally-distinct tampered bundle shape (extra ref,
+    extra reachable commit, wrong parent, wrong tree) while a valid bundle
+    passes all probes."""
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[_SHA_HEAD], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    base_tree, head_tree = _seed_base_tree(), _seed_head_tree()
+    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+
+    valid = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, valid)
+    sn.validate_offline_clone(valid, base_tree, head_tree, diff_sha, workdir=tmp_path)
+
+    # Synthetic commits with the same pinned identity as build_bundle's
+    # (deterministic: identical tree+message+env => identical sha).
+    synth_env = sn._synthetic_env()
+    base_commit = _git(m, "commit-tree", base_tree, "-m", "snapshot base", env=synth_env)
+    head_commit = _git(m, "commit-tree", head_tree, "-p", base_commit,
+                       "-m", "snapshot head", env=synth_env)
+
+    # (c) extra ref: a third ref in the bundle -> for-each-ref sees 3.
+    extra_ref_bundle = tmp_path / "snapshots" / "extra-ref.bundle"
+    extra = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "extra", env=synth_env)
+    _git(m, "update-ref", "refs/heads/extra", extra)
+    _git(m, "bundle", "create", str(extra_ref_bundle),
+         "refs/heads/base", "refs/heads/head", "refs/heads/extra")
+    with pytest.raises(git_ops.GitError):
+        sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha,
+                                  workdir=tmp_path)
+
+    # (c) extra reachable commit (no extra ref): head parented on an extra
+    # commit parented on base -> rev-list --count origin/head == 3.
+    extra_commit_bundle = tmp_path / "snapshots" / "extra-commit.bundle"
+    extra_commit = _git(m, "commit-tree", base_tree, "-p", base_commit,
+                        "-m", "extra", env=synth_env)
+    head_tampered = _git(m, "commit-tree", head_tree, "-p", extra_commit,
+                         "-m", "snapshot head", env=synth_env)
+    _git(m, "update-ref", "refs/heads/head", head_tampered)
+    _git(m, "bundle", "create", str(extra_commit_bundle),
+         "refs/heads/base", "refs/heads/head")
+    with pytest.raises(git_ops.GitError, match="exactly two reachable commits"):
+        sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, diff_sha,
+                                  workdir=tmp_path)
+
+    # (c) wrong parent: head with NO parent -> GitError (head^ fails, count 1).
+    wrong_parent_bundle = tmp_path / "snapshots" / "wrong-parent.bundle"
+    parentless_head = _git(m, "commit-tree", head_tree, "-m", "snapshot head", env=synth_env)
+    _git(m, "update-ref", "refs/heads/head", parentless_head)
+    _git(m, "bundle", "create", str(wrong_parent_bundle),
+         "refs/heads/base", "refs/heads/head")
+    with pytest.raises(git_ops.GitError):
+        sn.validate_offline_clone(wrong_parent_bundle, base_tree, head_tree, diff_sha,
+                                  workdir=tmp_path)
+
+    # (c) wrong tree: head's tree is the base tree -> tree mismatch.
+    wrong_tree_bundle = tmp_path / "snapshots" / "wrong-tree.bundle"
+    wrong_tree_head = _git(m, "commit-tree", base_tree, "-p", base_commit,
+                           "-m", "snapshot head", env=synth_env)
+    _git(m, "update-ref", "refs/heads/head", wrong_tree_head)
+    _git(m, "bundle", "create", str(wrong_tree_bundle),
+         "refs/heads/base", "refs/heads/head")
+    with pytest.raises(git_ops.GitError, match="tree mismatch"):
+        sn.validate_offline_clone(wrong_tree_bundle, base_tree, head_tree, diff_sha,
+                                  workdir=tmp_path)
+
+    # Restore the mirror refs so the mirror is reusable for later freezes.
+    _git(m, "update-ref", "refs/heads/base", base_commit)
+    _git(m, "update-ref", "refs/heads/head", head_commit)
+
+
+
 # ---------------------------------------------------------------------------
 # Task 7: freeze_one ready / unreplayable reason matrix
 # ---------------------------------------------------------------------------

@@ -293,10 +293,20 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 def validate_offline_clone(
     bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
 ) -> None:
-    """Clone the bundle with network disabled and verify refs/trees/diff.
+    """Offline-clone fidelity check on a frozen bundle, network disabled.
+
+    Clones the bundle with ``--no-local --no-checkout`` and verifies the full
+    fidelity contract: the clone exposes **exactly** the two refs
+    ``refs/remotes/origin/base`` and ``refs/remotes/origin/head``; exactly two
+    commits are reachable from the head (base + head); the base is a root
+    commit (no parent); the head's single parent is the base commit; the
+    base/head tree IDs match; and the canonical diff digest matches. A
+    checksum-restamped, ref-padded, or structurally-tampered bundle fails one
+    of these probes.
 
     Raises :class:`GitError` naming the failing check on any clone error,
-    missing ref, tree mismatch, or diff-digest mismatch. Returns ``None``.
+    unexpected ref set, ancestry/parent mismatch, tree mismatch, or diff-digest
+    mismatch. Returns ``None``.
     """
     bundle_path = Path(bundle_path)
     import tempfile
@@ -309,6 +319,41 @@ def validate_offline_clone(
         )
         if proc.returncode != 0:
             raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
+        refs_out = _run_git_cwd(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
+        assert isinstance(refs_out, str)
+        refs = set(refs_out.splitlines())
+        expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
+        if refs != expected_refs:
+            raise git_ops.GitError(
+                f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
+                f"got {sorted(refs)})"
+            )
+        count = _run_git_cwd(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
+        assert isinstance(count, str)
+        if count != "2":
+            raise git_ops.GitError(
+                f"offline clone head ancestry must contain exactly two reachable commits "
+                f"(got {count})"
+            )
+        parents_out = _run_git_cwd(
+            clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
+        )
+        assert isinstance(parents_out, str)
+        if len(parents_out.splitlines()) != 1:
+            raise git_ops.GitError(
+                f"offline clone base must be a root commit with no parent "
+                f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
+            )
+        head_parent = _run_git_cwd(
+            clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
+        )
+        base_commit = _run_git_cwd(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
+        assert isinstance(head_parent, str) and isinstance(base_commit, str)
+        if head_parent != base_commit:
+            raise git_ops.GitError(
+                f"offline clone head's parent must be the base commit "
+                f"(expected {base_commit}, got {head_parent})"
+            )
         for ref, expected in (
             ("refs/remotes/origin/base", base_tree),
             ("refs/remotes/origin/head", head_tree),
