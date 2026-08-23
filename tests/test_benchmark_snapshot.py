@@ -216,6 +216,28 @@ def test_bundle_two_refs_deterministic(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_canonical_diff_digest_is_abbreviation_stable(tmp_path):
+    """The same base/head pair hashes identically whether the diff runs in a
+    mirror whose effective core.abbrev is widened past the clone's. Failing-by-
+    construction: pre-fix the mirror's 12-hex index lines mismatch the clone's
+    default, so validate_offline_clone raises a digest mismatch."""
+    from daydream.benchmark import snapshot as sn
+
+    origin = _seed_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.fetch_pr_refs(tmp_path, "o/r", 1, base_tip=_SHA_BASE2,
+                     explicit_shas=[], origin_url=origin)
+    m = sn.mirror(tmp_path)
+    # widen the mirror's effective abbrev past the fresh 2-commit clone's default
+    _git(m, "config", "core.abbrev", "12")
+    bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
+    sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
+    diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
+    # must not raise: the clone's diff digest must equal the mirror's
+    sn.validate_offline_clone(bundle, _seed_base_tree(), _seed_head_tree(), diff_sha,
+                              workdir=tmp_path)
+
+
 def test_git_fetch_wires_command_scoped_credential_helper(tmp_path, monkeypatch):
     from daydream.benchmark import snapshot as sn
 
