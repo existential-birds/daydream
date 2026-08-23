@@ -9,6 +9,7 @@ rejection / transition surface of :mod:`daydream.benchmark.curation`.
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -677,6 +678,30 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
         assert holder.poll() is None
     finally:
         holder.wait(timeout=30)
+
+
+def test_workspace_lock_serializes_between_threads_within_one_process(tmp_path):
+    from daydream.benchmark import storage
+    with storage.WorkspaceLock(tmp_path):
+        # A second thread must NOT take the same-process reentrant path: it
+        # opens its own fd and the kernel flock excludes it (flock conflicts
+        # across open file descriptions even within one process). The probe is
+        # non-blocking so this cannot deadlock against the holder.
+        outcome: list[str] = []
+
+        def probe() -> None:
+            try:
+                storage.WorkspaceLock(tmp_path, blocking=False).__enter__()
+            except storage.LockContentionError:
+                outcome.append("contended")
+            else:
+                outcome.append("reentrant")
+
+        t = threading.Thread(target=probe)
+        t.start()
+        t.join(timeout=30)
+        assert not t.is_alive()
+        assert outcome == ["contended"]
 
 
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fake_gh):

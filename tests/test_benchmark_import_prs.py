@@ -883,6 +883,83 @@ def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh
     assert case["curation"]["findings"]                  # curated gold preserved
 
 
+def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh):
+    """A first ``--refresh`` after the canonical-record format change must NOT
+    flip prior curated cases stale on pure format drift. Pre-canonicalization
+    files persisted a comment that existed in both feeds twice (REST
+    ``inline_comment`` + GraphQL ``thread_comment``) and thread-only comments
+    under the ``thread_comment`` kind; the canonical format emits exactly one
+    ``inline_comment`` per database id. With byte-identical GitHub content the
+    only difference is the persisted shape, so the (database_id-keyed) evidence
+    signature must compare equal and keep the curated case ready."""
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    fake_gh._write_threads(
+        [
+            {"id": "thread_1", "isResolved": False, "isOutdated": False,
+             "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
+             "comments": {"nodes": [
+                 {"id": "c1", "databaseId": 1, "body": "please fix",
+                  "author": {"login": "alice", "type": "User"},
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "url": "https://github.com/o/r/pull/101#discussion_r1"},
+                 {"id": "c2", "databaseId": 2, "body": "thread-only",
+                  "author": {"login": "alice", "type": "User"},
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "url": "https://github.com/o/r/pull/101#discussion_r2"},
+             ]}},
+        ],
+        number=101,
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")       # state=ready, attested
+    # Rewrite the persisted import in the pre-canonicalization shape: the comment
+    # that existed in both feeds (db 1) is stored twice (inline + thread_comment)
+    # and the thread-only comment (db 2) under the thread_comment kind.
+    import_path = ws / "imports" / "pr-000101.json"
+    raw = load_json_strict(import_path)
+    old_evidence: list[dict] = []
+    for e in raw["evidence"]:
+        if e.get("thread_id"):
+            if e.get("commit_id"):
+                old_evidence.append({**e,
+                                     "source_id": f"github:inline_comment:{e['database_id']}",
+                                     "kind": "inline_comment"})
+            old_evidence.append({**e,
+                                 "source_id": f"github:thread_comment:{e['database_id']}",
+                                 "kind": "thread_comment"})
+        else:
+            old_evidence.append(e)
+    assert len(old_evidence) == 3      # db 1 twice, db 2 once as thread_comment
+    import_path.write_text(json.dumps({**raw, "evidence": old_evidence}, indent=2))
+    # refresh with IDENTICAL GitHub content: only the persisted format changed
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"           # format drift must NOT stale gold
+    assert case["curation"]["findings"]                   # curated gold preserved
+    # the migration path rewrites the file to the canonical shape: exactly one
+    # inline_comment per database id
+    refreshed = load_json_strict(import_path)
+    assert len(refreshed["evidence"]) == 2
+    assert {e["kind"] for e in refreshed["evidence"]} == {"inline_comment"}
+
+
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict

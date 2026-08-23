@@ -614,7 +614,9 @@ def _reconcile_inline_evidence(
             continue  # a thread with no comments contributes nothing
         for comment in nodes:
             if not isinstance(comment, dict) or "databaseId" not in comment:
-                continue
+                raise git_ops.GitError(
+                    f"graphql review thread {thread.get('id')} comment node missing databaseId"
+                )
             db_id = int(comment["databaseId"])
             base = inline_by_db.get(db_id)
             if base is None and comment.get("id"):
@@ -921,13 +923,24 @@ def _payload_sha256(import_doc: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[str, str]]:
-    return frozenset((e.source_id, e.body_sha256) for e in doc.evidence)
+def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[int, str]]:
+    """Content signature: one ``(database_id, body_sha256)`` pair per evidence record.
+
+    Keyed on the physical comment id rather than ``source_id`` so the refresh
+    stale check is immune to the canonical-record format change: pre-canonicalization
+    files rekinded thread-only comments and persisted a comment that existed in
+    both feeds twice, while the canonical format emits exactly one
+    ``inline_comment`` per database id. Byte-identical GitHub content changed only
+    the persisted shape, so a first ``--refresh`` after the format change must
+    compare equal and keep prior curated cases — a genuine content change (a
+    comment added/removed/edited) still flips the digest.
+    """
+    return frozenset((e.database_id, e.body_sha256) for e in doc.evidence)
 
 
-def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[str, str]]:
+def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, str]]:
     return frozenset(
-        (str(e.get("source_id")), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
+        (int(e["database_id"]), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
     )
 
 
@@ -1159,7 +1172,7 @@ def _stage_fetch_failure(
 def _prior_import_state(
     root: Path, raw: dict[str, Any], number: int
 ) -> tuple[
-    frozenset[tuple[str, str]] | None,
+    frozenset[tuple[int, str]] | None,
     str | None,
     dict[str, dict[str, Any]],
     str,
@@ -1172,7 +1185,7 @@ def _prior_import_state(
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
-    prior_sig: frozenset[tuple[str, str]] | None = None
+    prior_sig: frozenset[tuple[int, str]] | None = None
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
