@@ -257,3 +257,36 @@ def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch):
     with pytest.raises(pkg.PackageError) as rejected:
         pkg.validate_compiled(None)
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
+
+
+def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path, fake_gh):
+    import importlib.metadata
+
+    import pytest
+    import yaml
+
+    pytest.importorskip("harbor")
+    from harbor.models.job.config import JobConfig
+    try:
+        from harbor.models.task import Task
+    except ImportError:  # Harbor 0.21 wheel exposes task as a namespace package.
+        from harbor.models.task.task import Task
+
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import package as pkg
+    from tests.test_benchmark_harbor_build import _seed_ready_workspace
+
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ver = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    pkg.build_harbor(ws, wheel=wheel)
+    assert pkg.validate_compiled(ws) == 0
+    case = ws / "harbor" / build.derive_task_key(case_id)
+    assert Task(str(case), disable_verification=True) is not None
+    for name in ("harbor-job.yaml", "harbor-oracle.yaml"):
+        assert JobConfig.model_validate(yaml.safe_load((ws / "harbor" / name).read_text())) is not None
+    (ws / "harbor/harbor-job.yaml").write_text("n_attempts: not-an-int\n")
+    with pytest.raises(pkg.PackageError) as rejected:
+        pkg.validate_compiled(ws)
+    assert "harbor-job.yaml" in str(rejected.value)

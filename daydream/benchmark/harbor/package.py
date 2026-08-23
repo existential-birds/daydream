@@ -121,6 +121,30 @@ def validate_compiled(root: Path | None) -> int:
     compiled = Path(root) / "harbor"
     if not compiled.is_dir():
         raise PackageError(f"compiled dataset is missing: {compiled}")
+
+    try:
+        from harbor.models.job.config import JobConfig
+        try:
+            from harbor.models.task import Task
+        except ImportError:  # Harbor 0.21 wheel currently exposes a namespace package.
+            from harbor.models.task.task import Task
+    except ImportError as exc:
+        raise PackageError(
+            f"cannot import Harbor 0.21 models from the Daydream interpreter: {exc}",
+            remediation="pip install 'daydream[benchmark]'",
+        ) from exc
+
+    for task_toml in sorted(compiled.glob("case-*/task.toml")):
+        try:
+            Task(str(task_toml.parent), disable_verification=True)
+        except Exception as exc:
+            raise PackageError(f"Harbor rejected task {task_toml.parent.name}: {exc}") from exc
+    for name in ("harbor-job.yaml", "harbor-oracle.yaml"):
+        path = compiled / name
+        try:
+            JobConfig.model_validate(yaml.safe_load(path.read_text()))
+        except Exception as exc:
+            raise PackageError(f"Harbor rejected {name}: {exc}") from exc
     return 0
 
 
