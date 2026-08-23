@@ -8,7 +8,7 @@ YAML/state via service reads.
 
 from pathlib import Path
 
-from tests.test_benchmark_curation import _seed_ready_case
+from tests.test_benchmark_curation import _seed_ready_case, _seed_ready_case_mixed
 
 
 def _scripted(*lines):
@@ -61,6 +61,17 @@ def test_render_case_shows_header_and_numbered_evidence(tmp_path, fake_gh):
     assert "alice" in out and "inline_comment" in out          # evidence projection
     assert "feature.py:2" in out                                # path/line anchor
     assert "please fix" in out                                  # body preview
+
+
+def test_render_case_pages_all_evidence_kinds(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import render_case
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    out = render_case(cu.get_case(ws, case_id))
+    assert "APPROVED" in out and "carol" in out          # pure approval review paged
+    assert "issue_comment" in out and "dave" in out      # conversation comment paged
+    assert "reply text" in out and "bob" in out          # inline reply paged
+    assert "inline_comment" in out and "please fix" in out  # root candidate still visible
 
 
 def test_run_curate_tui_unknown_action_reprompts(tmp_path, fake_gh, capsys):
@@ -222,6 +233,91 @@ def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
 
 
+def test_action_edit_authors_edited_finding_from_non_candidate_evidence(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "auth.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: From approval\n"
+        "    body: edited wording\n    severity: null\n    location: null\n"
+        "    source_ids: [github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
+    assert f["provenance"]["source_ids"] == ["github:review:100"]
+
+
+def test_edit_author_prefills_selected_evidence_source_ids(tmp_path, fake_gh, monkeypatch):
+    """The [e]->a author selector must pin the selected evidence's source_ids
+    into the editor buffer before it opens, so a wrong/empty/off-by-one prefill
+    cannot slip past the callers that rewrite source_ids in their heredocs."""
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    log = tmp_path / "prefill.log"
+    editor = tmp_path / "prefill.sh"
+    editor.write_text(
+        "#!/bin/sh\n"
+        "cat > \"$LOG\" < \"$1\"\n"
+        "cat > \"$1\" <<'EOF'\nfindings:\n  - title: From selected\n    body: pinned\n"
+        "    severity: null\n    location: null\n    source_ids: [github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    monkeypatch.setenv("LOG", str(log))
+
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
+    # verdict: the prefill in the editor buffer carried the selected source_id
+    prefill = log.read_text()
+    assert "source_ids" in prefill and "- github:review:100" in prefill
+    assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
+
+
+def test_action_edit_splits_one_evidence_into_two_findings(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "split.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Part A\n    body: a\n"
+        "    severity: null\n    location: null\n    source_ids: [github:inline_comment:1]\n"
+        "  - title: Part B\n    body: b\n    severity: null\n    location: null\n"
+        "    source_ids: [github:inline_comment:1]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1", "q"))
+    fs = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
+    assert len(fs) == 2 and {f["provenance"]["kind"] for f in fs} == {"edited"}
+
+
+def test_action_edit_merges_range_into_one_finding(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "merge.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Merged\n    body: combined\n"
+        "    severity: null\n    location: null\n"
+        "    source_ids: [github:inline_comment:1, github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100"]
+
+
 def test_action_exclude_evidence_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import run_curate_tui
@@ -243,6 +339,26 @@ def test_action_exclude_evidence_rejects_stray_note(tmp_path, fake_gh, capsys):
     run_curate_tui(ws, case_id,
                    read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
     assert path.read_bytes() == before                      # service rejects the note
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_action_exclude_range_excludes_all_selected(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1,3", "duplicate", "q"))
+    ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
+    assert {e["source_id"] for e in ex} == {"github:inline_comment:1", "github:review:100"}
+    assert all(e["reason"] == "duplicate" for e in ex)
+
+
+def test_action_exclude_range_invalid_mutates_nothing(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "2,2", "q"))   # repeated index
+    assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
 
 

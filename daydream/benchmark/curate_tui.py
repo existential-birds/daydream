@@ -96,45 +96,73 @@ def _prompt(read_line: Callable[[str], str], message: str) -> str:
     return read_line("")
 
 
+def _evidence_entries(view: dict[str, Any]) -> list[Any]:
+    """The ordered evidence entries to render/page/edit/exclude in *view*.
+
+    Prefers the full import-evidence list and falls back to ``candidates`` only
+    for a minimal dict without an ``evidence`` key, so the render, edit,
+    exclude, and pager paths all target the same set and cannot drift.
+    """
+    return view.get("evidence") or view.get("candidates") or []
+
+
 def render_case(case: dict[str, Any]) -> str:
     """Render a plain-text snapshot header + numbered evidence list.
 
-    Each evidence entry shows its number, kind, author login (+ ``[bot]`` for a
-    bot), commit prefix, ``path:line`` anchor, resolved/outdated markers, the
-    candidate title, and a body preview (first ~120 chars). Candidates without
-    an ``evidence`` projection render those fields as ``-``.
+    Every evidence entry shows its number, kind, author login (+ ``[bot]`` for a
+    bot), commit prefix, and — where the record carries one — its review
+    ``state`` (e.g. ``APPROVED``/``COMMENTED``/``CHANGES_REQUESTED``), the
+    ``path:line`` anchor, resolved/outdated markers, and a body preview (first
+    ~120 chars). Candidate records additionally show their title. Sources from
+    the full ordered evidence list; callers passing a minimal dict without an
+    ``evidence`` key fall back to ``candidates``.
     """
     snapshot = case.get("snapshot") or {}
     curation = case.get("curation") or {}
     head = snapshot.get("original_head_sha") or "-"
     policy = snapshot.get("policy") or "-"
     state = curation.get("state") or "-"
+    candidates = case.get("candidates") or []
+    entries = _evidence_entries(case)
     lines = [
         f"case {case.get('case_id')}: state={state} policy={policy} head={head}",
     ]
-    for i, cand in enumerate(case.get("candidates") or [], start=1):
-        ev = cand.get("evidence") or {}
+    for i, ev in enumerate(entries, start=1):
+        cand = None
+        cand_index = ev.get("candidate_index")
+        if cand_index is not None and 0 <= cand_index < len(candidates):
+            cand = candidates[cand_index]
+        elif isinstance(ev.get("title"), str):
+            # minimal candidate-only fallback stores its own metadata.
+            cand = ev
         author = ev.get("author") or {}
         login = author.get("login") or "-"
         if author.get("type") == "Bot":
             login = f"{login}[bot]"
         kind = ev.get("kind") or "-"
         commit = (ev.get("commit_id") or "")[:12] or "-"
-        location = cand.get("location") or {}
-        loc_path = location.get("path") or "-"
-        start = location.get("start_line")
+        rec_state = ev.get("state")
+        state_tag = f" {rec_state}" if rec_state else ""
+        loc_path = ev.get("path")
+        start = ev.get("start_line") or ev.get("line")
+        if cand is not None:
+            cand_loc = cand.get("location") or {}
+            loc_path = loc_path or cand_loc.get("path")
+            start = start or cand_loc.get("start_line")
+        loc_path = loc_path or "-"
         anchor = f"{loc_path}:{start}" if loc_path != "-" and start else loc_path
         markers = ""
         if ev.get("resolved"):
             markers += " [resolved]"
         if ev.get("outdated"):
             markers += " [outdated]"
-        preview = (cand.get("body") or "").replace("\n", " ")[:120]
+        preview = (ev.get("body") or "").replace("\n", " ")[:120]
         line_parts = [
-            f"  {i}. [{kind}] {login} {commit} {anchor}{markers}",
-            f"      {cand.get('title') or '-'}",
+            f"  {i}. [{kind}] {login} {commit}{state_tag} {anchor}{markers}",
             f"      {preview or '-'}",
         ]
+        if cand is not None:
+            line_parts.insert(1, f"      {cand.get('title') or '-'}")
         lines.append("\n".join(line_parts))
     return "\n".join(lines)
 
@@ -210,6 +238,14 @@ def _editor_fragment_edit(finding: dict[str, Any]) -> str:
     return yaml.safe_dump({"findings": [atom]}, sort_keys=False)
 
 
+def _editor_fragment_authored(source_ids: list[str]) -> str:
+    """One blank atom pre-filled with the selected evidence *source_ids*."""
+    return yaml.safe_dump({"findings": [{
+        "title": "", "body": "", "severity": None,
+        "location": None, "source_ids": source_ids,
+    }]}, sort_keys=False)
+
+
 def _parse_fragment(text: str) -> list[dict[str, Any]] | None:
     """Parse edited YAML into a list of non-blank finding atoms, or ``None``.
 
@@ -238,9 +274,23 @@ def _parse_fragment(text: str) -> list[dict[str, Any]] | None:
     return atoms
 
 
-def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
-    """The ``[n]`` author action: edit a blank fragment, add every atom."""
-    text = _launch_editor(_editor_fragment_new())
+def _edit_and_stage_fragment(
+    initial: str,
+    stage: Callable[[list[dict[str, Any]]], None],
+    *,
+    success: Callable[[int], str],
+    err_outcome: str = "continue",
+) -> str:
+    """The shared edit-a-fragment -> stage-through-service scaffold.
+
+    Launches the editor over *initial*, parses its non-blank atoms, then stages
+    them through *stage*. Editor cancellation, an invalid fragment, a curation
+    error or a validation error all print a one-line message, mutate nothing,
+    and return *err_outcome* (``continue`` by default; ``rerender`` for the
+    ``[n]`` add path). On success reports *success(len(atoms))* and returns
+    ``"rerender"``.
+    """
+    text = _launch_editor(initial)
     if text is None:
         print("editor cancelled or failed; nothing written")
         return "continue"
@@ -249,17 +299,39 @@ def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Calla
         print("invalid fragment; nothing written")
         return "continue"
     try:
-        cu.add_findings(root, case_id, findings=atoms)
+        stage(atoms)
     except (cu.CurationError, ValidationError) as exc:
-        return _service_error(exc, "rerender")
-    print(f"added {len(atoms)} authored finding(s)")
+        return _service_error(exc, err_outcome)
+    print(success(len(atoms)))
     return "rerender"
 
 
+def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
+    """The ``[n]`` author action: edit a blank fragment, add every atom."""
+    return _edit_and_stage_fragment(
+        _editor_fragment_new(),
+        lambda atoms: cu.add_findings(root, case_id, findings=atoms),
+        success=lambda n: f"added {n} authored finding(s)",
+        err_outcome="rerender",
+    )
+
+
 def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
-    """The ``[e]`` edit action: replace one gold finding with its re-written atoms."""
+    """The ``[e]`` edit-or-author action.
+
+    Prompts for a finding to rewrite (the existing finding-rewrite path) or
+    ``a`` to author edited finding(s) from selected evidence via
+    :func:`add_edited_findings`.
+    """
     findings = (view.get("curation") or {}).get("findings") or []
-    text = _prompt(read_line, "finding (number, 0 to cancel): ").strip()
+    entries = _evidence_entries(view)
+    first = _prompt(
+        read_line,
+        "edit finding (number) or author from evidence [a] (0 to cancel): ",
+    ).strip()
+    if first.lower() == "a":
+        return _edit_author_evidence(root, case_id, entries, read_line)
+    text = first
     if text == "0":
         return "continue"
     try:
@@ -271,20 +343,38 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
         print(f"edit takes exactly one finding (got {len(indices)})")
         return "continue"
     finding = findings[indices[0]]
-    frag = _launch_editor(_editor_fragment_edit(finding))
-    if frag is None:
-        print("editor cancelled or failed; nothing written")
-        return "continue"
-    atoms = _parse_fragment(frag)
-    if atoms is None:
-        print("invalid fragment; nothing written")
+    return _edit_and_stage_fragment(
+        _editor_fragment_edit(finding),
+        lambda atoms: cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms),
+        success=lambda n: f"replaced finding with {n} atom(s)",
+    )
+
+
+def _edit_author_evidence(
+    root: Path, case_id: str, entries: list[dict[str, Any]], read_line: Callable[[str], str]
+) -> str:
+    """The ``[e]``\u2192[author-from-evidence] sub-flow.
+
+    Parses one 1-based evidence selector (a number or a single ``a-b`` range),
+    pins the selected source_ids into a blank atom, opens the editor, then
+    stages the atoms through :func:`add_edited_findings`. Editor cancellation,
+    an invalid fragment, a curation error or a validation error all mutate
+    nothing.
+    """
+    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
+    if text == "0":
         return "continue"
     try:
-        cu.replace_findings(root, case_id, finding["finding_id"], replacements=atoms)
-    except (cu.CurationError, ValidationError) as exc:
-        return _service_error(exc)
-    print(f"replaced finding with {len(atoms)} atom(s)")
-    return "rerender"
+        indices = parse_indices(text, len(entries))
+    except ValueError as exc:
+        print(str(exc))
+        return "continue"
+    source_ids = [entries[i]["source_id"] for i in indices]
+    return _edit_and_stage_fragment(
+        _editor_fragment_authored(source_ids),
+        lambda atoms: cu.add_edited_findings(root, case_id, atoms=atoms),
+        success=lambda n: f"authored {n} edited finding(s)",
+    )
 
 
 # Single source of truth lives on the curation service; re-export here so a
@@ -376,35 +466,51 @@ def _action_ready(
 def _action_exclude(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
 ) -> str:
-    """The ``[x]`` evidence-exclusion action (7 fixed reasons + optional note)."""
-    candidates = view.get("candidates") or []
-    text = _prompt(read_line, "evidence (number, 0 to cancel): ").strip()
+    """The ``[x]`` evidence-exclusion action over the full evidence list.
+
+    Parses one 1-based selector (a single index or one ``a-b`` range). The
+    reason/note contract is validated **before** any mutation, then every
+    selected evidence source is excluded with the same reason/note. A bad
+    range, an invalid reason, or a missing ``other`` note mutates nothing.
+    Single-index selections keep the original note prompt (a stray note on a
+    non-``other`` reason is still rejected); a range with reason ``other``
+    prompts for the single note applied to the whole range, so a range
+    exclusion is never a dead-end the service immediately rejects.
+    """
+    entries = _evidence_entries(view)
+    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
     if text == "0":
         return "continue"
     try:
-        indices = parse_indices(text, len(candidates))
+        indices = parse_indices(text, len(entries))
     except ValueError as exc:
         print(str(exc))
         return "continue"
-    if len(indices) != 1:
-        print(f"exclude takes exactly one evidence source (got {len(indices)})")
-        return "continue"
-    source_id = candidates[indices[0]]["source_id"]
     reason = _prompt(
         read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
     ).strip()
     if reason not in _EVIDENCE_REASONS:
         print(f"invalid evidence reason {reason!r}")
         return "continue"
-    note = _prompt(read_line, "note: ").strip() or None
-    if reason == "other" and not note:
-        print("reason 'other' requires a note")
-        return "continue"
+    note: str | None = None
+    if reason == "other":
+        note = _prompt(read_line, "note: ").strip() or None
+        if not note:
+            print("reason 'other' requires a note")
+            return "continue"
+    elif len(indices) == 1:
+        note = _prompt(read_line, "note: ").strip() or None
     try:
-        cu.exclude_evidence(root, case_id, source_id, reason=reason, note=note)
+        cu.exclude_evidence_batch(
+            root,
+            case_id,
+            [entries[i]["source_id"] for i in indices],
+            reason=reason,
+            note=note,
+        )
     except cu.CurationError as exc:
         return _service_error(exc)
-    print(f"excluded {source_id}")
+    print(f"excluded {len(indices)} evidence source(s)")
     return "rerender"
 
 
@@ -482,12 +588,13 @@ def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
             action = _prompt(read_line, _ACTION_PROMPT).strip().lower()
             if action not in _ACTIONS:
                 if action.isdigit():
-                    candidates = cu.get_case(root, case_id).get("candidates") or []
+                    view = cu.get_case(root, case_id)
+                    entries = _evidence_entries(view)
                     index = int(action) - 1
-                    if not (0 <= index < len(candidates)):
+                    if not (0 <= index < len(entries)):
                         print(f"no evidence number {action}")
                     else:
-                        _launch_pager(candidates[index].get("body") or "")
+                        _launch_pager(entries[index].get("body") or "")
                     continue
                 print(f"unknown action: {action}")
                 continue
