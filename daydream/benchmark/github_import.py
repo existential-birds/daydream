@@ -1345,7 +1345,9 @@ def fetch_and_normalize(
     each top-level inline comment is reconciled with its GraphQL thread state
     into one canonical ``inline_comment`` record (REST anchors plus joined
     thread id/resolved/outdated/dismissal), and review dismissal is joined by
-    review id. The normalized ``pull_request`` block
+    review id. Evidence is emitted in deterministic ``(database_id, created_at)``
+    order, independent of REST/GraphQL page boundaries. The normalized
+    ``pull_request`` block
     carries the complete header: number, url/html_url, title, body, state,
     merge/close timestamps, created/updated timestamps, author, exact
     base/head (sha + ref), and the persisted ``title_sha256``/``body_sha256``
@@ -1367,6 +1369,9 @@ def fetch_and_normalize(
         evidence.append(_evidence_from_issue(raw))
 
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
+    # Canonical order: sort by (database_id, created_at) so persisted order and
+    # payload_sha256 are independent of REST/GraphQL page boundaries.
+    records.sort(key=lambda r: (r.database_id, r.created_at))
     record_dicts = [r.model_dump(mode="json") for r in records]
     base = header.get("base") or {}
     head = header.get("head") or {}

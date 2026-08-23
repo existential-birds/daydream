@@ -1193,6 +1193,41 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
     assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
+def test_evidence_order_deterministic_across_page_sizes(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    # REST-only comments with distinct database ids + timestamps
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 1, "node_id": "PRR_1", "user": {"login": "alice", "type": "User"},
+         "body": "approved", "state": "APPROVED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"}])
+    comments = [
+        {"id": 30, "node_id": "DIFF_30", "user": {"login": "dave", "type": "User"},
+         "body": "first", "commit_id": "a" * 40, "path": "a.py", "line": 1,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r30"},
+        {"id": 7, "node_id": "DIFF_7", "user": {"login": "carol", "type": "User"},
+         "body": "second", "commit_id": "a" * 40, "path": "b.py", "line": 2,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
+    ]
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", comments)
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    # deterministic order: sorted by (database_id, created_at)
+    assert [e.database_id for e in doc.evidence] == [1, 7, 30]
+    payload = doc.fetch.payload_sha256
+    doc2 = gi.fetch_and_normalize(ws, "o/r", 101)     # refetch: identical digest
+    assert doc2.fetch.payload_sha256 == payload
+
+
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
     import pytest
