@@ -304,3 +304,88 @@ def test_templates_and_lock_readable_via_importlib_resources():
         "tests/Dockerfile"
     )
     assert "FROM" in resource.read_text()
+
+
+def test_audit_execution_proofs_harbor_gated(tmp_path, fake_gh):
+    import importlib.metadata
+    import json
+    import subprocess
+
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor import package as pkg
+    from tests.test_benchmark_harbor_build import _seed_ready_workspace
+
+    root = Path(__file__).resolve().parents[1]
+    wheels = tmp_path / "wheels"
+    subprocess.run(
+        ["uv", "build", "--wheel", "--out-dir", str(wheels), str(root)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    ver = importlib.metadata.version("daydream")
+    wheel = wheels / f"daydream-{ver}-py3-none-any.whl"
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    pkg.build_harbor(ws, wheel=wheel)
+    key = build.derive_task_key(case_id)
+    case = ws / "harbor" / key
+
+    env_df = (case / "environment/Dockerfile").read_text()
+    for forbidden in ("Task.md", "solution/", "tests/score_review", "tests/test.sh"):
+        assert forbidden not in env_df
+    ver_df = (case / "tests/Dockerfile").read_text()
+    assert "repository.bundle" not in ver_df and "instruction.md" not in ver_df
+    assert "DAYDREAM_REVIEW" not in ver_df
+
+    verifier_tag = f"dd-verifier-{key}"
+    environment_tag = f"dd-env-{key}"
+    subprocess.run(["docker", "build", "-t", verifier_tag, str(case / "tests")], check=True)
+    subprocess.run(["docker", "build", "-t", environment_tag, str(case / "environment")], check=True)
+    subprocess.run(
+        [
+            "docker", "run", "--rm", environment_tag, "sh", "-c",
+            "test ! -e /workspace/repo/Task.md && test ! -e /workspace/repo/solution "
+            "&& test ! -e /workspace/repo/tests",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "docker", "run", "--rm", verifier_tag, "sh", "-c",
+            "test ! -e /workspace/repo && test ! -e /instruction.md "
+            "&& test -z \"${DAYDREAM_REVIEW_API_KEY:-}\"",
+        ],
+        check=True,
+    )
+    container = subprocess.run(
+        ["docker", "run", "-d", verifier_tag, "sh", "-c", "sleep infinity"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    try:
+        state = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Status}}", container],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        assert state == "running"
+    finally:
+        subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
+
+    rewards = tmp_path / "rewards.jsonl"
+    rewards.write_text(json.dumps({
+        "verifier_error": 0, "tp": 1, "fp": 0, "fn": 0, "reward": 1.0, "clean_task": 0
+    }) + "\n")
+    out = tmp_path / "metric.json"
+    subprocess.run(
+        ["uv", "run", str(ws / "harbor/metric.py"), "-i", str(rewards), "-o", str(out)],
+        check=True,
+        cwd=ws / "harbor",
+    )
+    metric = json.loads(out.read_text())
+    assert metric["task_count"] == 1 and metric["micro_f1"] == 1.0
