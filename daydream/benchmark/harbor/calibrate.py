@@ -15,8 +15,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Any
+
+from daydream.benchmark import storage
+from daydream.benchmark.schema import BenchmarkManifest
 
 _HARBOR = Path(__file__).parent
 _TEMPLATES = _HARBOR / "templates"
@@ -82,6 +86,55 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
     allowlist = sr._effective_allowlist(base_url, env)
     initial_url = base_url.rstrip("/") + "/chat/completions"
     sr._validate_base_url(initial_url, allowlist)
+    base_url = sr.resolve_base_url(api_key, env.get("DAYDREAM_JUDGE_BASE_URL"))
+    allowlist = sr._effective_allowlist(base_url, env)
+    initial_url = base_url.rstrip("/") + "/chat/completions"
+    sr._validate_base_url(initial_url, allowlist)
     return sr.OpenAIJudgeClient(
         api_key, model, base_url=base_url, http=http, allowlist=allowlist
     )
+
+
+def _judge_host_from_env(env: dict[str, Any]) -> str:
+    """Return the normalized-lowercase judge host for ``env``.
+
+    The anthropic provider (or absent -> anthropic default) always routes to
+    ``api.anthropic.com``; the openai-compatible provider resolves its base URL
+    via the packaged ``resolve_base_url`` and returns that URL's host.
+    """
+    sr = _load_judge_template()
+    provider = env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic"
+    if provider == "anthropic":
+        return "api.anthropic.com"
+    base_url = sr.resolve_base_url(
+        env.get("DAYDREAM_JUDGE_API_KEY") or "", env.get("DAYDREAM_JUDGE_BASE_URL")
+    )
+    return str(urllib.parse.urlsplit(base_url).hostname or "").lower()
+
+
+def _load_workspace_allowlist(workspace: Path) -> list[str]:
+    """Read ``<workspace>/benchmark.yaml`` and return its judge allowlist.
+
+    Validates the manifest strictly via ``BenchmarkManifest.model_validate``;
+    a malformed or missing manifest raises the project's existing workspace
+    error (``WorkspaceCorrupt``) — never a silent default.
+    """
+    try:
+        raw = storage.load_yaml_strict(workspace / "benchmark.yaml")
+    except storage.WorkspaceCorrupt:
+        raise
+    try:
+        manifest = BenchmarkManifest.model_validate(raw)
+    except Exception as exc:
+        raise storage.WorkspaceCorrupt(
+            f"{workspace}: invalid benchmark.yaml: {exc}"
+        ) from exc
+    return list(manifest.privacy.judge_allowed_hosts)
+
+
+def _validate_workspace_host(allowlist: list[str] | set[str], host: str) -> None:
+    """Fail closed when ``host`` is not in the workspace judge host allowlist."""
+    if host not in allowlist:
+        raise ValueError(
+            f"judge host {host!r} is not in the workspace judge_allowed_hosts allowlist"
+        )
