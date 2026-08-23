@@ -221,3 +221,79 @@ def test_entrypoint_publish_failure_modes(tmp_path):
     )
     loaded = json.loads((tmp_path / "review.json").read_text())
     assert loaded["findings"] == []
+
+
+# ---------------------------------------------------------------------------
+# Task 6: DaydreamReviewAgent — lifecycle + network-free setup
+# ---------------------------------------------------------------------------
+
+
+import subprocess  # noqa: E402
+
+
+def test_agent_package_import_does_not_pull_harbor():
+    """Importing the daydream.benchmark package must not import Harbor (a lazy,
+    optional extra); ``daydream/benchmark/__init__.py`` keeps exporting only stable
+    schema/service types."""
+    probe = (
+        "import sys; import daydream.benchmark; "
+        "assert not any(m == 'harbor' or m.startswith('harbor.') for m in sys.modules), "
+        "[m for m in sys.modules if m == 'harbor' or m.startswith('harbor.')]"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    assert out.returncode == 0, f"harbor imported eagerly:\n{out.stdout}{out.stderr}"
+
+
+def test_agent_lifecycle_and_lazy_harbor():
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+
+    assert DaydreamReviewAgent.SUPPORTS_ATIF is True
+    assert callable(DaydreamReviewAgent.name) and callable(DaydreamReviewAgent.version)
+    assert isinstance(DaydreamReviewAgent.name(), str) and DaydreamReviewAgent.name()
+    assert isinstance(DaydreamReviewAgent.version(), str)
+
+
+def test_agent_setup_confirms_version_and_backend(tmp_path):
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor.agent import DaydreamReviewAgent
+    from harbor.environments.base import ExecResult
+
+    agent = DaydreamReviewAgent(
+        logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"}
+    )
+
+    class Env:
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.captured = command
+            return ExecResult(return_code=0, stdout="ok", stderr="")
+
+    env = Env()
+    import asyncio
+
+    asyncio.run(agent.setup(env))
+    assert agent.version() in env.captured        # setup checks the packaged version
+    assert "claude_agent_sdk" in env.captured      # and the required backend SDK
+
+
+def test_agent_setup_nonzero_exec_fails(tmp_path):
+    """A failed setup probe surfaces as a typed failure, never a silent pass."""
+    import pytest
+
+    pytest.importorskip("harbor")
+    from harbor.environments.base import ExecResult
+
+    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
+
+    agent = DaydreamReviewAgent(logs_dir=tmp_path)
+
+    class Env:
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.captured = command
+            return ExecResult(return_code=1, stdout="", stderr="boom")
+
+    import asyncio
+
+    with pytest.raises(AgentError):
+        asyncio.run(agent.setup(Env()))
