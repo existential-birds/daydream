@@ -700,7 +700,8 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
         curation = raw.setdefault("curation", {})
         if not curation.get("findings") and not curation.get("clean_attested"):
             raise CurationError(
-                f"case {case_id} cannot be marked ready with an empty gold findings set"
+                f"case {case_id} cannot be marked ready with an empty gold findings set "
+                "and no clean attestation (clean-attest first)"
             )
         _validate_transition(curation.get("state"), "ready")
         curation["state"] = "ready"

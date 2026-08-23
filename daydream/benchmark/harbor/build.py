@@ -434,7 +434,14 @@ _ROOT_README = (
 
 def _is_compilable(curation: dict) -> bool:
     """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
-    return bool(curation.get("state") == "ready" and curation.get("snapshot_attested"))
+    if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
+        return False
+    if not curation.get("findings"):
+        # An empty gold set is a genuine clean case only when clean-attested;
+        # mark_ready enforces the same guard on the authoring path, so a ready
+        # case that never received clean attestation must not compile as clean.
+        return bool(curation.get("clean_attested"))
+    return True
 
 
 def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
