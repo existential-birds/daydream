@@ -6,6 +6,7 @@ mutates the case YAML/model directly. Rendering is plain-string builders for
 deterministic tests; Rich stays available for live styling.
 """
 
+import hashlib
 import os
 import shlex
 import subprocess
@@ -18,7 +19,8 @@ import yaml
 from pydantic import ValidationError
 
 from daydream.benchmark import curation as cu
-from daydream.benchmark.storage import WorkspaceCorrupt
+from daydream.benchmark.harbor import build
+from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
 
 def parse_indices(spec: str, n: int) -> list[int]:
@@ -356,17 +358,28 @@ def _action_clean(
 def _action_ready(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
 ) -> str:
-    """The ``[r]`` mark-ready action (exact-head-SHA confirmation)."""
+    """The ``[r]`` mark-ready action: pages the exact Task Spec and asks one combined question.
+
+    Renders the byte-deterministic Task.md for the case (the same bytes the
+    compiler verifies and writes), prints it, then asks the single combined
+    approve-spec + attest-review question. Only a literal ``y`` proceeds: the
+    freshly-rendered digest is recorded via :func:`mark_ready`; anything else is
+    a no-op leaving the case ``draft``.
+    """
     head = (view.get("snapshot") or {}).get("original_head_sha") or ""
+    raw = load_yaml_strict(Path(root) / "cases" / f"{case_id}.yaml")
+    spec_bytes = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+    print(spec_bytes.decode("utf-8"))
     answer = _prompt(
         read_line,
-        f"Attest that this golden review is valid against head {head} "
-        f"and mark {case_id} ready? [y/N] ",
+        f"Approve this Task Spec and attest that this golden review is valid "
+        f"against head {head} and mark {case_id} ready? [y/N] ",
     ).strip()
     if answer.lower() != "y":
         return "continue"
     try:
-        cu.mark_ready(root, case_id, head_sha=head)
+        digest = hashlib.sha256(spec_bytes).hexdigest()
+        cu.mark_ready(root, case_id, head_sha=head, task_spec_sha256=digest)
     except cu.CurationError as exc:
         return _service_error(exc)
     print(f"marked {case_id} ready")

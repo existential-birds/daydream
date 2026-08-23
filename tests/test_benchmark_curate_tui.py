@@ -407,3 +407,30 @@ def test_resume_reflects_persisted_state(tmp_path, fake_gh):
     assert cases[0]["state"] == "ready"
     assert "ready" in render_index_table(cases)
 
+
+
+def test_ready_pages_spec_and_approval_sets_digest(tmp_path, fake_gh, capsys):
+    import hashlib
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["task_spec_sha256"]
+    assert cur.get("task_spec_approved_at")
+    out = capsys.readouterr().out
+    assert "Task Spec" in out                       # spec paged to stdout
+    assert f"valid against head {head_sha}" in out  # combined question keeps the SHA
+    assert "approve this Task Spec and attest" in out.lower() or "Approve this Task Spec" in out
+
+def test_ready_declined_leaves_draft_and_no_digest(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
