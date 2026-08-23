@@ -87,7 +87,13 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
     if not bundle_rel:
         raise CurationError("ready snapshot carries no bundle_file")
     root = Path(root)
-    bundle_path = storage.resolve_authoring_path(root, bundle_rel)
+    try:
+        bundle_path = storage.resolve_authoring_path(root, bundle_rel)
+    except storage.WorkspaceCorrupt as exc:
+        # absolute / traversal bundle_file must surface as the curated
+        # CurationError contract, never the storage family (the read-only
+        # paths and TUI catch only CurationError).
+        raise CurationError(f"invalid snapshot bundle path: {bundle_rel}") from exc
     if not bundle_path.exists():
         raise CurationError(f"snapshot bundle missing: {bundle_rel}")
     cache = root / "cache"

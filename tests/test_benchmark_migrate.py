@@ -107,6 +107,77 @@ def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path):
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
 
+def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path):
+    """A pre-provenance-split v1 workspace (ready snapshot without
+    requested_base_sha) is repaired: the backfill copies the recorded
+    original_base_sha so the migrated doc validates."""
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    del raw["snapshot"]["requested_base_sha"]
+    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+
+    report = migrate.migrate_workspace(ws)
+    assert report.errors == []
+    assert [c.case_id for c in report.cases] == [case_id]
+    assert report.cases[0].changed is True
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["schema_version"] == 2
+    assert raw["snapshot"]["requested_base_sha"] == raw["snapshot"]["original_base_sha"]
+    from daydream.benchmark.curation import _schema_ready
+    schema.CaseDocument.model_validate(_schema_ready(raw))  # no longer corrupt
+
+
+def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path):
+    """A v2 workspace persisted before requested_base_sha became required is
+    backfilled without touching finding ids (no recompute, no version bump),
+    and a second run is a no-op."""
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+    migrate.migrate_workspace(ws)                       # v1 -> v2 (field present)
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["schema_version"] == 2
+    finding_ids = [f["finding_id"] for f in raw["curation"]["findings"]]
+    del raw["snapshot"]["requested_base_sha"]          # simulate pre-break v2
+    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+
+    report = migrate.migrate_workspace(ws)
+    assert report.errors == []
+    assert report.cases[0].finding_ids_recomputed == 0  # ids untouched
+    assert report.cases[0].changed is True
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["schema_version"] == 2                  # no bump
+    assert raw["snapshot"]["requested_base_sha"] == raw["snapshot"]["original_base_sha"]
+    assert [f["finding_id"] for f in raw["curation"]["findings"]] == finding_ids
+    from daydream.benchmark.curation import _schema_ready
+    schema.CaseDocument.model_validate(_schema_ready(raw))
+
+    second = migrate.migrate_workspace(ws)              # idempotent
+    assert second.cases == [] and second.errors == []
+
+
+def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path):
+    """Unreplayable snapshots carry requested_base_sha as nullable, so a v2
+    case that omits it is left byte-unchanged (no repair needed, no rewrite)."""
+    ws, case_id, _ = _seed_v1_workspace(tmp_path)
+    migrate.migrate_workspace(ws)                       # v1 -> v2 (field present)
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    raw["snapshot"] = {
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
+        "original_base_sha": None,
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
+        "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
+    }
+    raw["curation"]["state"] = "unreplayable"
+    storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
+    before = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+
+    migrate.migrate_workspace(ws)
+    after = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert after == before                            # nothing rewritten
+    assert "requested_base_sha" not in after["snapshot"]
+
+
 def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path):
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     migrate.migrate_workspace(ws, dry_run=True)

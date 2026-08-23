@@ -664,12 +664,16 @@ def test_compile_lock_records_requested_base_sha(tmp_path, fake_gh):
     # original_base_sha is the merge base, carried through unchanged
     assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
 
-    # determinism: recomputing the authoring digest for the same case is byte-identical
+    # determinism: the recomputed authoring digest matches the one frozen in the
+    # compiled lock
     manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
     case_docs = {case_id: case_doc}
-    d1 = build._authoring_input_digest(case_docs, manifest)
-    d2 = build._authoring_input_digest(case_docs, manifest)
-    assert d1 == d2
+    assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
+    # sensitivity: requested_base_sha must fold into the payload -- a digest that
+    # dropped the field would stay byte-identical when only that value moves
+    moved = dict(case_doc, snapshot=dict(case_doc["snapshot"]))
+    moved["snapshot"]["requested_base_sha"] = "0" * 40
+    assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
 
 
 def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):

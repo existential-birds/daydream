@@ -6,7 +6,10 @@ Issue #806 hardened the authoring schemas and made ``finding_id`` case-scoped
 ``CaseDocument.schema_version == 2`` so pre-change v1 workspaces stay loadable.
 This module deterministically re-derives ``finding_id`` for every v1 case and
 bumps its ``schema_version`` to 2, mutating only those two fields and never
-touching authored content.
+touching authored content. It also backfills ``requested_base_sha`` from
+``original_base_sha`` on ready/imported snapshots that predate the
+provenance split: on v1 cases during the upgrade, and on v2 cases as a repair
+pass that recomputes no finding ids and bumps no version.
 
 Invalid data is **never** silently rewritten: a case that fails to load or
 validate is surfaced in ``UpgradeReport.errors`` and left byte-unchanged.
@@ -39,13 +42,36 @@ class UpgradeReport:
     errors: list[str] = field(default_factory=list)
 
 
+def _backfill_requested_base_sha(doc: dict) -> bool:
+    """Backfill ``requested_base_sha`` on a ready/imported snapshot that lacks it.
+
+    Pre-provenance-split workspaces recorded only ``original_base_sha``; the
+    schema now requires ``requested_base_sha`` on ready/imported snapshots.
+    Repair copies the recorded merge base so the doc validates. Returns True
+    when the doc was repaired. Unreplayable snapshots keep the field nullable
+    and are never touched.
+    """
+    snapshot = doc.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("status") not in ("ready", "imported"):
+        return False
+    original = snapshot.get("original_base_sha")
+    if snapshot.get("requested_base_sha") is not None or not original:
+        return False
+    snapshot["requested_base_sha"] = original
+    return True
+
+
 def _upgrade_case(raw: dict, case_id: str) -> tuple[dict, int]:
     """Return a copy of *raw* with case-scoped finding ids and schema_version 2.
 
-    Only ``finding_id`` values and ``schema_version`` are mutated; every
-    authored field is preserved verbatim.
+    Only ``finding_id`` values, ``schema_version`` and a missing
+    ``requested_base_sha`` backfill are mutated; every authored field is
+    preserved verbatim.
     """
     doc = dict(raw)
+    _backfill_requested_base_sha(doc)
     findings = doc.get("curation", {}).get("findings") or []
     recomputed = 0
     new_findings = list(findings)
@@ -97,20 +123,26 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
             raw = storage.load_yaml_strict(root / case_file)
             current = raw.get("schema_version")
             if current == 2:
-                continue
-            if current != 1:
-                raise ValueError(
-                    f"case {case_id} has unsupported schema_version {current!r}"
-                )
-            new_raw, recomputed = _upgrade_case(raw, case_id)
+                # v2 repair pass: backfill a missing requested_base_sha without
+                # recomputing finding ids or bumping the version. A valid v2
+                # case stays byte-unchanged and is not reported.
+                repaired = dict(raw)
+                if not _backfill_requested_base_sha(repaired):
+                    continue
+                new_raw, recomputed = repaired, 0
+            else:
+                if current != 1:
+                    raise ValueError(
+                        f"case {case_id} has unsupported schema_version {current!r}"
+                    )
+                new_raw, recomputed = _upgrade_case(raw, case_id)
             # strip the persisted audit field for validation (curation pattern),
             # but keep it in the written output — authored content is preserved.
             schema.CaseDocument.model_validate(schema._schema_ready(new_raw))
-            # Every loadable v1 case is staged: the schema_version bump is
-            # unconditional, so a write occurs even when no finding_id changed.
-            changed = True
+            # Every staged case is written: the v1 schema_version bump is
+            # unconditional, and a v2 repair is a real backfill.
             upgrades.append(CaseUpgrade(case_id=case_id, finding_ids_recomputed=recomputed,
-                                        changed=changed))
+                                        changed=True))
             writes[case_file] = yaml.safe_dump(new_raw, sort_keys=False).encode("utf-8")
         except Exception as exc:  # never silently rewrite a case
             report.errors.append(f"{case_id}: {exc}")

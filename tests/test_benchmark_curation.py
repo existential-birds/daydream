@@ -485,6 +485,37 @@ def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path, fak
     assert cases[0]["changed_files"] == 2 and cases[0]["changed_lines"] == 6
 
 
+def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path, fake_gh):
+    """A ready snapshot whose bundle_file is absolute / traversal must fail the
+    read-only bundle-clone paths with the curated CurationError contract, never
+    the storage WorkspaceCorrupt family — list_cases (and the TUI) and
+    validate_case's location-vs-head read catch only CurationError."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    # a located historical finding makes validate_case read the frozen head tree
+    view = cu.get_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
+    cu.accept_candidate(ws, case_id, cand["source_id"])
+
+    path = ws / "cases" / f"{case_id}.yaml"
+    good_bundle = load_yaml_strict(path)["snapshot"]["bundle_file"]
+    for bad in (str(ws / "snapshots" / "bundle.bundle"), "../../escape.bundle"):
+        raw = load_yaml_strict(path)
+        raw["snapshot"]["bundle_file"] = bad
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(cu.CurationError):
+            cu.list_cases(ws)
+        with pytest.raises(cu.CurationError):
+            cu.validate_case(ws, case_id)
+    # restoring the original relative in-root bundle_file heals the read-only paths
+    raw = load_yaml_strict(path)
+    raw["snapshot"]["bundle_file"] = good_bundle
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert cu.list_cases(ws)[0]["changed_files"] == 2
+
+
 def test_curate_and_validate_after_mirror_removal(tmp_path, fake_gh):
     """Acceptance (e): deleting the shared mirror never makes a case uncuratable.
 

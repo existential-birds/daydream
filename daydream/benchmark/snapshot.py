@@ -13,6 +13,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
+from typing import Literal, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -320,7 +321,6 @@ def validate_offline_clone(
         if proc.returncode != 0:
             raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
         refs_out = _run_git_cwd(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        assert isinstance(refs_out, str)
         refs = set(refs_out.splitlines())
         expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
         if refs != expected_refs:
@@ -329,7 +329,6 @@ def validate_offline_clone(
                 f"got {sorted(refs)})"
             )
         count = _run_git_cwd(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
-        assert isinstance(count, str)
         if count != "2":
             raise git_ops.GitError(
                 f"offline clone head ancestry must contain exactly two reachable commits "
@@ -338,7 +337,6 @@ def validate_offline_clone(
         parents_out = _run_git_cwd(
             clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
         )
-        assert isinstance(parents_out, str)
         if len(parents_out.splitlines()) != 1:
             raise git_ops.GitError(
                 f"offline clone base must be a root commit with no parent "
@@ -348,7 +346,6 @@ def validate_offline_clone(
             clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
         )
         base_commit = _run_git_cwd(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
-        assert isinstance(head_parent, str) and isinstance(base_commit, str)
         if head_parent != base_commit:
             raise git_ops.GitError(
                 f"offline clone head's parent must be the base commit "
@@ -359,7 +356,6 @@ def validate_offline_clone(
             ("refs/remotes/origin/head", head_tree),
         ):
             got = _run_git_cwd(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
-            assert isinstance(got, str)
             if got != expected:
                 raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
         diff = _run_git_cwd(
@@ -367,7 +363,6 @@ def validate_offline_clone(
             ["diff", "--binary", "refs/remotes/origin/base", "refs/remotes/origin/head"],
             capture_bytes=True,
         )
-        assert isinstance(diff, bytes)
         if hashlib.sha256(diff).hexdigest() != diff_sha256:
             raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
     finally:
@@ -375,7 +370,17 @@ def validate_offline_clone(
     return None
 
 
-def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: bool = False) -> str | bytes:
+@overload
+def _run_git_cwd(repo: Path | str, args: list[str]) -> str: ...
+
+
+@overload
+def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: Literal[True]) -> bytes: ...
+
+
+def _run_git_cwd(
+    repo: Path | str, args: list[str], *, capture_bytes: bool = False
+) -> str | bytes:
     """Run git and raise GitError on non-zero exit (offline-clone helper)."""
     repo = Path(repo)
     proc = git_ops._run_git(repo, args, retries=0, capture_bytes=capture_bytes, timeout=30)
@@ -416,14 +421,14 @@ def freeze_one(
 
     # The resolved merge base, recorded on any unreplayable dict produced after
     # merge-base resolution (None for the earlier fetch/ancestry failures).
-    resolved_base: dict[str, str | None] = {"base": None}
+    resolved_base: str | None = None
 
     def unreplayable(reason: str, detail: str) -> tuple[dict, None]:
         return ({
             "status": "unreplayable",
             "policy": policy,
             "requested_head": requested_head,
-            "original_base_sha": resolved_base["base"],
+            "original_base_sha": resolved_base,
             "requested_base_sha": base_tip,
             "original_head_sha": head_sha,
             "base_tree_sha": None,
@@ -478,7 +483,7 @@ def freeze_one(
 
     # 5) resolve the merge base and both trees.
     base = resolve_original_base(m, "refs/heads/base_tip", head_sha)
-    resolved_base["base"] = base
+    resolved_base = base
     if base is None:
         return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
     trees = resolve_trees(m, base, head_sha)
