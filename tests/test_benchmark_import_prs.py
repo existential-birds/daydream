@@ -11,10 +11,13 @@ origin (no network).
 """
 
 import hashlib
+import json
 import os
 import subprocess
 
 import pytest
+
+from tests.harness import github_schema as gs
 
 # Deterministic seed identity so a local bare origin's commits are stable and
 # reproducible (mirrors tests/test_benchmark_snapshot.py::_SEED_ENV).
@@ -279,6 +282,48 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path, fake_gh):
     assert all("--paginate" in (a or []) for a in collection_args)
 
 
+def test_review_thread_queries_request_only_schema_fields():
+    """Both GraphQL queries may only request fields GitHub's schema defines.
+
+    Aliases (`side: diffSide`, `type: __typename`) are allowed — the extractor
+    validates the *real* field name — but a bare invented field must fail.
+    """
+    from daydream.benchmark import github_import as gi
+    assert gs.unknown_query_fields(gi._REVIEW_THREADS_QUERY) == set()
+    assert gs.unknown_query_fields(gi._THREAD_COMMENTS_QUERY) == set()
+
+
+def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
+    """Reintroducing a field GitHub's schema does not define fails CI through the fake gh."""
+    from tests.harness.fake_gh import _handle_api
+    state = tmp_path / "state"
+    state.mkdir()
+    payload = state / "q.json"
+    payload.write_text(json.dumps({
+        "query": "query X($o:String!,$n:String!,$p:Int!){ repository(owner:$o,name:$n){"
+                 " pullRequest(number:$p){ reviewThreads(first:50){ nodes{ id isBot } } } } }",
+        "variables": {"o": "o", "n": "r", "p": 1},
+    }))
+    rc, _out, err = _handle_api(["api", "graphql", "--input", str(payload)], state)
+    assert rc == 1
+    assert "isBot" in err
+
+
+def test_fake_gh_accepts_fixed_review_threads_query(tmp_path):
+    """The fixed production query routes through the fake without a schema rejection."""
+    from daydream.benchmark import github_import as gi
+    from tests.harness.fake_gh import _handle_api
+    state = tmp_path / "state"
+    state.mkdir()
+    payload = state / "q.json"
+    payload.write_text(json.dumps({
+        "query": gi._REVIEW_THREADS_QUERY,
+        "variables": {"o": "o", "n": "r", "number": 1},
+    }))
+    rc, _out, err = _handle_api(["api", "graphql", "--input", str(payload)], state)
+    assert rc == 0 and "schema" not in err
+
+
 def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
 
@@ -303,7 +348,7 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([
         {"id": "thread_1", "isResolved": True,
-         "isOutdated": True, "isResolvedBy": None,
+         "isOutdated": True,
          "subjectType": "LINE", "path": "a.py", "line": 4, "originalLine": 3,
          "side": "RIGHT", "startSide": None,
          "comments": {"nodes": [
@@ -1291,7 +1336,7 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
          "html_url": "https://github.com/o/r/pull/101#discussion_r10"}])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([{"id": "thread_1", "isResolved": True,
-        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "isOutdated": True, "subjectType": "LINE",
         "path": "a.py", "line": 4, "originalLine": 3, "side": "RIGHT",
         "startSide": None,
         "comments": {"nodes": [
@@ -1365,7 +1410,7 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh)
          "html_url": "https://github.com/o/r/pull/101#discussion_r40"}])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([{"id": "thread_2", "isResolved": True,
-        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "isOutdated": True, "subjectType": "LINE",
         "path": "a.py", "line": 5, "originalLine": 4, "side": "RIGHT",
         "startSide": None,
         "comments": {"nodes": [
