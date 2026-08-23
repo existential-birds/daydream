@@ -1121,11 +1121,9 @@ def _case_materialize(
         if head_token == "final":
             # head-immutable: an existing final_pr_head case resolves to its
             # pinned commit; only a first import (no pin) uses the live head.
-            if prior_policy and prior_pinned:
-                for prior_case_id, prior_pol in prior_policy.items():
-                    if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
-                        head_sha = prior_pinned[prior_case_id]
-                        break
+            pinned = _pinned_head_sha(prior_policy, prior_pinned)
+            if pinned is not None:
+                head_sha = pinned
             if head_sha is None:
                 head_sha = pull_request.head.sha
         if not head_sha or head_sha in seen:
@@ -1404,6 +1402,26 @@ def _prior_import_state(
     )
 
 
+def _pinned_head_sha(
+    prior_policy: dict[str, str] | None,
+    prior_pinned: dict[str, str] | None,
+) -> str | None:
+    """Return the pinned head sha for an existing ``final_pr_head`` case, if any.
+
+    Head-immutable task input: an existing ``final`` case resolves to the pinned
+    head from its prior ``snapshot.original_head_sha``, so a live head advance
+    neither re-anchors the case nor flips its task-input signature. Only a first
+    import with no ``final_pr_head`` pin uses the live head (caller falls back).
+    Shared by the materialize path and ``_import_one_pr`` so the pinning logic
+    and its ``final_pr_head`` magic string live in exactly one place.
+    """
+    if prior_policy and prior_pinned:
+        for prior_case_id, prior_pol in prior_policy.items():
+            if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
+                return prior_pinned[prior_case_id]
+    return None
+
+
 def _import_one_pr(
     root: Path,
     raw: dict[str, Any],
@@ -1424,11 +1442,9 @@ def _import_one_pr(
         # head advance neither re-anchors the case nor flips the task-input
         # signature of the pinned case; only a first import (no pin) keeps the
         # live pull_request.head.sha.
-        if prior_policy and prior_pinned:
-            for prior_case_id, prior_pol in prior_policy.items():
-                if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
-                    doc.pull_request.head.sha = prior_pinned[prior_case_id]
-                    break
+        pinned = _pinned_head_sha(prior_policy, prior_pinned)
+        if pinned is not None:
+            doc.pull_request.head.sha = pinned
         # Two independent stale signals: the per-case referenced-evidence arm
         # (database_ids whose projection hash changed or disappeared — runs on
         # refresh AND plain re-import) and the PR-wide task-input arm (the
