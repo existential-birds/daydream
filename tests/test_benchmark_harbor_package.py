@@ -81,3 +81,29 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path):
     with pytest.raises(pkg.PackageError) as missing:
         pkg.validate_wheel(tmp_path / "absent.whl", daydream_version=ver)
     assert "absent.whl" in str(missing.value)
+
+
+def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch):
+    import importlib.metadata
+    import sys
+
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+
+    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.21.0")
+    exe = pkg.resolve_harbor()
+    assert exe == str(Path(sys.executable).parent / "harbor")
+
+    def absent(distribution):
+        raise importlib.metadata.PackageNotFoundError(distribution)
+
+    monkeypatch.setattr(pkg.importlib.metadata, "version", absent)
+    with pytest.raises(pkg.PackageError) as missing:
+        pkg.resolve_harbor()
+    assert "pip install 'daydream[benchmark]'" in str(missing.value)
+
+    monkeypatch.setattr(pkg.importlib.metadata, "version", lambda d: "0.20.0")
+    with pytest.raises(pkg.PackageError) as wrong:
+        pkg.resolve_harbor()
+    assert "[0.21, 0.22)" in str(wrong.value)

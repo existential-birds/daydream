@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +54,36 @@ def validate_wheel(wheel_path: Path, *, daydream_version: str) -> WheelInfo:
             f"cannot read wheel {wheel_path}: {exc}", remediation="run `uv build --wheel`"
         ) from exc
     return WheelInfo(distribution="daydream", version=daydream_version, sha256=digest)
+
+
+def resolve_harbor() -> str:
+    """Resolve a compatible Harbor executable from this Python environment."""
+    remediation = "pip install 'daydream[benchmark]'"
+    try:
+        version = importlib.metadata.version("harbor")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise PackageError(
+            "Harbor is not installed in the running Daydream interpreter", remediation=remediation
+        ) from exc
+    try:
+        parts = tuple(int(part) for part in version.split(".")[:2])
+    except ValueError as exc:
+        raise PackageError(
+            f"Harbor version {version!r} is invalid; supported range is [0.21, 0.22)",
+            remediation=remediation,
+        ) from exc
+    if parts != (0, 21):
+        raise PackageError(
+            f"Harbor version {version} is outside supported range [0.21, 0.22)",
+            remediation=remediation,
+        )
+    executable = Path(sys.executable).parent / "harbor"
+    if not executable.is_file():
+        raise PackageError(
+            f"Harbor metadata is present but {executable} is missing; install Harbor into the Daydream interpreter",
+            remediation=remediation,
+        )
+    return str(executable)
 
 
 def render_lock_header(
