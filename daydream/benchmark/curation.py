@@ -41,6 +41,7 @@ import shutil
 import tempfile
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, cast
 
@@ -785,13 +786,15 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
     return curation
 
 
-def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
+def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str) -> None:
     """The final-attest operation: the one path that sets a case ready + attested.
 
     SHA-specific confirmation: *head_sha* must equal the snapshot's original
     head SHA, and the current state must move to ``ready`` (draft -> ready or
     stale -> ready). Sets ``snapshot_attested=True`` and ``state=ready`` after
-    the full case revalidates.
+    the full case revalidates. Records the human-approved Task.md digest
+    (*task_spec_sha256*) plus a persisted-but-stripped ``task_spec_approved_at``
+    audit timestamp -- there is no approval without a digest (R7).
     """
 
     def mutate(raw: dict[str, Any]) -> None:
@@ -813,6 +816,8 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str) -> None:
         _validate_transition(curation.get("state"), "ready")
         curation["state"] = "ready"
         curation["snapshot_attested"] = True
+        curation["task_spec_sha256"] = task_spec_sha256
+        curation["task_spec_approved_at"] = datetime.now(timezone.utc).isoformat()
         _derive_content(raw)
 
     _with_case_lock(root, case_id, "mark-ready", mutate)

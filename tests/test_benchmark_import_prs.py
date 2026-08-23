@@ -817,6 +817,7 @@ def _curate_case(ws, case_file):
         "findings": [finding],
         "exclusions": [],
         "case_exclusion": None,
+        "task_spec_sha256": "d" * 64,
     }
     path.write_text(yaml.safe_dump(raw, sort_keys=False))
 

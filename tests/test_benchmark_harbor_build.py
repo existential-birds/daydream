@@ -151,6 +151,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
     """
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor import build
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
@@ -168,7 +169,13 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
         if c["exact_acceptable"]
     )
     cu.accept_candidate(ws, case_id, candidate["source_id"])
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    task_spec_sha256 = hashlib.sha256(
+        build.render_task_spec(
+            load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+            instruction=build.ASSIGNMENT_TEXT,
+        )
+    ).hexdigest()
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
     return ws, case_id, head_sha
 
 
@@ -180,6 +187,7 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tup
     """
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor import build
     from daydream.benchmark.storage import load_yaml_strict
     from daydream.benchmark.workspace import init_workspace
 
@@ -193,7 +201,13 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tup
     case_id = raw["cases"][0]["case_id"]
     cu.attest_clean(ws, case_id)
     if ready:
-        cu.mark_ready(ws, case_id, head_sha=head_sha)
+        task_spec_sha256 = hashlib.sha256(
+            build.render_task_spec(
+                load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+                instruction=build.ASSIGNMENT_TEXT,
+            )
+        ).hexdigest()
+        cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
     return ws, case_id, head_sha
 
 
@@ -204,6 +218,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
     """
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
+    from daydream.benchmark.harbor import build
     from daydream.benchmark.storage import load_yaml_strict
 
     _seed_preflight(fake_gh, number=102)
@@ -217,7 +232,13 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh, *, lines: int = 3
         if c["exact_acceptable"]
     )
     cu.accept_candidate(ws, case_id, candidate["source_id"])
-    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    task_spec_sha256 = hashlib.sha256(
+        build.render_task_spec(
+            load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
+            instruction=build.ASSIGNMENT_TEXT,
+        )
+    ).hexdigest()
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
     return case_id
 
 
