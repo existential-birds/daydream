@@ -4,8 +4,6 @@ The minimal subset here covers exactly the types the two queries touch
 (PullRequestReviewThread, the comment node, Actor). It is the enforcement point
 for "requesting a nonexistent field fails CI, never in production".
 """
-import json
-
 from tests.harness import github_schema as gs
 
 

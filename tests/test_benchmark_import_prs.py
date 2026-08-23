@@ -296,7 +296,8 @@ def test_review_thread_queries_request_only_schema_fields():
 def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
     """Reintroducing a field GitHub's schema does not define fails CI through the fake gh."""
     from tests.harness.fake_gh import _handle_api
-    state = tmp_path / "state"; state.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
     payload = state / "q.json"
     payload.write_text(json.dumps({
         "query": "query X($o:String!,$n:String!,$p:Int!){ repository(owner:$o,name:$n){"
@@ -310,9 +311,10 @@ def test_fake_gh_rejects_invented_review_thread_fields(tmp_path):
 
 def test_fake_gh_accepts_fixed_review_threads_query(tmp_path):
     """The fixed production query routes through the fake without a schema rejection."""
-    from tests.harness.fake_gh import _handle_api
     from daydream.benchmark import github_import as gi
-    state = tmp_path / "state"; state.mkdir()
+    from tests.harness.fake_gh import _handle_api
+    state = tmp_path / "state"
+    state.mkdir()
     payload = state / "q.json"
     payload.write_text(json.dumps({
         "query": gi._REVIEW_THREADS_QUERY,

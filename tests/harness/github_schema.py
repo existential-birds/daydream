@@ -8,10 +8,12 @@ checked-in subset below. It is shared by the contract test
 (``tests/test_github_schema.py``) and the fake ``gh`` graphql handler
 (``tests/harness/fake_gh.py``), so reintroducing an invented field fails CI.
 
-The subset is intentionally minimal — it covers exactly the types the two
-review-thread queries touch, per the issue-841 plan. A full GitHub
-introspection snapshot is impractical to maintain; a small field-set map is
-the sanctioned contract mechanism.
+The subset is intentionally minimal — it covers exactly the fields the
+review-thread queries that route through the fake ``gh`` touch (the import
+queries in ``github_import`` and the prior-finding inventory query in
+``reconcile``), per the issue-841 plan. A full GitHub introspection snapshot
+is impractical to maintain; a small field-set map is the sanctioned contract
+mechanism.
 """
 
 from __future__ import annotations
@@ -41,10 +43,12 @@ SCHEMA_FIELDS: dict[str, set[str]] = {
         "databaseId",
         "body",
         "author",
+        "isMinimized",
         "createdAt",
         "updatedAt",
         "url",
         "replyTo",
+        "viewerDidAuthor",
     },
     "Actor": {"login"},
 }

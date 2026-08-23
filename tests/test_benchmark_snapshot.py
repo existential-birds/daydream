@@ -89,22 +89,31 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[Path, str, str]:
     with refs/pull/1/head off base2, plus a diverged `dev` branch (off base1) whose
     first commit is PR2's base tip and second commit is PR2's head. Returns
     (bare, dev_base_tip_sha, pr2_head_sha)."""
-    repo = tmp_path / "seed_wt"; repo.mkdir()
+    repo = tmp_path / "seed_wt"
+    repo.mkdir()
     _git(repo, "init", "-b", "main")
-    _write(repo, "readme.txt", "base1\n"); _commit(repo, "base1")
-    _write(repo, "base.py", "BASE = 2\n"); _commit(repo, "base2")
-    _write(repo, "beyond.py", "BEYOND = 3\n"); _commit(repo, "base3")
+    _write(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n")
+    _commit(repo, "base2")
+    _write(repo, "beyond.py", "BEYOND = 3\n")
+    _commit(repo, "base3")
     # PR 1 head off base2 (identical seed to _seed_origin => same _SHA_HEAD)
     _git(repo, "checkout", "--detach", "HEAD~1")            # base2
-    repo.joinpath("base.py").write_text("BASE = 20\n"); _git(repo, "add", "base.py")
-    _write(repo, "feature.py", "FEATURE = 1\n"); _commit(repo, "feature")
+    repo.joinpath("base.py").write_text("BASE = 20\n")
+    _git(repo, "add", "base.py")
+    _write(repo, "feature.py", "FEATURE = 1\n")
+    _commit(repo, "feature")
     pr1_head = _git(repo, "rev-parse", "HEAD")
     # PR 2: unrelated `dev` branch diverged from base1; base tip = dev1, head = dev2
     _git(repo, "checkout", "-b", "dev", "HEAD~2")           # base1
-    _write(repo, "dev.py", "DEV = 1\n"); dev_tip = _commit(repo, "dev1")
-    repo.joinpath("dev.py").write_text("DEV = 2\n"); _git(repo, "add", "dev.py")
+    _write(repo, "dev.py", "DEV = 1\n")
+    dev_tip = _commit(repo, "dev1")
+    repo.joinpath("dev.py").write_text("DEV = 2\n")
+    _git(repo, "add", "dev.py")
     pr2_head = _commit(repo, "dev2")
-    bare = tmp_path / "origin.git"; bare.mkdir(parents=True, exist_ok=True)
+    bare = tmp_path / "origin.git"
+    bare.mkdir(parents=True, exist_ok=True)
     _git(bare, "init", "--bare")
     _git(repo, "remote", "add", "origin", str(bare))
     _git(repo, "push", "origin", "main:main", "dev:dev")
