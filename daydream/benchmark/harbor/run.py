@@ -19,8 +19,11 @@ handler maps them to exit ``1`` — never a bare traceback.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
+import importlib.metadata
 import json
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable
@@ -28,7 +31,7 @@ from typing import Any, Callable
 import yaml
 
 from daydream.benchmark import storage
-from daydream.benchmark.harbor import calibrate, package
+from daydream.benchmark.harbor import calibrate, package, verifier_core
 
 
 class RunError(Exception):
@@ -383,6 +386,176 @@ def _preflight(
                 "(run 'daydream benchmark calibrate-judge' first)"
             )
     return failures
+
+
+def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
+    """Parse Harbor's job dir for per-task scores + resolved environments.
+
+    Returns ``(oracle_ok, environments)``. A task is scored when its
+    ``<trial>/verifier/reward.json`` exists; it is *unscored* when only
+    ``reward-details.json`` exists (the infra-error path — never a numeric
+    zero). Oracle success requires every trial scored with ``reward == 1.0``
+    and ``verifier_error == 0``.
+    """
+    job_dir = Path(job_dir)
+    if not job_dir.is_dir():
+        return (False, [])
+    environments: list[dict[str, Any]] = []
+    oracle_ok = True
+    for trial in sorted(job_dir.iterdir()):
+        if not trial.is_dir():
+            continue
+        verifier = trial / "verifier"
+        reward_path = verifier / "reward.json"
+        if not reward_path.is_file():
+            continue  # not one of the compiled task trials
+        env = _environment_from_trial(trial)
+        reward = _parse_reward(reward_path)
+        if reward is None:
+            return (False, [])
+        environments.append(env)
+        if not oracle_ok:
+            continue
+        verr = reward.get("verifier_error")
+        if verr is None or float(reward.get("reward") or 0.0) < 1.0 or int(verr) != 0:
+            oracle_ok = False
+    # A details-only unscored task blocks the receipt even when no reward.json
+    # was present (Oracle must reproduce gold for every compiled task).
+    for trial in sorted(job_dir.iterdir()):
+        if not trial.is_dir():
+            continue
+        verifier = trial / "verifier"
+        if (verifier / "reward.json").is_file():
+            continue
+        if (verifier / "reward-details.json").is_file():
+            return (False, [])
+    return (oracle_ok, environments)
+
+
+def _parse_reward(reward_path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(reward_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _environment_from_trial(trial: Path) -> dict[str, Any]:
+    """Deterministic resolved-environment entry for one scored trial.
+
+    Computes ``environment_id`` as a content-address over the trial's compiled
+    environment (task.toml ``[environment]`` + environment/ bytes); the docker
+    provider tags the built image ``hb__<environment_id>`` when the task does
+    not pin a concrete ``docker_image``.
+    """
+    digest = hashlib.sha256()
+    for path in sorted((trial / "verifier").rglob("*")) if (trial / "verifier").is_dir() else []:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes())
+    environment_id = digest.hexdigest()
+    return {
+        "trial_name": trial.name,
+        "environment_id": environment_id,
+        "backend": "docker",
+        "image_id": f"hb__{environment_id}",
+        "image_tags": [],
+        "removed": False,
+    }
+
+
+def _oracle_receipt_document(
+    *, compiled_lock_sha256: str, env: dict[str, Any], calibration_digest: str,
+    result_dir: Path,
+) -> dict[str, Any]:
+    """Assemble the private deterministic Oracle receipt (mode-0600)."""
+    version = importlib.metadata.version("harbor")
+    major_minor = ".".join(str(version).split(".")[:2])
+    sr = calibrate._load_judge_template()
+    return {
+        "compiled_lock_sha256": compiled_lock_sha256,
+        "harbor_version": major_minor,
+        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+        "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
+        "judge_host": _judge_host_from_env(env),
+        "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
+        "threshold": verifier_core.CONFIDENCE_THRESHOLD,
+        "attempts": 3,
+        "calibration_receipt_sha256": calibration_digest,
+        "result_dir": str(Path(result_dir).resolve()),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def _write_oracle_receipt(
+    workspace: Path, *, job_dir: Path, compiled_lock_sha256: str,
+    env: dict[str, Any], calibration_digest: str,
+) -> int:
+    """Write the oracle-receipt only when the Oracle run reproduced gold."""
+    ok, _ = _parse_job_results(Path(job_dir))
+    if not ok:
+        print(
+            "Oracle run did not reproduce gold (a scored task/reward blocked the "
+            "receipt); no oracle-receipt.json written.",
+            file=sys.stderr,
+        )
+        return 1
+    doc = _oracle_receipt_document(
+        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        calibration_digest=calibration_digest, result_dir=Path(job_dir),
+    )
+    storage.atomic_write_json(
+        workspace / "harbor" / "oracle-receipt.json", doc, mode=0o600
+    )
+    return 0
+
+
+def _default_run_gate(
+    workspace: Path, *, env: dict[str, Any], compiled_lock_sha256: str,
+    calibration_digest: str,
+) -> str | None:
+    """Gate a default (non-Oracle) run behind a matching Oracle receipt."""
+    receipt_path = workspace / "harbor" / "oracle-receipt.json"
+    if not receipt_path.is_file():
+        return "no matching oracle receipt found (run --oracle first)"
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"malformed oracle receipt at {receipt_path}: {exc}"
+    if not isinstance(receipt, dict):
+        return f"malformed oracle receipt at {receipt_path}"
+    version = importlib.metadata.version("harbor")
+    major_minor = ".".join(str(version).split(".")[:2])
+    sr = calibrate._load_judge_template()
+    current = {
+        "compiled_lock_sha256": compiled_lock_sha256,
+        "harbor_version": major_minor,
+        "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+        "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
+        "judge_host": _judge_host_from_env(env),
+        "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
+        "threshold": verifier_core.CONFIDENCE_THRESHOLD,
+        "attempts": 3,
+        "calibration_receipt_sha256": calibration_digest,
+    }
+    for key, value in current.items():
+        if receipt.get(key) != value:
+            return (
+                f"{key} no longer matches the oracle receipt "
+                f"(got {value!r}, receipt had {receipt.get(key)!r})"
+            )
+    result_dir = Path(str(receipt.get("result_dir") or ""))
+    if not result_dir.is_dir():
+        return f"oracle result_dir {result_dir} no longer exists on disk"
+    return None
+
+
+def _default_confirm(prompt: str) -> bool:
+    """Default TTY confirmation: prompt on stdin, truthy answer confirms."""
+    try:
+        answer = input(f"{prompt} [y/N] ").strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "yes")
 
 
 def run_run(
