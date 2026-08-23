@@ -934,24 +934,79 @@ def _payload_sha256(import_doc: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _evidence_projection_hash(rec: dict[str, Any]) -> str:
+    """sha256 over the sorted-JSON of the projection-relevant evidence fields.
+
+    One digest per physical evidence record over exactly the fields that feed
+    candidate projection and the curated review surface: body sha, author
+    (login/type), commit anchors, path/line anchors, side, subject type,
+    resolution state, dismissal, and review state. Values use ``.get()``
+    defaults (``False`` for booleans, ``None`` for optional fields, ``""`` for
+    strings) so an absent pre-canonicalization key equals the canonical
+    default. ``kind``/``source_id``/``database_id``/``url``/timestamps are
+    excluded: they are format-drift/metadata-sensitive and must not flip the
+    signature.
+    """
+    author_raw = rec.get("author")
+    author = author_raw if isinstance(author_raw, dict) else {}
+    values: dict[str, Any] = {
+        "body_sha256": str(rec.get("body_sha256") or ""),
+        "author.login": str(author.get("login") or ""),
+        "author.type": str(author.get("type") or ""),
+        "commit_id": rec.get("commit_id"),
+        "original_commit_id": rec.get("original_commit_id"),
+        "path": rec.get("path"),
+        "original_path": rec.get("original_path"),
+        "line": rec.get("line"),
+        "start_line": rec.get("start_line"),
+        "original_line": rec.get("original_line"),
+        "side": rec.get("side"),
+        "start_side": rec.get("start_side"),
+        "subject_type": rec.get("subject_type"),
+        "resolved": bool(rec.get("resolved", False)),
+        "outdated": bool(rec.get("outdated", False)),
+        "dismissed": bool(rec.get("dismissed", False)),
+        "state": rec.get("state"),
+    }
+    canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[int, str]]:
-    """Content signature: one ``(database_id, body_sha256)`` pair per evidence record.
+    """Projection signature: one ``(database_id, projection_hash)`` per evidence record.
 
     Keyed on the physical comment id rather than ``source_id`` so the refresh
     stale check is immune to the canonical-record format change: pre-canonicalization
     files rekinded thread-only comments and persisted a comment that existed in
     both feeds twice, while the canonical format emits exactly one
-    ``inline_comment`` per database id. Byte-identical GitHub content changed only
-    the persisted shape, so a first ``--refresh`` after the format change must
-    compare equal and keep prior curated cases — a genuine content change (a
-    comment added/removed/edited) still flips the digest.
+    ``inline_comment`` per database id. The per-record hash spans the full
+    projection-relevant provenance (body, author, commit/anchor fields, sides,
+    subject type, resolution state, dismissal, review state) and excludes
+    ``kind``/``source_id``/``database_id``/``url``/timestamps, so a duplicate
+    pre-canon record collapses to one identical set element and a pure
+    format/metadata change keeps prior curated cases — a genuine content
+    change (a comment added/removed/edited, re-anchored, or re-resolved) still
+    flips the digest. Deletion is carried by the set: a removed record's
+    ``database_id`` simply disappears (no fallback hash).
     """
-    return frozenset((e.database_id, e.body_sha256) for e in doc.evidence)
+    return frozenset(
+        (e.database_id, _evidence_projection_hash(e.model_dump(mode="json")))
+        for e in doc.evidence
+    )
 
 
 def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, str]]:
+    """The projection signature computed over a raw import document's dict.
+
+    Shares the per-record hash helper with :func:`_evidence_signature_from_doc`
+    so the persisted-file path and the typed-doc path always agree; a record
+    appearing twice for one ``database_id`` (the pre-canonicalization duplicate)
+    collapses to one identical set element, and a deleted record simply
+    disappears from the set.
+    """
     return frozenset(
-        (int(e["database_id"]), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
+        (int(e["database_id"]), _evidence_projection_hash(e))
+        for e in raw.get("evidence", [])
     )
 
 

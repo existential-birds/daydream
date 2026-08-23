@@ -1453,3 +1453,58 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
     raw = load_yaml_strict(ws / "benchmark.yaml")
     prior_sig, prior_task_sig, curations, _ = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
+
+
+# ---------------------------------------------------------------------------
+# widened evidence signature (issue #813): projection-relevant provenance keyed
+# per physical database_id; kind/source_id/url/timestamps excluded
+# ---------------------------------------------------------------------------
+
+
+def _one_evidence() -> dict:
+    """One canonical inline-comment evidence record dict (projection fields)."""
+    return {"database_id": 1, "body_sha256": "a" * 64, "body": "please fix",
+            "path": "a.py", "line": 4, "commit_id": "a" * 40, "outdated": False,
+            "resolved": False, "dismissed": False, "state": "COMMENTED",
+            "subject_type": "line", "side": "RIGHT", "start_side": None,
+            "original_path": "a.py", "original_line": 4, "original_commit_id": "a" * 40,
+            "author": {"login": "alice", "type": "User"}}
+
+
+def _sig(ev: dict):
+    """Signature over one raw evidence record: ``{"evidence": [ev]}`` wrapper."""
+    from daydream.benchmark import github_import as gi
+
+    return gi._evidence_signature_from_raw({"evidence": [ev]})
+
+
+def test_signature_changes_on_anchor_move():
+    base = _one_evidence()
+    moved = {**base, "line": 7}                     # same body, moved anchor
+    assert _sig(base) != _sig(moved)
+
+
+def test_signature_changes_on_resolution_state():
+    base = _one_evidence()
+    assert _sig(base) != _sig({**base, "resolved": True})
+    assert _sig(base) != _sig({**base, "outdated": True})
+    assert _sig(base) != _sig({**base, "dismissed": True})
+    assert _sig(base) != _sig({**base, "commit_id": "b" * 40})
+    assert _sig(base) != _sig({**base, "author": {"login": "bob", "type": "User"}})
+
+
+def test_signature_ignores_metadata_only_change():
+    base = _one_evidence()
+    meta = {**base, "updated_at": "2026-01-02T00:00:00Z", "url": "https://e.example/2"}
+    assert _sig(base) == _sig(meta)
+
+
+def test_signature_ignores_format_drift_duplicate_and_kind():
+    from daydream.benchmark import github_import as gi
+
+    base = _one_evidence()
+    dup = [{**base, "kind": "inline_comment"},      # same database_id stored twice
+           {**base, "kind": "thread_comment"}]
+    canon = [base]
+    assert gi._evidence_signature_from_raw({"evidence": dup}) \
+        == gi._evidence_signature_from_raw({"evidence": canon})
