@@ -1043,6 +1043,8 @@ def _case_materialize(
             if changed and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
+                curation.pop("task_spec_sha256", None)
+                curation.pop("task_spec_approved_at", None)
         if root is not None and origin_url is not None and base_sha and head_sha:
             policy = "final_pr_head" if head_token == "final" else "explicit_head"
             snapshot_doc, bundle_bytes = snapshot.freeze_one(

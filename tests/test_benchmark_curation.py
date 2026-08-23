@@ -908,3 +908,18 @@ def test_mark_ready_wrong_sha_noop_leaves_approval_unset(tmp_path, fake_gh):
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
+
+
+def test_mutation_invalidates_task_spec_approval(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="d" * 64)
+    # a gold/provenance/evidence mutation on a ready case demotes to draft AND clears approval
+    src = next(c["source_id"] for c in load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur

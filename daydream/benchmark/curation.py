@@ -761,6 +761,8 @@ def _demote_ready(curation: dict[str, Any]) -> str | None:
         _validate_transition("ready", "draft")
         curation["state"] = "draft"
         curation["snapshot_attested"] = False
+        curation.pop("task_spec_sha256", None)
+        curation.pop("task_spec_approved_at", None)
         return "draft"
     return state
 
@@ -779,6 +781,8 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
         _demote_ready(curation)
     elif state == "stale":
         curation["snapshot_attested"] = False
+        curation.pop("task_spec_sha256", None)
+        curation.pop("task_spec_approved_at", None)
     elif state in ("excluded", "unreplayable"):
         raise CurationError(
             f"gold mutations are rejected on a {state} case (re-include or case-exclude it first)"
@@ -865,6 +869,8 @@ def _apply_case_exclusion(
     _validate_transition(state, "excluded")
     curation["state"] = "excluded"
     curation["snapshot_attested"] = False
+    curation.pop("task_spec_sha256", None)
+    curation.pop("task_spec_approved_at", None)
     curation["case_exclusion"] = {"reason": reason, "note": note}
 
 

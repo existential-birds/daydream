@@ -1475,3 +1475,24 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
     raw = load_yaml_strict(ws / "benchmark.yaml")
     prior_sig, prior_task_sig, curations, _ = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
+
+
+def test_refresh_stale_clears_task_spec_approval(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)   # seed REST with one evidence comment
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
+        [{"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
+          "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+          "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+          "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+          "html_url": "https://github.com/o/r/pull/101#discussion_r1"}])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # ready + attested (with digest, per Task 4)
+    # refresh: the referenced evidence disappears -> case flips stale
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
+    assert "task_spec_sha256" not in case["curation"] and "task_spec_approved_at" not in case["curation"]
