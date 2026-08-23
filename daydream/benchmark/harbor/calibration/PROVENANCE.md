@@ -1,7 +1,7 @@
 # Calibration Fixture Provenance
 
 **Reviewer:** Daydream parsing + rules team
-**Review date:** 2025-06-15 (RFC 3339)
+**Review date:** 2026-08-23
 **Attestation:** Every finding in `pairs.json` is **source-free** — hand-authored
 synthetic content, never copied from real repository source, diffs, or any
 source-derived artifact. The finding shape mirrors `golden-review.json`

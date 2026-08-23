@@ -29,17 +29,43 @@ from daydream.benchmark.schema import BenchmarkManifest
 _HARBOR = Path(__file__).parent
 _TEMPLATES = _HARBOR / "templates"
 _CALIBRATION_DIR = _HARBOR / "calibration"
+_TEMPLATE_CACHE: dict[str, Any] = {}
 
 
 def _load_template_asset(path: Path, name: str) -> Any:
-    """Load a non-package template asset so a bare sibling import resolves to it."""
+    """Load a non-package template asset so a bare sibling import resolves to it.
+
+    The loaded module is cached by ``name`` so repeated loads keep stable class
+    identity, and the ``sys.path`` insertion plus any ``sys.modules``
+    registrations (the module itself and transitive sibling imports like
+    ``verifier_core``) are restored afterwards, so a later bare import of the
+    same name anywhere in the same process cannot silently resolve to the
+    packaged template copy.
+    """
+    cached = _TEMPLATE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    prior_modules: dict[str, Any] = dict(sys.modules)
     sys.path.insert(0, str(path.parent))  # bare `import verifier_core` -> sibling template copy
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        _TEMPLATE_CACHE[name] = module
+        return module
+    finally:
+        try:
+            sys.path.remove(str(path.parent))
+        except ValueError:
+            pass
+        for key in list(sys.modules):
+            if key in prior_modules:
+                if sys.modules[key] is not prior_modules[key]:
+                    sys.modules[key] = prior_modules[key]
+            else:
+                sys.modules.pop(key, None)
 
 
 def _load_judge_template() -> Any:
@@ -62,37 +88,17 @@ def _load_fixture() -> list[dict[str, Any]]:
 def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
     """Build a judge client threading an injectable ``http=`` seam.
 
-    Mirrors ``score_review._build_client``'s provider branch exactly (same
-    ``DAYDREAM_JUDGE_*`` reads, same fail-closed provider set, same
-    ``_effective_allowlist``/``_validate_base_url``/``resolve_base_url``
-    helpers from the loaded module) and additionally passes ``http=http`` into
-    the ``AnthropicJudgeClient`` / ``OpenAIJudgeClient`` constructor. With
-    ``http=None`` it is behaviorally identical to ``_build_client`` (a real
-    httpx client).
+    Delegates provider selection, fail-closed allowlisting, and base-URL
+    validation to the packaged ``score_review._build_client`` so the two
+    branches cannot silently drift (the judge template is an in-repo,
+    editable file); only the injectable ``http=`` seam is added here, and
+    ``None`` leaves the client's real httpx behavior intact.
     """
     sr = _load_judge_template()
-    provider = env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic"
-    model = env.get("DAYDREAM_JUDGE_MODEL")
-    api_key = env.get("DAYDREAM_JUDGE_API_KEY")
-    if not model or not api_key:
-        raise sr.VerifierError("missing DAYDREAM_JUDGE_MODEL or DAYDREAM_JUDGE_API_KEY")
-    if provider not in {"anthropic", "openai-compatible"}:
-        raise sr.VerifierError(
-            f"unsupported DAYDREAM_JUDGE_PROVIDER '{provider}'; expected anthropic or openai-compatible"
-        )
-    if provider == "anthropic":
-        allowlist = sr._effective_allowlist(sr._ANTHROPIC_MESSAGES_URL, env)
-        sr._validate_base_url(sr._ANTHROPIC_MESSAGES_URL, allowlist)
-        return sr.AnthropicJudgeClient(
-            api_key, model, http=http, allowlist=allowlist
-        )
-    base_url = sr.resolve_base_url(api_key, env.get("DAYDREAM_JUDGE_BASE_URL"))
-    allowlist = sr._effective_allowlist(base_url, env)
-    initial_url = base_url.rstrip("/") + "/chat/completions"
-    sr._validate_base_url(initial_url, allowlist)
-    return sr.OpenAIJudgeClient(
-        api_key, model, base_url=base_url, http=http, allowlist=allowlist
-    )
+    client = sr._build_client(env)
+    if http is not None:
+        client.http = http
+    return client
 
 
 def _judge_host_from_env(env: dict[str, Any]) -> str:
@@ -307,7 +313,6 @@ def _build_receipt(
     pairs: list[dict[str, Any]],
     env: dict[str, Any],
     *,
-    attempts: int,
     passed: bool,
     balanced_accuracy: float,
     confusion: dict[str, int],
@@ -349,7 +354,10 @@ def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bo
 
 def _default_confirm(prompt: str) -> bool:
     """Read a confirmation reply from stdin; non-interactive stdin is refused."""
-    reply = input(prompt)
+    try:
+        reply = input(prompt)
+    except EOFError:
+        return False
     return reply.strip().lower() in ("y", "yes")
 
 
@@ -384,8 +392,12 @@ def run_calibration(
         print(str(exc), file=sys.stderr)
         return 1
 
-    pairs = _load_fixture()
-    inputs = _invalidation_inputs(env, pairs, sr)
+    try:
+        pairs = _load_fixture()
+        inputs = _invalidation_inputs(env, pairs, sr)
+    except (ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     if not yes:
         if confirm is None:
@@ -429,10 +441,14 @@ def run_calibration(
             for i, (p, r) in enumerate(zip(pairs, runs))
         ]
         receipt = _build_receipt(
-            sr, pairs, env, attempts=3, passed=True,
+            sr, pairs, env, passed=True,
             balanced_accuracy=bacc, confusion=matrix, disagreements=disagreements,
         )
-        _write_receipt(workspace, receipt)
+        try:
+            _write_receipt(workspace, receipt)
+        except OSError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         print(
             f"calibrate-judge: PASS (balanced accuracy {bacc:.4f}); "
             f"receipt written to {workspace / 'runtime' / 'calibration-receipt.json'}"

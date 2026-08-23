@@ -221,7 +221,7 @@ def test_receipt_written_atomic_0600_and_current(tmp_path):
         is_receipt_current,
     )
     sr, pairs = _load_judge_template(), _load_fixture()
-    receipt = _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+    receipt = _build_receipt(sr, pairs, _env(), passed=True,
                              balanced_accuracy=0.9583,
                              confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
                              disagreements=[])
@@ -245,7 +245,7 @@ def test_receipt_invalidated_on_input_change(tmp_path):
     sr, pairs = _load_judge_template(), _load_fixture()
     _write_receipt(
         tmp_path,
-        _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+        _build_receipt(sr, pairs, _env(), passed=True,
                        balanced_accuracy=0.9583,
                        confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
                        disagreements=[]),
@@ -261,7 +261,7 @@ def test_receipt_invalidated_on_input_change(tmp_path):
 def test_receipt_has_no_credentials_or_source():
     from daydream.benchmark.harbor.calibrate import _build_receipt, _load_fixture, _load_judge_template
     sr, pairs = _load_judge_template(), _load_fixture()
-    receipt = _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+    receipt = _build_receipt(sr, pairs, _env(), passed=True,
                              balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
                              disagreements=[])
     text = json.dumps(receipt)
