@@ -1275,6 +1275,50 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh)
     assert cand.not_exact_reason == "outdated"
 
 
+def test_fixture_matrix_evidence_preserved_and_historical(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},
+         "body": "Found a bug.", "state": "COMMENTED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},   # non-pure review body
+        {"id": 2, "node_id": "PRR_2", "user": {"login": "carol", "type": "User"},
+         "body": "Nice work.", "state": "APPROVED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-2"},   # pure approval
+    ])
+    # edited comment: updated_at != created_at
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
+         "body": "please fix", "commit_id": "a" * 40, "path": "a.py", "line": 4,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-03T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r7"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [
+        {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
+         "body": "question", "created_at": "2026-01-01T00:00:00Z",
+         "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#issuecomment-9"}])
+    fake_gh._write_threads([], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    kinds = {e.kind for e in doc.evidence}
+    assert kinds == {"review", "inline_comment", "issue_comment"}   # nothing dropped
+    assert any(e.is_bot for e in doc.evidence)                        # bot actor retained
+    assert any(not e.is_bot for e in doc.evidence)                    # human actor retained
+    edited = next(e for e in doc.evidence if e.database_id == 7)
+    assert edited.updated_at > edited.created_at                      # edit metadata preserved
+    by_src = {e.source_id: e for e in doc.evidence}
+    assert by_src["github:review:1"].state == "COMMENTED"             # non-pure review body retained
+    assert by_src["github:review:2"].state == "APPROVED"              # pure approval retained as evidence
+    cands = {c.source_id for c in gi.project_candidates(doc, head_sha="a" * 40)}
+    assert "github:inline_comment:7" in cands                          # root comment is a candidate
+    assert "github:review:2" not in cands                              # pure approval: evidence only
+
+
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
     import pytest
