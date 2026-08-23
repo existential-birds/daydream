@@ -16,6 +16,7 @@ checkout (``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -453,11 +454,15 @@ def _handle_bench_command(argv: list[str]) -> int:
 def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
-    Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``, ``curate``.
+    Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
+    ``curate``, ``calibrate-judge``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
-        description="Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/import-prs/curate.",
+        description=(
+            "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
+            "import-prs/curate/calibrate-judge."
+        ),
     )
     sub = parser.add_subparsers(dest="subcommand")
 
@@ -526,6 +531,12 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="FILE",
         help="apply a reviewed gold YAML draft (derive all forbidden fields, never ready)",
+    )
+
+    calibrate_p = sub.add_parser("calibrate-judge", help="calibrate the configured semantic-match judge")
+    calibrate_p.add_argument("dir", type=Path, help="workspace directory")
+    calibrate_p.add_argument(
+        "--yes", action="store_true", help="confirm the paid 72-call calibration run"
     )
 
     return parser
@@ -661,8 +672,47 @@ def _handle_benchmark_upgrade(args) -> int:
 
 
 def _is_interactive_tty() -> bool:
-    """True only when both stdin and stdout are real interactive terminals."""
+    """True only when both sys.stdin and stdout are real interactive terminals."""
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _handle_benchmark_calibrate(args) -> int:
+    """Calibrate the configured judge against the fixed 24-pair fixture.
+
+    Requires ``--yes`` or an interactive TTY before any paid judge call. Lazy
+    imports the calibrate module (mirroring the other handlers); build failures
+    and refusals print to stderr and return exit ``1`` — never a bare traceback.
+    """
+    if not args.yes and not _is_interactive_tty():
+        print(
+            "calibrate-judge: requires TTY confirmation or --yes before any paid judge call",
+            file=sys.stderr,
+        )
+        return 1
+    from daydream.benchmark.harbor import calibrate
+
+    env = {
+        name: os.environ.get(name)
+        for name in (
+            "DAYDREAM_JUDGE_PROVIDER",
+            "DAYDREAM_JUDGE_MODEL",
+            "DAYDREAM_JUDGE_API_KEY",
+            "DAYDREAM_JUDGE_BASE_URL",
+            "DAYDREAM_JUDGE_ALLOWED_HOSTS",
+        )
+    }
+
+    def _tty_confirm(prompt: str) -> bool:
+        reply = input(prompt)
+        return reply.strip().lower() in ("y", "yes", "")
+
+    return calibrate.run_calibration(
+        args.dir,
+        yes=args.yes,
+        env=env,
+        http=None,
+        confirm=_tty_confirm if not args.yes else None,
+    )
 
 
 def _handle_benchmark_curate(args) -> int:
@@ -728,5 +778,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_import_prs(args)
     if sub == "curate":
         return _handle_benchmark_curate(args)
+    if sub == "calibrate-judge":
+        return _handle_benchmark_calibrate(args)
     parser.print_help(file=sys.stderr)
     return 2

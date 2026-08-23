@@ -349,3 +349,32 @@ def test_run_calibration_refuses_before_any_call(tmp_path):
     assert code == 1
     assert counter[0] == 0
     assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
+
+
+def test_calibrate_judge_subparser_and_flags():
+    from daydream.benchmark.cli import _build_benchmark_parser
+    args = _build_benchmark_parser().parse_args(["calibrate-judge", "/ws", "--yes"])
+    assert args.subcommand == "calibrate-judge" and str(args.dir) == "/ws" and args.yes is True
+
+
+def test_calibrate_judge_refuses_without_tty_or_yes(tmp_path, monkeypatch, capsys):
+    from daydream.benchmark import cli
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path)])
+    assert code == 1
+    assert "requires TTY confirmation or --yes" in capsys.readouterr().err
+
+
+def test_calibrate_judge_handler_forwards_yes_and_dir(tmp_path, monkeypatch, capsys):
+    import daydream.benchmark.harbor.calibrate as cal
+    from daydream.benchmark import cli
+    seen = {}
+
+    def fake_run(workspace, *, yes, env, http, confirm):
+        seen.update(ws=str(workspace), yes=yes)
+        return 0
+    monkeypatch.setattr(cal, "run_calibration", fake_run)
+    monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
+    code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path), "--yes"])
+    capsys.readouterr()
+    assert code == 0 and seen == {"ws": str(tmp_path), "yes": True}
