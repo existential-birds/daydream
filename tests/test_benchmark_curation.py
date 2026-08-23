@@ -309,6 +309,43 @@ def test_mark_ready_requires_sha_and_attest_clean_never_ready(tmp_path, fake_gh)
     assert raw2["curation"]["state"] == "draft" and raw2["curation"]["snapshot_attested"] is False
 
 
+def test_mark_ready_clean_attested_empty_yields_ready(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import validate_workspace
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold
+    cu.attest_clean(ws, case_id)
+    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["clean_attested"] is True
+    assert cur["gold_status"] == "clean" and cur["gold_mode"] == "clean"
+    code, _label = validate_workspace(ws)     # ready-clean passes workspace validation
+    assert code == 0
+
+
+def test_mark_ready_empty_not_clean_attested_still_raises(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=2)  # empty gold, NOT attested
+    with pytest.raises(cu.CurationError):
+        cu.mark_ready(ws, case_id, head_sha=head_sha)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+
+
+def test_mark_ready_clean_wrong_sha_is_non_mutating(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    cu.attest_clean(ws, case_id)
+    with pytest.raises(cu.StaleStateError):
+        cu.mark_ready(ws, case_id, head_sha="f" * 40)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and cur["snapshot_attested"] is False
+    assert cur["clean_attested"] is True        # attestation preserved; only readiness failed
+
+
 def test_ready_edit_reopens_draft_and_clears_attestation(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)

@@ -433,13 +433,14 @@ _ROOT_README = (
 
 
 def _is_compilable(curation: dict) -> bool:
-    """Assumption 1: ready-with-findings or clean-attested."""
-    return bool(
-        (curation.get("state") == "ready"
-         and curation.get("snapshot_attested")
-         and bool(curation.get("findings")))
-        or (curation.get("clean_attested") and not curation.get("findings"))
-    )
+    """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
+    if not (curation.get("state") == "ready" and curation.get("snapshot_attested")):
+        return False
+    # Single-sourced empty-gold eligibility: derive_gold_status is None exactly
+    # when the gold set is empty and never clean-attested, the same derived
+    # status mark_ready's guard trusts, so a ready case that never received
+    # clean attestation must not compile as clean.
+    return schema.derive_gold_status(schema.Curation(**curation)) is not None
 
 
 def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
