@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **benchmark:** add `daydream benchmark calibrate-judge <workspace>` command (drives the exact packaged judge path, 24-pair fixture, three-part pass gate, private `runtime/calibration-receipt.json`)
+
 ### Changed
 
 - **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
