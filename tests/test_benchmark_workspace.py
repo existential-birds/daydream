@@ -1,3 +1,4 @@
+import json
 import stat
 
 import pytest
@@ -423,6 +424,47 @@ def test_status_rejects_minimal_invalid_case(tmp_path):
     root = _write_minimal_invalid_workspace(tmp_path, "ready")
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
+
+
+def _restamp_import_sha(tmp_path, imp_bytes: bytes) -> None:
+    """Overwrite the import file and re-stamp the ledger sha to match.
+
+    Leaves the import structurally invalid but byte-exact per the ledger, so
+    only the model gate (not the checksum gate) can catch it.
+    """
+    import hashlib
+
+    import yaml
+
+    root = tmp_path / "ws"
+    imp = next((root / "imports").glob("pr-*.json"))
+    imp.write_bytes(imp_bytes)
+    sha = hashlib.sha256(imp_bytes).hexdigest()
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw["pull_requests"][0]["import_sha256"] = sha
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_checksum_restamped_corrupt_import_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    imp = next((root / "imports").glob("pr-*.json"))
+    raw = load_json_strict(imp)
+    # Structurally invalid, but its sha is re-stamped to match the ledger.
+    raw["pull_request"]["number"] = 999   # wrong PR id; wrong shape vs intent
+    _restamp_import_sha(tmp_path, json.dumps(raw).encode())
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_import_missing_on_disk_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (next((root / "imports").glob("pr-*.json"))).unlink()
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
 
 
 def _mutate_manifest_case(tmp_path, pr_number=None, case_file=None):
