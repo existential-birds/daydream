@@ -680,11 +680,13 @@ def run_run(
     )
     returncode = int(result.get("returncode", 0))
 
-    # 7. Post-run: parse results and reconcile the ledger / receipt.
+    # 7. Post-run: parse results and reconcile the ledger / receipt. The
+    #    exact resolved trial environments are persisted into the ledger on
+    #    every terminal mark so ``clean --jobs`` has recorded image refs.
     try:
         actual_dir = _ledger_job_dir(workspace, run_id)
         if oracle:
-            ok, _ = _parse_job_results(actual_dir)
+            ok, environments = _parse_job_results(actual_dir)
             if returncode != 0 or not ok:
                 if returncode == 0:
                     print(
@@ -692,19 +694,28 @@ def run_run(
                         "was written.",
                         file=sys.stderr,
                     )
-                ledger_mark(workspace, run_id, state="cleanup_pending")
+                ledger_mark(workspace, run_id, state="cleanup_pending",
+                            environments=environments)
                 return returncode or 1
             write_code = _write_oracle_receipt(
                 workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
                 env=env, calibration_digest=_calibration_digest(workspace),
             )
-            ledger_mark(workspace, run_id, state="complete")
+            ledger_mark(workspace, run_id, state="complete",
+                        environments=environments)
             return write_code or returncode
         # Default real run: preserve Harbor's exact exit code.
         if returncode != 0:
-            ledger_mark(workspace, run_id, state="cleanup_pending")
+            if actual_dir.is_dir():
+                _, environments = _parse_job_results(actual_dir)
+            else:
+                environments = []
+            ledger_mark(workspace, run_id, state="cleanup_pending",
+                        environments=environments)
         else:
-            ledger_mark(workspace, run_id, state="complete")
+            _, environments = _parse_job_results(actual_dir)
+            ledger_mark(workspace, run_id, state="complete",
+                        environments=environments)
         return returncode
     except Exception:
         print("unexpected error during supervised run", file=sys.stderr)
