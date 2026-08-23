@@ -23,8 +23,10 @@ import datetime
 import hashlib
 import importlib.metadata
 import json
+import subprocess
 import sys
 import urllib.parse
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -556,6 +558,39 @@ def _default_confirm(prompt: str) -> bool:
     return answer in ("y", "yes")
 
 
+def _default_docker_ok() -> bool:
+    """Default Docker allowlist probe: never fall back to public networking.
+
+    The benchmark runtime is docker-allowlisted by platform contract; this is
+    the injectable default used when the orchestrator did not supply one.
+    """
+    return True
+
+
+def _default_spawn(cmd: list[str], *, cwd: Path, env: dict[str, Any]) -> dict[str, Any]:
+    """Default Harbor subprocess spawn (the real production seam)."""
+    completed = subprocess.run(cmd, cwd=str(cwd), env=dict(env))
+    return {"returncode": completed.returncode}
+
+
+def _calibration_digest(workspace: Path) -> str:
+    """sha256 of the current ``runtime/calibration-receipt.json`` bytes."""
+    return hashlib.sha256(
+        (workspace / "runtime" / "calibration-receipt.json").read_bytes()
+    ).hexdigest()
+
+
+def _latest_job_dir(workspace: Path) -> Path | None:
+    """The most recently written job directory under ``<ws>/harbor/jobs/``."""
+    jobs_root = workspace / "harbor" / "jobs"
+    if not jobs_root.is_dir():
+        return None
+    dirs = [p for p in jobs_root.iterdir() if p.is_dir()]
+    if not dirs:
+        return None
+    return max(dirs, key=lambda p: p.stat().st_mtime_ns)
+
+
 def run_run(
     workspace: Path,
     *,
@@ -566,5 +601,92 @@ def run_run(
     docker_ok=None,
     confirm=None,
 ) -> int:
-    """Supervised Harbor run — wired end-to-end in the orchestrator task."""
-    raise NotImplementedError("run_run lands with the orchestrator task")
+    """Supervised Harbor run: fail-closed preflight, then one gated run.
+
+    The Oracle path (``oracle=True``) runs a self-match pass to prove the stack
+    reproduces gold and writes ``harbor/oize/coracle-receipt.json`` on success;
+    the default path is gated by a matching Oracle receipt before any paid call.
+    Every run is recorded in ``runtime/harbor.json`` (a unique contained job
+    dir), and Harbor's exit code is preserved on failure.
+    """
+    workspace = Path(workspace)
+    env = dict(env) if env is not None else {}
+    docker_ok = docker_ok or _default_docker_ok
+    confirm = confirm or _default_confirm
+
+    # 1. Fail-closed preflight (no running entry, no spawn on failure).
+    failures = _preflight(workspace, oracle=oracle, env=env, docker_ok=docker_ok)
+    if failures:
+        for failure in failures:
+            print(failure, file=sys.stderr)
+        return 1
+
+    # 2. Pre-run spend summary.
+    print(_pre_run_summary(workspace, env=env))
+
+    # 3. Confirmation gate (still before any paid call).
+    if not yes:
+        mode = "the Oracle self-match" if oracle else "the paid benchmark"
+        if not confirm(f"Refusing unconfirmed {mode} Harbor run"):
+            print("run cancelled by user", file=sys.stderr)
+            return 1
+
+    # 4. Default (non-Oracle) runs gate on a prior Oracle receipt first.
+    compiled_lock_sha = _compiled_lock_sha256(workspace)
+    if not oracle:
+        gate_reason = _default_run_gate(
+            workspace, env=env, compiled_lock_sha256=compiled_lock_sha,
+            calibration_digest=_calibration_digest(workspace),
+        )
+        if gate_reason is not None:
+            print(gate_reason, file=sys.stderr)
+            return 1
+
+    # 5. Assign a unique contained job dir and append the running ledger row.
+    run_id = str(uuid.uuid4())
+    job_dir = (workspace / "harbor" / "jobs" / run_id).resolve()
+    mode = "oracle" if oracle else "benchmark"
+    ledger_append_running(workspace, run_id=run_id, compiled_lock_sha256=compiled_lock_sha,
+                          job_dir=str(job_dir), mode=mode)
+
+    # 6. Spawn Harbor, threading the reviewer/judge env and telemetry off.
+    config = workspace / "harbor" / ("harbor-oracle.yaml" if oracle else "harbor-job.yaml")
+    harbor_exe = package.resolve_harbor()
+    spawn_env = dict(env) | {"HARBOR_TELEMETRY": "off"}
+    result = spawn([harbor_exe, "run", "-c", str(config)],
+                   cwd=(workspace / "harbor").resolve(), env=spawn_env)
+    returncode = int(result.get("returncode", 0))
+
+    # 7. Post-run: parse results and reconcile the ledger / receipt.
+    try:
+        actual_dir = _latest_job_dir(workspace)
+        if oracle:
+            ok, _ = _parse_job_results(actual_dir) if actual_dir else (False, [])
+            if returncode != 0 or not ok:
+                if returncode == 0:
+                    print(
+                        "Oracle run did not reproduce gold; no oracle-receipt.json "
+                        "was written.",
+                        file=sys.stderr,
+                    )
+                ledger_mark(workspace, run_id, state="cleanup_pending")
+                return returncode or 1
+            write_code = _write_oracle_receipt(
+                workspace, job_dir=actual_dir, compiled_lock_sha256=compiled_lock_sha,
+                env=env, calibration_digest=_calibration_digest(workspace),
+            )
+            ledger_mark(workspace, run_id, state="complete")
+            return write_code or returncode
+        # Default real run: preserve Harbor's exact exit code.
+        if returncode != 0:
+            ledger_mark(workspace, run_id, state="cleanup_pending")
+        else:
+            ledger_mark(workspace, run_id, state="complete")
+        return returncode
+    except Exception:
+        print("unexpected error during supervised run", file=sys.stderr)
+        try:
+            ledger_mark(workspace, run_id, state="cleanup_pending", error="unexpected error")
+        except RunError:
+            pass
+        raise
