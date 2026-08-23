@@ -91,6 +91,39 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
+def build_harbor(root: Path, *, wheel: Path) -> dict:
+    """Validate all preconditions, then atomically compile a runnable dataset."""
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.workspace import validate_workspace
+
+    code, label = validate_workspace(Path(root))
+    if code != 0:
+        raise PackageError(
+            f"workspace must validate ready before build-harbor (validation: {label})",
+            remediation="run `daydream benchmark validate <workspace>` and resolve every finding",
+        )
+    version = importlib.metadata.version("daydream")
+    validate_wheel(Path(wheel), daydream_version=version)
+    resolve_harbor()
+    return build.compile_workspace(Path(root), wheel=Path(wheel))
+
+
+def validate_compiled(root: Path | None) -> int:
+    """Validate local authoring state and require compatible Harbor."""
+    resolve_harbor()
+    if root is None:
+        raise PackageError("compiled workspace path is required")
+    from daydream.benchmark.workspace import validate_workspace
+
+    code, label = validate_workspace(Path(root))
+    if code != 0:
+        raise PackageError(f"compiled workspace authoring validation failed: {label}")
+    compiled = Path(root) / "harbor"
+    if not compiled.is_dir():
+        raise PackageError(f"compiled dataset is missing: {compiled}")
+    return 0
+
+
 def lock_text() -> str:
     """Read the packaged runtime lock (resource routing is finalized in Task 14)."""
     path = Path(__file__).parent / "runtime-requirements.lock"

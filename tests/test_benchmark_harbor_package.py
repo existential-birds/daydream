@@ -224,3 +224,36 @@ def test_compile_with_wheel_emits_full_packaged_tree(tmp_path, fake_gh):
     tree1 = _harbor_tree_bytes(ws)
     build.compile_workspace(ws, wheel=wheel)
     assert _harbor_tree_bytes(ws) == tree1
+
+
+def test_build_harbor_refuses_without_ready_workspace(tmp_path, fake_gh):
+    import importlib.metadata
+
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+    from tests.test_benchmark_harbor_build import _seed_clean_workspace
+
+    ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)
+    ver = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
+    wheel.write_bytes(b"x")
+    with pytest.raises(pkg.PackageError) as rejected:
+        pkg.build_harbor(ws, wheel=wheel)
+    assert "validate" in str(rejected.value).lower() or "ready" in str(rejected.value).lower()
+
+
+def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch):
+    import importlib.metadata
+
+    import pytest
+
+    from daydream.benchmark.harbor import package as pkg
+
+    def absent(distribution):
+        raise importlib.metadata.PackageNotFoundError(distribution)
+
+    monkeypatch.setattr(pkg.importlib.metadata, "version", absent)
+    with pytest.raises(pkg.PackageError) as rejected:
+        pkg.validate_compiled(None)
+    assert "pip install 'daydream[benchmark]'" in str(rejected.value)
