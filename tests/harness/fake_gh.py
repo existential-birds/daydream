@@ -15,7 +15,10 @@ a JSONL log the :class:`FakeGh` helper parses, and replies from a canned
 response map (``responses.json``) plus built-in behaviors:
 
 - ``gh api graphql`` with a ``reviewThreads`` query returns the configured
-  prior-thread inventory (empty by default);
+  prior-thread inventory (empty by default), served via ``_write_threads``;
+- ``gh api graphql`` with a ``node(id:)``/``PullRequestReviewThread`` query
+  returns the configured per-thread nested-comment page catalog
+  (``_serve_thread_comments``);
 - ``gh api graphql`` with a ``minimizeComment`` mutation returns a minimized
   success (the Task 0 spike's chosen stale-finding mechanism);
 - ``GET repos/<o>/<r>/pulls/<n>/reviews`` returns the configured review list
@@ -37,6 +40,7 @@ Any other invocation exits non-zero so unexpected calls surface as failures.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -219,11 +223,26 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
     responses = _read_responses(state)
     if endpoint == "graphql":
         query = (payload or {}).get("query", "")
+        variables = (payload or {}).get("variables") or {}
         if "minimizeComment" in query:
             reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
             return 0, json.dumps(reply) + "\n", ""
+        if "PullRequestReviewThread" in query:
+            # Per-thread ``node(id:)`` comments page catalog: serve one page per
+            # incoming ``commentsAfter`` cursor, deterministic endCursor per page.
+            thread_id = variables.get("threadId") if isinstance(variables, dict) else None
+            pages = responses.get(f"graphql_thread_comments:{thread_id}")
+            if not isinstance(pages, list) or not pages:
+                return 1, "", f"fake gh: no thread-comment catalog for {thread_id}\n"
+            after = variables.get("commentsAfter") if isinstance(variables, dict) else None
+            if after is None:
+                idx = 0
+            else:
+                idx = int(str(after).rsplit(":p", 1)[1]) + 1
+            if idx >= len(pages):
+                return 1, "", f"fake gh: thread-comment cursor {after!r} past the catalog end\n"
+            return 0, json.dumps(pages[idx]) + "\n", ""
         if "reviewThreads" in query:
-            variables = (payload or {}).get("variables") or {}
             pr_num = variables.get("number") if isinstance(variables, dict) else None
             key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
             value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
@@ -552,16 +571,69 @@ class FakeGh:
         return {
             "id": thread_id,
             "isResolved": False,
-            "comments": {"nodes": [comment]},
+            "comments": {
+                "nodes": [comment],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
         }
 
     def _write_threads(self, nodes: list[dict[str, Any]], number: int | None = None) -> None:
-        """Serve *nodes* as the review-thread inventory for one PR (or globally)."""
+        """Serve *nodes* as the review-thread inventory for one PR (or globally).
+
+        Every nested ``comments`` connection is given a ``pageInfo`` (single-page
+        by default). A thread with a configured :meth:`_serve_thread_comments`
+        catalog is served with ``hasNextPage`` set so the production per-thread
+        ``node(id:)`` follow-up loop drives the remaining nested pages.
+        """
         response = json.loads(json.dumps(_EMPTY_THREADS_RESPONSE))
-        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
+        nodes = copy.deepcopy(nodes)
         responses = self._read_responses()
+        for thread in nodes:
+            comments = thread.get("comments")
+            if not isinstance(comments, dict) or isinstance(comments.get("pageInfo"), dict):
+                continue
+            catalog = responses.get(f"graphql_thread_comments:{thread.get('id')}")
+            if isinstance(catalog, list) and len(catalog) > 1:
+                comments["pageInfo"] = {"hasNextPage": True, "endCursor": f"{thread['id']}:p0"}
+            else:
+                comments["pageInfo"] = {"hasNextPage": False, "endCursor": None}
+        response["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"] = nodes
         key = f"graphql_threads:{number}" if number is not None else "graphql_threads"
         responses[key] = response
+        self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
+
+    def _serve_thread_comments(
+        self, thread_id: str, comment_nodes: list[dict[str, Any]], *, page_size: int
+    ) -> None:
+        """Store a per-thread nested-comment page catalog for ``node(id:)`` queries.
+
+        A ``node(id: \"<thread_id>\") { ... on PullRequestReviewThread { comments(
+        first: <page_size>, after: $commentsAfter) ... } } }`` query returns
+        ``page_size`` nodes per page, ``hasNextPage`` true until the last page,
+        with a deterministic ``endCursor`` (``"<thread_id>:p<N>"``) per page.
+        """
+        pages: list[dict[str, Any]] = []
+        for start in range(0, len(comment_nodes), page_size):
+            chunk = comment_nodes[start : start + page_size]
+            page_index = start // page_size
+            has_next = start + page_size < len(comment_nodes)
+            pages.append(
+                {
+                    "data": {
+                        "node": {
+                            "comments": {
+                                "pageInfo": {
+                                    "hasNextPage": has_next,
+                                    "endCursor": f"{thread_id}:p{page_index}" if has_next else None,
+                                },
+                                "nodes": chunk,
+                            }
+                        }
+                    }
+                }
+            )
+        responses = self._read_responses()
+        responses[f"graphql_thread_comments:{thread_id}"] = pages
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
 
     def _read_responses(self) -> dict[str, Any]:

@@ -265,12 +265,22 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
     ws = tmp_path / "ws"
     (ws / "imports").mkdir(parents=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
-    for ep, val in [
-        ("repos/o/r/pulls/101/reviews", []),
-        ("repos/o/r/pulls/101/comments", []),
-        ("repos/o/r/issues/101/comments", []),
-    ]:
-        fake_gh.set_response("GET", ep, val)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    # REST comments for db 10 (root) and 11 (reply to 10)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
+         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r10"},
+        {"id": 11, "node_id": "DIFF_11", "user": {"login": "eve", "type": "User"},
+         "body": "reply", "commit_id": "a" * 40, "path": "a.py", "line": 5,
+         "subject_type": "line", "side": "RIGHT", "in_reply_to_id": 10,
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r11"},
+    ])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([
         {"id": "thread_1", "isResolved": True,
          "isOutdated": True, "isResolvedBy": None,
@@ -285,14 +295,14 @@ def test_graphql_threads_and_replies_normalized(tmp_path, fake_gh):
          ]}},
     ])
     doc = gi.fetch_and_normalize(ws, "o/r", 101)
-    kinds = {e.kind for e in doc.evidence}
-    assert "thread_comment" in kinds
-    root = next(e for e in doc.evidence if e.database_id == 10)
-    reply = next(e for e in doc.evidence if e.database_id == 11)
+    by_db = {e.database_id: e for e in doc.evidence}
+    root, reply = by_db[10], by_db[11]
+    assert root.kind == "inline_comment" and root.source_id == "github:inline_comment:10"
     assert root.resolved is True and root.outdated is True
-    assert root.side == "RIGHT" and root.path == "a.py" and root.line == 4
-    assert reply.kind == "thread_comment" and reply.reply_to_id == "c1"
-    assert reply.thread_id == "thread_1"
+    assert root.thread_id == "thread_1" and root.side == "RIGHT" and root.path == "a.py"
+    assert reply.kind == "inline_comment" and reply.thread_id == "thread_1"
+    assert reply.reply_to_id == "10"          # REST in_reply_to_id (parent db id)
+    assert not any(e.kind == "thread_comment" for e in doc.evidence)
 
 
 def test_candidate_projection_right_file_body_left(tmp_path, fake_gh):
@@ -873,6 +883,83 @@ def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path, fake_gh
     assert case["curation"]["findings"]                  # curated gold preserved
 
 
+def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh):
+    """A first ``--refresh`` after the canonical-record format change must NOT
+    flip prior curated cases stale on pure format drift. Pre-canonicalization
+    files persisted a comment that existed in both feeds twice (REST
+    ``inline_comment`` + GraphQL ``thread_comment``) and thread-only comments
+    under the ``thread_comment`` kind; the canonical format emits exactly one
+    ``inline_comment`` per database id. With byte-identical GitHub content the
+    only difference is the persisted shape, so the (database_id-keyed) evidence
+    signature must compare equal and keep the curated case ready."""
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    fake_gh._write_threads(
+        [
+            {"id": "thread_1", "isResolved": False, "isOutdated": False,
+             "subjectType": "LINE", "path": "a.py", "line": 4, "side": "RIGHT",
+             "comments": {"nodes": [
+                 {"id": "c1", "databaseId": 1, "body": "please fix",
+                  "author": {"login": "alice", "type": "User"},
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "url": "https://github.com/o/r/pull/101#discussion_r1"},
+                 {"id": "c2", "databaseId": 2, "body": "thread-only",
+                  "author": {"login": "alice", "type": "User"},
+                  "createdAt": "2026-01-01T00:00:00Z",
+                  "url": "https://github.com/o/r/pull/101#discussion_r2"},
+             ]}},
+        ],
+        number=101,
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")       # state=ready, attested
+    # Rewrite the persisted import in the pre-canonicalization shape: the comment
+    # that existed in both feeds (db 1) is stored twice (inline + thread_comment)
+    # and the thread-only comment (db 2) under the thread_comment kind.
+    import_path = ws / "imports" / "pr-000101.json"
+    raw = load_json_strict(import_path)
+    old_evidence: list[dict] = []
+    for e in raw["evidence"]:
+        if e.get("thread_id"):
+            if e.get("commit_id"):
+                old_evidence.append({**e,
+                                     "source_id": f"github:inline_comment:{e['database_id']}",
+                                     "kind": "inline_comment"})
+            old_evidence.append({**e,
+                                 "source_id": f"github:thread_comment:{e['database_id']}",
+                                 "kind": "thread_comment"})
+        else:
+            old_evidence.append(e)
+    assert len(old_evidence) == 3      # db 1 twice, db 2 once as thread_comment
+    import_path.write_text(json.dumps({**raw, "evidence": old_evidence}, indent=2))
+    # refresh with IDENTICAL GitHub content: only the persisted format changed
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"           # format drift must NOT stale gold
+    assert case["curation"]["findings"]                   # curated gold preserved
+    # the migration path rewrites the file to the canonical shape: exactly one
+    # inline_comment per database id
+    refreshed = load_json_strict(import_path)
+    assert len(refreshed["evidence"]) == 2
+    assert {e["kind"] for e in refreshed["evidence"]} == {"inline_comment"}
+
+
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path, fake_gh):
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -981,7 +1068,12 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path, fake_gh):
     assert [p["number"] for p in raw["pull_requests"]] == [101, 102]
     imp = load_json_strict(ws / "imports/pr-000101.json")
     kinds = {e["kind"] for e in imp["evidence"]}
-    assert kinds == {"review", "inline_comment", "issue_comment", "thread_comment"}
+    assert kinds == {"review", "inline_comment", "issue_comment"}
+    # overlapping root (db 10) appears exactly once as a canonical inline_comment
+    assert len([e for e in imp["evidence"] if e["database_id"] == 10]) == 1
+    db10 = next(e for e in imp["evidence"] if e["database_id"] == 10)
+    assert db10["kind"] == "inline_comment" and db10["source_id"] == "github:inline_comment:10"
+    assert db10["thread_id"] == "thread_1"
     assert any(e["is_bot"] for e in imp["evidence"])      # bot author retained
     assert any(not e["is_bot"] for e in imp["evidence"])  # human author retained
     assert load_json_strict(ws / "imports/pr-000102.json")["evidence"] == []  # no-comment PR retained
@@ -1091,6 +1183,217 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(tmp_path, fake_gh,
     threads = gi_mod._graphql_review_threads(ws, "o/r", 101)
     assert threads == []
     assert calls["n"] == 3, "rate-limit retry should make 3 attempts"
+
+
+def test_spike_nested_comments_paginate_past_100(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    for ep, val in [("repos/o/r/pulls/101/reviews", []),
+                    ("repos/o/r/pulls/101/comments", []),
+                    ("repos/o/r/issues/101/comments", [])]:
+        fake_gh.set_response("GET", ep, val)
+    # thread "thread_1" carries 150 replies split across nested pages of 100+50
+    comments = [{"id": f"c{i}", "databaseId": 1000 + i, "body": f"r{i}",
+                 "author": {"login": "dave", "type": "User"},
+                 "createdAt": f"2026-01-01T00:00:{i % 60:02d}Z",
+                 "url": f"https://github.com/o/r/pull/101#discussion_r{1000+i}"}
+                for i in range(1, 151)]
+    fake_gh._serve_thread_comments("thread_1", comments, page_size=100)
+    fake_gh._write_threads([{"id": "thread_1", "isResolved": False,
+        "isOutdated": False, "subjectType": "LINE", "path": "a.py", "line": 4,
+        "side": "RIGHT", "comments": {"nodes": comments[:100]}}], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    ids = {e.database_id for e in doc.evidence}
+    assert {1000 + i for i in range(1, 151)} <= ids     # all 150 collected
+    assert len([e for e in doc.evidence if 1000 <= e.database_id <= 1150]) == 150
+
+
+def test_graphql_threads_replies_collect_past_100(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    for ep in ("repos/o/r/pulls/101/reviews", "repos/o/r/pulls/101/comments",
+               "repos/o/r/issues/101/comments"):
+        fake_gh.set_response("GET", ep, [])
+    comments = [{"id": f"c{i}", "databaseId": 2000 + i, "body": f"reply {i}",
+                 "author": {"login": "eve", "type": "User"},
+                 "createdAt": f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z",
+                 "replyTo": {"id": "c1"},
+                 "url": f"https://github.com/o/r/pull/101#discussion_r{2000+i}"}
+                for i in range(1, 251)]     # 250 replies -> 3 nested pages
+    fake_gh._serve_thread_comments("thread_9", comments, page_size=100)
+    fake_gh._write_threads([{"id": "thread_9", "isResolved": False,
+        "isOutdated": False, "subjectType": "LINE", "path": "a.py", "line": 4,
+        "side": "RIGHT", "comments": {"nodes": comments[:100]}}], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    replies = [e for e in doc.evidence if 2000 <= e.database_id <= 2250]
+    assert len(replies) == 250
+    assert len({e.database_id for e in replies}) == 250        # no dup
+    # deterministic creation order preserved end to end
+    assert [e.database_id for e in sorted(replies, key=lambda r: r.database_id)] \
+           == sorted(range(2001, 2251))
+
+
+def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    # review id 5 with state DISMISSED (dismissal source for comment 10)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 5, "node_id": "PRR_5", "user": {"login": "alice", "type": "User"},
+         "body": "", "state": "DISMISSED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-5"}])
+    # REST inline comment 10 is the root of thread_1, belongs to review 5
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
+         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
+         "subject_type": "line", "side": "RIGHT",
+         "pull_request_review_id": 5,
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r10"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([{"id": "thread_1", "isResolved": True,
+        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "path": "a.py", "line": 4, "originalLine": 3, "side": "RIGHT",
+        "startSide": None,
+        "comments": {"nodes": [
+            {"id": "c1", "databaseId": 10, "body": "root",
+             "author": {"login": "dave", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z",
+             "url": "https://github.com/o/r/pull/101#discussion_r10"}]}}],
+        number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    by_db = {e.database_id: e for e in doc.evidence}
+    rec = by_db[10]
+    assert rec.kind == "inline_comment"
+    assert rec.source_id == "github:inline_comment:10"
+    assert rec.thread_id == "thread_1" and rec.resolved is True
+    assert rec.outdated is True and rec.dismissed is True      # via review 5 DISMISSED
+    assert rec.review_id == "5"
+    assert rec.commit_id == "a" * 40 and rec.path == "a.py"     # REST anchors kept
+    # exactly one record with database_id 10, no thread_comment kind anywhere
+    assert len([e for e in doc.evidence if e.database_id == 10]) == 1
+    assert not any(e.kind == "thread_comment" for e in doc.evidence)
+
+
+def test_evidence_order_deterministic_across_page_sizes(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    # REST-only comments with distinct database ids + timestamps
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 1, "node_id": "PRR_1", "user": {"login": "alice", "type": "User"},
+         "body": "approved", "state": "APPROVED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"}])
+    comments = [
+        {"id": 30, "node_id": "DIFF_30", "user": {"login": "dave", "type": "User"},
+         "body": "first", "commit_id": "a" * 40, "path": "a.py", "line": 1,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r30"},
+        {"id": 7, "node_id": "DIFF_7", "user": {"login": "carol", "type": "User"},
+         "body": "second", "commit_id": "a" * 40, "path": "b.py", "line": 2,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
+    ]
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", comments)
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    # deterministic order: sorted by (database_id, created_at)
+    assert [e.database_id for e in doc.evidence] == [1, 7, 30]
+    payload = doc.fetch.payload_sha256
+    doc2 = gi.fetch_and_normalize(ws, "o/r", 101)     # refetch: identical digest
+    assert doc2.fetch.payload_sha256 == payload
+
+
+def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
+    # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 40, "node_id": "DIFF_40", "user": {"login": "dave", "type": "User"},
+         "body": "outdated root", "commit_id": "a" * 40, "path": "a.py", "line": 5,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r40"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([{"id": "thread_2", "isResolved": True,
+        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "path": "a.py", "line": 5, "originalLine": 4, "side": "RIGHT",
+        "startSide": None,
+        "comments": {"nodes": [
+            {"id": "c40", "databaseId": 40, "body": "outdated root",
+             "author": {"login": "dave", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z",
+             "url": "https://github.com/o/r/pull/101#discussion_r40"}]}}],
+        number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    cands = {c.source_id: c for c in gi.project_candidates(doc, head_sha="a" * 40)}
+    cand = cands["github:inline_comment:40"]
+    assert cand.exact_acceptable is False
+    assert cand.not_exact_reason == "outdated"
+
+
+def test_fixture_matrix_evidence_preserved_and_historical(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},
+         "body": "Found a bug.", "state": "COMMENTED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},   # non-pure review body
+        {"id": 2, "node_id": "PRR_2", "user": {"login": "carol", "type": "User"},
+         "body": "Nice work.", "state": "APPROVED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-2"},   # pure approval
+    ])
+    # edited comment: updated_at != created_at
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
+         "body": "please fix", "commit_id": "a" * 40, "path": "a.py", "line": 4,
+         "subject_type": "line", "side": "RIGHT",
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-03T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r7"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [
+        {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
+         "body": "question", "created_at": "2026-01-01T00:00:00Z",
+         "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#issuecomment-9"}])
+    fake_gh._write_threads([], number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    kinds = {e.kind for e in doc.evidence}
+    assert kinds == {"review", "inline_comment", "issue_comment"}   # nothing dropped
+    assert any(e.is_bot for e in doc.evidence)                        # bot actor retained
+    assert any(not e.is_bot for e in doc.evidence)                    # human actor retained
+    edited = next(e for e in doc.evidence if e.database_id == 7)
+    assert edited.updated_at > edited.created_at                      # edit metadata preserved
+    by_src = {e.source_id: e for e in doc.evidence}
+    assert by_src["github:review:1"].state == "COMMENTED"             # non-pure review body retained
+    assert by_src["github:review:2"].state == "APPROVED"              # pure approval retained as evidence
+    cands = {c.source_id for c in gi.project_candidates(doc, head_sha="a" * 40)}
+    assert "github:inline_comment:7" in cands                          # root comment is a candidate
+    assert "github:review:2" not in cands                              # pure approval: evidence only
 
 
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
