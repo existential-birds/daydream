@@ -13,10 +13,12 @@ Measuring, never tuning: no weights or thresholds are derived here.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import sys
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -266,3 +268,93 @@ def _pass_gate(
         failures["instability"] = unstable
 
     return (len(failures) == 0, failures)
+
+
+def _label_sha256(pairs: list[dict[str, Any]]) -> str:
+    """Canonical sha256 over the ordered gold/candidate/label triples."""
+    triples = [
+        {
+            "gold": p["gold"]["finding_id"],
+            "candidate": p["candidate"]["candidate_id"],
+            "label": p["label"],
+        }
+        for p in pairs
+    ]
+    canonical = json.dumps(
+        triples, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _render_judge_prompt_digest(sr: Any) -> str:
+    """sha256 of the packaged judge prompt template bytes."""
+    prompt_path = _TEMPLATES / "tests" / "judge_prompt.md"
+    return hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+
+
+def _serialize_inputs(inputs: dict[str, Any]) -> bytes:
+    """Deterministic byte-stable serialization of the invalidation inputs."""
+    return json.dumps(
+        inputs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+
+
+def _invalidation_inputs(
+    env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
+) -> dict[str, Any]:
+    """The receipt's invalidation contract: a deterministic byte-stable dict."""
+    return {
+        "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
+        "model": env.get("DAYDREAM_JUDGE_MODEL") or "",
+        "host": _judge_host_from_env(env),
+        "judge_prompt_sha256": _render_judge_prompt_digest(sr),
+        "threshold": sr.verifier_core.CONFIDENCE_THRESHOLD,
+        "label_sha256": _label_sha256(pairs),
+        "attempts": 3,
+        "request_timeout": sr._REQUEST_TIMEOUT,
+    }
+
+
+def _build_receipt(
+    sr: Any,
+    pairs: list[dict[str, Any]],
+    env: dict[str, Any],
+    *,
+    attempts: int,
+    passed: bool,
+    balanced_accuracy: float,
+    confusion: dict[str, int],
+    disagreements: list[Any],
+) -> dict[str, Any]:
+    """Build the private deterministic calibration receipt document."""
+    return {
+        "schema_version": 1,
+        "type": "judge-calibration",
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "inputs": _invalidation_inputs(env, pairs, sr),
+        "result": {
+            "passed": passed,
+            "balanced_accuracy": balanced_accuracy,
+            "confusion_matrix": confusion,
+            "disagreements": sorted(disagreements, key=lambda d: d["pair_index"]),
+        },
+    }
+
+
+def _write_receipt(workspace: Path, receipt: dict[str, Any]) -> Path:
+    """Atomically write the calibration receipt private (0o600) and return its path."""
+    runtime = Path(workspace) / "runtime"
+    path = runtime / "calibration-receipt.json"
+    storage.atomic_write_json(path, receipt, mode=0o600)
+    return path
+
+
+def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bool:
+    """Fail-closed invalidation check: True only on a byte-exact inputs match."""
+    try:
+        raw = json.loads(Path(receipt_path).read_bytes())
+    except (ValueError, OSError):
+        return False
+    if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
+        return False
+    return _serialize_inputs(raw["inputs"]) == _serialize_inputs(current_inputs)

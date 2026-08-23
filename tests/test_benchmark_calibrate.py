@@ -4,6 +4,7 @@
 import asyncio
 import json
 import re
+import stat
 from pathlib import Path
 
 import pytest
@@ -190,3 +191,79 @@ def test_pass_gate_reports_instability_only(sr):
     assert passed is False
     assert list(failures) == ["instability"]
     assert 0 in failures["instability"]
+
+
+def _env():
+    return {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "http://127.0.0.1:9"}
+
+
+def test_invalidation_inputs_and_determinism():
+    from daydream.benchmark.harbor.calibrate import (
+        _invalidation_inputs,
+        _load_fixture,
+        _load_judge_template,
+        _serialize_inputs,
+    )
+    sr, pairs = _load_judge_template(), _load_fixture()
+    a = _serialize_inputs(_invalidation_inputs(_env(), pairs, sr))
+    b = _serialize_inputs(_invalidation_inputs(_env(), pairs, sr))
+    assert a == b
+
+
+def test_receipt_written_atomic_0600_and_current(tmp_path):
+    from daydream.benchmark.harbor.calibrate import (
+        _build_receipt,
+        _invalidation_inputs,
+        _load_fixture,
+        _load_judge_template,
+        _write_receipt,
+        is_receipt_current,
+    )
+    sr, pairs = _load_judge_template(), _load_fixture()
+    receipt = _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+                             balanced_accuracy=0.9583,
+                             confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+                             disagreements=[])
+    p = _write_receipt(tmp_path, receipt)
+    assert (tmp_path / "runtime" / "calibration-receipt.json").exists()
+    assert stat.S_IMODE(
+        (tmp_path / "runtime" / "calibration-receipt.json").stat().st_mode
+    ) == 0o600
+    assert is_receipt_current(p, _invalidation_inputs(_env(), pairs, sr)) is True
+
+
+def test_receipt_invalidated_on_input_change(tmp_path):
+    from daydream.benchmark.harbor.calibrate import (
+        _build_receipt,
+        _invalidation_inputs,
+        _load_fixture,
+        _load_judge_template,
+        _write_receipt,
+        is_receipt_current,
+    )
+    sr, pairs = _load_judge_template(), _load_fixture()
+    _write_receipt(
+        tmp_path,
+        _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+                       balanced_accuracy=0.9583,
+                       confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+                       disagreements=[]),
+    )
+    changed = dict(_env())
+    changed["DAYDREAM_JUDGE_MODEL"] = "other-model"
+    assert is_receipt_current(
+        tmp_path / "runtime" / "calibration-receipt.json",
+        _invalidation_inputs(changed, pairs, sr),
+    ) is False
+
+
+def test_receipt_has_no_credentials_or_source():
+    from daydream.benchmark.harbor.calibrate import _build_receipt, _load_fixture, _load_judge_template
+    sr, pairs = _load_judge_template(), _load_fixture()
+    receipt = _build_receipt(sr, pairs, _env(), attempts=3, passed=True,
+                             balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+                             disagreements=[])
+    text = json.dumps(receipt)
+    assert "sk-ant-" not in text and "sk-or-" not in text and "Bearer " not in text
+    assert "DAYDREAM_JUDGE_API_KEY" not in text and "Cache key not tenant-scoped" not in text
