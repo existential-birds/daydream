@@ -172,8 +172,12 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
     return ws, case_id, head_sha
 
 
-def _seed_clean_workspace(tmp_path: Path, fake_gh) -> tuple[Path, str, str]:
-    """Seed a reviewed-clean workspace: import with no comments, then attest clean."""
+def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tuple[Path, str, str]:
+    """Seed a reviewed-clean workspace: import with no comments, then attest clean.
+
+    With *ready* True (default), the clean-attested case is also final-attested
+    ready; with *ready* False it stays a clean-attested draft.
+    """
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -188,6 +192,8 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh) -> tuple[Path, str, str]:
     raw = load_yaml_strict(ws / "benchmark.yaml")
     case_id = raw["cases"][0]["case_id"]
     cu.attest_clean(ws, case_id)
+    if ready:
+        cu.mark_ready(ws, case_id, head_sha=head_sha)
     return ws, case_id, head_sha
 
 
@@ -645,6 +651,13 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
 
 
+def test_clean_attested_draft_does_not_compile(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
+    with pytest.raises(build.CompileError):
+        build.compile_workspace(ws)
+
+
 def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
@@ -657,6 +670,31 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
     assert storage.load_json_strict(case / "solution" / "golden-review.json")["findings"] == []
     assert vc.validate_gold_set(_load_json(case / "tests" / "golden-review.json")) == []
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
+
+
+def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path, fake_gh):
+    """A ready empty-gold case with no clean attestation must not compile.
+
+    mark_ready refuses to final-attest an empty gold set that was never
+    clean-attested, so only a hand-edited doc can reach ready with
+    ``clean_attested=False``; the compiler must reject it rather than ship
+    the empty gold as a clean case.
+    """
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # clean-attested draft
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = storage.load_yaml_strict(path)
+    curation = dict(raw["curation"])
+    curation["state"] = "ready"            # hand-edit bypasses mark_ready
+    curation["snapshot_attested"] = True
+    curation["clean_attested"] = False     # never clean-attested
+    curation["gold_status"] = None         # no clean label without attestation
+    raw["curation"] = curation
+    storage.atomic_write_yaml(path, raw)
+    with pytest.raises(build.CompileError):
+        build.compile_workspace(ws)
+    assert not (ws / "harbor").exists()    # failed compile leaves no bundle
 
 
 def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path, fake_gh):
