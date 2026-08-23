@@ -356,11 +356,11 @@ def test_score_f1_example():
     assert abs(r.f1 - 0.8) < 1e-9 and abs(r.reward - 0.8) < 1e-9
 
 
-def test_score_malformed_artifact_is_verifier_error():
+def test_score_malformed_artifact_is_scored_zero():
     art = {"schema_version": 1, "case_id": "c", "base_ref": "b", "head_ref": "h",
            "findings": [{"candidate_id": "not-hex"}]}
     r = score_review([], art, [])
-    assert r.reward == 0.0 and r.verifier_error == 1
+    assert r.reward == 0.0 and r.verifier_error == 0   # invalid agent output is scored zero
 
 def test_empty_side_resolves_with_zero_verdicts():
     # clean/0 and N/0 both resolve deterministically with an EMPTY verdict set

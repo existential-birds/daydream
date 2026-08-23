@@ -454,8 +454,9 @@ def test_judge_failure_fails_whole_task_not_partial_score(sr_module, tmp_path) -
         },
     )
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    rj = json.loads((out_dir / "reward.json").read_text())
-    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    assert not (out_dir / "reward.json").exists()                 # NO numeric reward on any infra path
+    details = json.loads((out_dir / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic written
 
 
 def test_provider_selection_builds_expected_client(sr_module, monkeypatch) -> None:
@@ -487,7 +488,7 @@ def test_main_reads_only_tests_and_logs_artifact_paths(sr_module, tmp_path, monk
         seen["gold"] = str(gold_path)
         seen["artifact"] = str(artifact_path)
         seen["out"] = str(out_dir)
-        return type("R", (), {"verifier_error": 0, "reward": 1.0})()
+        return sr.verifier_core.Reward(reward=1.0, verifier_error=0)
 
     monkeypatch.setattr(sr, "run_verifier", fake_run_verifier)
     # guard the env overrides: main() reads them from real os.environ and the
@@ -815,9 +816,12 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module, tmp_path)
     env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
-    assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
     assert client.requests == 0  # no judge call
     details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
     assert details["request_counts"]["requests"] == 0
     blob = json.dumps(details)
     assert oversized_body not in blob and ("t" * 500) not in blob and ("p" * 200) not in blob
@@ -871,7 +875,11 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module, tmp_path
     env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
 
 
 
@@ -909,7 +917,11 @@ def test_run_verifier_rejects_cross_case_replay(sr_module, tmp_path) -> None:
     env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
 
 
 def test_run_verifier_rejects_ref_mismatch(sr_module, tmp_path) -> None:
@@ -926,7 +938,11 @@ def test_run_verifier_rejects_ref_mismatch(sr_module, tmp_path) -> None:
     env = {"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
-    assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert reward.verifier_error == 0 and reward.reward == 0.0   # scored, not infra
+    rj = json.loads((out / "reward.json").read_text())
+    assert rj["verifier_error"] == 0 and rj["reward"] == 0        # reward.json IS present, verifier_error 0
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic still written
 
 
 def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -> None:
@@ -947,6 +963,9 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module, tmp_path) -
            "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
     reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
     assert reward.verifier_error == 1 and reward.reward == 0.0
+    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic written
 
 
 
@@ -1166,9 +1185,9 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module, tmp_pat
     reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
     # unexpected runtime exception no longer escapes to a bare exit
     assert reward.verifier_error == 1 and reward.reward == 0.0
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
     details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic written
     blob = json.dumps(details)
     assert "sk-ant-leakme123" not in blob and "<redacted>" in blob   # no credential, redacted
     assert len(details["errors"]) >= 1 and any("unexpected" in e for e in details["errors"])
@@ -1186,9 +1205,9 @@ def test_main_fail_closed_on_bad_provider_and_reads_path_overrides(sr_module, tm
         _candidate_artifact(sr, case_id="c", n=0)))
     rc = sr.main()
     assert rc == 1  # verifier_error
-    rj = json.loads((out / "reward.json").read_text())
-    assert rj["verifier_error"] == 1 and rj["reward"] == 0
+    assert not (out / "reward.json").exists()                     # NO numeric reward on any infra path
     details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1                            # bounded diagnostic written
     assert any("unsupported" in e or "expected anthropic or openai-compatible" in e
                for e in details["errors"])  # typed diagnostic surfaced, not a barren client=None exit
 
@@ -1232,3 +1251,94 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
         with pytest.raises(sr.VerifierError) as e:
             await client.complete_json(user="u")
         assert "allowlist" in str(e.value)
+
+
+def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module, capsys) -> None:
+    sr = sr_module
+    r = sr.verifier_core.Reward(reward=0.8, tp=2, verifier_error=0)
+    assert sr._emit_reward(r) == 0
+    assert json.loads(capsys.readouterr().out) == r.to_dict()   # full 12-key dict, never the 2-key fallback shape
+    r2 = sr.verifier_core.Reward(reward=0.0, verifier_error=1)
+    assert sr._emit_reward(r2) == 1
+
+
+def test_run_verifier_without_client_is_unscored(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=None,
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+    assert reward.verifier_error == 1
+    assert not (out / "reward.json").exists()
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("no judge client" in e for e in details["errors"])
+
+
+def test_run_verifier_missing_gold_file_is_unscored(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    gold_path.unlink()                                    # metadata present, gold missing
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+    assert reward.verifier_error == 1
+    assert not (out / "reward.json").exists()
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("not found" in e for e in details["errors"])
+
+
+def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module, tmp_path) -> None:
+    """A missing candidate-artifact file is infra, not a scored-zero agent failure.
+
+    The FileNotFoundError branch is routed to the unscored infra zone
+    (reward-details only, verifier_error=1) so an infra path misconfiguration
+    (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount) never drags down the
+    mean with no infra_error_task_count signal. This pins finding #820's
+    file-absent vs file-invalid distinction.
+    """
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    artifact_path.unlink()                                 # artifact missing
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+    assert reward.verifier_error == 1
+    assert reward.reward == 0.0
+    assert not (out / "reward.json").exists()              # unscored: no numeric reward
+    details = json.loads((out / "reward-details.json").read_text())
+    assert any("not found" in e for e in details["errors"])
+
+
+def test_run_verifier_malformed_judge_output_is_unscored(sr_module, tmp_path) -> None:
+    sr = sr_module
+    gold_path = tmp_path / "golden-review.json"
+    gold_path.write_text(json.dumps(_gold_list(1)))
+    _write_metadata(gold_path)
+    artifact_path = tmp_path / "review.json"
+    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    out = tmp_path / "out"
+    class BadJudge:
+        async def complete_json(self, *, user, system, max_tokens):
+            return {"match": True, "confidence": 0.0}    # missing reasoning -> parse VerifierError
+    reward = sr.run_verifier(gold_path, artifact_path, out, client=BadJudge(),
+        env={"DAYDREAM_JUDGE_PROVIDER": "anthropic", "DAYDREAM_JUDGE_MODEL": "m",
+             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None})
+    assert reward.verifier_error == 1
+    assert not (out / "reward.json").exists()
+    details = json.loads((out / "reward-details.json").read_text())
+    assert len(details["errors"]) >= 1
