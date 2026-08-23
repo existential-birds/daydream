@@ -89,6 +89,19 @@ def resolve_harbor() -> str:
     return str(executable)
 
 
+def render_verifier_dockerfile(*, base_image: str) -> bytes:
+    """Render and validate the entrypoint-free separate verifier image."""
+    template = Path(__file__).parent.joinpath("templates/tests/Dockerfile").read_text()
+    text = template.replace("__BASE_IMAGE__", base_image)
+    forbidden = ("ENTRYPOINT", "CMD", "/verifier", "httpx>=")
+    violations = [token for token in forbidden if token in text]
+    if violations or "httpx==0.28.1" not in text:
+        raise PackageError(
+            f"verifier Dockerfile template violates pinned entrypoint-free contract: {violations}"
+        )
+    return text.encode("utf-8")
+
+
 def render_environment_dockerfile(*, base_image: str, daydream_version: str) -> bytes:
     """Render and validate the isolated agent environment image."""
     template = Path(__file__).parent.joinpath("templates/environment/Dockerfile").read_text()

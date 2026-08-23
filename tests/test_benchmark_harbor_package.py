@@ -164,3 +164,14 @@ def test_render_environment_dockerfile_clones_bundle_no_remote():
     assert "--require-hashes" in dockerfile and "--no-deps" in dockerfile
     for forbidden in ("Task.md", "solution/", "tests/score_review", "COPY .."):
         assert forbidden not in dockerfile
+
+
+def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned():
+    from daydream.benchmark.harbor import package as pkg
+
+    text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
+    assert text.startswith("FROM " + pkg.VERIFIER_BASE_IMAGE)
+    assert "ENTRYPOINT" not in text and "CMD" not in text
+    assert "/verifier" not in text
+    assert "test.sh" in text and "score_review.py" in text
+    assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
