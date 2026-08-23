@@ -18,10 +18,24 @@ def test_init_creates_private_layout_and_modes(tmp_path):
     )
     assert root.exists()
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
-    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache", "harbor"):
+    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
         d = root / sub
         assert d.is_dir() and stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert not (root / "harbor").exists()   # compiled dataset only after a build
     assert stat.S_IMODE((root / "benchmark.yaml").stat().st_mode) == 0o600
+
+
+def test_init_does_not_create_harbor(tmp_path):
+    root = tmp_path / "review-bench"
+    init_workspace(
+        root,
+        "O/R",
+        ["api.anthropic.com"],
+        ["api.anthropic.com"],
+    )
+    assert not (root / "harbor").exists()   # compiled dataset only after a build
+    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
+        assert (root / sub).is_dir()
 
 
 def test_init_gitignore_ignores_everything_except_itself(tmp_path):

@@ -44,7 +44,7 @@ from daydream.benchmark.storage import (
     sha256_file,
 )
 
-_SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache", "harbor")
+_SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache")
 
 _PRIVACY_CLASSIFICATION = "confidential"
 
