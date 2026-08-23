@@ -1024,3 +1024,29 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
     assert (case / "instruction.md").exists()
     assert (case / "tests" / "golden-review.json").exists()
     assert lock["cases"][key]["case_id"] == case_id
+
+
+def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
+    import hashlib
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
+    raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    b1 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+    b2 = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT)
+    assert b1 == b2                                          # R3 byte determinism
+    text = b1.decode("utf-8")
+    for label in ("Purpose", "Input and conditions", "Environment and access boundary",
+                  "Scoring contract", "Accepted semantic alternatives", "Invalid-run rules",
+                  "Fairness analysis", "Leakage analysis", "Historical source provenance"):
+        assert label in text, label                         # R2 exact sections
+    assert build.ASSIGNMENT_TEXT.split()[0] in text          # exact fixed instruction present
+    assert raw["pull_request"]["title"] in text              # case-specific input present
+    assert "task_spec_approved_at" not in text               # R4 audit timestamp never in bytes
+    import re
+    assert not re.search(r"\b[0-9a-f]{40}\b", text)          # no raw SHAs (R13 identifiers)
+    assert not re.search(r"\bpr-\d{6}-[0-9a-f]{12}\b", text) # no authoring case id
+    assert "2026-" not in text                               # no timestamps anywhere
+    # a different case renders different bytes
+    raw2 = dict(raw); raw2["pull_request"] = dict(raw["pull_request"]); raw2["pull_request"]["title"] = "Other"
+    assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1

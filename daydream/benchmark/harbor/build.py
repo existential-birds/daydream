@@ -190,6 +190,93 @@ def bounded_pr_context(
     )
 
 
+def render_task_spec(case_doc: dict, *, instruction: str) -> bytes:
+    """Deterministic per-case Task.md render; the single source shared by [r] approval and compile (D3)."""
+    pull_request = case_doc.get("pull_request") or {}
+    title = str(pull_request.get("title") or "")
+    curation = case_doc.get("curation") or {}
+    findings = curation.get("findings") or []
+    if findings:
+        counts: dict[str, int] = {}
+        for finding in findings:
+            severity = str(finding.get("severity") or "unknown")
+            counts[severity] = counts.get(severity, 0) + 1
+        severity_summary = ", ".join(
+            f"{count} {severity}" for severity, count in sorted(counts.items())
+        )
+        scoring = (
+            f"The gold set contains {len(findings)} verified findings "
+            f"({severity_summary}). A candidate finding scores when its content "
+            "semantically matches a gold finding; severity, location, and content "
+            "are graded, never the raw review-thread text."
+        )
+        stable_summary = "\n".join(
+            f"- {f.get('severity') or 'unknown'}: {f.get('title') or ''}"
+            for f in findings
+        )
+    else:
+        scoring = (
+            "The gold set is empty: the reviewed change was reviewed-clean with "
+            "zero expected findings. A candidate review that reports any finding "
+            "on this task scores as a false positive."
+        )
+        stable_summary = "clean (zero expected findings)"
+    parts = [
+        f"# Task Spec - {title}",
+        "",
+        "## Purpose",
+        "This document is the hidden evaluation contract for one private Harbor "
+        "task. It fully describes the task's grading conditions so the task can "
+        "be reproduced and scored without the raw authoring record.",
+        "",
+        "## Input and conditions",
+        "The agent reviews the code change between the local `base` ref and the "
+        "local `head` ref of the bundled repository. The instruction for the "
+        "task is:",
+        "",
+        instruction,
+        "",
+        "## Environment and access boundary",
+        "The task runs in a self-contained environment holding a repository "
+        "bundle and no network access, credentials, or references to the original "
+        "authoring host. The agent surface is exactly the compiled task tree.",
+        "",
+        "## Scoring contract",
+        scoring,
+        "",
+        "Stable per-case findings summary:",
+        stable_summary,
+        "",
+        "## Accepted semantic alternatives",
+        "A candidate finding matches gold when its content and intended defect "
+        "align with the gold finding; rewordings that preserve meaning are "
+        "accepted by the semantic judge.",
+        "",
+        "## Invalid-run rules",
+        "A run is invalid when the agent task tree is altered, the repository "
+        "bundle refs are changed, or the candidate artifact is not produced by "
+        "the agent. Invalid runs receive no score.",
+        "",
+        "## Fairness analysis",
+        "Tasks are compiled from private historical reviews; the hidden gold is "
+        "never visible to the agent at runtime. Scoring applies uniformly to "
+        "every candidate review regardless of order or length.",
+        "",
+        "## Leakage analysis",
+        "This contract deliberately omits every authoring identifier: commit "
+        "SHAs, the authoring case id, review comment ids, pull request numbers, "
+        "URLs, and timestamps. Nothing in this document can locate the original "
+        "review record.",
+        "",
+        "## Historical source provenance",
+        "The gold content is grounded in the change's own historical review "
+        "threads. Individual source comment identifiers are not part of this "
+        "contract and are never graded.",
+        "",
+    ]
+    return "\n".join(parts).encode("utf-8")
+
+
 def _flatten_finding(finding: dict) -> dict:
     """Map a curated finding to its provenance-free gold/artifact shape.
 
