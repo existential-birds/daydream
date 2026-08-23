@@ -433,13 +433,8 @@ _ROOT_README = (
 
 
 def _is_compilable(curation: dict) -> bool:
-    """Assumption 1: ready-with-findings or clean-attested."""
-    return bool(
-        (curation.get("state") == "ready"
-         and curation.get("snapshot_attested")
-         and bool(curation.get("findings")))
-        or (curation.get("clean_attested") and not curation.get("findings"))
-    )
+    """Eligible iff ready AND snapshot-attested (findings-ready or clean-ready)."""
+    return bool(curation.get("state") == "ready" and curation.get("snapshot_attested"))
 
 
 def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:

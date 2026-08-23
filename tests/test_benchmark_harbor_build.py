@@ -172,8 +172,12 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh, *, lines: int = 3) -> tuple[P
     return ws, case_id, head_sha
 
 
-def _seed_clean_workspace(tmp_path: Path, fake_gh) -> tuple[Path, str, str]:
-    """Seed a reviewed-clean workspace: import with no comments, then attest clean."""
+def _seed_clean_workspace(tmp_path: Path, fake_gh, *, ready: bool = True) -> tuple[Path, str, str]:
+    """Seed a reviewed-clean workspace: import with no comments, then attest clean.
+
+    With *ready* True (default), the clean-attested case is also final-attested
+    ready; with *ready* False it stays a clean-attested draft.
+    """
     from daydream.benchmark import curation as cu
     from daydream.benchmark import github_import as gi
     from daydream.benchmark.storage import load_yaml_strict
@@ -188,6 +192,8 @@ def _seed_clean_workspace(tmp_path: Path, fake_gh) -> tuple[Path, str, str]:
     raw = load_yaml_strict(ws / "benchmark.yaml")
     case_id = raw["cases"][0]["case_id"]
     cu.attest_clean(ws, case_id)
+    if ready:
+        cu.mark_ready(ws, case_id, head_sha=head_sha)
     return ws, case_id, head_sha
 
 
@@ -643,6 +649,13 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
         if rel == "benchmark.lock.json":
             continue
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
+
+
+def test_clean_attested_draft_does_not_compile(tmp_path, fake_gh):
+    from daydream.benchmark.harbor import build
+    ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
+    with pytest.raises(build.CompileError):
+        build.compile_workspace(ws)
 
 
 def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path, fake_gh):
