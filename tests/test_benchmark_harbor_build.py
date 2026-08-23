@@ -1049,7 +1049,6 @@ def test_compile_uses_shared_model_gated_loader(tmp_path, fake_gh, monkeypatch):
 
 
 def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
-    import hashlib
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
@@ -1070,12 +1069,15 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path, fake_gh):
     assert not re.search(r"\bpr-\d{6}-[0-9a-f]{12}\b", text) # no authoring case id
     assert "2026-" not in text                               # no timestamps anywhere
     # a different case renders different bytes
-    raw2 = dict(raw); raw2["pull_request"] = dict(raw["pull_request"]); raw2["pull_request"]["title"] = "Other"
+    raw2 = dict(raw)
+    raw2["pull_request"] = dict(raw["pull_request"])
+    raw2["pull_request"]["title"] = "Other"
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
 
 
 def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
     import hashlib
+
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # ready with a rendered digest (Task 4)
@@ -1100,6 +1102,7 @@ def test_compile_writes_task_md_and_inventories_its_digest(tmp_path, fake_gh):
 
 def test_spec_change_forces_recompile(tmp_path, fake_gh):
     import hashlib
+
     from daydream.benchmark import curation as cu
     from daydream.benchmark import storage
     from daydream.benchmark.harbor import build
@@ -1118,7 +1121,8 @@ def test_spec_change_forces_recompile(tmp_path, fake_gh):
         build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
     raw2 = storage.load_yaml_strict(path)
     raw2["curation"] = dict(raw2["curation"])
-    raw2["curation"]["state"] = "draft"; raw2["curation"]["snapshot_attested"] = False
+    raw2["curation"]["state"] = "draft"
+    raw2["curation"]["snapshot_attested"] = False
     storage.atomic_write_yaml(path, raw2)
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
     lock2 = build.compile_workspace(ws)
@@ -1152,5 +1156,6 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
     # agent task surface is instruction.md, and the environment Dockerfile clones only the bundle
-    env_docker = (case / "environment" / "Dockerfile").read_text() if (case / "environment" / "Dockerfile").exists() else ""
+    env_df = case / "environment" / "Dockerfile"
+    env_docker = env_df.read_text() if env_df.exists() else ""
     assert "Task.md" not in env_docker

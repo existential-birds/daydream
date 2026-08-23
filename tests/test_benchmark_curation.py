@@ -760,7 +760,7 @@ def test_concurrent_adds_then_final_readiness_lands(tmp_path, fake_gh):
     for p in procs:
         out, err = p.communicate(timeout=120)
         assert p.returncode == 0, (out, err)
-    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)                 # final readiness on top of the concurrent adds
+    cu.mark_ready(ws, case_id, task_spec_sha256="d" * 64, head_sha=head_sha)  # readiness on top of concurrent adds
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     # All three concurrent adds land before readiness (order is lock-acquisition
     # order, so title order is nondeterministic — assert the set, not the order).
@@ -850,8 +850,9 @@ def test_stale_attestation_raises_stale_state_error_and_leaves_unchanged(tmp_pat
 
 
 def test_curation_ready_requires_task_spec_sha256():
-    from daydream.benchmark.schema import Curation
     import pydantic
+
+    from daydream.benchmark.schema import Curation
     base = dict(state="ready", snapshot_attested=True, gold_status="findings",
                 clean_attested=False, exclusions=[], case_exclusion=None)
     f = {"finding_id": "f" * 64, "title": "t", "body": "b", "severity": "low",
@@ -868,9 +869,8 @@ def test_curation_ready_requires_task_spec_sha256():
 
 
 def test_task_spec_approved_at_is_stripped_before_validation():
-    from daydream.benchmark import schema
-    from daydream.benchmark.schema import Curation, _schema_ready
     from daydream.benchmark import curation as cu
+    from daydream.benchmark.schema import Curation, _schema_ready
     raw = {"curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
                         "gold_status": None, "findings": [], "exclusions": [],
                         "case_exclusion": None, "gold_mode": "clean",
@@ -927,9 +927,10 @@ def test_mutation_invalidates_task_spec_approval(tmp_path, fake_gh):
 
 def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path, fake_gh):
     """R14: approve, decline, wrong-SHA no-op, mutation invalidation, stale recovery, clean."""
+    import yaml
+
     from daydream.benchmark import curation as cu
     from daydream.benchmark.storage import load_yaml_strict
-    import yaml
     # findings case: approve
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     cu.accept_candidate(ws, case_id, next(
@@ -953,6 +954,7 @@ def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path, fake
     assert cur["state"] == "ready" and cur["task_spec_sha256"] == "e" * 64
     # clean case: approve
     ws2, case_id2, head2 = _seed_ready_case(tmp_path, fake_gh, lines=2)
-    cu.attest_clean(ws2, case_id2); cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
+    cu.attest_clean(ws2, case_id2)
+    cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
     cur2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["curation"]
     assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64

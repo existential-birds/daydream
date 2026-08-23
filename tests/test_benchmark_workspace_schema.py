@@ -409,6 +409,7 @@ def _valid_case_dict():
             ],
             "exclusions": [],
             "case_exclusion": None,
+            "task_spec_sha256": "d" * 64,
         },
     }
 

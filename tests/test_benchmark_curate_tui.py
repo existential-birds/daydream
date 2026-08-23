@@ -410,10 +410,7 @@ def test_resume_reflects_persisted_state(tmp_path, fake_gh):
 
 
 def test_ready_pages_spec_and_approval_sets_digest(tmp_path, fake_gh, capsys):
-    import hashlib
-    from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import run_curate_tui
-    from daydream.benchmark.harbor import build
     from daydream.benchmark.storage import load_yaml_strict
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
