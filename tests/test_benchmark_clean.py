@@ -319,3 +319,31 @@ def test_partial_failure_continues_to_other_runs(tmp_path):
     report = clean_mod.clean_workspace(ws, jobs=True, docker_rm=selective)
     assert report.images_failed == 1 and report.images_removed == 1
     assert report.job_dirs_deleted == 1                 # successful run's dir removed
+
+
+# ---------------------------------------------------------------------------
+# Task 8: containment + symlink-escape rejection (fails closed)
+# ---------------------------------------------------------------------------
+
+
+def test_symlink_escape_target_rejected(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    victim = tmp_path / "outside-secret"
+    victim.mkdir()
+    (ws / "cache").mkdir(parents=True)
+    (ws / "cache" / "repository.git").symlink_to(victim, target_is_directory=True)
+    with pytest.raises(clean_mod.WorkspaceCorrupt):
+        clean_mod.clean_workspace(ws, cache=True)
+    assert victim.exists()   # outside target untouched
+
+
+def test_non_contained_ledger_job_dir_rejected(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    _append_ledger_run_raw(
+        ws, "bad", job_dir=str(evil), state="complete", environments=[],
+    )
+    with pytest.raises(clean_mod.RunError):
+        clean_mod.clean_workspace(ws, jobs=True)
+    assert evil.exists()
