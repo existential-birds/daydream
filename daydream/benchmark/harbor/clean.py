@@ -36,7 +36,7 @@ from daydream.benchmark.storage import (
     atomic_write_json,
 )
 
-RunError  # re-exported for the CLI handler / hermetic escape tests
+__all__ = ["CleanReport", "clean_workspace", "RunError", "WorkspaceCorrupt"]
 
 
 _CACHE_TARGETS = ("cache/repository.git", "cache/harbor-build-stage")
