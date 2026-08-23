@@ -123,7 +123,8 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path, capsys):
     ws = _write_curated_workspace_with_sensitive_evidence(tmp_path)
     before = _tree_sha(ws)
     rc = _handle_benchmark_command(["validate", str(ws)])
-    out = capsys.readouterr().out + capsys.readouterr().err
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
     assert "SUPER_SECRET_EVIDENCE" not in out       # evidence bodies never printed
     assert "corrupt" in out.lower() or "ready" in out.lower()   # only labels/short strings
     assert rc == 1

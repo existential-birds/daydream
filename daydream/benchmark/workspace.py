@@ -313,9 +313,13 @@ def _derived_state(
         pull_requests=pr_dicts,
         cases=_case_curation_states(root, manifest, docs),
     )
-    _verify_import_checksums(root, manifest)
+    # Model-validate every fetched import exactly once per call; the checksum
+    # and cross-document verifiers share this set instead of each re-reading
+    # and re-model-validating the same documents.
+    imports = _import_documents(root, manifest)
+    _verify_import_checksums(root, manifest, imports=imports)
     _verify_snapshot_checksums(root, manifest, docs)
-    _verify_cross_document(root, manifest, docs)
+    _verify_cross_document(root, manifest, docs, imports=imports)
     _verify_duplicate_inodes(root, manifest, docs)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
@@ -339,8 +343,11 @@ def load_case_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, Ca
         try:
             docs[case.case_file] = CaseDocument.model_validate(schema._schema_ready(raw))
         except Exception as exc:
+            # The diagnostic names only the case file -- never the pydantic
+            # error, whose repr embeds the input document (PR bodies/evidence)
+            # that the CLI's no-disclosure contract keeps off stderr.
             raise WorkspaceCorrupt(
-                f"{root}: case {case.case_file} is not a valid case document: {exc}"
+                f"{root}: case {case.case_file} is not a valid case document"
             ) from exc
     return docs
 
@@ -383,11 +390,52 @@ def _verify_snapshot_checksums(
             )
 
 
-def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
+def _load_import_document(root: Path, import_file: str) -> ImportDocument:
+    """Model-gate one fetched import through the shared strict loader.
+
+    The single definition of the import load+validate block shared by the
+    checksum and cross-document verifiers: resolution through
+    :func:`resolve_authoring_path` plus ``ImportDocument.model_validate`` on
+    the strict JSON read. A present-but-invalid import raises
+    :class:`WorkspaceCorrupt` naming only the import file -- the diagnostic
+    never embeds the document body (the CLI's no-disclosure contract).
+    """
+    path = resolve_authoring_path(root, import_file)
+    try:
+        return ImportDocument.model_validate(load_json_strict(path))
+    except Exception as exc:
+        raise WorkspaceCorrupt(
+            f"{root}: import {import_file} is not a valid import document"
+        ) from exc
+
+
+def _import_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, ImportDocument]:
+    """Load every fetched import once through the shared model gate.
+
+    ``_derived_state`` precomputes the validated set so the checksum and
+    cross-document verifiers consume the same models instead of each
+    re-reading and re-model-validating every fetched import per call.
+    """
+    return {
+        pr.import_file: _load_import_document(root, pr.import_file)
+        for pr in manifest.pull_requests
+        if pr.import_state == "fetched" and pr.import_file
+    }
+
+
+def _verify_import_checksums(
+    root: Path,
+    manifest: BenchmarkManifest,
+    imports: dict[str, ImportDocument] | None = None,
+) -> None:
     """Verify each fetched import's on-disk sha256 against ``import_sha256``.
 
     A missing import file or a checksum mismatch is a :class:`WorkspaceCorrupt`
-    failure — it is never folded into an incomplete/curating result.
+    failure — it is never folded into an incomplete/curating result. When
+    ``imports`` is ``None`` each fetched import is additionally run through
+    the shared model gate (:func:`_load_import_document`); the validate/status
+    path precomputes the validated set (see :func:`_derived_state`) so every
+    import is model-validated exactly once per call.
     """
     for pr in manifest.pull_requests:
         if pr.import_state != "fetched" or pr.import_file is None or pr.import_sha256 is None:
@@ -403,15 +451,16 @@ def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
                 f"{root}: import {pr.import_file} checksum mismatch "
                 f"(expected {pr.import_sha256}, got {actual})"
             )
-        try:
-            ImportDocument.model_validate(load_json_strict(path))
-        except Exception as exc:
-            raise WorkspaceCorrupt(
-                f"{root}: import {pr.import_file} is not a valid import document: {exc}"
-            ) from exc
+        if imports is None:
+            _load_import_document(root, pr.import_file)
 
 
-def _verify_cross_document(root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> None:
+def _verify_cross_document(
+    root: Path,
+    manifest: BenchmarkManifest,
+    docs: dict[str, CaseDocument],
+    imports: dict[str, ImportDocument] | None = None,
+) -> None:
     """Verify every cross-document identity link and exact index membership.
 
     Each ``cases[]`` row must reference exactly ``cases/<case_id>.yaml`` and
@@ -449,13 +498,11 @@ def _verify_cross_document(root: Path, manifest: BenchmarkManifest, docs: dict[s
     for pr in manifest.pull_requests:
         if pr.import_state != "fetched" or pr.import_file is None:
             continue
-        path = resolve_authoring_path(root, pr.import_file)
-        try:
-            imp = ImportDocument.model_validate(load_json_strict(path))
-        except Exception as exc:
-            raise WorkspaceCorrupt(
-                f"{root}: import {pr.import_file} is not a valid import document: {exc}"
-            ) from exc
+        imp = (
+            imports[pr.import_file]
+            if imports is not None and pr.import_file in imports
+            else _load_import_document(root, pr.import_file)
+        )
         if imp.pull_request.number != pr.number:
             raise WorkspaceCorrupt(
                 f"{root}: import {pr.import_file} pull_request.number "

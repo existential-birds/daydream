@@ -1003,11 +1003,18 @@ def _prior_import_state(
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
-        prior_raw = storage.load_json_strict(root / existing["import_file"])
+        # Ledger-derived authoring paths go through the containment gate (same
+        # as every other workspace authoring read), so an absolute or escaping
+        # import_file/case_id can never read outside the workspace root.
+        prior_raw = storage.load_json_strict(
+            storage.resolve_authoring_path(root, existing["import_file"])
+        )
         prior_sig = _evidence_signature_from_raw(prior_raw)
         prior_task_sig = _task_input_signature_from_raw(prior_raw)
         for case_id in existing.get("case_ids", []):
-            cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
+            cur = storage.load_yaml_strict(
+                storage.resolve_authoring_path(root, f"cases/{case_id}.yaml")
+            ).get("curation")
             if isinstance(cur, dict):
                 prior_curations[case_id] = cur
     return prior_sig, prior_task_sig, prior_curations, import_file

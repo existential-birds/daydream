@@ -686,26 +686,38 @@ def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path, fake_gh):
 
 def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path, fake_gh):
     from daydream.benchmark import storage
-    from daydream.benchmark.harbor.build import compile_workspace
+    from daydream.benchmark.harbor.build import CompileError, compile_workspace
+    from daydream.benchmark.storage import WorkspaceCorrupt
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     # hand-edited case YAML: an unbounded body (forces truncation under the
-    # compiled 32 KiB default). The model gate now requires the persisted
-    # body_sha256 to equal sha256(body), so an attacker-supplied bogus digest
-    # never reaches the compiler; the marker must still carry the truthful
-    # digest rather than trusting a field it does not re-derive.
+    # compiled 32 KiB default). The model gate requires the persisted
+    # body_sha256 to equal sha256(body), so a bogus attacker-supplied digest
+    # fails closed at load time and never reaches the compiler.
     case_path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(case_path)
     raw["pull_request"] = dict(raw["pull_request"])
     body = "secret-sentinel-a1b2 " + "\U0001F600" * 9000 + "\nZ" * 500
     raw["pull_request"]["body"] = body
+    # bogus digest: 64-hex but != sha256(body) -> the model gate rejects the
+    # case before any compile, so a poisoned body_sha256 can neither inject
+    # content past the marker nor attest a wrong digest (fail-closed end-to-end
+    # through compile_workspace).
+    raw["pull_request"]["body_sha256"] = "c3d4" * 16
+    storage.atomic_write_yaml(case_path, raw)
+    with pytest.raises((CompileError, WorkspaceCorrupt)):
+        compile_workspace(ws)
+    # truthful digest passes the gate; the marker must still carry that
+    # truthful digest rather than trusting a field the compiler does not
+    # re-derive.
     raw["pull_request"]["body_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
     storage.atomic_write_yaml(case_path, raw)
     lock = compile_workspace(ws)
     key = next(iter(lock["cases"]))
     instr = (ws / "harbor" / key / "instruction.md").read_text()
     assert instr.count("</historical_pr_context>") == 1   # no breakout via body_sha256
-    assert "secret-sentinel-c3d4" not in instr
     inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
+    assert "secret-sentinel-a1b2" not in outside          # raw body stays inside the block
     marker = next(
         line for line in inner.splitlines() if line.startswith("[truncated")
     )

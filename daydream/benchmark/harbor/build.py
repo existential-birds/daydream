@@ -93,8 +93,11 @@ def _escape_historical_delimiters(text: str) -> str:
 
 # A persisted ``body_sha256`` is interpolated into the truncation marker only
 # when it has the schema's own digest shape (_hex64: lowercase 64-hex). The
-# compile path reads raw case docs with no model_validate, so any other value
-# is unvalidated input and falls back to the deterministic stored-body digest.
+# compile path loads every case through the shared model gate, where
+# ``PullRequestMeta._body_hash_consistency`` rejects a digest that mismatches
+# the stored body before it ever reaches this function; the shape check +
+# stored-body verification here is defense-in-depth, and any other value falls
+# back to the deterministic stored-body digest.
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -140,12 +143,13 @@ def bounded_pr_context(
     # The marker attests the persisted normalized-body digest (body_sha256 at
     # import time) verbatim -- but only when it satisfies the schema's own
     # _body_hash_consistency contract (lowercase 64-hex equal to sha256 of the
-    # stored normalized body). The compile path reads raw case docs with no
-    # model_validate, so a hand-edited body_sha256 could otherwise inject
-    # content past the marker line or attest a digest that no longer matches
-    # the compiled body; any value outside that contract falls back to the
-    # deterministic stored-body digest (the same fallback as a missing key).
-    # Never re-derived from the escaped surface.
+    # stored normalized body). Every case the compile path loads passes the
+    # model gate first, so a hand-edited body_sha256 is rejected as corruption
+    # before it could inject content past the marker line or attest a digest
+    # that no longer matches the compiled body; any other value (e.g. an
+    # absent/blank digest) falls back to the deterministic stored-body digest
+    # (the same fallback as a missing key). Never re-derived from the escaped
+    # surface.
     stored_body = str(pull_request.get("body") or "")
     stored_digest = hashlib.sha256(stored_body.encode("utf-8")).hexdigest()
     persisted = str(pull_request.get("body_sha256") or "")
@@ -456,7 +460,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     expected = snapshot.get("bundle_sha256")
     if not bundle_rel or not expected:
         raise CompileError(f"case {case_id} ready snapshot missing bundle_file/bundle_sha256")
-    bundle_src = ws / bundle_rel
+    bundle_src = storage.resolve_authoring_path(ws, bundle_rel)
     if not bundle_src.is_file():
         raise CompileError(f"case {case_id} missing bundle {bundle_rel}")
     bundle_dst = case_stage / "environment" / "repository.bundle"
@@ -569,7 +573,11 @@ def compile_workspace(root: Path) -> dict:
         # requires the canonical order; reversed rows are not corruption here).
         manifest["cases"] = sorted(
             manifest.get("cases") or [],
-            key=lambda c: (c.get("pr_number", 0), schema.head_sha_from_case_id(c["case_id"]), c["case_id"]),
+            key=lambda c: (
+                int(c["pr_number"]),
+                schema.head_sha_from_case_id(c["case_id"]),
+                c["case_id"],
+            ),
         )
         # Every indexed case is loaded through the shared model-gated loader
         # (same ``_schema_ready`` + ``CaseDocument`` validation as the
@@ -600,7 +608,13 @@ def compile_workspace(root: Path) -> dict:
             control_plane: dict[str, str] = {"README.md": _ROOT_README}
             for _case in manifest.get("cases") or []:
                 case_id = _case.get("case_id")
-                row = _compile_case(stage, root, case_docs[case_id], repo_slug)
+                case_doc = case_docs.get(case_id)
+                if case_doc is None:
+                    raise CompileError(
+                        f"case {case_id} index row has no matching case document "
+                        "(row case_id disagrees with the case document's own case_id)"
+                    )
+                row = _compile_case(stage, root, case_doc, repo_slug)
                 case_rows.append(row)
                 key = row["key"]
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
