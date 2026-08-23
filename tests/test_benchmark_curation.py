@@ -588,6 +588,13 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
         cu._head_file_line_count(ws, snapshot_doc, "missing.py")
 
 
+def test_list_cases_evidence_count_counts_all_evidence(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    row = next(r for r in cu.list_cases(ws) if r["case_id"] == case_id)
+    assert row["evidence_count"] == 5   # 2 candidates + approval + reply + conversation
+
+
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
     # numstat + evidence-count claims confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu

@@ -259,7 +259,9 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 
     Each row adds ``evidence_count``, ``changed_files``, and ``changed_lines``
     to the existing case_id/pr_number/state/gold_mode/gold_count/snapshot_status/
-    head_prefix keys.
+    head_prefix keys. ``evidence_count`` counts the case's full import evidence
+    set (all kinds), falling back to the candidate count only when the import
+    file is unreadable/missing so the resumable index never crashes.
     """
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
@@ -278,6 +280,13 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             gold_mode = schema.derive_gold_mode(_curation_model(curation))
         except ValidationError:
             gold_mode = None
+        try:
+            evidence_count = len(_evidence_list(root, doc))
+        except Exception:
+            # a missing/unreadable import file must not crash the resumable
+            # index: fall back to the candidate count (get_case/validate still
+            # surface the corruption). Never fall back for any other reason.
+            evidence_count = len(doc.get("candidates") or [])
         out.append({
             "case_id": case_id,
             "pr_number": case.get("pr_number"),
@@ -286,7 +295,7 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
-            "evidence_count": len(doc.get("candidates") or []),
+            "evidence_count": evidence_count,
             "changed_files": changed_files,
             "changed_lines": changed_lines,
         })
