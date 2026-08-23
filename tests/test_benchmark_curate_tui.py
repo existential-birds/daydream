@@ -313,6 +313,26 @@ def test_action_exclude_evidence_rejects_stray_note(tmp_path, fake_gh, capsys):
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_action_exclude_range_excludes_all_selected(tmp_path, fake_gh):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1,3", "duplicate", "q"))
+    ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"]
+    assert {e["source_id"] for e in ex} == {"github:inline_comment:1", "github:review:100"}
+    assert all(e["reason"] == "duplicate" for e in ex)
+
+
+def test_action_exclude_range_invalid_mutates_nothing(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    path = ws / "cases" / f"{case_id}.yaml"
+    before = path.read_bytes()
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "2,2", "q"))   # repeated index
+    assert path.read_bytes() == before
+    assert "Traceback" not in capsys.readouterr().err
+
+
 def test_clean_confirm_does_not_mark_ready(tmp_path, fake_gh, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict

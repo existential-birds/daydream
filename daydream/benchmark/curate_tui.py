@@ -439,35 +439,47 @@ def _action_ready(
 def _action_exclude(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]
 ) -> str:
-    """The ``[x]`` evidence-exclusion action (7 fixed reasons + optional note)."""
-    candidates = view.get("candidates") or []
-    text = _prompt(read_line, "evidence (number, 0 to cancel): ").strip()
+    """The ``[x]`` evidence-exclusion action over the full evidence list.
+
+    Parses one 1-based selector (a single index or one ``a-b`` range). The
+    reason/note contract is validated **before** any mutation, then every
+    selected evidence source is excluded with the same reason/note. A bad
+    range, an invalid reason, or a missing ``other`` note mutates nothing.
+    Single-index selections keep the original note prompt (a stray note on a
+    non-``other`` reason is still rejected); range selections apply their
+    reason without a note.
+    """
+    entries = view.get("evidence") or view.get("candidates") or []
+    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
     if text == "0":
         return "continue"
     try:
-        indices = parse_indices(text, len(candidates))
+        indices = parse_indices(text, len(entries))
     except ValueError as exc:
         print(str(exc))
         return "continue"
-    if len(indices) != 1:
-        print(f"exclude takes exactly one evidence source (got {len(indices)})")
+    if not indices:
         return "continue"
-    source_id = candidates[indices[0]]["source_id"]
     reason = _prompt(
         read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
     ).strip()
     if reason not in _EVIDENCE_REASONS:
         print(f"invalid evidence reason {reason!r}")
         return "continue"
-    note = _prompt(read_line, "note: ").strip() or None
-    if reason == "other" and not note:
-        print("reason 'other' requires a note")
-        return "continue"
-    try:
-        cu.exclude_evidence(root, case_id, source_id, reason=reason, note=note)
-    except cu.CurationError as exc:
-        return _service_error(exc)
-    print(f"excluded {source_id}")
+    note: str | None = None
+    if len(indices) == 1:
+        note = _prompt(read_line, "note: ").strip() or None
+        if reason == "other" and not note:
+            print("reason 'other' requires a note")
+            return "continue"
+    for index in indices:
+        try:
+            cu.exclude_evidence(
+                root, case_id, entries[index]["source_id"], reason=reason, note=note
+            )
+        except cu.CurationError as exc:
+            return _service_error(exc)
+    print(f"excluded {len(indices)} evidence source(s)")
     return "rerender"
 
 
