@@ -478,6 +478,7 @@ def _evidence_from_inline(raw: dict[str, Any]) -> dict[str, Any]:
         "start_line": raw.get("start_line"),
         "original_line": raw.get("original_line"),
         "thread_id": None,
+        "review_id": str(raw["pull_request_review_id"]) if raw.get("pull_request_review_id") is not None else None,
         "reply_to_id": str(raw["in_reply_to_id"]) if raw.get("in_reply_to_id") is not None else None,
         "subject_type": subject_type,
         "side": raw.get("side"),
@@ -566,7 +567,93 @@ def _evidence_from_thread(thread: dict[str, Any], comment: dict[str, Any]) -> di
     return fields
 
 
-def _graphql_with_rate_limit_retry(root: Path, variables: dict[str, Any], *, query: str = _REVIEW_THREADS_QUERY) -> dict[str, Any]:
+def _canonical_comment_from_thread(
+    thread: dict[str, Any], comment: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a canonical ``inline_comment`` record from GraphQL thread fields.
+
+    Used for thread comments with no REST counterpart (never dropped, and never
+    emitted with the ``thread_comment`` kind). The thread carries the anchors;
+    commit anchors are absent because only REST exposes them.
+    """
+    rec = _evidence_from_thread(thread, comment)
+    db_id = rec["database_id"]
+    rec["source_id"] = f"github:inline_comment:{db_id}"
+    rec["kind"] = "inline_comment"
+    rec["commit_id"] = None
+    rec["original_commit_id"] = None
+    rec["review_id"] = None
+    rec["dismissed"] = False
+    return rec
+
+
+def _reconcile_inline_evidence(
+    inline_records: list[dict[str, Any]],
+    thread_nodes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge REST inline comments and GraphQL thread comments into one record per comment.
+
+    The REST inline record is the canonical base — it carries the anchors only
+    REST exposes (``commit_id``/``original_commit_id``, ``path``/``original_path``,
+    line/start line, ``subject_type``, ``side``/``start_side``, ``url``). GraphQL
+    thread state (``thread_id``, ``resolved``, ``outdated``, and the reply link
+    when REST lacks it) is overlaid by ``database_id`` with a ``node_id``
+    fallback, so every comment that exists in both feeds yields exactly one
+    record. A thread comment with no REST counterpart is surfaced as a canonical
+    ``inline_comment`` record built from thread fields — never dropped, never
+    emitted as ``thread_comment``. Exactly one record is produced per comment
+    database id.
+    """
+    inline_by_db = {rec["database_id"]: rec for rec in inline_records}
+    inline_by_node = {rec["node_id"]: rec for rec in inline_records if rec.get("node_id")}
+    canonical: list[dict[str, Any]] = [dict(rec) for rec in inline_records]
+    canonical_by_db = {rec["database_id"]: rec for rec in canonical}
+    for thread in thread_nodes:
+        nodes = thread.get("comments", {}).get("nodes")
+        if nodes is None:
+            continue  # a thread with no comments contributes nothing
+        for comment in nodes:
+            if not isinstance(comment, dict) or "databaseId" not in comment:
+                continue
+            db_id = int(comment["databaseId"])
+            base = inline_by_db.get(db_id)
+            if base is None and comment.get("id"):
+                base = inline_by_node.get(comment["id"])
+            if base is not None:
+                rec = canonical_by_db[base["database_id"]]
+            else:
+                rec = _canonical_comment_from_thread(thread, comment)
+                canonical.append(rec)
+            rec["thread_id"] = thread.get("id")
+            rec["resolved"] = bool(thread.get("isResolved", False))
+            rec["outdated"] = bool(thread.get("isOutdated", False))
+            if rec.get("reply_to_id") is None:
+                rec["reply_to_id"] = (comment.get("replyTo") or {}).get("id")
+    return canonical
+
+
+def _join_dismissal(
+    canonical: list[dict[str, Any]], review_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Mark ``dismissed`` on comments whose review was dismissed.
+
+    Dismissal is joined deterministically from the review set already fetched:
+    REST review ``state == "DISMISSED"`` mapped through the comment's
+    ``pull_request_review_id``. Pure dict join — a comment whose review id maps
+    to no DISMISSED review (or to no review at all) simply keeps the default
+    ``dismissed=False``.
+    """
+    states = {str(int(raw["id"])): raw.get("state") for raw in review_records}
+    for rec in canonical:
+        review_id = rec.get("review_id")
+        if rec.get("kind") == "inline_comment" and review_id and states.get(review_id) == "DISMISSED":
+            rec["dismissed"] = True
+    return canonical
+
+
+def _graphql_with_rate_limit_retry(
+    root: Path, variables: dict[str, Any], *, query: str = _REVIEW_THREADS_QUERY
+) -> dict[str, Any]:
     """Call one GraphQL query honoring the rate-limit retry policy.
 
     REST paths flow through :func:`_call_with_rate_limit_retry` (3 attempts,
@@ -1254,8 +1341,11 @@ def fetch_and_normalize(
 ) -> schema.ImportDocument:
     """Fetch one PR's full evidence set through REST and normalize it.
 
-    Pulls the PR header, then every submitted review, top-level inline comment,
-    and conversation comment in order. The normalized ``pull_request`` block
+    Pulls the PR header, then every submitted review and conversation comment;
+    each top-level inline comment is reconciled with its GraphQL thread state
+    into one canonical ``inline_comment`` record (REST anchors plus joined
+    thread id/resolved/outdated/dismissal), and review dismissal is joined by
+    review id. The normalized ``pull_request`` block
     carries the complete header: number, url/html_url, title, body, state,
     merge/close timestamps, created/updated timestamps, author, exact
     base/head (sha + ref), and the persisted ``title_sha256``/``body_sha256``
@@ -1267,17 +1357,14 @@ def fetch_and_normalize(
     """
     header = _fetch_with_retry(root, owner_repo, number)
 
-    evidence: list[dict[str, Any]] = []
-    for raw in _rest(root, f"repos/{owner_repo}/pulls/{number}/reviews"):
-        evidence.append(_evidence_from_review(raw))
-    for raw in _rest(root, f"repos/{owner_repo}/pulls/{number}/comments"):
-        evidence.append(_evidence_from_inline(raw))
+    review_records = _rest(root, f"repos/{owner_repo}/pulls/{number}/reviews")
+    inline_records = [_evidence_from_inline(raw) for raw in _rest(root, f"repos/{owner_repo}/pulls/{number}/comments")]
+    threads = _graphql_review_threads(root, owner_repo, number)
+
+    evidence: list[dict[str, Any]] = [_evidence_from_review(raw) for raw in review_records]
+    evidence.extend(_join_dismissal(_reconcile_inline_evidence(inline_records, threads), review_records))
     for raw in _rest(root, f"repos/{owner_repo}/issues/{number}/comments"):
         evidence.append(_evidence_from_issue(raw))
-
-    for thread in _graphql_review_threads(root, owner_repo, number):
-        for comment in thread.get("comments", {}).get("nodes", []):
-            evidence.append(_evidence_from_thread(thread, comment))
 
     records = [schema.EvidenceRecord.model_validate(e) for e in evidence]
     record_dicts = [r.model_dump(mode="json") for r in records]

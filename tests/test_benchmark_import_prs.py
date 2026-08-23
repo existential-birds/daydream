@@ -1147,6 +1147,52 @@ def test_graphql_threads_replies_collect_past_100(tmp_path, fake_gh):
            == sorted(range(2001, 2251))
 
 
+def test_reconcile_inline_and_thread_into_one_record(tmp_path, fake_gh):
+    from daydream.benchmark import github_import as gi
+
+    ws = tmp_path / "ws"
+    (ws / "imports").mkdir(parents=True)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
+    # review id 5 with state DISMISSED (dismissal source for comment 10)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
+        {"id": 5, "node_id": "PRR_5", "user": {"login": "alice", "type": "User"},
+         "body": "", "state": "DISMISSED", "commit_id": "a" * 40,
+         "submitted_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-5"}])
+    # REST inline comment 10 is the root of thread_1, belongs to review 5
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
+        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
+         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
+         "subject_type": "line", "side": "RIGHT",
+         "pull_request_review_id": 5,
+         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+         "html_url": "https://github.com/o/r/pull/101#discussion_r10"}])
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
+    fake_gh._write_threads([{"id": "thread_1", "isResolved": True,
+        "isOutdated": True, "isResolvedBy": None, "subjectType": "LINE",
+        "path": "a.py", "line": 4, "originalLine": 3, "side": "RIGHT",
+        "startSide": None,
+        "comments": {"nodes": [
+            {"id": "c1", "databaseId": 10, "body": "root",
+             "author": {"login": "dave", "type": "User"},
+             "createdAt": "2026-01-01T00:00:00Z",
+             "url": "https://github.com/o/r/pull/101#discussion_r10"}]}}],
+        number=101)
+    doc = gi.fetch_and_normalize(ws, "o/r", 101)
+    by_db = {e.database_id: e for e in doc.evidence}
+    rec = by_db[10]
+    assert rec.kind == "inline_comment"
+    assert rec.source_id == "github:inline_comment:10"
+    assert rec.thread_id == "thread_1" and rec.resolved is True
+    assert rec.outdated is True and rec.dismissed is True      # via review 5 DISMISSED
+    assert rec.review_id == "5"
+    assert rec.commit_id == "a" * 40 and rec.path == "a.py"     # REST anchors kept
+    # exactly one record with database_id 10, no thread_comment kind anywhere
+    assert len([e for e in doc.evidence if e.database_id == 10]) == 1
+    assert not any(e.kind == "thread_comment" for e in doc.evidence)
+
+
 def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_gh, monkeypatch):
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
     import pytest
