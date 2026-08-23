@@ -448,9 +448,10 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
 
     view = cu.get_case(ws, case_id)
     assert view["snapshot"]["status"] == "ready"
-    assert cu._head_file_line_count(ws, head_sha, "feature.py") == 4
+    snapshot_doc = view["snapshot"]
+    assert cu._head_file_line_count(ws, snapshot_doc, "feature.py") == 4
     with pytest.raises(cu.CurationError):
-        cu._head_file_line_count(ws, head_sha, "missing.py")
+        cu._head_file_line_count(ws, snapshot_doc, "missing.py")
 
 
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
@@ -472,13 +473,43 @@ def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
     assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
 
 
-def test_list_cases_ready_mirror_failure_raises(tmp_path, fake_gh):
+def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path, fake_gh):
+    """Deliberate behavior flip (issue #814): a ready case whose shared bare
+    mirror is deleted still returns change stats — the reads come from a
+    disposable clone of the frozen bundle, never the mirror."""
     from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     import shutil
     shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
-    with pytest.raises(cu.CurationError):
-        cu.list_cases(ws)
+    cases = cu.list_cases(ws)
+    assert cases[0]["changed_files"] == 2 and cases[0]["changed_lines"] == 6
+
+
+def test_curate_and_validate_after_mirror_removal(tmp_path, fake_gh):
+    """Acceptance (e): deleting the shared mirror never makes a case uncuratable.
+
+    Curation location-vs-head reads and ``list_cases`` change stats must come
+    from a disposable clone of the frozen bundle (origin/base vs origin/head),
+    and ``validate_workspace`` fidelity is bundle-based too."""
+    import shutil
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.workspace import validate_workspace
+
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    shutil.rmtree(ws / "cache" / "repository.git")        # mirror gone
+    # curation location-vs-head still works from the bundle clone
+    cu.add_finding(ws, case_id, title="x", body="y", severity="high",
+                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
+    # list_cases change stats still work (was CurationError before this issue)
+    rows = cu.list_cases(ws)
+    assert rows[0]["changed_files"] == 2 and rows[0]["changed_lines"] == 6
+    # attest ready (re-exercises location-vs-head from the bundle), so the
+    # workspace reaches the ``ready`` exit-0 state on validation
+    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    # validate_workspace still passes (fidelity is bundle-based)
+    code, label = validate_workspace(ws)
+    assert code == 0 and label == "ready"
 
 
 def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
