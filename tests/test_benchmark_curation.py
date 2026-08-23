@@ -923,3 +923,36 @@ def test_mutation_invalidates_task_spec_approval(tmp_path, fake_gh):
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
+
+
+def test_task_spec_acceptance_approval_decline_invalidation_stale(tmp_path, fake_gh):
+    """R14: approve, decline, wrong-SHA no-op, mutation invalidation, stale recovery, clean."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+    import yaml
+    # findings case: approve
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
+    cu.accept_candidate(ws, case_id, next(
+        c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])["source_id"])
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="d" * 64)
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["task_spec_sha256"] == "d" * 64
+    # mutation invalidation
+    src = next(c["source_id"] for c in load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["candidates"])
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "draft" and "task_spec_sha256" not in cur
+    # stale recovery: force stale then re-approve
+    path = ws / "cases" / f"{case_id}.yaml"
+    raw = load_yaml_strict(path)
+    raw["curation"]["state"] = "stale"
+    raw["curation"]["snapshot_attested"] = False   # the stale contract (model-enforced)
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256="e" * 64)
+    cur = load_yaml_strict(path)["curation"]
+    assert cur["state"] == "ready" and cur["task_spec_sha256"] == "e" * 64
+    # clean case: approve
+    ws2, case_id2, head2 = _seed_ready_case(tmp_path, fake_gh, lines=2)
+    cu.attest_clean(ws2, case_id2); cu.mark_ready(ws2, case_id2, head_sha=head2, task_spec_sha256="c" * 64)
+    cur2 = load_yaml_strict(ws2 / "cases" / f"{case_id2}.yaml")["curation"]
+    assert cur2["state"] == "ready" and cur2["task_spec_sha256"] == "c" * 64

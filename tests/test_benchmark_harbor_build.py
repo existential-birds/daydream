@@ -742,6 +742,7 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path, f
     curation["snapshot_attested"] = True
     curation["clean_attested"] = False     # never clean-attested
     curation["gold_status"] = None         # no clean label without attestation
+    curation["task_spec_sha256"] = "d" * 64  # carry a digest so the clean gate is reached
     raw["curation"] = curation
     storage.atomic_write_yaml(path, raw)
     with pytest.raises(build.CompileError):
