@@ -187,6 +187,7 @@ class PullRequestEntry(BaseModel):
     import_file: str | None = None
     import_sha256: str | None = None
     error: dict[str, str] | None = None
+    latest_error: dict[str, str] | None = None
     requested_heads: list[str] = []
     case_ids: list[str] = []
 
@@ -204,9 +205,18 @@ class PullRequestEntry(BaseModel):
                 raise ValueError("fetch_failed import requires an error")
             if self.import_file is not None or self.import_sha256 is not None:
                 raise ValueError("fetch_failed import must not set import_file/import_sha256")
+            if self.latest_error is not None:
+                raise ValueError("fetch_failed import must not carry a latest_error")
         else:  # pending
-            if self.import_file is not None or self.import_sha256 is not None or self.error is not None:
-                raise ValueError("pending import must not set import_file/import_sha256/error")
+            if (
+                self.import_file is not None
+                or self.import_sha256 is not None
+                or self.error is not None
+                or self.latest_error is not None
+            ):
+                raise ValueError(
+                    "pending import must not set import_file/import_sha256/error/latest_error"
+                )
         if self.import_file is not None and not self.import_file:
             raise ValueError("import_file must not be blank")
         return self
@@ -987,7 +997,11 @@ class PreflightLedger(BaseModel):
 _PR_TRANSITIONS: dict[str, set[str]] = {
     "pending": {"fetched", "fetch_failed"},
     "fetch_failed": {"fetched", "fetch_failed"},
-    "fetched": {"fetched", "fetch_failed"},
+    # A fetched PR never goes to bare fetch_failed: a failed refresh preserves
+    # its last-good linkage and records the attempt in ``latest_error`` instead
+    # of wiping it (issue #813). Only a first-import failure (pending/fetch_failed
+    # with no linkage) stages a plain fetch_failed.
+    "fetched": {"fetched"},
 }
 
 _CASE_TRANSITIONS: dict[str, set[str]] = {

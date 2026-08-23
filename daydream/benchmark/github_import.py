@@ -934,24 +934,83 @@ def _payload_sha256(import_doc: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _evidence_projection_hash(rec: dict[str, Any]) -> str:
+    """sha256 over the sorted-JSON of the projection-relevant evidence fields.
+
+    One digest per physical evidence record over exactly the fields that feed
+    candidate projection and the curated review surface: body sha, author
+    (login/type), commit anchors, path/line anchors, side, subject type,
+    reply status (replies are evidence, never candidates), resolution
+    state, dismissal, and review state. Values use ``.get()``
+    defaults (``False`` for booleans, ``None`` for optional fields, ``""`` for
+    strings) so an absent pre-canonicalization key equals the canonical
+    default. ``kind``/``source_id``/``database_id``/``url``/timestamps are
+    excluded: they are format-drift/metadata-sensitive and must not flip the
+    signature.
+    """
+    author_raw = rec.get("author")
+    author = author_raw if isinstance(author_raw, dict) else {}
+    values: dict[str, Any] = {
+        "body_sha256": str(rec.get("body_sha256") or ""),
+        "author.login": str(author.get("login") or ""),
+        "author.type": str(author.get("type") or ""),
+        "commit_id": rec.get("commit_id"),
+        "original_commit_id": rec.get("original_commit_id"),
+        "path": rec.get("path"),
+        "original_path": rec.get("original_path"),
+        "line": rec.get("line"),
+        "start_line": rec.get("start_line"),
+        "original_line": rec.get("original_line"),
+        "side": rec.get("side"),
+        "start_side": rec.get("start_side"),
+        "subject_type": rec.get("subject_type"),
+        "reply_to_id": rec.get("reply_to_id"),
+        "resolved": bool(rec.get("resolved", False)),
+        "outdated": bool(rec.get("outdated", False)),
+        "dismissed": bool(rec.get("dismissed", False)),
+        "state": rec.get("state"),
+    }
+    canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[int, str]]:
-    """Content signature: one ``(database_id, body_sha256)`` pair per evidence record.
+    """Projection signature: one ``(database_id, projection_hash)`` per evidence record.
 
     Keyed on the physical comment id rather than ``source_id`` so the refresh
     stale check is immune to the canonical-record format change: pre-canonicalization
     files rekinded thread-only comments and persisted a comment that existed in
     both feeds twice, while the canonical format emits exactly one
-    ``inline_comment`` per database id. Byte-identical GitHub content changed only
-    the persisted shape, so a first ``--refresh`` after the format change must
-    compare equal and keep prior curated cases — a genuine content change (a
-    comment added/removed/edited) still flips the digest.
+    ``inline_comment`` per database id. The per-record hash spans the full
+    projection-relevant provenance (body, author, commit/anchor fields, sides,
+    subject type, reply status, resolution state, dismissal, review state) and excludes
+    ``kind``/``source_id``/``database_id``/``url``/timestamps, so a duplicate pre-canon record
+    collapses only when its projections are identical; when the thread copy lacks the commit
+    anchors the two copies project differently, and the refresh changed-check treats the fresh
+    canonical projection as unchanged while it matches any prior projection for that database id —
+    so a pure format/metadata change keeps prior curated cases, while a genuine content
+    change (a comment added/removed/edited, re-anchored, or re-resolved) still
+    flips the digest. Deletion is carried by the set: a removed record's
+    ``database_id`` simply disappears (no fallback hash).
     """
-    return frozenset((e.database_id, e.body_sha256) for e in doc.evidence)
+    return frozenset(
+        (e.database_id, _evidence_projection_hash(e.model_dump(mode="json")))
+        for e in doc.evidence
+    )
 
 
 def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, str]]:
+    """The projection signature computed over a raw import document's dict.
+
+    Shares the per-record hash helper with :func:`_evidence_signature_from_doc`
+    so the persisted-file path and the typed-doc path always agree; a record
+    appearing twice for one ``database_id`` (the pre-canonicalization duplicate)
+    may linger as two format-only projections when the thread copy lacks
+    the commit anchors, and a deleted record simply disappears from the set.
+    """
     return frozenset(
-        (int(e["database_id"]), str(e.get("body_sha256"))) for e in raw.get("evidence", [])
+        (int(e["database_id"]), _evidence_projection_hash(e))
+        for e in raw.get("evidence", [])
     )
 
 
@@ -994,6 +1053,47 @@ def _task_input_signature_from_raw(raw: dict[str, Any]) -> str | None:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
+def _referenced_evidence_id(sid: str) -> int:
+    """The trailing database id of one canonical ``github:<kind>:<id>`` source_id.
+
+    Fail-closed, mirroring the schema's ``_canonical_source_id`` validator: a
+    non-canonical source_id (a hand-edited or externally-mutated curation) is
+    corrupt prior state and is never silently dropped from the referenced-
+    evidence set, or the per-case stale gate would fail open and let
+    referenced evidence change without the case flipping stale.
+    """
+    if not schema._SOURCE_ID_RE.fullmatch(sid):
+        raise storage.WorkspaceCorrupt(
+            f"curation references non-canonical source_id {sid!r}"
+        )
+    return int(sid.rsplit(":", 1)[-1])
+
+
+def _referenced_evidence_ids(curation: dict[str, Any]) -> set[int]:
+    """The physical database_ids a curation references via its source_ids.
+
+    Derives each id from ``findings[].provenance.source_ids`` and
+    ``exclusions[].source_id`` by parsing the canonical
+    ``github:<kind>:<id>`` form to the trailing int. Used by the per-case
+    stale decision so a case stales only when evidence *it references*
+    changed; an unreferenced record never flips it. A non-canonical
+    reference raises :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    (see :func:`_referenced_evidence_id`) instead of being skipped.
+    """
+    ids: set[int] = set()
+    for finding in curation.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        provenance = finding.get("provenance") or {}
+        for sid in provenance.get("source_ids", []):
+            ids.add(_referenced_evidence_id(str(sid)))
+    for exclusion in curation.get("exclusions", []):
+        if not isinstance(exclusion, dict):
+            continue
+        ids.add(_referenced_evidence_id(str(exclusion.get("source_id") or "")))
+    return ids
+
+
 def _case_materialize(
     doc: schema.ImportDocument,
     number: int,
@@ -1005,16 +1105,31 @@ def _case_materialize(
     repo_slug: str = "",
     origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
-    changed: bool = False,
+    prior_pinned: dict[str, str] | None = None,
+    prior_policy: dict[str, str] | None = None,
+    changed_ids: set[int] | None = None,
+    task_input_changed: bool = False,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
     """One materialized case document per requested head.
 
     When *root*/origin are provided the case ``snapshot`` is frozen via
     :func:`daydream.benchmark.snapshot.freeze_one` (a ``ready|unreplayable``
     dict) and any produced bundle is returned in the second element for the
-    caller to stage atomically. When *changed* is True and a prior curated
-    case exists, its curation is carried over and flipped to ``stale`` with
-    attestation cleared — findings/exclusions are never overwritten by refresh.
+    caller to stage atomically. An existing ``final`` case resolves to the
+    pinned head from its prior ``snapshot.original_head_sha`` (head-immutable,
+    so a live head advance reproduces the identical ``case_id``); only a first
+    import with no prior ``final_pr_head`` pin uses the live
+    ``pull_request.head.sha``. When a prior curated case exists, its curation
+    is carried over; it is flipped to ``stale`` with attestation cleared iff
+    *task_input_changed* (PR-wide) or its own referenced evidence ids
+    intersect *changed_ids* (a referenced record changed or disappeared).
+    An unreferenced evidence change never stales it and an untouched PR keeps
+    it ready — findings/exclusions are never overwritten by refresh. A freeze
+    of an existing ``ready|stale`` case that comes back ``unreplayable`` (the
+    pinned head became unreachable after a force-push/rebased branch) raises
+    :class:`~daydream.git_ops.GitError` instead of writing an unreplayable
+    snapshot over the curated case — the refresh then fails like the sibling
+    fetch-failure path (rc != 0, last-good linkage kept).
     """
     pull_request = doc.pull_request
     base_sha = pull_request.base.sha
@@ -1022,7 +1137,15 @@ def _case_materialize(
     bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
-        head_sha = head_token if head_token != "final" else pull_request.head.sha
+        head_sha = head_token if head_token != "final" else None
+        if head_token == "final":
+            # head-immutable: an existing final_pr_head case resolves to its
+            # pinned commit; only a first import (no pin) uses the live head.
+            pinned = _pinned_head_sha(prior_policy, prior_pinned)
+            if pinned is not None:
+                head_sha = pinned
+            if head_sha is None:
+                head_sha = pull_request.head.sha
         if not head_sha or head_sha in seen:
             continue
         seen.add(head_sha)
@@ -1040,7 +1163,11 @@ def _case_materialize(
         if prior_curations and case_id in prior_curations:
             prior = prior_curations[case_id]
             curation = dict(prior)
-            if changed and prior.get("state") in ("ready", "stale"):
+            should_stale = task_input_changed or (
+                changed_ids is not None
+                and bool(_referenced_evidence_ids(prior) & changed_ids)
+            )
+            if should_stale and prior.get("state") in ("ready", "stale"):
                 curation["state"] = "stale"
                 curation["snapshot_attested"] = False
         if root is not None and origin_url is not None and base_sha and head_sha:
@@ -1057,6 +1184,22 @@ def _case_materialize(
             )
             if snapshot_doc.get("status") == "ready" and bundle_bytes is not None:
                 bundle_drops.append((snapshot_doc["bundle_file"], bundle_bytes))
+            elif snapshot_doc.get("status") != "ready" and prior_curations and (
+                prior_curations.get(case_id) or {}
+            ).get("state") in ("ready", "stale"):
+                # A pinned head that became unreachable (force-push/rebased
+                # branch) makes the re-freeze of a previously curated case
+                # unreplayable. Never overwrite the curated case's snapshot
+                # with an unreplayable dict: that would orphan its staged
+                # bundle and silently flip the case out of ready while
+                # _import_one_pr still returns 0. Fail the refresh like the
+                # sibling fetch-failure path (rc 1, last-good linkage kept)
+                # so the curated state and its bundle stay intact and indexed.
+                error = snapshot_doc.get("error") or {}
+                raise git_ops.GitError(
+                    f"PR {number} freeze of curated case {case_id} is unreplayable "
+                    f"({error.get('reason')}): {error.get('detail')}"
+                )
         else:
             snapshot_doc = {
                 "status": "imported",
@@ -1109,6 +1252,7 @@ def _stamp_fetched(
             "import_file": import_file,
             "import_sha256": import_sha256,
             "error": None,
+            "latest_error": None,  # a successful import/refresh clears the prior failed attempt
             "requested_heads": requested_heads,
             "case_ids": case_ids,
         },
@@ -1127,7 +1271,28 @@ def _stamp_fetched(
 
 
 def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) -> None:
-    schema.validate_pr_transition(_pending_pr_state(raw, number), "fetch_failed")
+    prior_state = _pending_pr_state(raw, number)
+    if prior_state == "fetched":
+        # Non-destructive failed refresh (issue #813): a fetched PR keeps its
+        # last-good linkage (import_file/import_sha256/requested_heads/case_ids)
+        # and records the failed attempt separately in latest_error — it never
+        # flips to bare fetch_failed, which would orphan its curated cases.
+        entry = _manifest_entry(raw, number) or {}
+        _ledger_replace(
+            raw,
+            {
+                "number": number,
+                "import_state": "fetched",
+                "import_file": entry.get("import_file"),
+                "import_sha256": entry.get("import_sha256"),
+                "error": None,
+                "latest_error": {"code": code, "message": message},
+                "requested_heads": entry.get("requested_heads", []),
+                "case_ids": entry.get("case_ids", []),
+            },
+        )
+        return
+    schema.validate_pr_transition(prior_state, "fetch_failed")
     _ledger_replace(
         raw,
         {
@@ -1136,6 +1301,7 @@ def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) ->
             "import_file": None,
             "import_sha256": None,
             "error": {"code": code, "message": message},
+            "latest_error": None,
             "requested_heads": [],
             "case_ids": [],
         },
@@ -1171,11 +1337,14 @@ def _manifest_bytes(raw: dict[str, Any]) -> bytes:
 def _stage_fetch_failure(
     root: Path, raw: dict[str, Any], number: int, code: str, message: str
 ) -> None:
-    """Atomically flip a PR's ledger entry to ``fetch_failed``.
+    """Atomically stage a failed fetch on a PR's ledger entry.
 
-    Stages only ``benchmark.yaml`` through one :class:`Transaction`; a failed
-    fetch materializes no import/case file (the whole before/after ledger state
-    is atomic).
+    A first-import failure flips the entry to ``fetch_failed`` with an exact
+    error; a failed refresh on an already-``fetched`` PR preserves its last-good
+    linkage and records the attempt in ``latest_error`` instead. Stages only
+    ``benchmark.yaml`` through one :class:`Transaction`; a failed fetch
+    materializes no import/case file (the whole before/after ledger state is
+    atomic).
     """
     _stages_failed(raw, number, code, message)
     with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
@@ -1190,22 +1359,34 @@ def _prior_import_state(
     str | None,
     dict[str, dict[str, Any]],
     str,
+    dict[str, str],
+    dict[str, str],
+    list[str],
 ]:
-    """The prior evidence signature, task-input signature, curations, and import path.
+    """Prior import signatures, curations, path, pins, policies, and heads.
 
-    A missing prior state (no ``fetched`` ledger entry, or no persisted
-    import/case to read) yields ``None`` for both signatures and empty
-    curations — the normal first-run path. A *present-but-corrupt* prior
-    import or curation file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    Returns the prior evidence signature, task-input signature, per-case
+    curations, the import path, each prior case's pinned
+    ``snapshot.original_head_sha`` (``prior_pinned``), each prior case's
+    ``snapshot.policy`` (``prior_policy``), and the prior ledger entry's
+    ``requested_heads``. A missing prior state (no ``fetched`` ledger entry, or
+    no persisted import/case to read) yields ``None`` for both signatures,
+    empty curations/pins/policies/heads, and the default import path — the
+    normal first-run path. A *present-but-corrupt* prior import or curation
+    file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
     from the strict loaders propagates so a refresh fails before any network
     fetch or mutation, never silently healing corrupt prior state to
-    ``None``/``draft``.
+    ``None``/``draft``. A ``ready``/``stale`` prior case missing its pinned
+    head is also corrupt prior state — never a silent live-head default.
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
     prior_sig: frozenset[tuple[int, str]] | None = None
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
+    prior_pinned: dict[str, str] = {}
+    prior_policy: dict[str, str] = {}
+    prior_requested_heads: list[str] = list(existing.get("requested_heads", [])) if existing else []
     if existing is not None and existing.get("import_state") == "fetched":
         prior_import_file = existing.get("import_file")
         if not prior_import_file:
@@ -1225,12 +1406,59 @@ def _prior_import_state(
         prior_sig = _evidence_signature_from_raw(prior_raw)
         prior_task_sig = _task_input_signature_from_raw(prior_raw)
         for case_id in existing.get("case_ids", []):
-            cur = storage.load_yaml_strict(
+            case_raw = storage.load_yaml_strict(
                 storage.resolve_authoring_path(root, f"cases/{case_id}.yaml")
-            ).get("curation")
+            )
+            cur = case_raw.get("curation")
             if isinstance(cur, dict):
                 prior_curations[case_id] = cur
-    return prior_sig, prior_task_sig, prior_curations, import_file
+            snapshot = case_raw.get("snapshot") or {}
+            original_head_sha = snapshot.get("original_head_sha")
+            if (
+                isinstance(cur, dict)
+                and cur.get("state") in ("ready", "stale")
+                and not original_head_sha
+            ):
+                # A curated case must know which commit it was curated against;
+                # an absent pin makes head-immutable refresh impossible without
+                # silently re-anchoring to the live head.
+                raise storage.WorkspaceCorrupt(
+                    f"{root}: ready/stale case {case_id} is missing snapshot.original_head_sha"
+                )
+            if original_head_sha:
+                prior_pinned[case_id] = original_head_sha
+            policy = snapshot.get("policy")
+            if policy:
+                prior_policy[case_id] = policy
+    return (
+        prior_sig,
+        prior_task_sig,
+        prior_curations,
+        import_file,
+        prior_pinned,
+        prior_policy,
+        prior_requested_heads,
+    )
+
+
+def _pinned_head_sha(
+    prior_policy: dict[str, str] | None,
+    prior_pinned: dict[str, str] | None,
+) -> str | None:
+    """Return the pinned head sha for an existing ``final_pr_head`` case, if any.
+
+    Head-immutable task input: an existing ``final`` case resolves to the pinned
+    head from its prior ``snapshot.original_head_sha``, so a live head advance
+    neither re-anchors the case nor flips its task-input signature. Only a first
+    import with no ``final_pr_head`` pin uses the live head (caller falls back).
+    Shared by the materialize path and ``_import_one_pr`` so the pinning logic
+    and its ``final_pr_head`` magic string live in exactly one place.
+    """
+    if prior_policy and prior_pinned:
+        for prior_case_id, prior_pol in prior_policy.items():
+            if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
+                return prior_pinned[prior_case_id]
+    return None
 
 
 def _import_one_pr(
@@ -1244,29 +1472,77 @@ def _import_one_pr(
     origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_task_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
+    prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, \
+        prior_requested_heads = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
-        # stale only on an evidence change OR a task-input-contract change
-        # (the title/body/base/head a reviewer was shown); a metadata-only change
-        # updates checksums without staling gold.
-        changed = (
+        # Head-immutable task input: an existing final_pr_head case pins the
+        # refreshed doc's head to its snapshot.original_head_sha, so a live
+        # head advance neither re-anchors the case nor flips the task-input
+        # signature of the pinned case; only a first import (no pin) keeps the
+        # live pull_request.head.sha.
+        pinned = _pinned_head_sha(prior_policy, prior_pinned)
+        if pinned is not None:
+            doc.pull_request.head.sha = pinned
+        # Two independent stale signals: the per-case referenced-evidence arm
+        # (database_ids whose projection hash changed or disappeared — runs on
+        # refresh AND plain re-import) and the PR-wide task-input arm (the
+        # title/body/base/head a reviewer was shown — refresh only). A
+        # metadata-only change updates checksums without staling.
+        task_input_changed = (
             refresh
-            and prior_sig is not None
-            and (
-                prior_sig != _evidence_signature_from_doc(doc)
-                or (
-                    prior_task_sig is not None
-                    and prior_task_sig != _task_input_signature_from_doc(doc)
-                )
-            )
+            and prior_task_sig is not None
+            and prior_task_sig != _task_input_signature_from_doc(doc)
         )
+        changed_ids: set[int] | None = None
+        # The referenced-evidence arm runs for ANY fetched PR, refresh or plain
+        # re-import: a curated case whose own referenced evidence changed or
+        # disappeared must stale even on a non-refresh import (the refresh
+        # semantics cannot be bypassed). Only the PR-wide task-input arm stays
+        # gated on *refresh* (Assumption 3: a plain re-import never stales on
+        # title/body/base/head). A first import (no prior_sig) computes nothing.
+        if prior_sig is not None:
+            # Per-id projection-hash SETS instead of a dict() collapse: two
+            # records for one database_id (the pre-canonicalization duplicate —
+            # a REST inline copy and a GraphQL thread copy under the same id)
+            # carry different projection hashes, and which tuple dict() keeps
+            # depends on frozenset iteration order, which hash randomization
+            # makes nondeterministic across processes. Comparing per-id hash
+            # sets is order-independent. A database id counts as changed only
+            # when its fresh canonical projection is NOT covered by the prior
+            # projections: a genuine content/anchor/resolution edit, an
+            # addition, or a deletion. The pre-canonical thread copy lacks the
+            # commit anchors only REST exposes, so it is a pure format artifact
+            # — the fresh REST-derived projection still matches a prior
+            # projection and the first post-format refresh must NOT stale
+            # curated gold. When every id is unique on both sides this reduces
+            # exactly to the old single-hash comparison.
+            prior_by_id: dict[int, set[str]] = {}
+            for db_id, proj_hash in prior_sig:
+                prior_by_id.setdefault(db_id, set()).add(proj_hash)
+            new_by_id: dict[int, set[str]] = {}
+            for db_id, proj_hash in _evidence_signature_from_doc(doc):
+                new_by_id.setdefault(db_id, set()).add(proj_hash)
+            changed_ids = {
+                db_id
+                for db_id in set(prior_by_id) | set(new_by_id)
+                if db_id not in new_by_id
+                or not (new_by_id[db_id] <= prior_by_id.get(db_id, set()))
+            }
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+        # Refresh/re-import never orphans a previously pinned case: materialize
+        # the union of the prior ledger heads and the newly-requested heads so
+        # _stamp_fetched's cases[] rewrite keeps every curated case indexed.
+        materialize_heads = requested_heads
+        if prior_requested_heads:
+            materialize_heads = list(dict.fromkeys([*prior_requested_heads, *requested_heads]))
         cases, bundle_rels = _case_materialize(
-            doc, number, requested_heads, import_file, import_sha256,
+            doc, number, materialize_heads, import_file, import_sha256,
             root=root, repo_slug=repo, origin_url=origin_url,
-            prior_curations=prior_curations, changed=changed,
+            prior_curations=prior_curations,
+            prior_pinned=prior_pinned, prior_policy=prior_policy,
+            changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
             tx.stage(import_file, import_bytes)
@@ -1279,7 +1555,7 @@ def _import_one_pr(
                 number,
                 import_file,
                 import_sha256,
-                requested_heads,
+                materialize_heads,
                 [c[0] for c in cases],
             )
             tx.stage("benchmark.yaml", _manifest_bytes(raw))
