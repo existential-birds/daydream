@@ -71,3 +71,42 @@ def test_build_candidate_findings_maps_and_skips():
     )
     assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in findings]
     assert findings[1]["candidate_id"] != findings[2]["candidate_id"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2: candidate artifact assembly + caps + atomic write
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path):
+    from daydream.benchmark.harbor import candidate
+    from daydream.benchmark.harbor import verifier_core as vc
+
+    case_id = "case-abc123def456"
+    over = [{"title": f"t{i}", "body": "b", "severity": "low",
+             "path": "src/f.py", "start_line": i, "end_line": i}
+            for i in range(1, vc.MAX_CANDIDATE_FINDINGS + 2)]
+    with pytest.raises(candidate.CandidateError) as too_many:
+        candidate.build_candidate_artifact(case_id, over)
+    assert too_many.value.kind == "over_limit"
+
+    dest = tmp_path / "logs" / "artifacts" / "review.json"
+    art = candidate.build_candidate_artifact(case_id, [])
+    assert art == {"schema_version": 1, "case_id": case_id,
+                   "base_ref": "base", "head_ref": "head", "findings": []}
+    candidate.write_candidate_artifact_atomic(dest, art)
+    loaded = json.loads(dest.read_text())
+    assert loaded == art and loaded["findings"] == []      # clean review round-trips
+    assert vc.validate_candidate_artifact(loaded) == []     # schema-valid
+    # no stray temp file is observable at the destination
+    assert list(dest.parent.glob("review.json*")) == [dest]
+
+
+def test_artifact_write_failure_raises(tmp_path):
+    from daydream.benchmark.harbor import candidate
+
+    dest = tmp_path / "adir"                                # a directory -> replace fails
+    dest.mkdir()
+    with pytest.raises(candidate.CandidateError) as write_fail:
+        candidate.write_candidate_artifact_atomic(dest, {"schema_version": 1, "findings": []})
+    assert write_fail.value.kind == "write_failure"

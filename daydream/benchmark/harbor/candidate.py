@@ -106,3 +106,56 @@ def build_candidate_findings(items: list[dict], *, case_id: str) -> list[dict]:
         entry["candidate_id"] = vc.derive_candidate_id(case_id, entry, ordinal)
         findings.append(entry)
     return findings
+
+
+def build_candidate_artifact(case_id: str, findings: list[dict]) -> dict:
+    """Assemble the strict §9 candidate artifact, enforcing the caps fail-closed.
+
+    Returns ``{"schema_version": 1, "case_id": case_id, "base_ref": "base",
+    "head_ref": "head", "findings": findings}`` -- an empty ``findings`` list
+    is a clean review. ``base_ref``/``head_ref`` are hardcoded ``"base"``/``"head"``
+    per the bound-task contract. Exceeding the 100-finding cap or the 1 MiB
+    serialized-artifact cap raises ``CandidateError(kind="over_limit")`` --
+    never silently truncates to fit.
+    """
+    artifact = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "base_ref": "base",
+        "head_ref": "head",
+        "findings": findings,
+    }
+    if len(findings) > vc.MAX_CANDIDATE_FINDINGS:
+        raise CandidateError(
+            f"candidate artifact exceeds {vc.MAX_CANDIDATE_FINDINGS} findings "
+            f"({len(findings)})",
+            kind="over_limit",
+        )
+    if len(json.dumps(artifact).encode("utf-8")) > vc.MAX_ARTIFACT_BYTES:
+        raise CandidateError(
+            f"candidate artifact exceeds {vc.MAX_ARTIFACT_BYTES} bytes",
+            kind="over_limit",
+        )
+    return artifact
+
+
+def write_candidate_artifact_atomic(dest, artifact: dict) -> None:
+    """Write *artifact* to *dest* atomically (temp + rename).
+
+    Writes to a sibling ``.tmp-<uuid>`` file in the destination directory then
+    ``os.replace``s it into place, so a reader sees either the prior complete
+    artifact or the complete new artifact -- never a torn write. Any ``OSError``
+    raises ``CandidateError(kind="write_failure")``; a failure is never
+    silently discarded.
+    """
+    dest = Path(dest)
+    payload = json.dumps(artifact).encode("utf-8")
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.parent / (dest.name + f".tmp-{uuid.uuid4().hex}")
+        tmp.write_bytes(payload)
+        os.replace(tmp, dest)
+    except OSError as exc:
+        raise CandidateError(
+            f"cannot write candidate artifact {dest}: {exc}", kind="write_failure"
+        ) from exc
