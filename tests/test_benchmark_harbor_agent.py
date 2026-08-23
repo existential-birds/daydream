@@ -166,3 +166,58 @@ def test_entrypoint_backend_fail_closed(monkeypatch):
     with pytest.raises(entrypoint.EntrypointError) as exc:
         entrypoint.require_supported_backend()
     assert "claude" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: entrypoint — publish candidate artifact + failure modes
+# ---------------------------------------------------------------------------
+
+
+def test_entrypoint_publish_failure_modes(tmp_path):
+    from daydream.benchmark.harbor import candidate, entrypoint
+
+    # missing merged output -> fail-closed, never a silent clean review
+    with pytest.raises(candidate.CandidateError) as missing:
+        entrypoint.publish_review(
+            repo_dir=tmp_path,
+            artifact_path=tmp_path / "review.json",
+            case_id="case-abc123def456",
+        )
+    assert missing.value.kind == "missing_merged"
+
+    # corrupt merged output (items not a list) -> fail-closed
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    (deep / "merged-items.json").write_text('{"items": "nope"}')
+    with pytest.raises(candidate.CandidateError) as corrupt:
+        entrypoint.publish_review(
+            repo_dir=tmp_path,
+            artifact_path=tmp_path / "review.json",
+            case_id="case-abc123def456",
+        )
+    assert corrupt.value.kind == "corrupt_merged"
+
+    # 101 parseable items -> artifact build raises over_limit
+    items = [
+        {"file": "src/f.py", "line": i, "description": f"d{i}",
+         "rationale": "r", "severity": "low", "confidence": "LOW"}
+        for i in range(1, 102)
+    ]
+    (deep / "merged-items.json").write_text(json.dumps({"items": items}))
+    with pytest.raises(candidate.CandidateError) as over:
+        entrypoint.publish_review(
+            repo_dir=tmp_path,
+            artifact_path=tmp_path / "review.json",
+            case_id="case-abc123def456",
+        )
+    assert over.value.kind == "over_limit"
+
+    # a clean review round-trips to a schema-valid empty artifact
+    (deep / "merged-items.json").write_text(json.dumps({"items": []}))
+    entrypoint.publish_review(
+        repo_dir=tmp_path,
+        artifact_path=tmp_path / "review.json",
+        case_id="case-abc123def456",
+    )
+    loaded = json.loads((tmp_path / "review.json").read_text())
+    assert loaded["findings"] == []
