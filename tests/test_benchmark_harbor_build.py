@@ -893,6 +893,21 @@ def test_staging_failure_preserves_prior_tree(tmp_path, fake_gh, monkeypatch):
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
 
+def test_leakage_scan_covers_task_toml_and_job_configs():
+    from daydream.benchmark.harbor import build
+
+    cases = {
+        "case-abcdef123456/task.toml": (
+            'schema_version = "1.4"\n# leak: ghp_abcdefghijklmnopqrstuv\n'
+        ),
+        "harbor-job.yaml": "jobs_dir: jobs\n# leak: https://user:pass@github.com/o/r\n",
+    }
+    with pytest.raises(build.CompileError) as rejected:
+        build.leakage_scan(cases, repository_slug="o/r")
+    assert "case-abcdef123456/task.toml" in str(rejected.value)
+    assert "harbor-job.yaml" in str(rejected.value)
+
+
 def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token():
     from daydream.benchmark.harbor import build
     from daydream.benchmark.harbor.build import CompileError

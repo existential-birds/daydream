@@ -492,18 +492,21 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     match of any rule raises :class:`CompileError` naming the file and matched
     token. Returns ``None`` when clean.
     """
+    violations: list[str] = []
     for rel, text in control_plane.items():
         scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
         rules = _TASK_SPEC_IDENTIFIER_RULES if rel.endswith("Task.md") else _LEAK_RULES
         hits: list[str] = []
         if repository_slug and repository_slug in scanned:
             hits.append(repository_slug)
-        for label, pattern in rules:
+        for _label, pattern in rules:
             m = pattern.search(scanned)
             if m is not None:
                 hits.append(m.group(0))
         if hits:
-            raise CompileError(f"{rel}: leakage tokens matched {hits!r}")
+            violations.append(f"{rel}: leakage tokens matched {hits!r}")
+    if violations:
+        raise CompileError("; ".join(violations))
     return None
 
 
