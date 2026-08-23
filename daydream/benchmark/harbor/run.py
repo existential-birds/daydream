@@ -174,6 +174,115 @@ def _compiled_lock_sha256(workspace: Path) -> str:
     return hashlib.sha256((workspace / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
 
 
+LEDGER_SUPPORTED_STATES = ("running", "complete", "cleanup_pending", "cleaned")
+LEDGER_SUPPORTED_MODES = ("oracle", "benchmark")
+LEDGER_SUPPORTED_BACKENDS = ("docker",)
+
+
+def _ledger_path(workspace: Path) -> Path:
+    return workspace / "runtime" / "harbor.json"
+
+
+def _load_ledger(workspace: Path) -> dict[str, Any]:
+    """Read ``runtime/harbor.json``; initialise a fresh ledger when absent.
+
+    A malformed existing entry (bad JSON / missing keys / unsupported backend /
+    environment ref without an exact ``image_id``) raises ``RunError`` —
+    corruption is never silently dropped or broadened.
+    """
+    path = _ledger_path(workspace)
+    if not path.is_file():
+        return {"schema_version": 1, "runs": []}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunError(f"malformed cleanup ledger at {path}: {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("schema_version") != 1:
+        raise RunError(f"unrecognised cleanup ledger schema at {path}")
+    runs = doc.get("runs")
+    if not isinstance(runs, list):
+        raise RunError(f"cleanup ledger at {path} is missing its runs list")
+    for run in runs:
+        _validate_ledger_entry(path, run)
+    return doc
+
+
+def _validate_ledger_entry(path: Path, run: Any) -> None:
+    if not isinstance(run, dict):
+        raise RunError(f"ledger {path} has a non-object run entry")
+    for key in ("run_id", "mode", "state", "compiled_lock_sha256", "job_dir"):
+        if key not in run:
+            raise RunError(f"ledger {path} run entry missing {key!r}")
+    if run.get("mode") not in LEDGER_SUPPORTED_MODES:
+        raise RunError(f"ledger {path} run entry has unsupported mode {run.get('mode')!r}")
+    if run.get("state") not in LEDGER_SUPPORTED_STATES:
+        raise RunError(f"ledger {path} run entry has unsupported state {run.get('state')!r}")
+    for env in run.get("environments") or []:
+        if not isinstance(env, dict):
+            raise RunError(f"ledger {path} run entry has a non-object environment")
+        if env.get("backend") not in LEDGER_SUPPORTED_BACKENDS:
+            raise RunError(
+                f"ledger {path} environment has unsupported backend {env.get('backend')!r}"
+            )
+        if not env.get("image_id"):
+            raise RunError(f"ledger {path} environment ref lacks an exact image_id")
+
+
+def _validate_job_dir(workspace: Path, job_dir: str) -> str:
+    """Reject a job dir that is not contained under ``<ws>/harbor/jobs/``."""
+    root = Path(job_dir).expanduser().resolve() if job_dir else Path(job_dir)
+    jobs_root = (workspace / "harbor" / "jobs").resolve()
+    if not root.is_absolute() or not root.is_relative_to(jobs_root):
+        raise RunError(f"run job dir must live under {jobs_root}, got {job_dir!r}")
+    return str(root)
+
+
+def ledger_append_running(
+    workspace: Path, *, run_id: str, compiled_lock_sha256: str, job_dir: str,
+    mode: str = "oracle",
+) -> None:
+    """Append a ``running`` entry for a unique job dir (block-before-spawn)."""
+    contained = _validate_job_dir(workspace, job_dir)
+    with storage.WorkspaceLock(workspace):
+        doc = _load_ledger(workspace)
+        entry = {
+            "run_id": run_id,
+            "mode": mode,
+            "state": "running",
+            "compiled_lock_sha256": compiled_lock_sha256,
+            "job_dir": contained,
+            "harbor_job_id": None,
+            "environments": [],
+            "error": None,
+        }
+        doc["runs"].append(entry)
+        storage.atomic_write_json(_ledger_path(workspace), doc, mode=0o600)
+
+
+def ledger_mark(
+    workspace: Path, run_id: str, *, state: str,
+    environments: list[dict[str, Any]] | None = None,
+    harbor_job_id: str | None = None, error: str | None = None,
+) -> None:
+    """Update an existing ledger entry's terminal state + optional fields."""
+    path = _ledger_path(workspace)
+    with storage.WorkspaceLock(workspace):
+        doc = _load_ledger(workspace)
+        for run in doc["runs"]:
+            if run.get("run_id") == run_id:
+                run["state"] = state
+                if environments is not None:
+                    run["environments"] = environments
+                    _validate_ledger_entry(path, run)
+                if harbor_job_id is not None:
+                    run["harbor_job_id"] = harbor_job_id
+                if error is not None:
+                    run["error"] = error
+                storage.atomic_write_json(path, doc, mode=0o600)
+                return
+        raise RunError(f"run {run_id!r} not found in cleanup ledger {path}")
+
+
 def _calibration_invalidation_inputs(env: dict[str, Any]) -> dict[str, Any]:
     """The calibration-receipt invalidation inputs for ``env`` (reused verbatim)."""
     sr = calibrate._load_judge_template()
