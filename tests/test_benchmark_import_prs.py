@@ -1413,3 +1413,43 @@ def test_graphql_review_threads_records_rate_limit_after_retries(tmp_path, fake_
     monkeypatch.setattr(gi_mod, "time", type("_T", (), {"sleep": staticmethod(lambda _s: None)})())
     with pytest.raises(gi_mod._ImportRateLimitError):
         gi_mod._graphql_review_threads(ws, "o/r", 101)
+
+
+def test_corrupt_prior_import_fails_before_network(tmp_path, fake_gh):
+    # Seed a fetched ledger entry + a corrupt prior import, then refresh.
+    from test_benchmark_curation import _seed_ready_case
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+
+    ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)     # valid prior state
+    imp = next((ws / "imports").glob("*.json"))
+    imp.write_bytes(b"{ corrupt json !!")                       # corrupt the persisted import
+    with pytest.raises(WorkspaceCorrupt):                       # must fail, not heal to None
+        gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
+
+
+def test_corrupt_prior_curation_fails_not_healed(tmp_path, fake_gh):
+    from test_benchmark_curation import _seed_ready_case
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+
+    ws, case_id, head = _seed_ready_case(tmp_path, fake_gh)
+    case = ws / "cases" / f"{case_id}.yaml"
+    case.write_bytes(b"{ corrupt yaml !!")   # corruption the strict loader rejects
+    with pytest.raises(WorkspaceCorrupt):
+        gi._prior_import_state(ws, load_yaml_strict(ws / "benchmark.yaml"), 101)
+
+
+def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
+    # A never-imported PR (no ledger fetch) must not fail on prior-state discovery.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    prior_sig, prior_task_sig, curations, _ = gi._prior_import_state(ws, raw, 202)
+    assert prior_sig is None and prior_task_sig is None and curations == {}

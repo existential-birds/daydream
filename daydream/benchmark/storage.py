@@ -586,6 +586,20 @@ def _resolve_target(root: Path, target: str | Path) -> str:
     return _resolve_cached(str(root_r), str(target))
 
 
+def resolve_authoring_path(root: Path, rel: str | Path) -> Path:
+    """Resolve an authoring path (case/import/bundle) contained in ``root``.
+
+    Stricter than :func:`_resolve_target` (which keeps serving the transaction
+    journal): any *absolute* authoring path is a containment violation, even
+    one resolving inside ``root``. ``..``, symlink-escape, and outside-root
+    inputs are rejected by :func:`_resolve_target` and surface as
+    :class:`WorkspaceCorrupt` naming the path.
+    """
+    if Path(rel).is_absolute():
+        raise WorkspaceCorrupt(f"{root}: authoring path must be relative: {rel!r}")
+    return root / _resolve_target(root, rel)
+
+
 # ---------------------------------------------------------------------------
 # startup recovery + orphan rules
 # ---------------------------------------------------------------------------
@@ -869,7 +883,7 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
 
 
 def _apply_orphan_rule(root: Path, indexed: set[str], on_disk: set[Path]) -> None:
-    indexed_norm = {p.replace(os.sep, "/").lstrip("/") for p in indexed}
+    indexed_norm = {p.replace(os.sep, "/") for p in indexed}
     disk_rel: set[str] = set()
     for item in on_disk:
         p = Path(item)

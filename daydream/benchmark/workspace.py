@@ -12,16 +12,22 @@ failures map to the documented exit codes.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, TypeVar
 from uuid import uuid4
 
 import yaml
+from pydantic import BaseModel
 
+from daydream.benchmark import schema
 from daydream.benchmark.schema import (
     BenchmarkManifest,
+    CaseDocument,
     CaseIndexEntry,
+    ImportDocument,
     PreflightLedger,
     Privacy,
     PullRequestEntry,
@@ -37,10 +43,11 @@ from daydream.benchmark.storage import (
     load_json_strict,
     load_yaml_strict,
     recover_startup,
+    resolve_authoring_path,
     sha256_file,
 )
 
-_SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache", "harbor")
+_SUBDIRS = ("imports", "cases", "snapshots", "transactions", "runtime", "cache")
 
 _PRIVACY_CLASSIFICATION = "confidential"
 
@@ -204,7 +211,7 @@ def workspace_status(root: Path) -> WorkspaceStatus:
             manifest = BenchmarkManifest.model_validate(raw)
         except Exception as exc:
             raise WorkspaceCorrupt(f"{root}: invalid benchmark.yaml: {exc}") from exc
-        docs = _load_case_docs(root, manifest)
+        docs = load_case_documents(root, manifest)
         state, resolved = _derived_state(root, manifest, docs)
         case_snapshots = _case_snapshot_summaries(root, manifest, docs)
     return WorkspaceStatus(
@@ -261,12 +268,13 @@ def validate_workspace(root: Path) -> tuple[int, str]:
                 f"corrupt: invalid benchmark.yaml ({exc})",
             )
 
-        # Orphan + missing-indexed-file rule over the case/import set.
+        # Orphan + missing-indexed-file rule over the case/import/bundle set.
         try:
+            docs = load_case_documents(root, manifest)
             recover_startup(
                 root,
-                indexed=_case_index_paths(manifest),
-                on_disk=_scan_case_files(root),
+                indexed=_case_index_paths(manifest, docs),
+                on_disk=_scan_authoring_files(root),
             )
         except WorkspaceCorrupt as exc:
             return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
@@ -275,7 +283,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         # strictly and verifying import checksums (below) surfaces a
         # present-but-corrupt case as ``1`` rather than silently ``draft``.
         try:
-            state, resolved = _derived_state(root, manifest)
+            state, resolved = _derived_state(root, manifest, docs)
         except WorkspaceCorrupt as exc:
             return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
 
@@ -290,47 +298,105 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 
 
 def _derived_state(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
 ) -> tuple[str, bool]:
     """Shared (workspace state, identity-resolved) derivation for status+validate.
 
-    Loading each indexed case document with the strict loader and verifying
-    each fetched import's on-disk sha256 plus each ``ready`` snapshot's bundle
-    sha256 keeps the two read-only call paths on one rule set, so a
+    Loading each indexed case document with the shared model-gated loader,
+    resolving every indexed authoring file exactly once, and verifying each
+    fetched import's on-disk sha256 plus each ``ready`` snapshot's bundle
+    sha256 keeps the two read-only call paths on one rule, so a
     state/resolution rule can't diverge between them. An unreadable/invalid
     case or a checksum mismatch surfaces as :class:`WorkspaceCorrupt`.
     """
     if docs is None:
-        docs = _load_case_docs(root, manifest)
+        docs = load_case_documents(root, manifest)
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
         pull_requests=pr_dicts,
         cases=_case_curation_states(root, manifest, docs),
     )
-    _verify_import_checksums(root, manifest)
-    _verify_snapshot_checksums(root, manifest, docs)
+    # Model-validate every fetched import exactly once per call; the checksum
+    # and cross-document verifiers share this set instead of each re-reading
+    # and re-model-validating the same documents. The authoring index is
+    # likewise resolved (and existence-checked) exactly once per call, shared
+    # by the checksum + duplicate-inode verifiers instead of each verifier
+    # re-resolving the same files.
+    imports = _import_documents(root, manifest)
+    paths = _resolved_authoring_paths(root, manifest, docs)
+    _verify_import_checksums(root, manifest, paths)
+    _verify_snapshot_checksums(root, manifest, docs, paths)
+    _verify_cross_document(root, manifest, docs, imports=imports)
+    _verify_duplicate_inodes(root, paths)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
 
 
-def _load_case_docs(root: Path, manifest: BenchmarkManifest) -> dict[str, dict]:
-    """Load every indexed case document strictly, once, keyed by ``case_file``.
+def load_case_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, CaseDocument]:
+    """Load every indexed case document as a strict ``CaseDocument`` model.
 
-    ``_derived_state`` / ``_case_curation_states`` / ``_case_snapshot_summaries``
-    all need the same per-case YAML. Loading each file here once and sharing
-    the mapping avoids re-reading every case 2-3x per ``status``/``validate``
-    call. The strict loader is used, so an unreadable/invalid case surfaces as
-    :class:`WorkspaceCorrupt` (storage's invariant: a corrupt file is an error,
-    never defaulted).
+    Shared by the validate/status read path and the ``harbor`` compile path,
+    keyed by ``case_file``. Each case file is resolved through
+    :func:`resolve_authoring_path` (containment enforced) and validated with
+    ``CaseDocument.model_validate`` after the persisted ``gold_mode`` audit
+    field is stripped via :func:`schema._schema_ready` — a present-but-corrupt
+    case raises :class:`WorkspaceCorrupt` naming the ``case_file``, never a
+    defaulted/skipped read.
     """
-    docs: dict[str, dict] = {}
+    docs: dict[str, CaseDocument] = {}
     for case in manifest.cases:
-        docs[case.case_file] = load_yaml_strict(root / case.case_file)
+        docs[case.case_file] = _load_authoring_document(
+            root,
+            case.case_file,
+            what="case",
+            loader=load_yaml_strict,
+            model=CaseDocument,
+            preprocess=schema._schema_ready,
+        )
     return docs
 
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
+
+
+def _load_authoring_document(
+    root: Path,
+    rel: str,
+    *,
+    what: str,
+    loader: Callable[[Path], dict[str, Any]],
+    model: type[_ModelT],
+    preprocess: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+) -> _ModelT:
+    """Resolve one authoring document and model-gate it through the strict loader.
+
+    The single definition of the resolve -> strict-load -> model-validate ->
+    wrap-in-:class:`WorkspaceCorrupt` block shared by the case and import
+    authoring loaders: resolution through :func:`resolve_authoring_path`, the
+    strict ``loader``, then ``model.model_validate`` (with an optional
+    ``preprocess`` of the raw dict, e.g. :func:`schema._schema_ready`). A
+    present-but-invalid document raises :class:`WorkspaceCorrupt` naming only
+    ``what`` + the authoring file -- the diagnostic never embeds the pydantic
+    error, whose repr embeds the input document (PR bodies/evidence) that the
+    CLI's no-disclosure contract keeps off stderr.
+    """
+    path = resolve_authoring_path(root, rel)
+    try:
+        raw = loader(path)
+        if preprocess is not None:
+            raw = preprocess(raw)
+        return model.model_validate(raw)
+    except Exception as exc:
+        raise WorkspaceCorrupt(
+            f"{root}: {what} {rel} is not a valid {what} document"
+        ) from exc
+
+
 def _verify_snapshot_checksums(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+    root: Path,
+    manifest: BenchmarkManifest,
+    docs: dict[str, CaseDocument],
+    paths: dict[str, Path],
 ) -> None:
     """Verify each indexed ``ready`` snapshot's bundle file + sha256 digest.
 
@@ -339,27 +405,26 @@ def _verify_snapshot_checksums(
     never curatable staleness, and never mutates the case document or ledger.
 
     A ``ready`` snapshot with no ``bundle_file``/``bundle_sha256`` is itself
-    structurally invalid and reported corrupt.
+    structurally invalid and reported corrupt. ``paths`` is the shared
+    single-resolution pass (:func:`_resolved_authoring_paths`); a ``ready``
+    bundle absent from it is a missing file.
     """
-    if docs is None:
-        docs = _load_case_docs(root, manifest)
     for case in manifest.cases:
-        raw = docs[case.case_file]
-        snapshot = raw.get("snapshot")
-        if not isinstance(snapshot, dict) or snapshot.get("status") != "ready":
+        snapshot = docs[case.case_file].snapshot
+        if not isinstance(snapshot, schema.SnapshotReady):
             continue
-        bundle_rel = snapshot.get("bundle_file")
-        expected = snapshot.get("bundle_sha256")
+        bundle_rel = snapshot.bundle_file
+        expected = snapshot.bundle_sha256
         if not bundle_rel or not expected:
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} ready snapshot missing bundle_file/bundle_sha256"
             )
-        bundle_path = root / bundle_rel
-        actual = sha256_file(bundle_path) if bundle_path.exists() else ""
-        if not bundle_path.exists():
+        bundle_path = paths.get(bundle_rel)
+        if bundle_path is None:
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} snapshot bundle missing: {bundle_rel}"
             )
+        actual = sha256_file(bundle_path)
         if actual != expected:
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} snapshot bundle checksum mismatch "
@@ -367,16 +432,61 @@ def _verify_snapshot_checksums(
             )
 
 
-def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
+def _load_import_document(root: Path, import_file: str) -> ImportDocument:
+    """Model-gate one fetched import through the shared strict loader.
+
+    The single definition of the import load+validate block shared by the
+    checksum and cross-document verifiers (see :func:`_load_authoring_document`):
+    resolution through :func:`resolve_authoring_path` plus
+    ``ImportDocument.model_validate`` on the strict JSON read. A
+    present-but-invalid import raises :class:`WorkspaceCorrupt` naming only
+    the import file -- the diagnostic never embeds the document body (the
+    CLI's no-disclosure contract).
+    """
+    return _load_authoring_document(
+        root,
+        import_file,
+        what="import",
+        loader=load_json_strict,
+        model=ImportDocument,
+    )
+
+
+def _import_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, ImportDocument]:
+    """Load every fetched import once through the shared model gate.
+
+    ``_derived_state`` precomputes the validated set so the checksum and
+    cross-document verifiers consume the same models instead of each
+    re-reading and re-model-validating every fetched import per call.
+    """
+    return {
+        pr.import_file: _load_import_document(root, pr.import_file)
+        for pr in manifest.pull_requests
+        if pr.import_state == "fetched" and pr.import_file
+    }
+
+
+def _verify_import_checksums(
+    root: Path,
+    manifest: BenchmarkManifest,
+    paths: dict[str, Path],
+) -> None:
     """Verify each fetched import's on-disk sha256 against ``import_sha256``.
 
     A missing import file or a checksum mismatch is a :class:`WorkspaceCorrupt`
-    case — it is never folded into an incomplete/curating result.
+    failure — it is never folded into an incomplete/curating result. Each
+    import is model-validated exactly once per call by :func:`_import_documents`
+    before the verifiers run (see :func:`_derived_state`), and ``paths`` is
+    the shared single-resolution pass (:func:`_resolved_authoring_paths`);
+    an import absent from it is a missing file.
     """
     for pr in manifest.pull_requests:
         if pr.import_state != "fetched" or pr.import_file is None or pr.import_sha256 is None:
             continue
-        actual = sha256_file(root / pr.import_file)
+        path = paths.get(pr.import_file)
+        if path is None:
+            raise WorkspaceCorrupt(f"{root}: import {pr.import_file} is missing on disk")
+        actual = sha256_file(path)
         if actual != pr.import_sha256:
             raise WorkspaceCorrupt(
                 f"{root}: import {pr.import_file} checksum mismatch "
@@ -384,71 +494,205 @@ def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
             )
 
 
-def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
-    return {c.case_file for c in manifest.cases}
+def _verify_cross_document(
+    root: Path,
+    manifest: BenchmarkManifest,
+    docs: dict[str, CaseDocument],
+    imports: dict[str, ImportDocument] | None = None,
+) -> None:
+    """Verify every cross-document identity link and exact index membership.
+
+    Each ``cases[]`` row must reference exactly ``cases/<case_id>.yaml`` and
+    agree with its case document's ``pull_request.number``, and its PR must be
+    present in the ``pull_requests[]`` ledger. Every case_id a ledger entry
+    claims must be backed by an indexed ``cases[]`` row naming the same PR —
+    the reverse (every indexed case covered by ``case_ids``) is not required,
+    because a fetched->fetched narrower re-import (shrink) rewrites the
+    ledger's ``case_ids`` to the newly requested heads while the previously
+    imported case rows stay indexed, so the index legitimately outgrows the
+    claim. Each fetched import document must name the same PR number and
+    repository as its ledger entry. Any mismatch is
+    :class:`WorkspaceCorrupt` — never a logged skip.
+    """
+    ledger = {pr.number: pr for pr in manifest.pull_requests}
+    for case in manifest.cases:
+        exact = f"cases/{case.case_id}.yaml"
+        if case.case_file != exact:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} case_file {case.case_file!r} is not the "
+                f"exact index path {exact!r}"
+            )
+        doc = docs[case.case_file]
+        if doc.pull_request.number != case.pr_number:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} pull_request.number {doc.pull_request.number} "
+                f"mismatches cases[] pr_number {case.pr_number}"
+            )
+        if case.pr_number not in ledger:
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} PR {case.pr_number} is absent from "
+                f"the pull_requests ledger"
+            )
+    indexed_cases = {case.case_id: case for case in manifest.cases}
+    for pr in manifest.pull_requests:
+        for case_id in pr.case_ids:
+            row = indexed_cases.get(case_id)
+            if row is None or row.pr_number != pr.number:
+                raise WorkspaceCorrupt(
+                    f"{root}: ledger PR {pr.number} case_ids {pr.case_ids!r} claims "
+                    f"case {case_id} with no matching indexed cases[] row"
+                )
+        if pr.import_state != "fetched" or pr.import_file is None:
+            continue
+        imp = (
+            imports[pr.import_file]
+            if imports is not None and pr.import_file in imports
+            else _load_import_document(root, pr.import_file)
+        )
+        if imp.pull_request.number != pr.number:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} pull_request.number "
+                f"{imp.pull_request.number} mismatches ledger PR {pr.number}"
+            )
+        if imp.repository.name_with_owner != manifest.source.repository:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} repository "
+                f"{imp.repository.name_with_owner!r} mismatches manifest source "
+                f"{manifest.source.repository!r}"
+            )
+
+
+def _case_index_paths(manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> set[str]:
+    """Every authoring file the workspace index owns, across all three trees.
+
+    The manifest index covers each indexed case document **plus** every
+    ``fetched`` ledger import file **plus** every ``ready`` snapshot bundle
+    referenced by the model-validated case docs. Orphan detection then spans
+    ``cases/``, ``imports/``, and ``snapshots/``, so an unindexed import or
+    bundle — and a referenced-but-missing one — surfaces as
+    :class:`WorkspaceCorrupt` instead of being silently adopted or reported
+    ``incomplete``.
+    """
+    paths = {c.case_file for c in manifest.cases}
+    for pr in manifest.pull_requests:
+        if pr.import_state == "fetched" and pr.import_file:
+            paths.add(pr.import_file)
+    for case in manifest.cases:
+        doc = docs[case.case_file]
+        if doc.snapshot.status == "ready" and doc.snapshot.bundle_file:
+            paths.add(doc.snapshot.bundle_file)
+    return paths
+
+
+def _resolved_authoring_paths(
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
+) -> dict[str, Path]:
+    """Resolve every indexed authoring file exactly once, omitting missing ones.
+
+    One :func:`resolve_authoring_path` + existence check per indexed rel,
+    shared by the checksum and duplicate-inode verifiers so each
+    validate/status call makes a single resolve+stat pass over the index
+    instead of one per verifier. Missing files never enter the map — the
+    checksum verifiers report them as corrupt (a missing import/bundle is
+    :class:`WorkspaceCorrupt`), and the inode verifier only collides files
+    that actually exist.
+    """
+    paths: dict[str, Path] = {}
+    for rel in _case_index_paths(manifest, docs):
+        path = resolve_authoring_path(root, rel)
+        if path.exists():
+            paths[rel] = path
+    return paths
+
+
+def _verify_duplicate_inodes(root: Path, paths: dict[str, Path]) -> None:
+    """Reject two distinct indexed authoring files sharing one ``(st_dev, st_ino)``.
+
+    A hard link (or any duplicate-inode surprise) between two differently-
+    named indexed authoring files is corruption: ``Path.resolve()`` cannot
+    distinguish the names (both resolve inside ``root``), so the batch inode
+    cross-check across every resolved indexed authoring file is the enforcement
+    point (Task 0 spike 4). ``paths`` is the shared single-resolution pass
+    (:func:`_resolved_authoring_paths`): missing files are already omitted
+    there (they are corruption via the orphan rule / checksum gates), so only
+    files that actually exist are collided. Every check here is a hard
+    failure — never a skip.
+    """
+    seen: dict[tuple[int, int], str] = {}
+    for rel in sorted(paths):
+        path = paths[rel]
+        key = (path.stat().st_dev, path.stat().st_ino)
+        if key in seen:
+            raise WorkspaceCorrupt(
+                f"{root}: indexed authoring files {seen[key]!r} and {rel!r} "
+                f"share inode ({key[0]}, {key[1]})"
+            )
+        seen[key] = rel
 
 
 def _case_curation_states(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
 ) -> list[dict[str, str]]:
     """The ``curation.state`` per indexed case, for workspace-state derivation.
 
     ``derive_workspace_state`` needs the real curation states (its ``ready`` /
     ``stale`` / ``curating`` branches are driven by them); passing ``[]`` made
     those branches unreachable so a fully curated workspace could never report
-    ``ready``. Each case document is loaded with the strict loader — an
-    unreadable/invalid case surfaces as :class:`WorkspaceCorrupt` rather than
-    being silently folded into ``draft`` (storage's strict-loader invariant: a
-    corrupt file is an error, never defaulted). A present document without an
-    explicit curation state (or a non-mapping curation block) is treated
-    conservatively as ``draft`` so a workspace cannot claim ``ready`` while any
-    case is not verifiably curated.
+    ``ready``. Each case document is loaded through the shared model-gated
+    loader — an unreadable/invalid case surfaces as
+    :class:`WorkspaceCorrupt` rather than being silently folded into ``draft``
+    (storage's strict-loader invariant: a corrupt file is an error, never
+    defaulted). A validated model always carries a concrete ``curation.state``.
     """
     if docs is None:
-        docs = _load_case_docs(root, manifest)
+        docs = load_case_documents(root, manifest)
     states: list[dict[str, str]] = []
     for case in manifest.cases:
-        raw = docs[case.case_file]
-        curation = raw.get("curation")
-        cs = curation.get("state") if isinstance(curation, dict) else None
-        states.append({"curation_state": cs or "draft"})
+        states.append({"curation_state": docs[case.case_file].curation.state})
     return states
 
 
 def _case_snapshot_summaries(
-    root: Path, manifest: BenchmarkManifest, docs: dict[str, dict] | None = None
+    root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument] | None = None
 ) -> list[dict[str, str]]:
     """Per-case snapshot summary for ``status``: snapshot state + frozen head.
 
-    For each indexed case, loads the case strictly and reports its snapshot
-    ``status`` (``ready``/``unreplayable``/``imported``) and the frozen head
-    prefix (``original_head_sha[:12]``) when present. An unreadable/invalid
-    case surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
+    For each indexed case, loads the case through the shared model-gated
+    loader and reports its snapshot ``status`` and the frozen head prefix
+    (``original_head_sha[:12]``) when present. An unreadable/invalid case
+    surfaces as :class:`WorkspaceCorrupt` (shared with the validate path).
     """
     if docs is None:
-        docs = _load_case_docs(root, manifest)
+        docs = load_case_documents(root, manifest)
     summaries: list[dict[str, str]] = []
     for case in manifest.cases:
-        raw = docs[case.case_file]
-        snapshot = raw.get("snapshot")
-        status = snapshot.get("status") if isinstance(snapshot, dict) else "imported"
-        head = (snapshot or {}).get("original_head_sha") or ""
+        doc = docs[case.case_file]
+        status = doc.snapshot.status or "imported"
+        head = doc.snapshot.original_head_sha or ""
         summaries.append(
             {
                 "case_id": case.case_id,
-                "snapshot_status": status or "imported",
+                "snapshot_status": status,
                 "head_prefix": head[:12],
             }
         )
     return summaries
 
 
-def _scan_case_files(root: Path) -> set[Path]:
-    cases_dir = root / "cases"
-    if not cases_dir.exists():
-        return set()
+def _scan_authoring_files(root: Path) -> set[Path]:
+    """Every regular file under the authoring trees: ``cases/``, ``imports/``, ``snapshots/``.
+
+    Runtime/cache/transaction residue is not authoring content, so it is never
+    scanned — an unindexed authoring file in one of the three trees is
+    orphan corruption, while internal state under ``runtime/``/``cache/``/
+    ``transactions/`` stays out of the orphan rule.
+    """
     found: set[Path] = set()
-    for entry in cases_dir.rglob("*"):
-        if entry.is_file():
-            found.add(entry)
+    for sub in ("cases", "imports", "snapshots"):
+        tree = root / sub
+        if not tree.exists():
+            continue
+        for entry in tree.rglob("*"):
+            if entry.is_file():
+                found.add(entry)
     return found

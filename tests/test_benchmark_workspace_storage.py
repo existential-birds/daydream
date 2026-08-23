@@ -15,6 +15,7 @@ from daydream.benchmark.storage import (
     load_json_strict,
     load_yaml_strict,
     recover_startup,
+    resolve_authoring_path,
     sha256_file,
 )
 
@@ -547,3 +548,40 @@ def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path):
     with pytest.raises(WorkspaceCorrupt):
         recover_startup(tmp_path)
     assert op.is_dir()  # left untouched
+
+
+def test_resolve_authoring_path_rejects_absolute(tmp_path):
+    p = tmp_path / "cases" / "x.yaml"
+    p.parent.mkdir(parents=True)
+    with pytest.raises(WorkspaceCorrupt):
+        resolve_authoring_path(tmp_path, str(p))  # absolute even inside root
+
+
+def test_resolve_authoring_path_rejects_traversal(tmp_path):
+    with pytest.raises(WorkspaceCorrupt):
+        resolve_authoring_path(tmp_path, "../cases/x.yaml")
+
+
+def test_resolve_authoring_path_rejects_symlink_escape(tmp_path):
+    outside = tmp_path.parent / f"esc-{tmp_path.name}"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "cases").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(WorkspaceCorrupt):
+        resolve_authoring_path(tmp_path, "cases/x.yaml")
+
+
+def test_resolve_authoring_path_accepts_relative_inside(tmp_path):
+    (tmp_path / "cases").mkdir(parents=True)
+    (tmp_path / "cases" / "x.yaml").write_text("x")
+    assert resolve_authoring_path(tmp_path, "cases/x.yaml").is_absolute()
+    assert resolve_authoring_path(tmp_path, "cases/x.yaml").resolve() == (
+        tmp_path / "cases" / "x.yaml"
+    ).resolve()
+
+
+def test_apply_orphan_rule_rejects_absolute_indexed(tmp_path):
+    (tmp_path / "cases").mkdir(parents=True)
+    f = tmp_path / "cases" / "pr-000001-abcdef012345.yaml"
+    f.write_text("case")
+    with pytest.raises(WorkspaceCorrupt):
+        recover_startup(tmp_path, indexed={str(f)}, on_disk={f})

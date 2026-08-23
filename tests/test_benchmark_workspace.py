@@ -1,9 +1,10 @@
+import json
 import stat
 
 import pytest
 
-from daydream.benchmark.schema import BenchmarkManifest
-from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDocument
+from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace
 
 
@@ -17,10 +18,24 @@ def test_init_creates_private_layout_and_modes(tmp_path):
     )
     assert root.exists()
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
-    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache", "harbor"):
+    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
         d = root / sub
         assert d.is_dir() and stat.S_IMODE(d.stat().st_mode) == 0o700
+    assert not (root / "harbor").exists()   # compiled dataset only after a build
     assert stat.S_IMODE((root / "benchmark.yaml").stat().st_mode) == 0o600
+
+
+def test_init_does_not_create_harbor(tmp_path):
+    root = tmp_path / "review-bench"
+    init_workspace(
+        root,
+        "O/R",
+        ["api.anthropic.com"],
+        ["api.anthropic.com"],
+    )
+    assert not (root / "harbor").exists()   # compiled dataset only after a build
+    for sub in ("imports", "cases", "snapshots", "transactions", "runtime", "cache"):
+        assert (root / sub).is_dir()
 
 
 def test_init_gitignore_ignores_everything_except_itself(tmp_path):
@@ -110,13 +125,171 @@ def test_validate_missing_manifest_returns_1(tmp_path):
     assert code == 1
 
 
-def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
-    """Build a workspace whose single indexed case carries ``curation_state``.
+def _write_case_docs(root, curation_state):
+    """Write a fully-valid ledger + import + bundle + case doc into ``root``.
 
-    Reuses ``init_workspace`` for the base layout then resolves the source
-    identity and adds one ready/unready case so ``validate_workspace`` /
-    ``workspace_status`` exercise the case-driven readiness path (regression
-    for the finding that ``cases=[]`` made exit 0 unreachable).
+    The workspace at ``root`` must already be ``init_workspace``-created. The
+    artifacts written here are all schema-valid: a resolved manifest, a
+    ``fetched`` ledger entry referencing a real import file + sha256, a real
+    bundle whose sha256 matches the case doc's ``snapshot.bundle_sha256``, and
+    a ``CaseDocument`` whose ``pull_request``/``snapshot``/``source``/
+    ``curation`` model-validate without any ``_schema_ready`` strip.
+    """
+    import hashlib
+
+    import yaml
+
+    from daydream.benchmark.schema import (
+        CaseDocument,
+        CaseSource,
+        ImportDocument,
+        PullRequestEntry,
+        PullRequestMeta,
+        SnapshotReady,
+        derive_finding_id,
+    )
+
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw["source"]["repository_id"] = "R_kgDOABC123"
+    raw["source"]["visibility"] = "private"
+    repo_slug = raw["source"]["repository"]
+
+    head_sha = "0123456789ab" + "0" * 28
+    base_sha = "b" * 40
+    case_id = f"pr-000101-{head_sha[:12]}"
+    case_file = f"cases/{case_id}.yaml"
+    import_file = "imports/pr-000101.json"
+    bundle_rel = f"snapshots/{case_id}.bundle"
+
+    pr_meta = PullRequestMeta(
+        number=101,
+        url=f"https://github.com/{repo_slug}/pull/101",
+        title="Fix cache",
+        state="open",
+        base={"ref": "main", "sha": base_sha},
+        head={"ref": "feature/cache", "sha": head_sha},
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        author={"login": "alice", "type": "User"},
+        body="Fix the cache invalidation on write.",
+    )
+    import_doc = ImportDocument(
+        schema_version=1,
+        repository={
+            "id": "R_kgDOABC123",
+            "name_with_owner": repo_slug,
+            "visibility": "private",
+        },
+        pull_request=pr_meta,
+        evidence=[],
+        fetch={
+            "fetched_at": "2026-01-01T00:00:00Z",
+            "etag": None,
+            "payload_sha256": "0" * 64,
+        },
+    )
+    import_bytes = import_doc.model_dump_json(indent=2).encode("utf-8")
+    import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+
+    bundle_bytes = b"frozen-snapshot-bundle-bytes"
+    bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
+
+    curation: dict
+    if curation_state == "ready":
+        finding = {
+            "finding_id": "f" * 64,
+            "title": "Cache is never invalidated",
+            "body": "The cache key is stable across writes, so stale data is served.",
+            "severity": "high",
+            "location": {"path": "feature.py", "start_line": 1, "end_line": 1},
+            "provenance": {"kind": "authored", "source_ids": []},
+        }
+        finding["finding_id"] = derive_finding_id(finding, case_id=case_id)
+        curation = {
+            "state": "ready",
+            "snapshot_attested": True,
+            "clean_attested": False,
+            "gold_status": "findings",
+            "findings": [finding],
+            "exclusions": [],
+            "case_exclusion": None,
+        }
+    elif curation_state == "clean":
+        curation = {
+            "state": "ready",
+            "snapshot_attested": True,
+            "clean_attested": True,
+            "gold_status": "clean",
+            "findings": [],
+            "exclusions": [],
+            "case_exclusion": None,
+        }
+    else:  # draft
+        curation = {
+            "state": "draft",
+            "snapshot_attested": False,
+            "clean_attested": False,
+            "gold_status": None,
+            "findings": [],
+            "exclusions": [],
+            "case_exclusion": None,
+        }
+
+    case_doc = CaseDocument(
+        schema_version=2,
+        case_id=case_id,
+        pull_request=pr_meta,
+        snapshot=SnapshotReady(
+            status="ready",
+            policy="final_pr_head",
+            requested_head="final",
+            original_base_sha=base_sha,
+            original_head_sha=head_sha,
+            base_tree_sha="1" * 40,
+            head_tree_sha="2" * 40,
+            diff_sha256="3" * 64,
+            bundle_file=bundle_rel,
+            bundle_sha256=bundle_sha256,
+            error=None,
+        ),
+        source=CaseSource(import_file=import_file, import_sha256=import_sha256),
+        curation=curation,
+        candidates=[],
+    )
+
+    raw["pull_requests"] = [
+        PullRequestEntry(
+            number=101,
+            import_state="fetched",
+            import_file=import_file,
+            import_sha256=import_sha256,
+            case_ids=[case_id],
+        ).model_dump(mode="json")
+    ]
+    raw["cases"] = [
+        {"case_id": case_id, "pr_number": 101, "case_file": case_file}
+    ]
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    (root / "imports").mkdir(parents=True, exist_ok=True)
+    (root / import_file).write_bytes(import_bytes)
+    (root / "snapshots").mkdir(parents=True, exist_ok=True)
+    (root / bundle_rel).write_bytes(bundle_bytes)
+    (root / "cases").mkdir(parents=True, exist_ok=True)
+    (root / case_file).write_text(
+        yaml.safe_dump(case_doc.model_dump(mode="json"), sort_keys=False)
+    )
+    return root
+
+
+def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
+    """Build a fully-valid workspace whose single indexed case is curated.
+
+    Reuses ``init_workspace`` for the base layout, resolves the source
+    identity (unless ``resolved=False``), and adds a real fetched ledger
+    entry + import + bundle + schema-valid case doc so ``validate_workspace``
+    / ``workspace_status`` exercise the case-driven readiness path on
+    documents that model-validate directly.
     """
     import yaml
 
@@ -124,22 +297,14 @@ def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
 
     root = tmp_path / "ws"
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
-    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
-    if resolved:
-        raw["source"]["repository_id"] = "R_kgDOABC123"
-        raw["source"]["visibility"] = "private"
-    case_id = "pr-000101-0123456789ab"
-    case_file = f"cases/{case_id}.yaml"
-    raw["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": case_file}]
-    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-    (root / "cases").mkdir(parents=True, exist_ok=True)
-    (root / case_file).write_text(
-        yaml.safe_dump(
-            {"schema_version": 1, "case_id": case_id, "curation": {"state": curation_state}},
-            sort_keys=False,
-        )
-    )
+    _write_case_docs(root, curation_state)
+    if not resolved:
+        raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+        raw["source"]["repository_id"] = None
+        raw["source"]["visibility"] = "unresolved"
+        (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
     return root
+
 
 
 def test_validate_ready_workspace_returns_0(tmp_path):
@@ -185,52 +350,13 @@ def test_status_derives_ready_from_curated_cases(tmp_path):
 def _seed_frozen_case(ws):
     """Seed one ``ready`` snapshot case + its bundle + the indexed ledger.
 
-    Builds on ``_write_curated_workspace``'s ready case shape, adding the
-    frozen ``snapshot.ready`` block (bundle_file + bundle_sha256) and writing a
-    real ``snapshots/<case>.bundle`` whose sha256 matches. Resolves the source
-    identity so ``validate_workspace`` reaches exit 0.
+    Builds on ``_write_curated_workspace``'s fully-valid ready case shape,
+    writing the frozen ``snapshot.ready`` block (bundle_file + bundle_sha256)
+    and a real ``snapshots/<case>.bundle`` whose sha256 matches, plus the
+    fetched ledger entry + import file. Resolves the source identity so
+    ``validate_workspace`` reaches exit 0.
     """
-    import hashlib
-
-    import yaml
-
-    raw = yaml.safe_load((ws / "benchmark.yaml").read_text())
-    raw["source"]["repository_id"] = "R_kgDOABC123"
-    raw["source"]["visibility"] = "private"
-    head_sha = "0123456789ab" + "0" * 28
-    case_id = f"pr-000101-{head_sha[:12]}"
-    case_file = f"cases/{case_id}.yaml"
-    raw["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": case_file}]
-    (ws / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
-    bundle_rel = f"snapshots/{case_id}.bundle"
-    bundle_bytes = b"frozen-snapshot-bundle-bytes"
-    bundle_sha = hashlib.sha256(bundle_bytes).hexdigest()
-    (ws / "cases").mkdir(parents=True, exist_ok=True)
-    (ws / "snapshots").mkdir(parents=True, exist_ok=True)
-    (ws / bundle_rel).write_bytes(bundle_bytes)
-    (ws / case_file).write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "case_id": case_id,
-                "curation": {"state": "ready"},
-                "snapshot": {
-                    "status": "ready",
-                    "policy": "final_pr_head",
-                    "requested_head": "final",
-                    "original_base_sha": "b" * 40,
-                    "original_head_sha": head_sha,
-                    "base_tree_sha": "1" * 40,
-                    "head_tree_sha": "2" * 40,
-                    "diff_sha256": "3" * 64,
-                    "bundle_file": bundle_rel,
-                    "bundle_sha256": bundle_sha,
-                    "error": None,
-                },
-            },
-            sort_keys=False,
-        )
-    )
+    _write_case_docs(ws, "ready")
     return ws
 
 
@@ -267,3 +393,196 @@ def test_status_reports_snapshot_state_per_case(tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "ready" in out and "pr-000101-0123456789ab" in out and "0123456789ab" in out
+
+
+def test_curated_fixture_writes_schema_valid_case(tmp_path):
+    """The curated-workspace fixture itself writes only schema-valid documents."""
+    root = _write_curated_workspace(tmp_path, "ready")   # rewritten in this task; same module
+    raw = load_yaml_strict(next((root / "cases").glob("*.yaml")))
+    CaseDocument.model_validate(raw)                      # must validate WITHOUT _schema_ready (no gold_mode)
+    m = BenchmarkManifest.model_validate(load_yaml_strict(root / "benchmark.yaml"))
+    pr = m.pull_requests[0]
+    assert pr.import_state == "fetched" and pr.import_file and pr.import_sha256
+    ImportDocument.model_validate(load_json_strict(root / pr.import_file))   # import round-trips
+
+
+def _write_minimal_invalid_workspace(tmp_path, curation_state="ready"):
+    """A workspace whose case doc is the OLD minimal shape (Task 2 removed)."""
+    import yaml
+
+    root = _write_curated_workspace(tmp_path, curation_state)
+    case_file = next((root / "cases").glob("*.yaml"))
+    case_file.write_text(
+        yaml.safe_dump(
+            {"schema_version": 1, "case_id": "pr-000101-0123456789ab",
+             "curation": {"state": curation_state}},
+            sort_keys=False,
+        )
+    )
+    return root
+
+
+def test_validate_minimal_invalid_ready_returns_1(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    code, label = validate_workspace(root)
+    assert code == 1
+    assert "corrupt" in label.lower()
+
+
+def test_status_rejects_minimal_invalid_case(tmp_path):
+    from daydream.benchmark.storage import WorkspaceCorrupt
+    from daydream.benchmark.workspace import workspace_status
+
+    root = _write_minimal_invalid_workspace(tmp_path, "ready")
+    with pytest.raises(WorkspaceCorrupt):
+        workspace_status(root)
+
+
+def _restamp_import_sha(tmp_path, imp_bytes: bytes) -> None:
+    """Overwrite the import file and re-stamp the ledger sha to match.
+
+    Leaves the import structurally invalid but byte-exact per the ledger, so
+    only the model gate (not the checksum gate) can catch it.
+    """
+    import hashlib
+
+    import yaml
+
+    root = tmp_path / "ws"
+    imp = next((root / "imports").glob("pr-*.json"))
+    imp.write_bytes(imp_bytes)
+    sha = hashlib.sha256(imp_bytes).hexdigest()
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw["pull_requests"][0]["import_sha256"] = sha
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_checksum_restamped_corrupt_import_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    imp = next((root / "imports").glob("pr-*.json"))
+    raw = load_json_strict(imp)
+    # Structurally invalid, but its sha is re-stamped to match the ledger.
+    raw["pull_request"]["number"] = 999   # wrong PR id; wrong shape vs intent
+    _restamp_import_sha(tmp_path, json.dumps(raw).encode())
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_import_missing_on_disk_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (next((root / "imports").glob("pr-*.json"))).unlink()
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def _mutate_manifest_case(tmp_path, pr_number=None, case_file=None):
+    """Rewrite the manifest cases[] entry (pr_number and/or case_file)."""
+    import yaml
+
+    root = tmp_path / "ws"
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    row = raw["cases"][0]
+    if pr_number is not None:
+        row["pr_number"] = pr_number
+    if case_file is not None:
+        row["case_file"] = case_file
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def _drop_ledger_entry(tmp_path):
+    """Remove the pull_requests[] entry for PR 101."""
+    import yaml
+
+    root = tmp_path / "ws"
+    raw = yaml.safe_load((root / "benchmark.yaml").read_text())
+    raw["pull_requests"] = [
+        pr for pr in raw["pull_requests"] if pr.get("number") != 101
+    ]
+    (root / "benchmark.yaml").write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # manifest cases[] pr_number disagrees with the case doc's pull_request.number
+    _mutate_manifest_case(tmp_path, pr_number=999)
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_case_file_not_exact_index_path_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # manifest case_file is not exactly cases/<case_id>.yaml
+    _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_case_pr_absent_from_ledger_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_orphan_import_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (root / "imports" / "pr-000999.json").write_text('{"unindexed": true}')   # unindexed import
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_orphan_bundle_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (root / "snapshots" / "pr-000999-abcdef012345.bundle").write_bytes(b"orphan")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_referenced_bundle_missing_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (next((root / "snapshots").glob("*.bundle"))).unlink()
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_duplicate_inode_indexed_files_is_corruption(tmp_path):
+    import hashlib
+    import os
+
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # hard-link the import to the bundle path (one inode, two indexed names).
+    # the import bytes are a valid ImportDocument whose ledger sha is unchanged;
+    # only the bundle sha is re-stamped to the import bytes, so every checksum /
+    # model gate stays green and only the duplicate-inode cross-check can flag it
+    imp = next((root / "imports").glob("pr-*.json"))
+    bundle = next((root / "snapshots").glob("*.bundle"))
+    imp_bytes = imp.read_bytes()
+    bundle.unlink()
+    os.link(imp, bundle)   # duplicate-inode surprise
+    case_raw = yaml.safe_load(next((root / "cases").glob("*.yaml")).read_text())
+    case_raw["snapshot"]["bundle_sha256"] = hashlib.sha256(imp_bytes).hexdigest()
+    next((root / "cases").glob("*.yaml")).write_text(yaml.safe_dump(case_raw, sort_keys=False))
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()   # gated on Task 0 spike 4 verdict

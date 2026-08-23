@@ -1190,9 +1190,13 @@ def _prior_import_state(
 ]:
     """The prior evidence signature, task-input signature, curations, and import path.
 
-    A missing/unreadable prior snapshot yields ``None`` for both signatures (so
-    a refresh cannot compare); an unreadable curation file is skipped, never
-    fatal.
+    A missing prior state (no ``fetched`` ledger entry, or no persisted
+    import/case to read) yields ``None`` for both signatures and empty
+    curations — the normal first-run path. A *present-but-corrupt* prior
+    import or curation file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    from the strict loaders propagates so a refresh fails before any network
+    fetch or mutation, never silently healing corrupt prior state to
+    ``None``/``draft``.
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
@@ -1200,20 +1204,29 @@ def _prior_import_state(
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
     if existing is not None and existing.get("import_state") == "fetched":
-        try:
-            prior_raw = storage.load_json_strict(root / existing["import_file"])
-            prior_sig = _evidence_signature_from_raw(prior_raw)
-            prior_task_sig = _task_input_signature_from_raw(prior_raw)
-        except Exception:
-            prior_sig = None
-            prior_task_sig = None
+        prior_import_file = existing.get("import_file")
+        if not prior_import_file:
+            # A fetched ledger entry must name its import document; one that
+            # lacks or nulls import_file is corrupt prior state — without the
+            # guard it escapes as a bare KeyError/TypeError instead of the
+            # documented fail-closed WorkspaceCorrupt of the strict loaders.
+            raise storage.WorkspaceCorrupt(
+                f"{root}: fetched ledger entry for PR {number} is missing import_file"
+            )
+        # Ledger-derived authoring paths go through the containment gate (same
+        # as every other workspace authoring read), so an absolute or escaping
+        # import_file/case_id can never read outside the workspace root.
+        prior_raw = storage.load_json_strict(
+            storage.resolve_authoring_path(root, prior_import_file)
+        )
+        prior_sig = _evidence_signature_from_raw(prior_raw)
+        prior_task_sig = _task_input_signature_from_raw(prior_raw)
         for case_id in existing.get("case_ids", []):
-            try:
-                cur = storage.load_yaml_strict(root / "cases" / f"{case_id}.yaml").get("curation")
-                if isinstance(cur, dict):
-                    prior_curations[case_id] = cur
-            except Exception:
-                pass
+            cur = storage.load_yaml_strict(
+                storage.resolve_authoring_path(root, f"cases/{case_id}.yaml")
+            ).get("curation")
+            if isinstance(cur, dict):
+                prior_curations[case_id] = cur
     return prior_sig, prior_task_sig, prior_curations, import_file
 
 

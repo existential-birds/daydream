@@ -19,7 +19,7 @@ import re
 import shutil
 from pathlib import Path
 
-from daydream.benchmark import schema, snapshot, storage
+from daydream.benchmark import schema, snapshot, storage, workspace
 from daydream.benchmark.harbor import verifier_core as vc
 
 TEMPLATE_VERSION = "2"
@@ -118,8 +118,11 @@ def _escape_historical_delimiters(text: str) -> str:
 
 # A persisted ``body_sha256`` is interpolated into the truncation marker only
 # when it has the schema's own digest shape (_hex64: lowercase 64-hex). The
-# compile path reads raw case docs with no model_validate, so any other value
-# is unvalidated input and falls back to the deterministic stored-body digest.
+# compile path loads every case through the shared model gate, where
+# ``PullRequestMeta._body_hash_consistency`` rejects a digest that mismatches
+# the stored body before it ever reaches this function; the shape check +
+# stored-body verification here is defense-in-depth, and any other value falls
+# back to the deterministic stored-body digest.
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -165,12 +168,13 @@ def bounded_pr_context(
     # The marker attests the persisted normalized-body digest (body_sha256 at
     # import time) verbatim -- but only when it satisfies the schema's own
     # _body_hash_consistency contract (lowercase 64-hex equal to sha256 of the
-    # stored normalized body). The compile path reads raw case docs with no
-    # model_validate, so a hand-edited body_sha256 could otherwise inject
-    # content past the marker line or attest a digest that no longer matches
-    # the compiled body; any value outside that contract falls back to the
-    # deterministic stored-body digest (the same fallback as a missing key).
-    # Never re-derived from the escaped surface.
+    # stored normalized body). Every case the compile path loads passes the
+    # model gate first, so a hand-edited body_sha256 is rejected as corruption
+    # before it could inject content past the marker line or attest a digest
+    # that no longer matches the compiled body; any other value (e.g. an
+    # absent/blank digest) falls back to the deterministic stored-body digest
+    # (the same fallback as a missing key). Never re-derived from the escaped
+    # surface.
     stored_body = str(pull_request.get("body") or "")
     stored_digest = hashlib.sha256(stored_body.encode("utf-8")).hexdigest()
     persisted = str(pull_request.get("body_sha256") or "")
@@ -481,7 +485,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
     expected = snapshot.get("bundle_sha256")
     if not bundle_rel or not expected:
         raise CompileError(f"case {case_id} ready snapshot missing bundle_file/bundle_sha256")
-    bundle_src = ws / bundle_rel
+    bundle_src = storage.resolve_authoring_path(ws, bundle_rel)
     if not bundle_src.is_file():
         raise CompileError(f"case {case_id} missing bundle {bundle_rel}")
     bundle_dst = case_stage / "environment" / "repository.bundle"
@@ -588,18 +592,35 @@ def compile_workspace(root: Path) -> dict:
         manifest = storage.load_yaml_strict(root / "benchmark.yaml")
         repo_slug = manifest.get("source", {}).get("repository") or ""
 
+        # Compile canonicalizes the manifest's ``cases[]`` row order to the
+        # schema's canonical (pr_number, head-sha, case_id) order before model
+        # validation, so compile output stays row-order-insensitive (the model
+        # requires the canonical order; reversed rows are not corruption here).
+        manifest["cases"] = sorted(
+            manifest.get("cases") or [],
+            key=lambda c: (
+                int(c.get("pr_number", 0) or 0),
+                schema.head_sha_from_case_id(c.get("case_id", "")),
+                c.get("case_id", ""),
+            ),
+        )
+        # Every indexed case is loaded through the shared model-gated loader
+        # (same ``_schema_ready`` + ``CaseDocument`` validation as the
+        # validate/status read path); a present-but-corrupt case raises
+        # ``WorkspaceCorrupt`` before any staging begins.
+        manifest_model = schema.BenchmarkManifest.model_validate(manifest)
         case_docs: dict[str, dict] = {}
-        for _case in manifest.get("cases") or []:
-            case_id = _case.get("case_id")
-            doc = storage.load_yaml_strict(root / _case["case_file"])
-            if not _is_compilable(doc.get("curation") or {}):
-                curation = doc.get("curation") or {}
+        for case_file, doc in workspace.load_case_documents(root, manifest_model).items():
+            dumped = doc.model_dump(mode="json")
+            case_id = dumped["case_id"]
+            if not _is_compilable(dumped.get("curation") or {}):
+                curation = dumped.get("curation") or {}
                 raise CompileError(
                     f"case {case_id} is not compilable (state {curation.get('state')}, "
                     f"findings {len(curation.get('findings') or [])}, "
                     f"clean_attested {bool(curation.get('clean_attested'))})"
                 )
-            case_docs[case_id] = doc
+            case_docs[case_id] = dumped
 
         stage = root / "cache" / "harbor-build-stage"
         if stage.exists():
@@ -612,7 +633,13 @@ def compile_workspace(root: Path) -> dict:
             control_plane: dict[str, str] = {"README.md": _ROOT_README}
             for _case in manifest.get("cases") or []:
                 case_id = _case.get("case_id")
-                row = _compile_case(stage, root, case_docs[case_id], repo_slug)
+                case_doc = case_docs.get(case_id)
+                if case_doc is None:
+                    raise CompileError(
+                        f"case {case_id} index row has no matching case document "
+                        "(row case_id disagrees with the case document's own case_id)"
+                    )
+                row = _compile_case(stage, root, case_doc, repo_slug)
                 case_rows.append(row)
                 key = row["key"]
                 all_files.update({f"{key}/{rel}": sha for rel, sha in row["files"].items()})
