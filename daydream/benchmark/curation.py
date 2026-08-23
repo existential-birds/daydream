@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, cast
@@ -70,18 +71,47 @@ class StaleStateError(CurationError):
     """
 
 
+# Process-wide reuse cache for disposable frozen-bundle clones. Every located
+# finding and every list_cases/validate_case/pager call used to open a fresh
+# ``git clone --no-checkout`` of the same bundle (O(cases x findings) clone
+# fan-out per operation); the cache collapses that to at most one clone per
+# distinct bundle file per process. Keyed on the resolved bundle path + stat
+# signature (mtime_ns, size), so a rewritten or re-targeted ``bundle_file``
+# misses and is re-cloned. Clones live under ``root/cache`` (scratch, never
+# part of the authoring index) for the process lifetime.
+_CLONE_CACHE: dict[tuple[str, int, int], Path] = {}
+_CLONE_CACHE_LOCK = threading.Lock()
+
+
+def _clone_cache_key(bundle_path: Path) -> tuple[str, int, int] | None:
+    """The reuse-cache key for a bundle, or None when the file vanished.
+
+    ``(resolved path, mtime_ns, size)``: any rewrite of the bundle changes the
+    signature, so a cached clone is never served for changed bytes.
+    """
+    try:
+        st = bundle_path.stat()
+    except OSError:
+        return None
+    return (str(bundle_path), st.st_mtime_ns, st.st_size)
+
+
 @contextmanager
 def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
-    """A disposable mirror-independent clone of the case's frozen bundle.
+    """A mirror-independent clone of the case's frozen bundle, reused per process.
 
     Clones ``snapshot.bundle_file`` (resolved via
     :func:`storage.resolve_authoring_path`) with ``--no-local --no-checkout``
-    into a scratch dir under ``root/cache`` and removes it on exit, so every
-    curation git read is served from the frozen bundle itself — the shared bare
-    mirror can be deleted without making a case uncuratable. The clone exposes
-    the two synthetic refs ``refs/remotes/origin/base`` and
-    ``refs/remotes/origin/head``. Raises :class:`CurationError` when the
-    snapshot carries no bundle or the bundle cannot be cloned.
+    into a scratch dir under ``root/cache`` kept for the process lifetime, so
+    every curation git read is served from the frozen bundle itself — the shared
+    bare mirror can be deleted without making a case uncuratable. One clone per
+    distinct bundle file is reused (keyed on the resolved path + stat
+    signature, see :func:`_clone_cache_key`), so a case with N located findings
+    costs one clone instead of N, and repeated ``list_cases``/``validate_case``
+    calls reuse it instead of re-cloning per call. The clone exposes the two
+    synthetic refs ``refs/remotes/origin/base`` and ``refs/remotes/origin/head``.
+    Raises :class:`CurationError` when the snapshot carries no bundle or the
+    bundle cannot be cloned.
     """
     bundle_rel = snapshot_doc.get("bundle_file")
     if not bundle_rel:
@@ -96,6 +126,14 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
         raise CurationError(f"invalid snapshot bundle path: {bundle_rel}") from exc
     if not bundle_path.exists():
         raise CurationError(f"snapshot bundle missing: {bundle_rel}")
+    key = _clone_cache_key(bundle_path)
+    if key is None:
+        raise CurationError(f"snapshot bundle missing: {bundle_rel}")
+    with _CLONE_CACHE_LOCK:
+        cached = _CLONE_CACHE.get(key)
+    if cached is not None and cached.exists():
+        yield cached
+        return
     cache = root / "cache"
     cache.mkdir(parents=True, exist_ok=True)
     clone_dir = Path(tempfile.mkdtemp(prefix="curate-bundle-", dir=str(cache)))
@@ -110,9 +148,14 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
             raise CurationError(
                 f"bundle clone failed for {bundle_rel}: {proc.stderr.strip()}"
             )
+        with _CLONE_CACHE_LOCK:
+            _CLONE_CACHE[key] = clone_dir
         yield clone_dir
     finally:
-        shutil.rmtree(clone_dir, ignore_errors=True)
+        if _CLONE_CACHE.get(key) is not clone_dir:
+            # a failed clone, or a clone superseded by a newer one of a
+            # rewritten bundle, is not the cached entry: remove the scratch dir.
+            shutil.rmtree(clone_dir, ignore_errors=True)
 
 
 def _head_file_line_count(root: Path, snapshot_doc: dict[str, Any], path: str) -> int:

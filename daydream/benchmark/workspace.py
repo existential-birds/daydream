@@ -457,7 +457,10 @@ def _verify_snapshot_checksums(
                 snapshot.diff_sha256,
                 workdir=root / "cache",
             )
-        except git_ops.GitError as exc:
+        except (git_ops.GitError, OSError) as exc:
+            # OSError covers a missing ``root/cache`` scratch dir surfacing as
+            # FileNotFoundError from the probe's mkdtemp — mapped to corruption
+            # (exit 1) like the sibling freeze path, never a bare traceback.
             raise WorkspaceCorrupt(
                 f"{root}: case {case.case_id} snapshot bundle fails offline-clone "
                 f"fidelity: {exc}"

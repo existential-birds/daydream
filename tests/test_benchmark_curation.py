@@ -543,6 +543,38 @@ def test_curate_and_validate_after_mirror_removal(tmp_path, fake_gh):
     assert code == 0 and label == "ready"
 
 
+def test_bundle_clone_reused_across_findings_and_calls(tmp_path, fake_gh, monkeypatch):
+    """Located-finding validation and list_cases share one bundle clone.
+
+    Regression for the O(cases x findings) clone fan-out: every located finding
+    used to open a fresh ``git clone --no-checkout`` of the frozen bundle, and
+    every list_cases/validate_case call re-cloned. The reuse cache must serve
+    all of them from a single clone per bundle file.
+    """
+    from daydream.benchmark import curation as cu
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    real_run_git = git_ops._run_git
+    clones = {"n": 0}
+
+    def spy_run_git(repo, args, **kwargs):
+        if args and args[0] == "clone":
+            clones["n"] += 1
+        return real_run_git(repo, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_run_git", spy_run_git)
+
+    cu.add_finding(ws, case_id, title="a", body="b", severity="high",
+                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
+    cu.add_finding(ws, case_id, title="c", body="d", severity="medium",
+                   location={"path": "feature.py", "start_line": 2, "end_line": 2})
+    assert clones["n"] == 1            # both located-finding mutations share one clone
+    cu.validate_case(ws, case_id)      # two located findings, still one clone
+    assert clones["n"] == 1
+    cu.list_cases(ws)
+    assert clones["n"] == 1
+
+
 def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):
     # evidence-join claim confirmed by tests/test_spike_issue775_reads.py
     from daydream.benchmark import curation as cu

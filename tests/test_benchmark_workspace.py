@@ -439,6 +439,29 @@ def test_validate_restamped_tampered_bundle_fails(tmp_path):
     assert code2 == 0 and label2 == "ready"
 
 
+def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path):
+    """A ready workspace whose ``cache/`` scratch dir is absent maps to exit 1.
+
+    ``validate_offline_clone``'s mkdtemp raises FileNotFoundError when
+    ``root/cache`` is gone; it must surface as corruption (exit 1 + label) per
+    the no-raw-traceback contract — like the sibling freeze path's ``OSError``
+    catch — never a bare traceback. ``workspace_status`` raises
+    :class:`WorkspaceCorrupt` for the same state.
+    """
+    import shutil
+
+    from daydream.benchmark.storage import WorkspaceCorrupt
+    from daydream.benchmark.workspace import validate_workspace, workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    assert validate_workspace(root) == (0, "ready")
+    shutil.rmtree(root / "cache")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+    with pytest.raises(WorkspaceCorrupt):
+        workspace_status(root)
+
+
 def test_validate_curating_workspace_returns_2(tmp_path):
     from daydream.benchmark.workspace import validate_workspace
 
