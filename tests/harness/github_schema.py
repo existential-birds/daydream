@@ -202,7 +202,7 @@ def _requested_fields(query: str) -> dict[str | None, set[str]]:
             j = skip_ws(j)
             if j < n and query[j] == "{":
                 if real == "nodes":
-                    nested = _CONNECTION_NODE_TYPE.get(type_ctx)
+                    nested = _CONNECTION_NODE_TYPE.get(type_ctx or "")
                 else:
                     nested = _NESTED_SELECTION_TYPE.get(real)
                 i = j
@@ -224,6 +224,6 @@ def unknown_query_fields(query: str) -> set[str]:
     """
     unknown: set[str] = set()
     for type_ctx, fields in _requested_fields(query).items():
-        valid: set[str] = _MACHINERY_FIELDS | (SCHEMA_FIELDS.get(type_ctx) or set())
+        valid: set[str] = _MACHINERY_FIELDS | (SCHEMA_FIELDS.get(type_ctx or "") or set())
         unknown |= fields - valid
     return unknown
