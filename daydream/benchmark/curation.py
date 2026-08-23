@@ -580,14 +580,21 @@ def _derive_provenance_kind(
     return "edited"
 
 
-def _check_candidate_sources(raw: dict[str, Any], source_ids: list[str], case_id: str) -> None:
-    """Reject a caller-supplied source reference that no candidate backs."""
+def _evidence_source_ids(root: Path, raw: dict[str, Any]) -> set[str]:
+    """The source_ids of every import evidence record the case references."""
+    return set(_evidence_projection(root, raw))
+
+
+def _check_evidence_sources(
+    root: Path, raw: dict[str, Any], source_ids: list[str], case_id: str
+) -> None:
+    """Reject a caller-supplied source reference that no import evidence backs."""
     if not source_ids:
         return
-    candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
+    evidence_ids = _evidence_source_ids(root, raw)
     for src in source_ids:
-        if src not in candidate_ids:
-            raise CurationError(f"source {src} is not a candidate of case {case_id}")
+        if src not in evidence_ids:
+            raise CurationError(f"source {src} is not evidence of case {case_id}")
 
 
 def add_finding(
@@ -604,7 +611,7 @@ def add_finding(
     source_ids = source_ids or []
 
     def mutate(raw: dict[str, Any]) -> None:
-        _check_candidate_sources(raw, source_ids, case_id)
+        _check_evidence_sources(root, raw, source_ids, case_id)
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
         finding = {
@@ -638,7 +645,7 @@ def add_findings(
 
     def mutate(raw: dict[str, Any]) -> None:
         for fi in findings:
-            _check_candidate_sources(raw, list(fi.get("source_ids") or []), case_id)
+            _check_evidence_sources(root, raw, list(fi.get("source_ids") or []), case_id)
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
         for fi in findings:
@@ -661,11 +668,11 @@ def add_findings(
 
 
 def _build_replacement(
-    raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
+    root: Path, raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
 ) -> dict[str, Any]:
     """Build one edited finding from a replacement atom (owner supply the content)."""
     source_ids = list(replacement.get("source_ids") or [])
-    _check_candidate_sources(raw, source_ids, case_id)
+    _check_evidence_sources(root, raw, source_ids, case_id)
     finding = {
         "title": replacement["title"],
         "body": replacement["body"],
@@ -700,7 +707,7 @@ def replace_findings(
         )
         if index is None:
             raise CurationError(f"no finding {finding_id}")
-        built = [_build_replacement(raw, case_id, r) for r in replacements]
+        built = [_build_replacement(root, raw, case_id, r) for r in replacements]
         new_findings = list(findings[:index]) + built + list(findings[index + 1:])
         curation["findings"] = new_findings
         _derive_content(raw)
@@ -763,7 +770,7 @@ def exclude_evidence(
 
     def mutate(raw: dict[str, Any]) -> None:
         _validate_evidence_exclusion_contract(reason, note)
-        _check_candidate_sources(raw, [source_id], case_id)
+        _check_evidence_sources(root, raw, [source_id], case_id)
 
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
@@ -940,9 +947,7 @@ def reinclude_case(root: Path, case_id: str) -> None:
 
 
 def _fragment_provenance(
-    raw: dict[str, Any],
-    finding: dict[str, Any],
-    source_ids: list[str],
+    root: Path, raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str],
     *,
     case_id: str,
 ) -> tuple[str, list[str]]:
@@ -952,7 +957,7 @@ def _fragment_provenance(
     the finding; else ``edited`` (>=1 source) or ``authored`` (no source). The
     fragment's own kind is never trusted.
     """
-    _check_candidate_sources(raw, source_ids, case_id)
+    _check_evidence_sources(root, raw, source_ids, case_id)
     if len(source_ids) == 1:
         cand = next(
             (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
@@ -987,7 +992,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
                 "location": frag.get("location"),
             }
             kind, source_ids = _fragment_provenance(
-                raw, finding, list(frag.get("source_ids") or []), case_id=case_id
+                root, raw, finding, list(frag.get("source_ids") or []), case_id=case_id
             )
             finding["provenance"] = {"kind": kind, "source_ids": source_ids}
             finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
@@ -999,7 +1004,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             reason = exc["reason"]
             note = exc.get("note")
             _validate_evidence_exclusion_contract(reason, note)
-            _check_candidate_sources(raw, [src], case_id)
+            _check_evidence_sources(root, raw, [src], case_id)
             _append_evidence_exclusion(curation, src, reason, note)
         curation["exclusions"] = curation.get("exclusions") or []
 

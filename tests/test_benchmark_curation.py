@@ -351,6 +351,17 @@ def test_add_finding_is_authored_and_replace_is_edited(tmp_path, fake_gh):
     assert f2["title"] == "New concern (v2)" and raw["curation"]["gold_mode"] == "historical"
     assert f2["finding_id"] == derive_finding_id(f2, case_id=case_id)
 
+def test_non_candidate_evidence_is_citable_and_excludable(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    src = "github:review:100"   # a pure approval, NOT a candidate
+    cu.exclude_evidence(ws, case_id, src, reason="duplicate")
+    raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+    assert raw["curation"]["exclusions"][0]["source_id"] == src
+    with pytest.raises(cu.CurationError):        # genuinely unknown still rejected
+        cu.exclude_evidence(ws, case_id, "github:review:999", reason="duplicate")
+
+
 def test_exclude_evidence_reason_contract_and_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
