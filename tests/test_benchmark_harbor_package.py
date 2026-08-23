@@ -136,6 +136,11 @@ def test_render_task_toml_matches_plan_s8():
         "cpus": 2,
         "memory_mb": 4096,
         "storage_mb": 10240,
+        "env": {
+            "DAYDREAM_REVIEW_CASE_ID": "case-4f7c81d922a0",
+            "DAYDREAM_REVIEW_BASE_REF": "base",
+            "DAYDREAM_REVIEW_HEAD_REF": "head",
+        },
     }
     assert doc["verifier"]["timeout_sec"] == 900.0
     assert doc["verifier"]["environment_mode"] == "separate"

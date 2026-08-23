@@ -206,7 +206,12 @@ def _validate_compiled_local(root: Path) -> Path:
 
 
 def validate_compiled(root: Path | None) -> int:
-    """Validate local authoring/compiled state and all Harbor models."""
+    """Validate local authoring/compiled state, all Harbor models, and the custom agent.
+
+    Runs the authoring preflight, the compiled-local inventory/leakage scan, the
+    same-interpreter Harbor resolution, the Harbor Task/JobConfig model checks, and
+    the custom-agent import preflight (``daydream.benchmark.harbor.agent`` must
+    import in this interpreter)."""
     if root is None:
         resolve_harbor()
         raise PackageError("compiled workspace path is required")
@@ -242,6 +247,20 @@ def validate_compiled(root: Path | None) -> int:
             JobConfig.model_validate(yaml.safe_load(path.read_text()))
         except Exception as exc:
             raise PackageError(f"Harbor rejected {name}: {exc}") from exc
+
+    # Custom-agent preflight: import the exact runnable agent path in the same
+    # interpreter Harbor/validation share, so a missing or separate-environment
+    # class fails before any trial is consumed.
+    try:
+        agent_mod = importlib.import_module("daydream.benchmark.harbor.agent")
+        getattr(agent_mod, "DaydreamReviewAgent")
+    except (ImportError, AttributeError) as exc:
+        raise PackageError(
+            f"cannot import custom Harbor agent "
+            f"daydream.benchmark.harbor.agent:DaydreamReviewAgent from the "
+            f"Daydream interpreter: {exc}",
+            remediation="pip install 'daydream[benchmark]'",
+        ) from exc
     return 0
 
 
@@ -389,7 +408,14 @@ def _render_and_check(
 
 
 def render_task_toml(opaque_key: str) -> bytes:
-    """Render the fixed Harbor schema-1.4 task configuration."""
+    """Render the fixed Harbor schema-1.4 task configuration.
+
+    The ``[environment.env]`` block threads the opaque per-case task key and the
+    deterministic ``base``/``head`` ref names into the agent container (Harbor
+    natively injects ``[environment].env`` into the environment). The case key
+    is the only per-case value; everything else is fixed. No judge/credential/
+    archive configuration is ever rendered onto the agent surface.
+    """
     # TOML is intentionally rendered directly: fixed ordering and no timestamp
     # make these bytes part of the deterministic compiled-tree contract.
     return f'''schema_version = "1.4"
@@ -410,6 +436,11 @@ workdir = "/workspace/repo"
 cpus = 2
 memory_mb = 4096
 storage_mb = 10240
+
+[environment.env]
+DAYDREAM_REVIEW_CASE_ID = "{opaque_key}"
+DAYDREAM_REVIEW_BASE_REF = "base"
+DAYDREAM_REVIEW_HEAD_REF = "head"
 
 [verifier]
 timeout_sec = 900.0
