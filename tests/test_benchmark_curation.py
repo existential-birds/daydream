@@ -666,8 +666,8 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
          str(lock_path)],
         stdout=subprocess.PIPE, text=True,
     )
-    assert holder.stdout.readline().strip() == "held"            # another process now holds the flock
     try:
+        assert holder.stdout.readline().strip() == "held"        # another process now holds the flock
         cu.list_cases(ws)
         cu.get_case(ws, case_id)
         cu.validate_case(ws, case_id)
@@ -676,7 +676,11 @@ def test_read_only_paths_run_concurrent_with_a_writer(tmp_path, fake_gh):
         # writer released (30s later).
         assert holder.poll() is None
     finally:
-        holder.wait(timeout=30)
+        # Cleanup must not race the writer's 30s sleep: a bare wait(timeout=30)
+        # started ~milliseconds after the sleep begins has zero scheduling
+        # margin and can TimeoutExpired under parallel-suite load. Kill instead.
+        holder.kill()
+        holder.wait()
 
 
 def test_locked_mutation_heals_interrupted_journal_before_new_write(tmp_path, fake_gh):

@@ -941,9 +941,16 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh
                 old_evidence.append({**e,
                                      "source_id": f"github:inline_comment:{e['database_id']}",
                                      "kind": "inline_comment"})
-            old_evidence.append({**e,
-                                 "source_id": f"github:thread_comment:{e['database_id']}",
-                                 "kind": "thread_comment"})
+            # The thread feed never carried commit anchors, so the pre-canonical
+            # thread_comment copy has no commit_id/original_commit_id: the two
+            # copies of db 1 must project DIFFERENTLY.  Spreading e verbatim
+            # would make them hash identically and collapse onto one element,
+            # under-modeling the drift (and hiding the spurious stale it used to
+            # trigger on the first post-format refresh).
+            old_evidence.append({
+                **{k: v for k, v in e.items() if k not in ("commit_id", "original_commit_id")},
+                "source_id": f"github:thread_comment:{e['database_id']}",
+                "kind": "thread_comment"})
         else:
             old_evidence.append(e)
     assert len(old_evidence) == 3      # db 1 twice, db 2 once as thread_comment
@@ -1675,3 +1682,58 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path, fake_gh):
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "stale"        # cannot bypass refresh semantics
     assert case["curation"]["findings"]                # curated findings preserved
+
+
+def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path, fake_gh):
+    """A legacy raw import file storing the same database_id twice - a REST
+    inline copy WITH ``commit_id`` and a GraphQL thread copy WITHOUT it (the
+    pre-canonicalization duplicate) - must yield ONE deterministic changed
+    verdict per id. The two copies' projection hashes differ (``commit_id`` is
+    projected), and the thread copy's missing commit anchors are a pure format
+    artifact: the fresh REST-derived canonical projection is still covered by a
+    prior projection, so the first post-format refresh must NOT stale the
+    curated case. The old ``dict(prior_sig)`` collapse left which tuple survives
+    to frozenset iteration order (nondeterministic across processes under hash
+    randomization), making the spurious stale a coin toss.
+    """
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # Rewrite the prior import file to the REAL historical shape: the same
+    # database_id persisted twice — the REST inline copy (commit_id present) and
+    # a GraphQL thread copy (commit_id absent) — whose projection hashes differ.
+    import_path = ws / "imports/pr-000101.json"
+    prior = load_json_strict(import_path)
+    rest = next(e for e in prior["evidence"] if e["database_id"] == 1)
+    thread = {k: v for k, v in rest.items() if k not in ("commit_id", "original_commit_id")}
+    thread.update(kind="thread_comment", source_id="github:thread_comment:1")
+    prior["evidence"] = [thread, rest]
+    import_path.write_text(json.dumps(prior, indent=2))
+
+    # Premise check: the duplicate's two tuples are genuinely distinct (the
+    # thread copy lacks the projected commit_id), so a dict() collapse would
+    # hand the survivor to frozenset iteration order instead of comparing sets.
+    sig = gi._evidence_signature_from_raw(prior)
+    assert len(sig) == 2 and len({h for _, h in sig}) == 2
+
+    # Refresh against the canonical feed (one record per id, unchanged body):
+    # the fresh REST-derived projection matches a prior projection, so the
+    # per-id comparison (order-independent) leaves the curated case ready, and
+    # the refreshed file carries exactly one record per id.
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None
+    ) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"      # format drift must NOT stale gold
+    assert case["curation"]["findings"]              # curated findings preserved
+    refreshed = load_json_strict(import_path)
+    assert len([e for e in refreshed["evidence"] if e["database_id"] == 1]) == 1

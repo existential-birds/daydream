@@ -982,9 +982,11 @@ def _evidence_signature_from_doc(doc: schema.ImportDocument) -> frozenset[tuple[
     ``inline_comment`` per database id. The per-record hash spans the full
     projection-relevant provenance (body, author, commit/anchor fields, sides,
     subject type, resolution state, dismissal, review state) and excludes
-    ``kind``/``source_id``/``database_id``/``url``/timestamps, so a duplicate
-    pre-canon record collapses to one identical set element and a pure
-    format/metadata change keeps prior curated cases — a genuine content
+    ``kind``/``source_id``/``database_id``/``url``/timestamps, so a duplicate pre-canon record
+    collapses only when its projections are identical; when the thread copy lacks the commit
+    anchors the two copies project differently, and the refresh changed-check treats the fresh
+    canonical projection as unchanged while it matches any prior projection for that database id —
+    so a pure format/metadata change keeps prior curated cases, while a genuine content
     change (a comment added/removed/edited, re-anchored, or re-resolved) still
     flips the digest. Deletion is carried by the set: a removed record's
     ``database_id`` simply disappears (no fallback hash).
@@ -1001,8 +1003,8 @@ def _evidence_signature_from_raw(raw: dict[str, Any]) -> frozenset[tuple[int, st
     Shares the per-record hash helper with :func:`_evidence_signature_from_doc`
     so the persisted-file path and the typed-doc path always agree; a record
     appearing twice for one ``database_id`` (the pre-canonicalization duplicate)
-    collapses to one identical set element, and a deleted record simply
-    disappears from the set.
+    may linger as two format-only projections when the thread copy lacks
+    the commit anchors, and a deleted record simply disappears from the set.
     """
     return frozenset(
         (int(e["database_id"]), _evidence_projection_hash(e))
@@ -1445,12 +1447,32 @@ def _import_one_pr(
         # gated on *refresh* (Assumption 3: a plain re-import never stales on
         # title/body/base/head). A first import (no prior_sig) computes nothing.
         if prior_sig is not None:
-            prior_by_id = dict(prior_sig)
-            new_by_id = dict(_evidence_signature_from_doc(doc))
+            # Per-id projection-hash SETS instead of a dict() collapse: two
+            # records for one database_id (the pre-canonicalization duplicate —
+            # a REST inline copy and a GraphQL thread copy under the same id)
+            # carry different projection hashes, and which tuple dict() keeps
+            # depends on frozenset iteration order, which hash randomization
+            # makes nondeterministic across processes. Comparing per-id hash
+            # sets is order-independent. A database id counts as changed only
+            # when its fresh canonical projection is NOT covered by the prior
+            # projections: a genuine content/anchor/resolution edit, an
+            # addition, or a deletion. The pre-canonical thread copy lacks the
+            # commit anchors only REST exposes, so it is a pure format artifact
+            # — the fresh REST-derived projection still matches a prior
+            # projection and the first post-format refresh must NOT stale
+            # curated gold. When every id is unique on both sides this reduces
+            # exactly to the old single-hash comparison.
+            prior_by_id: dict[int, set[str]] = {}
+            for db_id, proj_hash in prior_sig:
+                prior_by_id.setdefault(db_id, set()).add(proj_hash)
+            new_by_id: dict[int, set[str]] = {}
+            for db_id, proj_hash in _evidence_signature_from_doc(doc):
+                new_by_id.setdefault(db_id, set()).add(proj_hash)
             changed_ids = {
                 db_id
                 for db_id in set(prior_by_id) | set(new_by_id)
-                if new_by_id.get(db_id) != prior_by_id.get(db_id)
+                if db_id not in new_by_id
+                or not (new_by_id[db_id] <= prior_by_id.get(db_id, set()))
             }
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
