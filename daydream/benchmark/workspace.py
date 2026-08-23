@@ -24,6 +24,7 @@ from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
     CaseIndexEntry,
+    ImportDocument,
     PreflightLedger,
     Privacy,
     PullRequestEntry,
@@ -383,17 +384,28 @@ def _verify_import_checksums(root: Path, manifest: BenchmarkManifest) -> None:
     """Verify each fetched import's on-disk sha256 against ``import_sha256``.
 
     A missing import file or a checksum mismatch is a :class:`WorkspaceCorrupt`
-    case — it is never folded into an incomplete/curating result.
+    failure — it is never folded into an incomplete/curating result.
     """
     for pr in manifest.pull_requests:
         if pr.import_state != "fetched" or pr.import_file is None or pr.import_sha256 is None:
             continue
-        actual = sha256_file(root / pr.import_file)
+        path = resolve_authoring_path(root, pr.import_file)
+        if not path.exists():
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} is missing on disk"
+            )
+        actual = sha256_file(path)
         if actual != pr.import_sha256:
             raise WorkspaceCorrupt(
                 f"{root}: import {pr.import_file} checksum mismatch "
                 f"(expected {pr.import_sha256}, got {actual})"
             )
+        try:
+            ImportDocument.model_validate(load_json_strict(path))
+        except Exception as exc:
+            raise WorkspaceCorrupt(
+                f"{root}: import {pr.import_file} is not a valid import document: {exc}"
+            ) from exc
 
 
 def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
