@@ -455,13 +455,13 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
     Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``, ``run``.
+    ``curate``, ``calibrate-judge``, ``run``, ``clean``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
             "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
-            "import-prs/curate/calibrate-judge/run."
+            "import-prs/curate/calibrate-judge/run/clean."
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
@@ -548,6 +548,34 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--yes", action="store_true", help="confirm the paid run without prompting"
+    )
+
+    clean_p = sub.add_parser(
+        "clean", help="remove ledger-derived disposable artifacts (issue #782)"
+    )
+    clean_p.add_argument("dir", type=Path, help="workspace directory")
+    clean_p.add_argument(
+        "--cache", action="store_true",
+        help="remove the disposable clone + build stage under cache/"
+    )
+    clean_p.add_argument(
+        "--jobs", action="store_true",
+        help="remove ledgered Harbor job dirs + their recorded Docker images"
+    )
+    clean_p.add_argument(
+        "--trajectories", action="store_true",
+        help="remove contained agent/trajectory.json files in ledgered job dirs"
+    )
+    clean_p.add_argument(
+        "--derived", action="store_true",
+        help="union of --cache --jobs --trajectories (preserves curated source/gold)"
+    )
+    clean_p.add_argument(
+        "--all", action="store_true",
+        help="delete every deletable artifact including curated source/gold (needs --yes)"
+    )
+    clean_p.add_argument(
+        "--yes", action="store_true", help="confirm --all without prompting"
     )
 
     return parser
@@ -748,6 +776,48 @@ def _handle_benchmark_run(args) -> int:
     return run_mod.run_run(args.dir, oracle=args.oracle, yes=args.yes, env=env)
 
 
+def _handle_benchmark_clean(args) -> int:
+    """Handle ``daydream benchmark clean <dir> [--cache] [--jobs] [...]``.
+
+    Resolves the ``--derived`` union into the three selection flags *before*
+    calling ``clean_workspace`` (the contract the routing test pins) and runs
+    contracted deletion entirely inside ``clean_workspace``. An explicit
+    ``--all`` without ``--yes`` needs a TTY (mirroring ``run --yes`` /
+
+    ``calibrate-judge``); expected ``RunError``/``WorkspaceCorrupt`` print to
+    stderr and return exit ``1`` — never a bare traceback.
+    """
+    from daydream.benchmark.harbor import clean as clean_mod
+    from daydream.benchmark.harbor import run as run_mod
+    from daydream.benchmark.storage import WorkspaceCorrupt
+
+    if args.all and not args.yes and not _is_interactive_tty():
+        print(
+            "clean --all: requires TTY confirmation or --yes before deleting "
+            "curated source/gold",
+            file=sys.stderr,
+        )
+        return 1
+    cache = args.cache or args.derived
+    jobs = args.jobs or args.derived
+    trajectories = args.trajectories or args.derived
+    try:
+        report = clean_mod.clean_workspace(
+            args.dir,
+            cache=cache,
+            jobs=jobs,
+            trajectories=trajectories,
+            all_=args.all,
+            yes=args.yes,
+        )
+    except (run_mod.RunError, WorkspaceCorrupt) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for line in report.summary_lines():
+        print(line)
+    return report.exit_code
+
+
 def _handle_benchmark_curate(args) -> int:
     """Curate a case: derive everything, never attests to ready.
 
@@ -816,5 +886,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_calibrate(args)
     if sub == "run":
         return _handle_benchmark_run(args)
+    if sub == "clean":
+        return _handle_benchmark_clean(args)
     parser.print_help(file=sys.stderr)
     return 2
