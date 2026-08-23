@@ -170,7 +170,11 @@ class WorkspaceLock:
     ``<root>/.benchmark.lock`` file. The lock is process-reentrant per root:
     nested acquisitions within the same process share the same open fd and
     only bump a depth counter, so a command that holds the lock across its own
-    journal writes cannot deadlock against itself.
+    journal writes cannot deadlock against itself. The curation service
+    (``daydream/benchmark/curation.py``) relies on this blocking,
+    process-reentrant semantics for every mutation: each locked mutation runs
+    its whole read -> validate -> mutate -> commit sequence under one
+    acquisition, so concurrent curators serialize instead of losing updates.
 
     The ``.benchmark.lock`` file itself is left on disk after release (removal
     races are unsafe), and mutual-exclusion among separate OS processes is
