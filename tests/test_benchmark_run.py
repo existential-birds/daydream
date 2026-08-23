@@ -10,6 +10,35 @@ import pytest
 
 from daydream.benchmark.cli import _build_benchmark_parser, _handle_benchmark_command
 
+
+@pytest.fixture(autouse=True)
+def _stub_harbor_environment(monkeypatch):
+    """Keep the run-supervisor suite hermetic without a Harbor install.
+
+    The supervisor's production path only reads ``importlib.metadata.version
+    ("harbor")`` / ``package.resolve_harbor()`` after ``_preflight`` has already
+    confirmed Harbor is present. These unit tests exercise the receipt and gate
+    logic directly, so they must not require the optional ``[benchmark]`` extra
+    (Harbor is only installed when that extra is enabled — e.g. the review VMs
+    — but the CI ``check`` job installs base deps only). Stub the Harbor
+    environment so the suite stays hermetic.
+    """
+    import importlib.metadata
+    import sys
+
+    from daydream.benchmark.harbor import package as _pkg
+
+    real_version = importlib.metadata.version
+
+    def _version(dist):
+        return "0.21.0" if dist == "harbor" else real_version(dist)
+
+    monkeypatch.setattr(importlib.metadata, "version", _version)
+    monkeypatch.setattr(
+        _pkg, "resolve_harbor", lambda: str(Path(sys.executable).parent / "harbor")
+    )
+
+
 # ---------------------------------------------------------------------------
 # shared hermetic fixtures (Tasks 2-8)
 # ---------------------------------------------------------------------------
