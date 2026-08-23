@@ -1121,6 +1121,11 @@ def test_spec_change_forces_recompile(tmp_path, fake_gh):
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
     lock2 = build.compile_workspace(ws)
     assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
+    # the task-spec digest itself must have changed (not merely the title member,
+    # which is already a direct authoring-input), proving the task_spec_sha256
+    # member's change-sensitivity is what forces the recompile
+    key = build.derive_task_key(case_id)
+    assert lock2["cases"][key]["task_spec_sha256"] != lock1["cases"][key]["task_spec_sha256"]
 
 
 def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
@@ -1149,7 +1154,8 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path, fake_gh)
     for sub in ("tests", "environment"):
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
-    # agent task surface is instruction.md, and the environment Dockerfile clones only the bundle
-    env_df = case / "environment" / "Dockerfile"
-    env_docker = env_df.read_text() if env_df.exists() else ""
-    assert "Task.md" not in env_docker
+    # agent task surface is instruction.md; the environment is ONLY the repository
+    # bundle (no Dockerfile or other file that could embed Task.md), so assert the
+    # environment surface is exactly that and Task.md never reaches it.
+    env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
+    assert env_files == {"repository.bundle"}, f"unexpected environment files: {env_files}"
