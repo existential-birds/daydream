@@ -22,6 +22,9 @@ pytestmark = pytest.mark.skipif(
     not _run, reason="live gh smoke test disabled (DAYDREAM_LIVE_GH=1 + gh required)"
 )
 
+# The module-level skipif already gates on gh + DAYDREAM_LIVE_GH=1.
+_SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")
+
 
 def _seed_manifest(ws, repository: str) -> None:
     init_workspace(ws, repository, ["h1.example.com"], ["h2.example.com"])
@@ -38,3 +41,25 @@ def test_private_preflight_smoke_with_installed_gh(tmp_path):
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"].startswith("R_kgD")
     assert "password=" not in json.dumps(raw)     # no credential leakage into the manifest
+
+
+def test_import_prs_two_prs_smoke_with_installed_gh(tmp_path):
+    """Opt-in: import two PRs from an accessible repo with the installed gh; both
+    frozen snapshots must classify ready. Operator sets DAYDREAM_SMOKE_PRS to a
+    comma-separated pair (e.g. '841,842'); skipped when absent."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    if not _SMOKE_PRS:
+        pytest.skip("DAYDREAM_SMOKE_PRS not set (comma-separated PR numbers)")
+    pr_numbers = [int(x) for x in _SMOKE_PRS.split(",")]
+    ws = tmp_path / "ws"
+    init_workspace(ws, "existential-birds/daydream", ["h1.example.com"], ["h2.example.com"])
+    rc = gi.run_import_prs(ws, pr_numbers=pr_numbers)
+    assert rc == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    assert len(raw["pull_requests"]) == len(pr_numbers)
+    for pr in raw["pull_requests"]:
+        case = load_yaml_strict(ws / f"cases/{pr['case_ids'][0]}.yaml")
+        assert case["snapshot"]["status"] == "ready"
