@@ -189,6 +189,103 @@ def _seed_ready_case(tmp_path, fake_gh, *, lines: int = 3, candidate: bool = Fal
     return ws, case_id, head_sha
 
 
+def _seed_ready_case_mixed(tmp_path, fake_gh, *, lines: int = 3):
+    """Seed a frozen ``ready`` workspace with a mixed evidence set.
+
+    Mirrors :func:`_seed_ready_case` but seeds three evidence kinds so a case
+    has exactly five evidence records (per the verified spike composition):
+    inline replies and pure approvals and conversation comments that are
+    evidence-only, plus one exact candidate and one non-exact candidate.
+    Returns ``(ws, case_id, head_sha)``.
+    """
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace
+
+    _SEED_SEQ["n"] += 1
+    ws = tmp_path / f"ws-{_SEED_SEQ['n']}"
+    init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _, head_sha = _seed_local_origin(tmp_path, fake_gh, lines=lines)
+    reviews = [
+        {
+            "id": 100,
+            "node_id": "PRR_100",
+            "user": {"login": "carol", "type": "User"},
+            "body": "approval text",
+            "state": "APPROVED",
+            "commit_id": None,
+            "submitted_at": "2026-01-01T00:01:00Z",
+            "created_at": "2026-01-01T00:01:00Z",
+            "updated_at": "2026-01-01T00:01:00Z",
+            "html_url": "https://github.com/o/r/pull/101#pullrequestreview-100",
+        },
+        {
+            "id": 101,
+            "user_id": "PRR_101",
+            "user": {"login": "carol", "type": "User"},
+            "body": "please also fix this",
+            "state": "COMMENTED",
+            "commit_id": None,
+            "submitted_at": "2026-01-01T00:02:00Z",
+            "created_at": "2026-01-01T00:02:00Z",
+            "updated_at": "2026-01-01T00:02:00Z",
+            "html_url": "https://github.com/o/r/pull/101#pullrequestreview-101",
+        },
+    ]
+    inline_comments = [
+        {
+            "id": 1,
+            "node_id": "DIFF_1",
+            "user": {"login": "alice", "type": "User"},
+            "body": "please fix",
+            "commit_id": head_sha,
+            "original_commit_id": head_sha,
+            "path": "feature.py",
+            "line": 2,
+            "subject_type": "line",
+            "side": "RIGHT",
+            "in_reply_to_id": None,
+            "created_at": "2026-01-01T00:03:00Z",
+            "updated_at": "2026-01-01T00:03:00Z",
+            "html_url": "https://github.com/o/r/pull/101#discussion_r1",
+        },
+        {
+            "id": 2,
+            "node_id": "DIFF_2",
+            "user": {"login": "bob", "type": "User"},
+            "body": "reply text",
+            "commit_id": None,
+            "path": None,
+            "line": None,
+            "subject_type": None,
+            "side": None,
+            "in_reply_to_id": 1,
+            "created_at": "2026-01-01T00:04:00Z",
+            "updated_at": "2026-01-01T00:04:00Z",
+            "html_url": "https://github.com/o/r/pull/101#discussion_r2",
+        },
+    ]
+    issue_comments = [
+        {
+            "id": 200,
+            "node_id": "IC_200",
+            "user": {"login": "dave", "type": "User"},
+            "body": "conversation text",
+            "created_at": "2026-01-01T00:05:00Z",
+            "updated_at": "2026-01-01T00:05:00Z",
+            "html_url": "https://github.com/o/r/issues/101#issuecomment-200",
+        }
+    ]
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", reviews)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", inline_comments)
+    fake_gh.set_response("GET", "repos/o/r/issues/101/comments", issue_comments)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    case_id = raw["cases"][0]["case_id"]
+    return ws, case_id, head_sha
+
+
 def test_spike_head_file_line_count_from_mirror(tmp_path, fake_gh):
     """The frozen head tree is readable via ``git cat-file blob <head>:<path>``
     with cwd in the shared bare mirror — the location-vs-head read source."""
@@ -610,6 +707,19 @@ def test_bundle_clone_reused_across_findings_and_calls(tmp_path, fake_gh, monkey
     assert clones["n"] == 1
     cu.list_cases(ws)
     assert clones["n"] == 1
+
+
+def test_get_case_exposes_all_evidence_kinds(tmp_path, fake_gh):
+    from daydream.benchmark import curation as cu
+    ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
+    view = cu.get_case(ws, case_id)
+    ev = {e["source_id"]: e for e in view["evidence"]}
+    assert "github:review:100" in ev and ev["github:review:100"]["kind"] == "review"
+    assert ev["github:review:100"]["state"] == "APPROVED"   # pure approval paged
+    assert "github:inline_comment:2" in ev                    # reply paged
+    assert "github:issue_comment:200" in ev                   # conversation paged
+    assert ev["github:inline_comment:1"]["candidate_index"] == 0   # candidate annotated
+    assert ev["github:review:100"]["candidate_index"] is None      # non-candidate
 
 
 def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):

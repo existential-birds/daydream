@@ -293,6 +293,35 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _evidence_list(
+    root: Path, raw: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Load the import evidence once and return the ordered full record list.
+
+    Returns every evidence record in persisted file order (all kinds — review,
+    inline_comment, thread_comment, issue_comment), each augmented with
+    ``candidate_index`` = index into ``raw["candidates"]`` by matching
+    ``source_id``, or ``None`` when the record is not a candidate. A case that
+    references an import file that is missing/unreadable raises the storage
+    error — no list is fabricated.
+    """
+    source = raw.get("source") or {}
+    import_file = source.get("import_file")
+    if not import_file:
+        return []
+    import_data = storage.load_json_strict(Path(root) / import_file)
+    candidate_index = {
+        c.get("source_id"): i
+        for i, c in enumerate(raw.get("candidates") or [])
+    }
+    records: list[dict[str, Any]] = []
+    for ev in import_data.get("evidence") or []:
+        record = dict(ev)
+        record["candidate_index"] = candidate_index.get(record.get("source_id"))
+        records.append(record)
+    return records
+
+
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
     """Read-only view of one case document and its per-candidate evidence.
 
@@ -300,7 +329,9 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
     persisted) ``evidence`` sub-dict ``{kind, author, commit_id, resolved,
     outdated}`` joined by ``source_id`` from the import file the case doc
     references; a candidate whose ``source_id`` matches no evidence record has
-    no ``evidence`` key (absent, not ``None``). A missing/unreadable import
+    no ``evidence`` key (absent, not ``None``). Additionally the case gains an
+    in-memory ``evidence`` list of every import evidence record (all kinds),
+    each augmented with a ``candidate_index``. A missing/unreadable import
     file for a case that references it propagates the storage error.
     """
     raw = _load_case(root, case_id)
@@ -310,6 +341,7 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
             src = cand.get("source_id")
             if src in projection:
                 cand["evidence"] = projection[src]
+    raw["evidence"] = _evidence_list(root, raw)
     return raw
 
 
