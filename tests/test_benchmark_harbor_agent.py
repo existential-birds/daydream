@@ -130,3 +130,39 @@ def test_render_task_toml_host_policy_and_case_env():
     assert pkg.render_task_toml("case-abc123def456") == pkg.render_task_toml("case-abc123def456")
     # no judge vars or archive/target config reach the agent surface
     assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
+
+
+# ---------------------------------------------------------------------------
+# Task 4: entrypoint — controlled in-container runner
+# ---------------------------------------------------------------------------
+
+
+def test_entrypoint_build_run_config_is_controlled():
+    from daydream.benchmark.harbor import entrypoint
+    from daydream.config_file import DaydreamFileConfig
+
+    cfg = entrypoint.build_run_config(
+        repo_dir="/workspace/repo",
+        trajectory_path="/logs/agent/trajectory.json",
+        backend="claude",
+        model="sonnet",
+    )
+    assert cfg.output_mode == "review"
+    assert cfg.base == "base"
+    assert cfg.non_interactive is True
+    assert cfg.archive is False and cfg.run_eval is False
+    assert cfg.findings_out is None                     # NO --findings-out (live PR lookup)
+    assert cfg.trajectory_path == Path("/logs/agent/trajectory.json")
+    assert cfg.backend == "claude" and cfg.model == "sonnet"
+    assert isinstance(cfg.file_config, DaydreamFileConfig)
+    # controlled empty: the target repo's .daydream.toml is never loaded
+    assert cfg.file_config == DaydreamFileConfig()
+
+
+def test_entrypoint_backend_fail_closed(monkeypatch):
+    from daydream.benchmark.harbor import entrypoint
+
+    monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "codex")
+    with pytest.raises(entrypoint.EntrypointError) as exc:
+        entrypoint.require_supported_backend()
+    assert "claude" in str(exc.value)
