@@ -104,7 +104,7 @@ _SKIP_CHARS = " \t\r\n,?$"
 
 
 def _requested_fields(query: str) -> dict[str | None, set[str]]:
-    """Recursive-descent over *query*'s selection sets; returns requested names
+    """Iterative descent over *query*'s selection sets; returns requested names
     grouped by the GraphQL type they were requested on.
 
     Each selection set is parsed in the type context of its enclosing parent
@@ -147,70 +147,87 @@ def _requested_fields(query: str) -> dict[str | None, set[str]]:
                 i += 1
         return i
 
-    def parse_selections(type_ctx: str | None) -> None:
-        """Parse one selection set; returns at its closing ``}``."""
-        nonlocal i
-        while True:
-            i = skip_ws(i)
-            if i >= n:
-                return
-            c = query[i]
-            if c == "}":
-                i += 1
-                return
-            if c == "{":
-                i += 1
-                continue
-            if c == ".":
-                # '... on Type' switches the type context for its selection;
-                # a named fragment spread is skipped.
-                i = skip_ws(i + 3)
-                tok, i = read_name(i)
-                i = skip_ws(i)
-                if tok == "on":
-                    ftype, i = read_name(i)
-                    i = skip_ws(i)
-                    if i < n and query[i] == "{":
-                        parse_selections(ftype)
-                continue
+    def record_field(tok: str, i: int, type_ctx: str | None) -> tuple[str, int]:
+        """Resolve *tok*'s real name (stripping an alias), record it under
+        *type_ctx*, and return ``(real_name, cursor)`` with the cursor just
+        past any argument list — a nested selection set, if any, opens there.
+        """
+        real = tok
+        j = skip_ws(i)
+        # strip an alias: "side: diffSide" validates "diffSide"
+        if j < n and query[j] == ":":
+            j = skip_ws(j + 1)
+            rname, j = read_name(j)
+            if rname is not None:
+                real = rname
+        if real != "__typename":
+            out.setdefault(type_ctx, set()).add(real)
+        j = skip_ws(j)
+        j = skip_args(j)
+        j = skip_ws(j)
+        return real, j
+
+    # Iterative descent with an explicit stack of type contexts: every ``{``
+    # that opens a selection set pushes the enclosing context and switches to
+    # the set's own context (``... on Type``, ``nodes``/connection machinery,
+    # or the unmodeled root operation type); the matching ``}`` pops it. The
+    # cursor is threaded as data, so there is no mutable index and no
+    # recursion — each decision point is a flat branch of this loop or a
+    # small cursor-returning helper above.
+    pending_types: list[str | None] = []
+    type_ctx: str | None = None
+    while True:
+        i = skip_ws(i)
+        if i >= n:
+            break
+        c = query[i]
+        if c == "}":
+            i += 1
+            if pending_types:
+                type_ctx = pending_types.pop()
+            continue
+        if c == "{":
+            i += 1
+            continue
+        if c == ".":
+            # '... on Type' switches the type context for its selection;
+            # a named fragment spread is skipped.
+            i = skip_ws(i + 3)
             tok, i = read_name(i)
-            if tok is None:
-                i += 1
-                continue
-            if tok in ("query", "mutation"):
-                # skip the operation name (if any) and variable declarations
-                i = skip_ws(i)
-                _, i = read_name(i)
-                i = skip_ws(i)
-                i = skip_args(i)
+            i = skip_ws(i)
+            if tok == "on":
+                ftype, i = read_name(i)
                 i = skip_ws(i)
                 if i < n and query[i] == "{":
-                    parse_selections(None)  # root operation type is unmodeled
-                continue
-            # strip an alias: "side: diffSide" validates "diffSide"
-            j = skip_ws(i)
-            real = tok
-            if j < n and query[j] == ":":
-                j = skip_ws(j + 1)
-                rname, j = read_name(j)
-                if rname is not None:
-                    real = rname
-            if real != "__typename":
-                out.setdefault(type_ctx, set()).add(real)
-            j = skip_ws(j)
-            j = skip_args(j)
-            j = skip_ws(j)
-            if j < n and query[j] == "{":
-                if real == "nodes":
-                    nested = _CONNECTION_NODE_TYPE.get(type_ctx or "")
-                else:
-                    nested = _NESTED_SELECTION_TYPE.get(real)
-                i = j
-                parse_selections(nested)
+                    pending_types.append(type_ctx)
+                    type_ctx = ftype
+                    i += 1
+            continue
+        tok, i = read_name(i)
+        if tok is None:
+            i += 1
+            continue
+        if tok in ("query", "mutation"):
+            # skip the operation name (if any) and variable declarations
+            i = skip_ws(i)
+            _, i = read_name(i)
+            i = skip_ws(i)
+            i = skip_args(i)
+            i = skip_ws(i)
+            if i < n and query[i] == "{":
+                pending_types.append(type_ctx)
+                type_ctx = None  # root operation type is unmodeled
+                i += 1
+            continue
+        real, i = record_field(tok, i, type_ctx)
+        if i < n and query[i] == "{":
+            if real == "nodes":
+                nested = _CONNECTION_NODE_TYPE.get(type_ctx or "")
             else:
-                i = j
-
-    parse_selections(None)
+                nested = _NESTED_SELECTION_TYPE.get(real)
+            pending_types.append(type_ctx)
+            type_ctx = nested
+            i += 1
     return out
 
 

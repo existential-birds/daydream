@@ -227,17 +227,16 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
     if endpoint == "graphql":
         query = (payload or {}).get("query", "")
         variables = (payload or {}).get("variables") or {}
-        if "reviewThreads" in query or "PullRequestReviewThread" in query:
-            unknown = github_schema.unknown_query_fields(query)
-            if unknown:
-                return (1, "",
-                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
         if "minimizeComment" in query:
             reply: dict[str, Any] = {"data": {"minimizeComment": {"minimizedComment": {"isMinimized": True}}}}
             return 0, json.dumps(reply) + "\n", ""
         if "PullRequestReviewThread" in query:
             # Per-thread ``node(id:)`` comments page catalog: serve one page per
             # incoming ``commentsAfter`` cursor, deterministic endCursor per page.
+            unknown = github_schema.unknown_query_fields(query)
+            if unknown:
+                return (1, "",
+                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
             thread_id = variables.get("threadId") if isinstance(variables, dict) else None
             pages = responses.get(f"graphql_thread_comments:{thread_id}")
             if not isinstance(pages, list) or not pages:
@@ -251,6 +250,10 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
                 return 1, "", f"fake gh: thread-comment cursor {after!r} past the catalog end\n"
             return 0, json.dumps(pages[idx]) + "\n", ""
         if "reviewThreads" in query:
+            unknown = github_schema.unknown_query_fields(query)
+            if unknown:
+                return (1, "",
+                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
             pr_num = variables.get("number") if isinstance(variables, dict) else None
             key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
             value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
