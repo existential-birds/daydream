@@ -1451,8 +1451,17 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     raw = load_yaml_strict(ws / "benchmark.yaml")
-    prior_sig, prior_task_sig, curations, _ = gi._prior_import_state(ws, raw, 202)
+    (
+        prior_sig,
+        prior_task_sig,
+        curations,
+        _,
+        prior_pinned,
+        prior_policy,
+        prior_heads,
+    ) = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
+    assert prior_pinned == {} and prior_policy == {} and prior_heads == []
 
 
 # ---------------------------------------------------------------------------
@@ -1563,3 +1572,32 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path, fake_gh)
     assert case["curation"]["state"] == "stale"
     assert case["curation"]["findings"]               # curated findings preserved
     assert case["curation"]["snapshot_attested"] is False
+
+
+# ---------------------------------------------------------------------------
+# head-immutability (issue #813): an existing case resolves to its pinned head,
+# so a live head advance reproduces the same case_id with no orphan
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_after_head_advance_keeps_case_id(tmp_path, fake_gh):
+    # Import + curate PR 101 at head a*40, then change the live head to b*40
+    # (the branch advanced) and refresh: the SAME case_id is reproduced, no
+    # new case, no orphan, and the untouched pinned case stays ready.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    hdr = dict(_PR_HEADER)
+    hdr["head"] = {"ref": "feature/cache", "sha": "b" * 40}   # live head now advanced (valid 40-hex)
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    ids = [c["case_id"] for c in raw["cases"]]
+    assert ids == ["pr-000101-aaaaaaaaaaaa"]          # pinned, not advanced to b*40
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready

@@ -1088,6 +1088,8 @@ def _case_materialize(
     repo_slug: str = "",
     origin_url: str | None = None,
     prior_curations: dict[str, dict[str, Any]] | None = None,
+    prior_pinned: dict[str, str] | None = None,
+    prior_policy: dict[str, str] | None = None,
     changed_ids: set[int] | None = None,
     task_input_changed: bool = False,
 ) -> tuple[list[tuple[str, str, dict[str, Any]]], list[tuple[str, bytes]]]:
@@ -1096,7 +1098,11 @@ def _case_materialize(
     When *root*/origin are provided the case ``snapshot`` is frozen via
     :func:`daydream.benchmark.snapshot.freeze_one` (a ``ready|unreplayable``
     dict) and any produced bundle is returned in the second element for the
-    caller to stage atomically. When a prior curated case exists, its curation
+    caller to stage atomically. An existing ``final`` case resolves to the
+    pinned head from its prior ``snapshot.original_head_sha`` (head-immutable,
+    so a live head advance reproduces the identical ``case_id``); only a first
+    import with no prior ``final_pr_head`` pin uses the live
+    ``pull_request.head.sha``. When a prior curated case exists, its curation
     is carried over; it is flipped to ``stale`` with attestation cleared iff
     *task_input_changed* (PR-wide) or its own referenced evidence ids
     intersect *changed_ids* (a referenced record changed or disappeared).
@@ -1109,7 +1115,17 @@ def _case_materialize(
     bundle_drops: list[tuple[str, bytes]] = []
     seen: set[str] = set()
     for head_token in requested_heads:
-        head_sha = head_token if head_token != "final" else pull_request.head.sha
+        head_sha = head_token if head_token != "final" else None
+        if head_token == "final":
+            # head-immutable: an existing final_pr_head case resolves to its
+            # pinned commit; only a first import (no pin) uses the live head.
+            if prior_policy and prior_pinned:
+                for prior_case_id, prior_pol in prior_policy.items():
+                    if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
+                        head_sha = prior_pinned[prior_case_id]
+                        break
+            if head_sha is None:
+                head_sha = pull_request.head.sha
         if not head_sha or head_sha in seen:
             continue
         seen.add(head_sha)
@@ -1278,22 +1294,34 @@ def _prior_import_state(
     str | None,
     dict[str, dict[str, Any]],
     str,
+    dict[str, str],
+    dict[str, str],
+    list[str],
 ]:
-    """The prior evidence signature, task-input signature, curations, and import path.
+    """Prior import signatures, curations, path, pins, policies, and heads.
 
-    A missing prior state (no ``fetched`` ledger entry, or no persisted
-    import/case to read) yields ``None`` for both signatures and empty
-    curations — the normal first-run path. A *present-but-corrupt* prior
-    import or curation file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
+    Returns the prior evidence signature, task-input signature, per-case
+    curations, the import path, each prior case's pinned
+    ``snapshot.original_head_sha`` (``prior_pinned``), each prior case's
+    ``snapshot.policy`` (``prior_policy``), and the prior ledger entry's
+    ``requested_heads``. A missing prior state (no ``fetched`` ledger entry, or
+    no persisted import/case to read) yields ``None`` for both signatures,
+    empty curations/pins/policies/heads, and the default import path — the
+    normal first-run path. A *present-but-corrupt* prior import or curation
+    file is fatal: :class:`~daydream.benchmark.storage.WorkspaceCorrupt`
     from the strict loaders propagates so a refresh fails before any network
     fetch or mutation, never silently healing corrupt prior state to
-    ``None``/``draft``.
+    ``None``/``draft``. A ``ready``/``stale`` prior case missing its pinned
+    head is also corrupt prior state — never a silent live-head default.
     """
     import_file = f"imports/pr-{number:06d}.json"
     existing = _manifest_entry(raw, number)
     prior_sig: frozenset[tuple[int, str]] | None = None
     prior_task_sig: str | None = None
     prior_curations: dict[str, dict[str, Any]] = {}
+    prior_pinned: dict[str, str] = {}
+    prior_policy: dict[str, str] = {}
+    prior_requested_heads: list[str] = list(existing.get("requested_heads", [])) if existing else []
     if existing is not None and existing.get("import_state") == "fetched":
         prior_import_file = existing.get("import_file")
         if not prior_import_file:
@@ -1313,12 +1341,39 @@ def _prior_import_state(
         prior_sig = _evidence_signature_from_raw(prior_raw)
         prior_task_sig = _task_input_signature_from_raw(prior_raw)
         for case_id in existing.get("case_ids", []):
-            cur = storage.load_yaml_strict(
+            case_raw = storage.load_yaml_strict(
                 storage.resolve_authoring_path(root, f"cases/{case_id}.yaml")
-            ).get("curation")
+            )
+            cur = case_raw.get("curation")
             if isinstance(cur, dict):
                 prior_curations[case_id] = cur
-    return prior_sig, prior_task_sig, prior_curations, import_file
+            snapshot = case_raw.get("snapshot") or {}
+            original_head_sha = snapshot.get("original_head_sha")
+            if (
+                isinstance(cur, dict)
+                and cur.get("state") in ("ready", "stale")
+                and not original_head_sha
+            ):
+                # A curated case must know which commit it was curated against;
+                # an absent pin makes head-immutable refresh impossible without
+                # silently re-anchoring to the live head.
+                raise storage.WorkspaceCorrupt(
+                    f"{root}: ready/stale case {case_id} is missing snapshot.original_head_sha"
+                )
+            if original_head_sha:
+                prior_pinned[case_id] = original_head_sha
+            policy = snapshot.get("policy")
+            if policy:
+                prior_policy[case_id] = policy
+    return (
+        prior_sig,
+        prior_task_sig,
+        prior_curations,
+        import_file,
+        prior_pinned,
+        prior_policy,
+        prior_requested_heads,
+    )
 
 
 def _import_one_pr(
@@ -1332,9 +1387,19 @@ def _import_one_pr(
     origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_task_sig, prior_curations, import_file = _prior_import_state(root, raw, number)
+    prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, prior_requested_heads = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
+        # Head-immutable task input: an existing final_pr_head case pins the
+        # refreshed doc's head to its snapshot.original_head_sha, so a live
+        # head advance neither re-anchors the case nor flips the task-input
+        # signature of the pinned case; only a first import (no pin) keeps the
+        # live pull_request.head.sha.
+        if prior_policy and prior_pinned:
+            for prior_case_id, prior_pol in prior_policy.items():
+                if prior_pol == "final_pr_head" and prior_case_id in prior_pinned:
+                    doc.pull_request.head.sha = prior_pinned[prior_case_id]
+                    break
         # Two independent stale signals: the per-case referenced-evidence arm
         # (database_ids whose projection hash changed or disappeared) and the
         # PR-wide task-input arm (the title/body/base/head a reviewer was
@@ -1355,10 +1420,17 @@ def _import_one_pr(
             }
         import_bytes = json.dumps(doc.model_dump(mode="json"), indent=2).encode("utf-8")
         import_sha256 = hashlib.sha256(import_bytes).hexdigest()
+        # Refresh/re-import never orphans a previously pinned case: materialize
+        # the union of the prior ledger heads and the newly-requested heads so
+        # _stamp_fetched's cases[] rewrite keeps every curated case indexed.
+        materialize_heads = requested_heads
+        if prior_requested_heads:
+            materialize_heads = list(dict.fromkeys([*prior_requested_heads, *requested_heads]))
         cases, bundle_rels = _case_materialize(
-            doc, number, requested_heads, import_file, import_sha256,
+            doc, number, materialize_heads, import_file, import_sha256,
             root=root, repo_slug=repo, origin_url=origin_url,
             prior_curations=prior_curations,
+            prior_pinned=prior_pinned, prior_policy=prior_policy,
             changed_ids=changed_ids, task_input_changed=task_input_changed,
         )
         with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
@@ -1372,7 +1444,7 @@ def _import_one_pr(
                 number,
                 import_file,
                 import_sha256,
-                requested_heads,
+                materialize_heads,
                 [c[0] for c in cases],
             )
             tx.stage("benchmark.yaml", _manifest_bytes(raw))
