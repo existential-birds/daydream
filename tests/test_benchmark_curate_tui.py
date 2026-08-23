@@ -258,6 +258,18 @@ def test_clean_confirm_does_not_mark_ready(tmp_path, fake_gh, capsys):
             capsys.readouterr().out)
 
 
+def test_no_comment_clean_then_ready_marks_case_ready(tmp_path, fake_gh, capsys):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # no-comment, empty gold
+    run_curate_tui(ws, case_id, read_line=_scripted("c", "y", "r", "y", "q"))
+    cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
+    assert cur["state"] == "ready" and cur["snapshot_attested"] is True
+    assert cur["clean_attested"] is True and cur["gold_status"] == "clean"
+    out = capsys.readouterr().out
+    assert "attested" in out and f"mark {case_id} ready?" in out
+
+
 def test_mark_ready_requires_yes_and_exact_sha(tmp_path, fake_gh, capsys):
     from daydream.benchmark.curate_tui import run_curate_tui
     from daydream.benchmark.storage import load_yaml_strict
