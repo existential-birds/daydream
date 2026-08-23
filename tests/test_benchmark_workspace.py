@@ -520,3 +520,55 @@ def test_case_pr_absent_from_ledger_is_corruption(tmp_path):
     _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
     code, label = validate_workspace(root)
     assert code == 1 and "corrupt" in label.lower()
+
+
+def test_orphan_import_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (root / "imports" / "pr-000999.json").write_text('{"unindexed": true}')   # unindexed import
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_orphan_bundle_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (root / "snapshots" / "pr-000999-abcdef012345.bundle").write_bytes(b"orphan")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_referenced_bundle_missing_is_corruption(tmp_path):
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    (next((root / "snapshots").glob("*.bundle"))).unlink()
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
+def test_duplicate_inode_indexed_files_is_corruption(tmp_path):
+    import hashlib
+    import os
+
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    # hard-link the import to the bundle path (one inode, two indexed names).
+    # the import bytes are a valid ImportDocument whose ledger sha is unchanged;
+    # only the bundle sha is re-stamped to the import bytes, so every checksum /
+    # model gate stays green and only the duplicate-inode cross-check can flag it
+    imp = next((root / "imports").glob("pr-*.json"))
+    bundle = next((root / "snapshots").glob("*.bundle"))
+    imp_bytes = imp.read_bytes()
+    bundle.unlink()
+    os.link(imp, bundle)   # duplicate-inode surprise
+    case_raw = yaml.safe_load(next((root / "cases").glob("*.yaml")).read_text())
+    case_raw["snapshot"]["bundle_sha256"] = hashlib.sha256(imp_bytes).hexdigest()
+    next((root / "cases").glob("*.yaml")).write_text(yaml.safe_dump(case_raw, sort_keys=False))
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()   # gated on Task 0 spike 4 verdict

@@ -265,12 +265,13 @@ def validate_workspace(root: Path) -> tuple[int, str]:
                 f"corrupt: invalid benchmark.yaml ({exc})",
             )
 
-        # Orphan + missing-indexed-file rule over the case/import set.
+        # Orphan + missing-indexed-file rule over the case/import/bundle set.
         try:
+            docs = load_case_documents(root, manifest)
             recover_startup(
                 root,
-                indexed=_case_index_paths(manifest),
-                on_disk=_scan_case_files(root),
+                indexed=_case_index_paths(manifest, docs),
+                on_disk=_scan_authoring_files(root),
             )
         except WorkspaceCorrupt as exc:
             return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
@@ -279,7 +280,7 @@ def validate_workspace(root: Path) -> tuple[int, str]:
         # strictly and verifying import checksums (below) surfaces a
         # present-but-corrupt case as ``1`` rather than silently ``draft``.
         try:
-            state, resolved = _derived_state(root, manifest)
+            state, resolved = _derived_state(root, manifest, docs)
         except WorkspaceCorrupt as exc:
             return (classify_validation(corrupt=True, ready=False, incomplete=False), f"corrupt: {exc}")
 
@@ -315,6 +316,7 @@ def _derived_state(
     _verify_import_checksums(root, manifest)
     _verify_snapshot_checksums(root, manifest, docs)
     _verify_cross_document(root, manifest, docs)
+    _verify_duplicate_inodes(root, manifest, docs)
     resolved = manifest.source.repository_id is not None and manifest.source.visibility != "unresolved"
     return state, resolved
 
@@ -467,8 +469,51 @@ def _verify_cross_document(root: Path, manifest: BenchmarkManifest, docs: dict[s
             )
 
 
-def _case_index_paths(manifest: BenchmarkManifest) -> set[str]:
-    return {c.case_file for c in manifest.cases}
+def _case_index_paths(manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> set[str]:
+    """Every authoring file the workspace index owns, across all three trees.
+
+    The manifest index covers each indexed case document **plus** every
+    ``fetched`` ledger import file **plus** every ``ready`` snapshot bundle
+    referenced by the model-validated case docs. Orphan detection then spans
+    ``cases/``, ``imports/``, and ``snapshots/``, so an unindexed import or
+    bundle — and a referenced-but-missing one — surfaces as
+    :class:`WorkspaceCorrupt` instead of being silently adopted or reported
+    ``incomplete``.
+    """
+    paths = {c.case_file for c in manifest.cases}
+    for pr in manifest.pull_requests:
+        if pr.import_state == "fetched" and pr.import_file:
+            paths.add(pr.import_file)
+    for case in manifest.cases:
+        doc = docs[case.case_file]
+        if doc.snapshot.status == "ready" and doc.snapshot.bundle_file:
+            paths.add(doc.snapshot.bundle_file)
+    return paths
+
+
+def _verify_duplicate_inodes(root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> None:
+    """Reject two distinct indexed authoring files sharing one ``(st_dev, st_ino)``.
+
+    A hard link (or any duplicate-inode surprise) between two differently-
+    named indexed authoring files is corruption: ``Path.resolve()`` cannot
+    distinguish the names (both resolve inside ``root``), so the batch inode
+    cross-check across every resolved indexed authoring file is the enforcement
+    point (Task 0 spike 4). Every check here is a hard failure — never a skip.
+    """
+    seen: dict[tuple[int, int], str] = {}
+    for rel in sorted(_case_index_paths(manifest, docs)):
+        path = resolve_authoring_path(root, rel)
+        if not path.exists():
+            # Missing indexed files are already corruption via the orphan rule /
+            # checksum gates; only collide on files that actually exist.
+            continue
+        key = (path.stat().st_dev, path.stat().st_ino)
+        if key in seen:
+            raise WorkspaceCorrupt(
+                f"{root}: indexed authoring files {seen[key]!r} and {rel!r} "
+                f"share inode ({key[0]}, {key[1]})"
+            )
+        seen[key] = rel
 
 
 def _case_curation_states(
@@ -520,12 +565,20 @@ def _case_snapshot_summaries(
     return summaries
 
 
-def _scan_case_files(root: Path) -> set[Path]:
-    cases_dir = root / "cases"
-    if not cases_dir.exists():
-        return set()
+def _scan_authoring_files(root: Path) -> set[Path]:
+    """Every regular file under the authoring trees: ``cases/``, ``imports/``, ``snapshots/``.
+
+    Runtime/cache/transaction residue is not authoring content, so it is never
+    scanned — an unindexed authoring file in one of the three trees is
+    orphan corruption, while internal state under ``runtime/``/``cache/``/
+    ``transactions/`` stays out of the orphan rule.
+    """
     found: set[Path] = set()
-    for entry in cases_dir.rglob("*"):
-        if entry.is_file():
-            found.add(entry)
+    for sub in ("cases", "imports", "snapshots"):
+        tree = root / sub
+        if not tree.exists():
+            continue
+        for entry in tree.rglob("*"):
+            if entry.is_file():
+                found.add(entry)
     return found
