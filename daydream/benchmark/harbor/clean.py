@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from daydream.benchmark.harbor.run import (
     RunError,
+    _default_confirm,
     _ledger_path,
     _load_ledger,
     _validate_job_dir,
@@ -39,6 +40,7 @@ RunError  # re-exported for the CLI handler / hermetic escape tests
 
 
 _CACHE_TARGETS = ("cache/repository.git", "cache/harbor-build-stage")
+_CURATED_DIRS = ("imports", "cases", "snapshots")
 
 
 def _default_docker_rm(refs: list[str]) -> dict[str, Any]:
@@ -198,6 +200,26 @@ def _clean_jobs(
             atomic_write_json(_ledger_path(root), doc, mode=0o600)
 
 
+def _clean_curated(root: Path, report: CleanReport) -> None:
+    """Delete curated source/gold: the four curated paths (only under ``--all``).
+
+    Each is containment-resolved first; a symlink escape under ``imports/`` etc.
+    fails closed. Curated deletion is unrecoverable.
+    """
+    for rel in _CURATED_DIRS:
+        _resolve_target(root, rel)
+        target = root / rel
+        if target.exists() or target.is_symlink():
+            _delete_path(target)
+            report.gold_deleted += 1
+    _resolve_target(root, "benchmark.yaml")
+    manifest = root / "benchmark.yaml"
+    if manifest.exists() or manifest.is_symlink():
+        _delete_path(manifest)
+        report.gold_deleted += 1
+    report.recoverable = False
+
+
 def clean_workspace(
     root,
     *,
@@ -209,13 +231,26 @@ def clean_workspace(
     confirm: Callable[[str], bool] | None = None,
     docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> CleanReport:
-    """Delete only the requested ledger-derived artifacts (empty selection = no-op)."""
+    """Delete only the requested ledger-derived artifacts (empty selection = no-op).
+
+    ``--all`` requires ``--yes`` (or an interactive TTY via the ``confirm``
+    seam); otherwise it refuses before deleting anything.
+    """
     root = Path(root).resolve()
     report = CleanReport()
-    if cache:
+    if all_ and not yes:
+        confirm = confirm or _default_confirm
+        if not confirm("Refusing unconfirmed total cleanup (--all)"):
+            report.refused = True
+            return report
+    if not (cache or jobs or trajectories or all_):
+        return report
+    if cache or all_:
         _clean_cache(root, report)
-    if trajectories:
+    if all_:
+        _clean_curated(root, report)
+    if trajectories or all_:
         _clean_trajectories(root, report)
-    if jobs:
+    if jobs or all_:
         _clean_jobs(root, report, docker_rm=docker_rm)
     return report

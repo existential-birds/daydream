@@ -347,3 +347,27 @@ def test_non_contained_ledger_job_dir_rejected(tmp_path):
     with pytest.raises(clean_mod.RunError):
         clean_mod.clean_workspace(ws, jobs=True)
     assert evil.exists()
+
+
+# ---------------------------------------------------------------------------
+# Task 9: --all --yes total-deletion gate
+# ---------------------------------------------------------------------------
+
+
+def test_clean_all_refuses_without_yes_and_no_tty(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    report = clean_mod.clean_workspace(ws, all_=True, yes=False,
+                                       confirm=lambda _: False)
+    assert report.exit_code == 1
+    for name in ("benchmark.yaml", "imports", "cases", "snapshots"):
+        assert (ws / name).exists()   # nothing deleted on refusal
+
+
+def test_clean_all_yes_deletes_curated_and_derived(tmp_path):
+    ws = _seed_clean_ws(tmp_path)
+    report = clean_mod.clean_workspace(ws, all_=True, yes=True)
+    assert report.exit_code == 0 and report.gold_deleted == 4   # imports cases snapshots + manifest
+    assert not (ws / "benchmark.yaml").exists()
+    assert not (ws / "imports").exists() and not (ws / "cases").exists()
+    assert not (ws / "snapshots").exists()
+    assert report.recoverable is False        # curated deletion is unrecoverable
