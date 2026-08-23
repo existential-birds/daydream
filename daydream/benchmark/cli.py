@@ -702,16 +702,11 @@ def _handle_benchmark_calibrate(args) -> int:
         )
     }
 
-    def _tty_confirm(prompt: str) -> bool:
-        reply = input(prompt)
-        return reply.strip().lower() in ("y", "yes", "")
-
     return calibrate.run_calibration(
         args.dir,
         yes=args.yes,
         env=env,
         http=None,
-        confirm=_tty_confirm if not args.yes else None,
     )
 
 

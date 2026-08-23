@@ -172,9 +172,9 @@ def test_majority_and_stability(sr):
 
 
 def test_balanced_accuracy_and_confusion(sr):
-    from daydream.benchmark.harbor.calibrate import _balanced_accuracy, _confusion_matrix
-    assert _balanced_accuracy(12, 0, 12, 0) == pytest.approx(1.0)
-    assert _balanced_accuracy(9, 0, 12, 3) == pytest.approx(0.5 * (9 / 12 + 12 / 12))
+    from daydream.benchmark.harbor.calibrate import _class_balanced_accuracy, _confusion_matrix
+    assert _class_balanced_accuracy({"tp": 12, "fp": 0, "tn": 12, "fn": 0}) == pytest.approx(1.0)
+    assert _class_balanced_accuracy({"tp": 9, "fp": 3, "tn": 12, "fn": 0}) == pytest.approx(0.9)
     assert _confusion_matrix([True, True, False, False],
                              [True, False, True, False]) == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
 
@@ -443,7 +443,7 @@ def test_calibrate_judge_handler_forwards_yes_and_dir(tmp_path, monkeypatch, cap
     from daydream.benchmark import cli
     seen = {}
 
-    def fake_run(workspace, *, yes, env, http, confirm):
+    def fake_run(workspace, *, yes, env, http):
         seen.update(ws=str(workspace), yes=yes)
         return 0
     monkeypatch.setattr(cal, "run_calibration", fake_run)

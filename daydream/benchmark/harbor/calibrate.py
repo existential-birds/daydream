@@ -90,10 +90,6 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
     allowlist = sr._effective_allowlist(base_url, env)
     initial_url = base_url.rstrip("/") + "/chat/completions"
     sr._validate_base_url(initial_url, allowlist)
-    base_url = sr.resolve_base_url(api_key, env.get("DAYDREAM_JUDGE_BASE_URL"))
-    allowlist = sr._effective_allowlist(base_url, env)
-    initial_url = base_url.rstrip("/") + "/chat/completions"
-    sr._validate_base_url(initial_url, allowlist)
     return sr.OpenAIJudgeClient(
         api_key, model, base_url=base_url, http=http, allowlist=allowlist
     )
@@ -208,16 +204,6 @@ def _confusion_matrix(
         else:
             counts["fn"] += 1
     return counts
-
-
-def _balanced_accuracy(
-    matches_correct: int,
-    matches_wrong: int,
-    nonmatches_correct: int,
-    nonmatches_wrong: int,
-) -> float:
-    """Balanced accuracy over the periodic 12-match / 12-nonmatch split."""
-    return 0.5 * (matches_correct / 12 + nonmatches_correct / 12)
 
 
 def _class_balanced_accuracy(matrix: dict[str, int]) -> float:
@@ -364,7 +350,7 @@ def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bo
 def _default_confirm(prompt: str) -> bool:
     """Read a confirmation reply from stdin; non-interactive stdin is refused."""
     reply = input(prompt)
-    return reply.strip().lower() in ("y", "yes", "")
+    return reply.strip().lower() in ("y", "yes")
 
 
 def run_calibration(
@@ -383,22 +369,19 @@ def run_calibration(
     written and the exit code is nonzero (fail-closed). Never measures by
     tuning anything.
     """
-    import sys as _sys
-
-    from daydream.benchmark.storage import WorkspaceCorrupt as _WorkspaceCorrupt
 
     env = dict(env) if env is not None else dict(os.environ)
     sr = _load_judge_template()
     try:
         allowlist = _load_workspace_allowlist(workspace)
-    except _WorkspaceCorrupt as exc:
-        print(str(exc), file=_sys.stderr)
+    except storage.WorkspaceCorrupt as exc:
+        print(str(exc), file=sys.stderr)
         return 1
     host = _judge_host_from_env(env)
     try:
         _validate_workspace_host(allowlist, host)
     except ValueError as exc:
-        print(str(exc), file=_sys.stderr)
+        print(str(exc), file=sys.stderr)
         return 1
 
     pairs = _load_fixture()
@@ -416,7 +399,7 @@ def run_calibration(
             f"API costs. Proceed? [y/N] "
         )
         if not confirm(prompt):
-            print("calibrate-judge: aborted before any paid call", file=_sys.stderr)
+            print("calibrate-judge: aborted before any paid call", file=sys.stderr)
             return 1
 
     try:
@@ -426,7 +409,7 @@ def run_calibration(
             pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD
         )
     except sr.VerifierError as exc:
-        print(f"calibrate-judge: judge failure: {sr._bounded_error(str(exc))}", file=_sys.stderr)
+        print(f"calibrate-judge: judge failure: {sr._bounded_error(str(exc))}", file=sys.stderr)
         return 1
 
     if passed:
@@ -457,5 +440,5 @@ def run_calibration(
         return 0
 
     for condition, detail in failures.items():
-        print(f"calibrate-judge: FAIL ({condition}): {detail}", file=_sys.stderr)
+        print(f"calibrate-judge: FAIL ({condition}): {detail}", file=sys.stderr)
     return 1
