@@ -50,7 +50,7 @@ from pydantic import ValidationError
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.benchmark.schema import _schema_ready
-from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
 
 class CurationError(Exception):
@@ -282,10 +282,13 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             gold_mode = None
         try:
             evidence_count = len(_evidence_list(root, doc))
-        except Exception:
+        except WorkspaceCorrupt:
             # a missing/unreadable import file must not crash the resumable
-            # index: fall back to the candidate count (get_case/validate still
-            # surface the corruption). Never fall back for any other reason.
+            # index: fall back to the candidate count. Present-but-malformed
+            # content (a non-list ``evidence``/``candidates`` value, a record
+            # without a source_id) propagates as TypeError/KeyError instead of
+            # being masked, matching get_case/validate_case — never fall back
+            # for any other reason.
             evidence_count = len(doc.get("candidates") or [])
         out.append({
             "case_id": case_id,
@@ -597,6 +600,32 @@ def _check_evidence_sources(
             raise CurationError(f"source {src} is not evidence of case {case_id}")
 
 
+def _append_atoms_to_case(
+    root: Path, raw: dict[str, Any], case_id: str, atoms: list[dict[str, Any]],
+    *, authored: bool, require_sources: bool,
+) -> None:
+    """Shared mutate body of the three atomic-add siblings.
+
+    Validates every atom's sources up front (all-or-nothing), reopens the case
+    for mutation, appends each atom via :func:`_build_replacement` (the single
+    finding builder, never duplicated inline), and re-derives gold status.
+    With *require_sources* an atom carrying no ``source_ids`` is rejected
+    naming its index — it would otherwise silently derive ``authored``.
+    """
+    for i, atom in enumerate(atoms):
+        source_ids = list(atom.get("source_ids") or [])
+        if require_sources and not source_ids:
+            raise CurationError(f"edited-finding atom {i} carries no source_ids")
+        _check_evidence_sources(root, raw, source_ids, case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
+    for atom in atoms:
+        curation.setdefault("findings", []).append(
+            _build_replacement(root, raw, case_id, atom, authored=authored)
+        )
+    _derive_content(raw)
+
+
 def add_finding(
     root: Path,
     case_id: str,
@@ -608,25 +637,13 @@ def add_finding(
     source_ids: list[str] | None = None,
 ) -> None:
     """Add an authored (new) finding. provenance is ``authored`` with empty sources."""
-    source_ids = source_ids or []
+    atom = {"title": title, "body": body, "severity": severity,
+            "location": location, "source_ids": source_ids or []}
 
     def mutate(raw: dict[str, Any]) -> None:
-        _check_evidence_sources(root, raw, source_ids, case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        finding = {
-            "title": title,
-            "body": body,
-            "severity": severity,
-            "location": location,
-            "provenance": {
-                "kind": _derive_provenance_kind(source_ids, authored=True),
-                "source_ids": source_ids,
-            },
-        }
-        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-        raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
-        _derive_content(raw)
+        _append_atoms_to_case(
+            root, raw, case_id, [atom], authored=True, require_sources=False
+        )
 
     _with_case_lock(root, case_id, "add", mutate)
 
@@ -637,32 +654,16 @@ def add_findings(
     """Atomically add a batch of authored findings in one transaction.
 
     Unlike a loop of :func:`add_finding` calls, a mid-batch invariant violation
-    stages **nothing** — the whole batch validates (candidate sources checked
+    stages **nothing** — the whole batch validates (evidence sources checked
     up front), derives, and stages together, so the TUI's multi-atom ``[n]``
     add stays all-or-nothing and never leaves earlier atoms persisted on a
     failure.
     """
 
     def mutate(raw: dict[str, Any]) -> None:
-        for fi in findings:
-            _check_evidence_sources(root, raw, list(fi.get("source_ids") or []), case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        for fi in findings:
-            source_ids = list(fi.get("source_ids") or [])
-            finding = {
-                "title": fi["title"],
-                "body": fi["body"],
-                "severity": fi.get("severity"),
-                "location": fi.get("location"),
-                "provenance": {
-                    "kind": _derive_provenance_kind(source_ids, authored=True),
-                    "source_ids": source_ids,
-                },
-            }
-            finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-            curation.setdefault("findings", []).append(finding)
-        _derive_content(raw)
+        _append_atoms_to_case(
+            root, raw, case_id, findings, authored=True, require_sources=False
+        )
 
     _with_case_lock(root, case_id, "add", mutate)
 
@@ -685,36 +686,31 @@ def add_edited_findings(
     """
 
     def mutate(raw: dict[str, Any]) -> None:
-        for i, atom in enumerate(atoms):
-            source_ids = list(atom.get("source_ids") or [])
-            if not source_ids:
-                raise CurationError(
-                    f"edited-finding atom {i} carries no source_ids"
-                )
-            _check_evidence_sources(root, raw, source_ids, case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        for atom in atoms:
-            built = _build_replacement(root, raw, case_id, atom)
-            curation.setdefault("findings", []).append(built)
-        _derive_content(raw)
+        _append_atoms_to_case(
+            root, raw, case_id, atoms, authored=False, require_sources=True
+        )
 
     _with_case_lock(root, case_id, "add-edited", mutate)
 
 
 def _build_replacement(
-    root: Path, raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
+    root: Path, raw: dict[str, Any], case_id: str, replacement: dict[str, Any],
+    *, authored: bool = False,
 ) -> dict[str, Any]:
-    """Build one edited finding from a replacement atom (owner supply the content)."""
+    """Build one finding from a replacement atom; provenance kind driven by *authored*.
+
+    The single finding builder shared by the atomic-adds (via
+    :func:`_append_atoms_to_case`) and replacement paths; callers validate
+    sources up front, so this is a pure dict construction.
+    """
     source_ids = list(replacement.get("source_ids") or [])
-    _check_evidence_sources(root, raw, source_ids, case_id)
     finding = {
         "title": replacement["title"],
         "body": replacement["body"],
         "severity": replacement.get("severity"),
         "location": replacement.get("location"),
         "provenance": {
-            "kind": _derive_provenance_kind(source_ids, authored=False),
+            "kind": _derive_provenance_kind(source_ids, authored=authored),
             "source_ids": source_ids,
         },
     }
@@ -742,6 +738,8 @@ def replace_findings(
         )
         if index is None:
             raise CurationError(f"no finding {finding_id}")
+        for r in replacements:
+            _check_evidence_sources(root, raw, list(r.get("source_ids") or []), case_id)
         built = [_build_replacement(root, raw, case_id, r) for r in replacements]
         new_findings = list(findings[:index]) + built + list(findings[index + 1:])
         curation["findings"] = new_findings
