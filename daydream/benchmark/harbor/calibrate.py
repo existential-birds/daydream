@@ -16,11 +16,12 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from daydream.benchmark import storage
 from daydream.benchmark.schema import BenchmarkManifest
@@ -358,3 +359,103 @@ def is_receipt_current(receipt_path: Path, current_inputs: dict[str, Any]) -> bo
     if not isinstance(raw, dict) or not isinstance(raw.get("inputs"), dict):
         return False
     return _serialize_inputs(raw["inputs"]) == _serialize_inputs(current_inputs)
+
+
+def _default_confirm(prompt: str) -> bool:
+    """Read a confirmation reply from stdin; non-interactive stdin is refused."""
+    reply = input(prompt)
+    return reply.strip().lower() in ("y", "yes", "")
+
+
+def run_calibration(
+    workspace: Path,
+    *,
+    yes: bool = False,
+    env: dict[str, Any] | None = None,
+    http: Any = None,
+    confirm: Callable[[str], bool] | None = None,
+) -> int:
+    """Drive the calibration gate end-to-end and return an exit code.
+
+    Order: manifest/host validation -> fixture + template load -> confirmation
+    gate -> client build -> 72-call judge driver -> three-part pass gate.
+    On pass a private receipt is written; on failure (or refusal) no receipt is
+    written and the exit code is nonzero (fail-closed). Never measures by
+    tuning anything.
+    """
+    import sys as _sys
+
+    from daydream.benchmark.storage import WorkspaceCorrupt as _WorkspaceCorrupt
+
+    env = dict(env) if env is not None else dict(os.environ)
+    sr = _load_judge_template()
+    try:
+        allowlist = _load_workspace_allowlist(workspace)
+    except _WorkspaceCorrupt as exc:
+        print(str(exc), file=_sys.stderr)
+        return 1
+    host = _judge_host_from_env(env)
+    try:
+        _validate_workspace_host(allowlist, host)
+    except ValueError as exc:
+        print(str(exc), file=_sys.stderr)
+        return 1
+
+    pairs = _load_fixture()
+    inputs = _invalidation_inputs(env, pairs, sr)
+
+    if not yes:
+        if confirm is None:
+            confirm = _default_confirm
+        prompt = (
+            f"Run calibration against {inputs['provider']} model "
+            f"{inputs['model']!r} on host {inputs['host']}? "
+            f"judge prompt digest {inputs['judge_prompt_sha256'][:12]}, "
+            f"threshold {inputs['threshold']}, 72 judged calls, "
+            f"request timeout {inputs['request_timeout']}s; this incurs paid "
+            f"API costs. Proceed? [y/N] "
+        )
+        if not confirm(prompt):
+            print("calibrate-judge: aborted before any paid call", file=_sys.stderr)
+            return 1
+
+    try:
+        client = _build_calibration_client(env, http=http)
+        runs = _judge_pairs(sr, client, pairs, attempts=3)
+        passed, failures = _pass_gate(
+            pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD
+        )
+    except sr.VerifierError as exc:
+        print(f"calibrate-judge: judge failure: {sr._bounded_error(str(exc))}", file=_sys.stderr)
+        return 1
+
+    if passed:
+        matrix = _confusion_matrix(
+            [p["label"] for p in pairs], [_majority_label(runs) for runs in runs]
+        )
+        bacc = _class_balanced_accuracy(matrix)
+        disagreements = [
+            {
+                "pair_index": i,
+                "gold_id": p["gold"]["finding_id"],
+                "candidate_id": p["candidate"]["candidate_id"],
+                "per_run_retained": [
+                    _retained_edge(v, sr.verifier_core.CONFIDENCE_THRESHOLD) for v in r
+                ],
+            }
+            for i, (p, r) in enumerate(zip(pairs, runs))
+        ]
+        receipt = _build_receipt(
+            sr, pairs, env, attempts=3, passed=True,
+            balanced_accuracy=bacc, confusion=matrix, disagreements=disagreements,
+        )
+        _write_receipt(workspace, receipt)
+        print(
+            f"calibrate-judge: PASS (balanced accuracy {bacc:.4f}); "
+            f"receipt written to {workspace / 'runtime' / 'calibration-receipt.json'}"
+        )
+        return 0
+
+    for condition, detail in failures.items():
+        print(f"calibrate-judge: FAIL ({condition}): {detail}", file=_sys.stderr)
+    return 1
