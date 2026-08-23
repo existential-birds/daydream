@@ -1,11 +1,44 @@
 import json
+import os
 import stat
+import subprocess
 
 import pytest
 
 from daydream.benchmark.schema import BenchmarkManifest, CaseDocument, ImportDocument
 from daydream.benchmark.storage import load_json_strict, load_yaml_strict
 from daydream.benchmark.workspace import InitError, init_workspace
+
+_SEED_ENV = {
+    "GIT_AUTHOR_NAME": "Tester",
+    "GIT_AUTHOR_EMAIL": "test@example.com",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "Tester",
+    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+}
+
+
+def _git(repo, *args, env=None, check=True):
+    proc_env = {**os.environ, **env} if env is not None else os.environ.copy()
+    proc = subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, env=proc_env, check=check
+    )
+    if check and proc.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _commit(repo, message):
+    _git(repo, "commit", "-m", message, env=_SEED_ENV)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _write_seed(repo, name, content):
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    _git(repo, "add", name)
 
 
 def test_init_creates_private_layout_and_modes(tmp_path):
@@ -125,20 +158,61 @@ def test_validate_missing_manifest_returns_1(tmp_path):
     assert code == 1
 
 
+def _seed_local_origin(root):
+    """Real local bare origin: main base1->base2->base3 + feature head off base2.
+
+    The feature head adds ``feature.py`` — the ready fixture's finding
+    location — so the frozen head tree contains the location the curated
+    finding references. Returns ``(origin_url, base_sha, head_sha)``.
+    """
+    import shutil as _sh
+
+    seed = root.parent
+    repo = seed / "local_wt"
+    if repo.exists():
+        _sh.rmtree(repo)
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write_seed(repo, "readme.txt", "base1\n")
+    _commit(repo, "base1")
+    _write_seed(repo, "base.py", "BASE = 2\n")
+    base_sha = _commit(repo, "base2")
+    _write_seed(repo, "beyond.py", "BEYOND = 3\n")
+    _commit(repo, "base3")
+    _git(repo, "checkout", "--detach", base_sha)
+    (repo / "base.py").write_text("BASE = 20\n")
+    _git(repo, "add", "base.py")
+    _write_seed(repo, "feature.py", "LINE 1\n")
+    head_sha = _commit(repo, "feature")
+    bare = seed / "origin_local.git"
+    if bare.exists():
+        _sh.rmtree(bare)
+    bare.mkdir()
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main")
+    _git(repo, "push", "origin", f"{head_sha}:refs/pull/101/head")
+    return str(bare), base_sha, head_sha
+
+
 def _write_case_docs(root, curation_state):
     """Write a fully-valid ledger + import + bundle + case doc into ``root``.
 
     The workspace at ``root`` must already be ``init_workspace``-created. The
     artifacts written here are all schema-valid: a resolved manifest, a
-    ``fetched`` ledger entry referencing a real import file + sha256, a real
-    bundle whose sha256 matches the case doc's ``snapshot.bundle_sha256``, and
-    a ``CaseDocument`` whose ``pull_request``/``snapshot``/``source``/
-    ``curation`` model-validate without any ``_schema_ready`` strip.
+    ``fetched`` ledger entry referencing a real import file + sha256, a REAL
+    deterministic git bundle (built from a seeded local origin whose frozen
+    head tree contains ``feature.py``) whose sha256 matches the case doc's
+    ``snapshot.bundle_sha256`` and whose tree IDs + canonical diff digest are
+    recorded from that origin, and a ``CaseDocument`` whose ``pull_request``/
+    ``snapshot``/``source``/``curation`` model-validate without any
+    ``_schema_ready`` strip.
     """
     import hashlib
 
     import yaml
 
+    from daydream.benchmark import snapshot as sn
     from daydream.benchmark.schema import (
         CaseDocument,
         CaseSource,
@@ -154,12 +228,28 @@ def _write_case_docs(root, curation_state):
     raw["source"]["visibility"] = "private"
     repo_slug = raw["source"]["repository"]
 
+    # The PR-meta SHAs recorded on the doc stay the fixture's fixed
+    # schema-valid values (provenance metadata, never cross-checked by
+    # validate); the bundle bytes + tree IDs + digests come from the real
+    # origin so the authoritative offline-clone fidelity check passes.
     head_sha = "0123456789ab" + "0" * 28
     base_sha = "b" * 40
     case_id = f"pr-000101-{head_sha[:12]}"
     case_file = f"cases/{case_id}.yaml"
     import_file = "imports/pr-000101.json"
     bundle_rel = f"snapshots/{case_id}.bundle"
+
+    origin_url, real_base_sha, real_head_sha = _seed_local_origin(root)
+    sn.ensure_mirror(root, repo_slug, origin_url)
+    sn.fetch_pr_refs(root, repo_slug, 101, base_tip=real_base_sha,
+                     explicit_shas=[real_head_sha], origin_url=origin_url)
+    m = sn.mirror(root)
+    bundle_path = root / bundle_rel
+    sn.build_bundle(m, real_base_sha, real_head_sha, bundle_path)
+    base_tree_sha = sn.rev_parse(m, f"{real_base_sha}^{{tree}}")
+    head_tree_sha = sn.rev_parse(m, f"{real_head_sha}^{{tree}}")
+    diff_sha256 = sn.canonical_diff_sha256(m, real_base_sha, real_head_sha)
+    bundle_sha256 = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
 
     pr_meta = PullRequestMeta(
         number=101,
@@ -190,9 +280,6 @@ def _write_case_docs(root, curation_state):
     )
     import_bytes = import_doc.model_dump_json(indent=2).encode("utf-8")
     import_sha256 = hashlib.sha256(import_bytes).hexdigest()
-
-    bundle_bytes = b"frozen-snapshot-bundle-bytes"
-    bundle_sha256 = hashlib.sha256(bundle_bytes).hexdigest()
 
     curation: dict
     if curation_state == "ready":
@@ -244,10 +331,11 @@ def _write_case_docs(root, curation_state):
             policy="final_pr_head",
             requested_head="final",
             original_base_sha=base_sha,
+            requested_base_sha=base_sha,
             original_head_sha=head_sha,
-            base_tree_sha="1" * 40,
-            head_tree_sha="2" * 40,
-            diff_sha256="3" * 64,
+            base_tree_sha=base_tree_sha,
+            head_tree_sha=head_tree_sha,
+            diff_sha256=diff_sha256,
             bundle_file=bundle_rel,
             bundle_sha256=bundle_sha256,
             error=None,
@@ -274,7 +362,6 @@ def _write_case_docs(root, curation_state):
     (root / "imports").mkdir(parents=True, exist_ok=True)
     (root / import_file).write_bytes(import_bytes)
     (root / "snapshots").mkdir(parents=True, exist_ok=True)
-    (root / bundle_rel).write_bytes(bundle_bytes)
     (root / "cases").mkdir(parents=True, exist_ok=True)
     (root / case_file).write_text(
         yaml.safe_dump(case_doc.model_dump(mode="json"), sort_keys=False)
@@ -291,11 +378,15 @@ def _write_curated_workspace(tmp_path, curation_state, *, resolved=True):
     / ``workspace_status`` exercise the case-driven readiness path on
     documents that model-validate directly.
     """
+    import shutil
+
     import yaml
 
     from daydream.benchmark.workspace import init_workspace
 
     root = tmp_path / "ws"
+    if root.exists():
+        shutil.rmtree(root)   # the fixture is re-invocable (b-valid case)
     init_workspace(root, "O/R", ["h1.example.com"], ["h2.example.com"])
     _write_case_docs(root, curation_state)
     if not resolved:
@@ -317,6 +408,58 @@ def test_validate_ready_workspace_returns_0(tmp_path):
     code, label = validate_workspace(root)
     assert code == 0
     assert label == "ready"
+
+
+def test_validate_restamped_tampered_bundle_fails(tmp_path):
+    """Acceptance (b): a checksum-restamped tampered bundle fails validate.
+
+    The recorded ``bundle_sha256`` is re-stamped to match the tampered bytes,
+    so the checksum gate alone would accept it; the authoritative offline-clone
+    fidelity check must flag the corruption."""
+    import hashlib
+
+    import yaml
+
+    from daydream.benchmark.workspace import validate_workspace
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    bundle = next((root / "snapshots").glob("*.bundle"))
+    tampered = bundle.read_bytes() + b"INJECTED"          # content changed
+    bundle.write_bytes(tampered)
+    case_yaml = next((root / "cases").glob("*.yaml"))
+    raw = yaml.safe_load(case_yaml.read_text())
+    raw["snapshot"]["bundle_sha256"] = hashlib.sha256(tampered).hexdigest()   # restamp
+    case_yaml.write_text(yaml.safe_dump(raw, sort_keys=False))
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()        # checksum alone no longer suffices
+
+    # A genuine real-bundle ready workspace still passes as ready.
+    root2 = _write_curated_workspace(tmp_path, "ready")
+    code2, label2 = validate_workspace(root2)
+    assert code2 == 0 and label2 == "ready"
+
+
+def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path):
+    """A ready workspace whose ``cache/`` scratch dir is absent maps to exit 1.
+
+    ``validate_offline_clone``'s mkdtemp raises FileNotFoundError when
+    ``root/cache`` is gone; it must surface as corruption (exit 1 + label) per
+    the no-raw-traceback contract — like the sibling freeze path's ``OSError``
+    catch — never a bare traceback. ``workspace_status`` raises
+    :class:`WorkspaceCorrupt` for the same state.
+    """
+    import shutil
+
+    from daydream.benchmark.storage import WorkspaceCorrupt
+    from daydream.benchmark.workspace import validate_workspace, workspace_status
+
+    root = _write_curated_workspace(tmp_path, "ready")
+    assert validate_workspace(root) == (0, "ready")
+    shutil.rmtree(root / "cache")
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+    with pytest.raises(WorkspaceCorrupt):
+        workspace_status(root)
 
 
 def test_validate_curating_workspace_returns_2(tmp_path):

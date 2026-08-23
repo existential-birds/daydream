@@ -651,6 +651,37 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path, fake_gh
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
 
 
+def test_compile_lock_records_requested_base_sha(tmp_path, fake_gh):
+    """The compiled lock row + authoring-input digest carry the corrected base provenance:
+    ``requested_base_sha`` alongside the merge-base ``original_base_sha``, with the
+    digest deterministic across recomputes.
+    """
+    from daydream.benchmark import storage
+    from daydream.benchmark.harbor import build
+
+    ws, case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    key = build.derive_task_key(case_id)
+    case_doc = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
+
+    lock = build.compile_workspace(ws)
+    row = lock["cases"][key]
+    assert row["requested_base_sha"] == case_doc["snapshot"]["requested_base_sha"]
+    # original_base_sha is the merge base, carried through unchanged
+    assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
+
+    # determinism: the recomputed authoring digest matches the one frozen in the
+    # compiled lock
+    manifest = storage.load_yaml_strict(ws / "benchmark.yaml")
+    case_docs = {case_id: case_doc}
+    assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
+    # sensitivity: requested_base_sha must fold into the payload -- a digest that
+    # dropped the field would stay byte-identical when only that value moves
+    moved = dict(case_doc, snapshot=dict(case_doc["snapshot"]))
+    moved["snapshot"]["requested_base_sha"] = "0" * 40
+    assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
+
+
 def test_clean_attested_draft_does_not_compile(tmp_path, fake_gh):
     from daydream.benchmark.harbor import build
     ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean

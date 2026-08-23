@@ -22,7 +22,9 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel
 
+from daydream import git_ops
 from daydream.benchmark import schema
+from daydream.benchmark import snapshot as snapshot_mod
 from daydream.benchmark.schema import (
     BenchmarkManifest,
     CaseDocument,
@@ -398,7 +400,7 @@ def _verify_snapshot_checksums(
     docs: dict[str, CaseDocument],
     paths: dict[str, Path],
 ) -> None:
-    """Verify each indexed ``ready`` snapshot's bundle file + sha256 digest.
+    """Verify each indexed ``ready`` snapshot's bundle + sha256 digest.
 
     A missing ``bundle_file`` or a ``bundle_sha256`` mismatch for a committed
     ``ready`` case is :class:`WorkspaceCorrupt` — it is corruption surfacing,
@@ -408,6 +410,15 @@ def _verify_snapshot_checksums(
     structurally invalid and reported corrupt. ``paths`` is the shared
     single-resolution pass (:func:`_resolved_authoring_paths`); a ``ready``
     bundle absent from it is a missing file.
+
+    Beyond the checksum, every ``ready`` snapshot is validated with the
+    authoritative offline-clone fidelity contract
+    (:func:`daydream.benchmark.snapshot.validate_offline_clone`) on a
+    disposable network-disabled clone under ``root/cache`` — exact refs, two
+    synthetic reachable commits, root base, head-parented-on-base, tree IDs
+    and the canonical diff digest. A fidelity failure is corruption (exit 1),
+    never curatable staleness; only a checksum-restamped tampered bundle
+    passes the sha256 gate yet still fails here.
     """
     for case in manifest.cases:
         snapshot = docs[case.case_file].snapshot
@@ -417,7 +428,8 @@ def _verify_snapshot_checksums(
         expected = snapshot.bundle_sha256
         if not bundle_rel or not expected:
             raise WorkspaceCorrupt(
-                f"{root}: case {case.case_id} ready snapshot missing bundle_file/bundle_sha256"
+                f"{root}: case {case.case_id} ready snapshot missing "
+                f"bundle_file/bundle_sha256"
             )
         bundle_path = paths.get(bundle_rel)
         if bundle_path is None:
@@ -430,6 +442,29 @@ def _verify_snapshot_checksums(
                 f"{root}: case {case.case_id} snapshot bundle checksum mismatch "
                 f"(expected {expected}, got {actual})"
             )
+        # Authoritative offline-clone fidelity: the recorded sha256 alone cannot
+        # prove the bundle is the frozen base->head snapshot (a restamped
+        # tampered bundle matches), so run the full fidelity contract (exact
+        # refs, two synthetic commits, root base, head-parented-on-base, tree
+        # IDs, canonical diff digest) on a disposable network-disabled clone of
+        # the bundle under ``cache/``. A fidelity failure is corruption — never
+        # swallowed, never a fallback.
+        try:
+            snapshot_mod.validate_offline_clone(
+                bundle_path,
+                snapshot.base_tree_sha,
+                snapshot.head_tree_sha,
+                snapshot.diff_sha256,
+                workdir=root / "cache",
+            )
+        except (git_ops.GitError, OSError) as exc:
+            # OSError covers a missing ``root/cache`` scratch dir surfacing as
+            # FileNotFoundError from the probe's mkdtemp — mapped to corruption
+            # (exit 1) like the sibling freeze path, never a bare traceback.
+            raise WorkspaceCorrupt(
+                f"{root}: case {case.case_id} snapshot bundle fails offline-clone "
+                f"fidelity: {exc}"
+            ) from exc
 
 
 def _load_import_document(root: Path, import_file: str) -> ImportDocument:

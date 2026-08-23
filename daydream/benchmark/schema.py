@@ -328,7 +328,11 @@ class _SnapshotBase(BaseModel):
 
 class SnapshotReady(_SnapshotBase):
     status: Literal["ready"]
+    # original_base_sha is the true merge base of base-tip and head (the
+    # bundle's synthetic base commit); requested_base_sha is the selected
+    # base-branch tip the merge base was resolved against.
     original_base_sha: str
+    requested_base_sha: str
     original_head_sha: str
     base_tree_sha: str
     head_tree_sha: str
@@ -338,7 +342,11 @@ class SnapshotReady(_SnapshotBase):
     error: None = None
 
     @field_validator(
-        "original_base_sha", "original_head_sha", "base_tree_sha", "head_tree_sha"
+        "original_base_sha",
+        "requested_base_sha",
+        "original_head_sha",
+        "base_tree_sha",
+        "head_tree_sha",
     )
     @classmethod
     def _sha40(cls, v: str) -> str:
@@ -374,6 +382,7 @@ class _SnapshotError(BaseModel):
 class SnapshotUnreplayable(_SnapshotBase):
     status: Literal["unreplayable"]
     original_base_sha: str | None = None
+    requested_base_sha: str | None = None
     original_head_sha: str | None = None
     base_tree_sha: None = None
     head_tree_sha: None = None
@@ -382,7 +391,7 @@ class SnapshotUnreplayable(_SnapshotBase):
     bundle_sha256: None = None
     error: _SnapshotError
 
-    @field_validator("original_base_sha", "original_head_sha")
+    @field_validator("original_base_sha", "requested_base_sha", "original_head_sha")
     @classmethod
     def _sha40_nullable(cls, v: str | None) -> str | None:
         if v is not None and not _HEX40.fullmatch(v):
@@ -395,15 +404,18 @@ class SnapshotImported(_SnapshotBase):
 
     Issue 3 transitions ``imported -> ready|unreplayable`` once snapshot
     bundles exist; at import the tree/bundle fields are unknowable, so they
-    are deliberately absent.
+    are deliberately absent. Both ``original_base_sha`` and
+    ``requested_base_sha`` carry the PR base tip (the merge base is not yet
+    computed; it diverges on the ``imported -> ready`` transition).
     """
 
     status: Literal["imported"]
     original_base_sha: str
+    requested_base_sha: str
     original_head_sha: str
     error: None = None
 
-    @field_validator("original_base_sha", "original_head_sha")
+    @field_validator("original_base_sha", "requested_base_sha", "original_head_sha")
     @classmethod
     def _sha40(cls, v: str) -> str:
         if not _HEX40.fullmatch(v):

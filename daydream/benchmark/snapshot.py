@@ -13,6 +13,7 @@ import hashlib
 import os
 import shutil
 from pathlib import Path
+from typing import Literal, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
@@ -85,6 +86,50 @@ def _git_fetch(mirror_repo: Path, url: str, refspecs: list[str]) -> None:
         )
 
 
+def fetch_base_tip(
+    root: Path,
+    repo_slug: str,
+    base_tip: str,
+    origin_url: str | None = None,
+) -> Path:
+    """Fetch the selected base-branch tip into the mirror as ``refs/heads/base_tip``.
+
+    A missing/unfetchable base tip raises :class:`GitError` — the caller
+    classifies it ``base_unreachable``. The ref is force-updated (``+``
+    refspec): the mirror ref is derived state that must re-point to the
+    caller's selected tip even when a later freeze selects an ancestor (a
+    plain fetch would reject the non-fast-forward update). Returns the mirror
+    path. Idempotent.
+    """
+    root = Path(root)
+    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
+    m = ensure_mirror(root, repo_slug, origin_url)
+    _git_fetch(m, origin_url, [f"+{base_tip}:refs/heads/base_tip"])
+    return m
+
+
+def fetch_head_refs(
+    root: Path,
+    repo_slug: str,
+    pr_number: int,
+    explicit_shas: list[str] | tuple[str, ...] = (),
+    origin_url: str | None = None,
+) -> Path:
+    """Fetch ``refs/pull/N/head`` + explicit heads into the mirror.
+
+    A missing/unfetchable PR-head ref raises :class:`GitError` — the caller
+    classifies it ``head_unreachable``. Returns the mirror path. Idempotent.
+    """
+    root = Path(root)
+    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
+    m = ensure_mirror(root, repo_slug, origin_url)
+    refspecs = [f"refs/pull/{pr_number}/head:refs/pull/{pr_number}/head"]
+    for sha in explicit_shas:
+        refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
+    _git_fetch(m, origin_url, refspecs)
+    return m
+
+
 def fetch_pr_refs(
     root: Path,
     repo_slug: str,
@@ -95,17 +140,15 @@ def fetch_pr_refs(
 ) -> Path:
     """Fetch base tip + ``refs/pull/N/head`` + explicit heads into the mirror.
 
-    The base tip and PR-head ref are fetched by name; the PR-head SHA is then
-    resolvable from ``refs/pull/N/head``. Returns the mirror path. Idempotent.
+    Backward-compatible wrapper over :func:`fetch_base_tip` +
+    :func:`fetch_head_refs` for callers that do not need distinct failure
+    reasons; ``freeze_one`` uses the individual fetches so a base-tip failure
+    classifies ``base_unreachable`` and a PR-head failure ``head_unreachable``.
+    Returns the mirror path. Idempotent.
     """
-    root = Path(root)
-    origin_url = origin_url or f"https://github.com/{repo_slug}.git"
-    m = ensure_mirror(root, repo_slug, origin_url)
-    refspecs = [f"{base_tip}:refs/heads/base_tip", f"refs/pull/{pr_number}/head:refs/pull/{pr_number}/head"]
-    for sha in explicit_shas:
-        refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
-    _git_fetch(m, origin_url, refspecs)
-    return m
+    fetch_base_tip(root, repo_slug, base_tip, origin_url)
+    fetch_head_refs(root, repo_slug, pr_number, explicit_shas, origin_url)
+    return mirror(root)
 
 
 def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
@@ -251,10 +294,20 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 def validate_offline_clone(
     bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
 ) -> None:
-    """Clone the bundle with network disabled and verify refs/trees/diff.
+    """Offline-clone fidelity check on a frozen bundle, network disabled.
+
+    Clones the bundle with ``--no-local --no-checkout`` and verifies the full
+    fidelity contract: the clone exposes **exactly** the two refs
+    ``refs/remotes/origin/base`` and ``refs/remotes/origin/head``; exactly two
+    commits are reachable from the head (base + head); the base is a root
+    commit (no parent); the head's single parent is the base commit; the
+    base/head tree IDs match; and the canonical diff digest matches. A
+    checksum-restamped, ref-padded, or structurally-tampered bundle fails one
+    of these probes.
 
     Raises :class:`GitError` naming the failing check on any clone error,
-    missing ref, tree mismatch, or diff-digest mismatch. Returns ``None``.
+    unexpected ref set, ancestry/parent mismatch, tree mismatch, or diff-digest
+    mismatch. Returns ``None``.
     """
     bundle_path = Path(bundle_path)
     import tempfile
@@ -267,12 +320,42 @@ def validate_offline_clone(
         )
         if proc.returncode != 0:
             raise git_ops.GitError(f"offline clone of {bundle_path} failed: {proc.stderr.strip()}")
+        refs_out = _run_git_cwd(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
+        refs = set(refs_out.splitlines())
+        expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
+        if refs != expected_refs:
+            raise git_ops.GitError(
+                f"offline clone exposes unexpected refs (expected {sorted(expected_refs)}, "
+                f"got {sorted(refs)})"
+            )
+        count = _run_git_cwd(clone_dir, ["rev-list", "--count", "refs/remotes/origin/head"])
+        if count != "2":
+            raise git_ops.GitError(
+                f"offline clone head ancestry must contain exactly two reachable commits "
+                f"(got {count})"
+            )
+        parents_out = _run_git_cwd(
+            clone_dir, ["rev-list", "--parents", "refs/remotes/origin/base"]
+        )
+        if len(parents_out.splitlines()) != 1:
+            raise git_ops.GitError(
+                f"offline clone base must be a root commit with no parent "
+                f"(rev-list --parents base yielded {len(parents_out.splitlines())} commits)"
+            )
+        head_parent = _run_git_cwd(
+            clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/head^"]
+        )
+        base_commit = _run_git_cwd(clone_dir, ["rev-parse", "--verify", "refs/remotes/origin/base"])
+        if head_parent != base_commit:
+            raise git_ops.GitError(
+                f"offline clone head's parent must be the base commit "
+                f"(expected {base_commit}, got {head_parent})"
+            )
         for ref, expected in (
             ("refs/remotes/origin/base", base_tree),
             ("refs/remotes/origin/head", head_tree),
         ):
             got = _run_git_cwd(clone_dir, ["rev-parse", "--verify", f"{ref}^{{tree}}"])
-            assert isinstance(got, str)
             if got != expected:
                 raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
         diff = _run_git_cwd(
@@ -280,7 +363,6 @@ def validate_offline_clone(
             ["diff", "--binary", "refs/remotes/origin/base", "refs/remotes/origin/head"],
             capture_bytes=True,
         )
-        assert isinstance(diff, bytes)
         if hashlib.sha256(diff).hexdigest() != diff_sha256:
             raise git_ops.GitError(f"offline clone diff digest mismatch (case {bundle_path})")
     finally:
@@ -288,7 +370,17 @@ def validate_offline_clone(
     return None
 
 
-def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: bool = False) -> str | bytes:
+@overload
+def _run_git_cwd(repo: Path | str, args: list[str]) -> str: ...
+
+
+@overload
+def _run_git_cwd(repo: Path | str, args: list[str], *, capture_bytes: Literal[True]) -> bytes: ...
+
+
+def _run_git_cwd(
+    repo: Path | str, args: list[str], *, capture_bytes: bool = False
+) -> str | bytes:
     """Run git and raise GitError on non-zero exit (offline-clone helper)."""
     repo = Path(repo)
     proc = git_ops._run_git(repo, args, retries=0, capture_bytes=capture_bytes, timeout=30)
@@ -327,12 +419,17 @@ def freeze_one(
     case_id = schema.case_id_for(pr_number, head_sha)
     bundle_rel = f"snapshots/{case_id}.bundle"
 
+    # The resolved merge base, recorded on any unreplayable dict produced after
+    # merge-base resolution (None for the earlier fetch/ancestry failures).
+    resolved_base: str | None = None
+
     def unreplayable(reason: str, detail: str) -> tuple[dict, None]:
         return ({
             "status": "unreplayable",
             "policy": policy,
             "requested_head": requested_head,
-            "original_base_sha": base_tip,
+            "original_base_sha": resolved_base,
+            "requested_base_sha": base_tip,
             "original_head_sha": head_sha,
             "base_tree_sha": None,
             "head_tree_sha": None,
@@ -342,17 +439,26 @@ def freeze_one(
             "error": {"reason": reason, "detail": detail},
         }, None)
 
-    # 1) establish the shared bare mirror (local-only, no network).
+    # 1) establish the shared bare mirror (local-only, no network). A failure
+    #    here is a base-side (environment) problem: no ref on either side can be
+    #    sourced, so it classifies ``base_unreachable``.
     try:
         m = ensure_mirror(root, repo_slug, origin_url)
     except git_ops.GitError as exc:
         return unreplayable(
-            "head_unreachable", f"could not establish the shared bare mirror: {exc}"
+            "base_unreachable", f"could not establish the shared bare mirror: {exc}"
         )
-    # 2) fetch the base tip, the PR head ref, and the requested head into the
-    #    mirror (credential/network/timeout or a missing refspec on the remote).
+    # 2) fetch the selected base tip (its own failure reason) and then the PR
+    #    head + explicit heads (their own failure reason) into the mirror
+    #    (credential/network/timeout or a missing refspec on the remote).
     try:
-        fetch_pr_refs(root, repo_slug, pr_number, base_tip, [head_sha], origin_url)
+        fetch_base_tip(root, repo_slug, base_tip, origin_url)
+    except git_ops.GitError as exc:
+        return unreplayable(
+            "base_unreachable", f"could not fetch the base tip from the origin: {exc}"
+        )
+    try:
+        fetch_head_refs(root, repo_slug, pr_number, [head_sha], origin_url)
     except git_ops.GitError as exc:
         return unreplayable(
             "head_unreachable", f"could not fetch the PR head refs from the origin: {exc}"
@@ -377,6 +483,7 @@ def freeze_one(
 
     # 5) resolve the merge base and both trees.
     base = resolve_original_base(m, "refs/heads/base_tip", head_sha)
+    resolved_base = base
     if base is None:
         return unreplayable("base_unreachable", "no merge-base could be resolved for the sourced base tip and head")
     trees = resolve_trees(m, base, head_sha)
@@ -411,7 +518,10 @@ def freeze_one(
         "status": "ready",
         "policy": policy,
         "requested_head": requested_head,
-        "original_base_sha": base_tip,
+        # original_base_sha is the true merge base of the selected base tip and
+        # the head; requested_base_sha is the selected base-branch tip.
+        "original_base_sha": base,
+        "requested_base_sha": base_tip,
         "original_head_sha": head_sha,
         "base_tree_sha": base_tree,
         "head_tree_sha": head_tree,

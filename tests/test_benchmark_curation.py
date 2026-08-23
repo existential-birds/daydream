@@ -485,9 +485,10 @@ def test_list_cases_and_head_file_line_count(tmp_path, fake_gh):
 
     view = cu.get_case(ws, case_id)
     assert view["snapshot"]["status"] == "ready"
-    assert cu._head_file_line_count(ws, head_sha, "feature.py") == 4
+    snapshot_doc = view["snapshot"]
+    assert cu._head_file_line_count(ws, snapshot_doc, "feature.py") == 4
     with pytest.raises(cu.CurationError):
-        cu._head_file_line_count(ws, head_sha, "missing.py")
+        cu._head_file_line_count(ws, snapshot_doc, "missing.py")
 
 
 def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
@@ -509,13 +510,106 @@ def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path, fake_gh):
     assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
 
 
-def test_list_cases_ready_mirror_failure_raises(tmp_path, fake_gh):
+def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path, fake_gh):
+    """Deliberate behavior flip (issue #814): a ready case whose shared bare
+    mirror is deleted still returns change stats — the reads come from a
+    disposable clone of the frozen bundle, never the mirror."""
     from daydream.benchmark import curation as cu
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     import shutil
     shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
-    with pytest.raises(cu.CurationError):
-        cu.list_cases(ws)
+    cases = cu.list_cases(ws)
+    assert cases[0]["changed_files"] == 2 and cases[0]["changed_lines"] == 6
+
+
+def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path, fake_gh):
+    """A ready snapshot whose bundle_file is absolute / traversal must fail the
+    read-only bundle-clone paths with the curated CurationError contract, never
+    the storage WorkspaceCorrupt family — list_cases (and the TUI) and
+    validate_case's location-vs-head read catch only CurationError."""
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    # a located historical finding makes validate_case read the frozen head tree
+    view = cu.get_case(ws, case_id)
+    cand = next(c for c in view["candidates"] if c["exact_acceptable"])
+    cu.accept_candidate(ws, case_id, cand["source_id"])
+
+    path = ws / "cases" / f"{case_id}.yaml"
+    good_bundle = load_yaml_strict(path)["snapshot"]["bundle_file"]
+    for bad in (str(ws / "snapshots" / "bundle.bundle"), "../../escape.bundle"):
+        raw = load_yaml_strict(path)
+        raw["snapshot"]["bundle_file"] = bad
+        path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        with pytest.raises(cu.CurationError):
+            cu.list_cases(ws)
+        with pytest.raises(cu.CurationError):
+            cu.validate_case(ws, case_id)
+    # restoring the original relative in-root bundle_file heals the read-only paths
+    raw = load_yaml_strict(path)
+    raw["snapshot"]["bundle_file"] = good_bundle
+    path.write_text(yaml.safe_dump(raw, sort_keys=False))
+    assert cu.list_cases(ws)[0]["changed_files"] == 2
+
+
+def test_curate_and_validate_after_mirror_removal(tmp_path, fake_gh):
+    """Acceptance (e): deleting the shared mirror never makes a case uncuratable.
+
+    Curation location-vs-head reads and ``list_cases`` change stats must come
+    from a disposable clone of the frozen bundle (origin/base vs origin/head),
+    and ``validate_workspace`` fidelity is bundle-based too."""
+    import shutil
+
+    from daydream.benchmark import curation as cu
+    from daydream.benchmark.workspace import validate_workspace
+
+    ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    shutil.rmtree(ws / "cache" / "repository.git")        # mirror gone
+    # curation location-vs-head still works from the bundle clone
+    cu.add_finding(ws, case_id, title="x", body="y", severity="high",
+                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
+    # list_cases change stats still work (was CurationError before this issue)
+    rows = cu.list_cases(ws)
+    assert rows[0]["changed_files"] == 2 and rows[0]["changed_lines"] == 6
+    # attest ready (re-exercises location-vs-head from the bundle), so the
+    # workspace reaches the ``ready`` exit-0 state on validation
+    cu.mark_ready(ws, case_id, head_sha=head_sha)
+    # validate_workspace still passes (fidelity is bundle-based)
+    code, label = validate_workspace(ws)
+    assert code == 0 and label == "ready"
+
+
+def test_bundle_clone_reused_across_findings_and_calls(tmp_path, fake_gh, monkeypatch):
+    """Located-finding validation and list_cases share one bundle clone.
+
+    Regression for the O(cases x findings) clone fan-out: every located finding
+    used to open a fresh ``git clone --no-checkout`` of the frozen bundle, and
+    every list_cases/validate_case call re-cloned. The reuse cache must serve
+    all of them from a single clone per bundle file.
+    """
+    from daydream.benchmark import curation as cu
+
+    ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
+    real_run_git = git_ops._run_git
+    clones = {"n": 0}
+
+    def spy_run_git(repo, args, **kwargs):
+        if args and args[0] == "clone":
+            clones["n"] += 1
+        return real_run_git(repo, args, **kwargs)
+
+    monkeypatch.setattr(git_ops, "_run_git", spy_run_git)
+
+    cu.add_finding(ws, case_id, title="a", body="b", severity="high",
+                   location={"path": "feature.py", "start_line": 1, "end_line": 1})
+    cu.add_finding(ws, case_id, title="c", body="d", severity="medium",
+                   location={"path": "feature.py", "start_line": 2, "end_line": 2})
+    assert clones["n"] == 1            # both located-finding mutations share one clone
+    cu.validate_case(ws, case_id)      # two located findings, still one clone
+    assert clones["n"] == 1
+    cu.list_cases(ws)
+    assert clones["n"] == 1
 
 
 def test_get_case_attaches_evidence_projection(tmp_path, fake_gh):

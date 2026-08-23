@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **benchmark:** require `requested_base_sha` on ready/imported snapshot records; `migrate.migrate_workspace` backfills the field from `original_base_sha` on both v1 upgrade and v2 repair passes so pre-provenance-split workspaces stay loadable.
+
 ## [0.27.0] - 2026-08-16
 
 ### Added

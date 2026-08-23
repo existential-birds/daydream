@@ -461,6 +461,7 @@ def _authoring_input_digest(case_docs: dict, manifest: dict) -> str:
                 curation.get("findings") or [], key=derive_task_key(case_id)
             ),
             "base": snapshot.get("original_base_sha"),
+            "requested_base_sha": snapshot.get("requested_base_sha"),
             "head": snapshot.get("original_head_sha"),
             "bundle_sha256": snapshot.get("bundle_sha256"),
         }
@@ -551,6 +552,7 @@ def _compile_case(stage: Path, ws: Path, case_doc: dict, repo_slug: str) -> dict
         "pr_number": number,
         "repository": repo_slug,
         "original_base_sha": snapshot.get("original_base_sha"),
+        "requested_base_sha": snapshot.get("requested_base_sha"),
         "original_head_sha": snapshot.get("original_head_sha"),
         "bundle_sha256": hashlib.sha256(bundle_dst.read_bytes()).hexdigest(),
         "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),

@@ -376,6 +376,7 @@ def _valid_case_dict():
             "policy": "final_pr_head",
             "requested_head": "final",
             "original_base_sha": "0123456789abcdef0123456789abcdef01234567",
+            "requested_base_sha": "0123456789abcdef0123456789abcdef01234567",
             "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
             "base_tree_sha": "0000000000000000000000000000000000000001",
             "head_tree_sha": "0000000000000000000000000000000000000002",
@@ -446,6 +447,17 @@ def test_ready_snapshot_rejects_missing_bundle_fields():
         CaseDocument.model_validate(raw)
 
 
+def test_ready_snapshot_requires_requested_base_sha():
+    # requested_base_sha is required on a ready snapshot (no back-compat).
+    raw = _valid_case_dict()
+    raw["snapshot"].pop("requested_base_sha")
+    with pytest.raises(ValidationError):
+        CaseDocument.model_validate(raw)
+    # a populated requested_base_sha passes and is the selected base-branch tip.
+    doc = _valid_case()
+    assert doc.snapshot.requested_base_sha == "0123456789abcdef0123456789abcdef01234567"
+
+
 def test_ready_requires_snapshot_attestation():
     raw = _valid_case_dict()
     raw["curation"].update({"state": "ready", "snapshot_attested": False})
@@ -470,7 +482,8 @@ def test_unreplayable_curation_requires_unreplayable_snapshot():
     # a genuine unreplayable snapshot + unreplayable state loads
     raw["snapshot"] = {
         "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
-        "original_base_sha": None, "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "original_base_sha": None, "requested_base_sha": None,
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
         "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
         "bundle_file": None, "bundle_sha256": None,
         "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
@@ -486,6 +499,7 @@ def test_unreplayable_snapshot_requires_error_and_null_bundle():
         "policy": "final_pr_head",
         "requested_head": "final",
         "original_base_sha": None,
+        "requested_base_sha": None,
         "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
         "base_tree_sha": None,
         "head_tree_sha": None,
