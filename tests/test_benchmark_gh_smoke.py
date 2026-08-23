@@ -47,10 +47,6 @@ def test_import_prs_two_prs_smoke_with_installed_gh(tmp_path):
     """Opt-in: import two PRs from an accessible repo with the installed gh; both
     frozen snapshots must classify ready. Operator sets DAYDREAM_SMOKE_PRS to a
     comma-separated pair (e.g. '841,842'); skipped when absent."""
-    from daydream.benchmark import github_import as gi
-    from daydream.benchmark.storage import load_yaml_strict
-    from daydream.benchmark.workspace import init_workspace
-
     if not _SMOKE_PRS:
         pytest.skip("DAYDREAM_SMOKE_PRS not set (comma-separated PR numbers)")
     pr_numbers = [int(x) for x in _SMOKE_PRS.split(",")]

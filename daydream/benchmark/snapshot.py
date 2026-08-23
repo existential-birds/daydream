@@ -216,10 +216,15 @@ def degenerate(mirror_repo: Path, base_tree: str, head_tree: str) -> str | None:
     return None
 
 
+def _canonical_diff_args(base: str, head: str) -> list[str]:
+    """The canonical diff argv: digest-pinned refs with full (non-abbreviated) SHAs."""
+    return ["-c", "core.abbrev=40", "diff", "--binary", base, head]
+
+
 def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
     """sha256 of the canonical binary-safe diff between two commits."""
     proc = git_ops._run_git(
-        mirror_repo, ["-c", "core.abbrev=40", "diff", "--binary", base_sha, head_sha],
+        mirror_repo, _canonical_diff_args(base_sha, head_sha),
         retries=0, capture_bytes=True,
     )
     if proc.returncode != 0:
@@ -361,8 +366,7 @@ def validate_offline_clone(
                 raise git_ops.GitError(f"offline clone tree mismatch for {ref} (expected {expected}, got {got})")
         diff = _run_git_cwd(
             clone_dir,
-            ["-c", "core.abbrev=40", "diff", "--binary",
-             "refs/remotes/origin/base", "refs/remotes/origin/head"],
+            _canonical_diff_args("refs/remotes/origin/base", "refs/remotes/origin/head"),
             capture_bytes=True,
         )
         if hashlib.sha256(diff).hexdigest() != diff_sha256:
