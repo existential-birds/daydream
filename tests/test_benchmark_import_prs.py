@@ -1601,3 +1601,35 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path, fake_gh):
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready
+
+
+# ---------------------------------------------------------------------------
+# non-destructive failed refresh (issue #813): a failed refresh on an already-
+# fetched PR preserves last-good linkage and records the attempt in latest_error
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path, fake_gh):
+    # Import + curate PR 101 successfully, then make the refresh fetch fail: the
+    # last-good import_file/import_sha256/case_ids are preserved and the attempt
+    # is recorded separately in latest_error (NOT reset to fetch_failed).
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"}
+    )
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0
+    after = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    assert after["import_state"] == "fetched"            # NOT reset to fetch_failed
+    assert after["import_file"] == before["import_file"]  # last-good linkage preserved
+    assert after["import_sha256"] == before["import_sha256"]
+    assert after["case_ids"] == before["case_ids"]
+    assert after["latest_error"]["code"] == "rate_limit"  # attempt recorded separately
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed

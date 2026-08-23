@@ -1213,6 +1213,7 @@ def _stamp_fetched(
             "import_file": import_file,
             "import_sha256": import_sha256,
             "error": None,
+            "latest_error": None,  # a successful import/refresh clears the prior failed attempt
             "requested_heads": requested_heads,
             "case_ids": case_ids,
         },
@@ -1231,7 +1232,28 @@ def _stamp_fetched(
 
 
 def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) -> None:
-    schema.validate_pr_transition(_pending_pr_state(raw, number), "fetch_failed")
+    prior_state = _pending_pr_state(raw, number)
+    if prior_state == "fetched":
+        # Non-destructive failed refresh (issue #813): a fetched PR keeps its
+        # last-good linkage (import_file/import_sha256/requested_heads/case_ids)
+        # and records the failed attempt separately in latest_error — it never
+        # flips to bare fetch_failed, which would orphan its curated cases.
+        entry = _manifest_entry(raw, number) or {}
+        _ledger_replace(
+            raw,
+            {
+                "number": number,
+                "import_state": "fetched",
+                "import_file": entry.get("import_file"),
+                "import_sha256": entry.get("import_sha256"),
+                "error": None,
+                "latest_error": {"code": code, "message": message},
+                "requested_heads": entry.get("requested_heads", []),
+                "case_ids": entry.get("case_ids", []),
+            },
+        )
+        return
+    schema.validate_pr_transition(prior_state, "fetch_failed")
     _ledger_replace(
         raw,
         {
@@ -1240,6 +1262,7 @@ def _stages_failed(raw: dict[str, Any], number: int, code: str, message: str) ->
             "import_file": None,
             "import_sha256": None,
             "error": {"code": code, "message": message},
+            "latest_error": None,
             "requested_heads": [],
             "case_ids": [],
         },
@@ -1275,11 +1298,14 @@ def _manifest_bytes(raw: dict[str, Any]) -> bytes:
 def _stage_fetch_failure(
     root: Path, raw: dict[str, Any], number: int, code: str, message: str
 ) -> None:
-    """Atomically flip a PR's ledger entry to ``fetch_failed``.
+    """Atomically stage a failed fetch on a PR's ledger entry.
 
-    Stages only ``benchmark.yaml`` through one :class:`Transaction`; a failed
-    fetch materializes no import/case file (the whole before/after ledger state
-    is atomic).
+    A first-import failure flips the entry to ``fetch_failed`` with an exact
+    error; a failed refresh on an already-``fetched`` PR preserves its last-good
+    linkage and records the attempt in ``latest_error`` instead. Stages only
+    ``benchmark.yaml`` through one :class:`Transaction`; a failed fetch
+    materializes no import/case file (the whole before/after ledger state is
+    atomic).
     """
     _stages_failed(raw, number, code, message)
     with storage.Transaction(root, op_id=f"import-{number}", kind="import") as tx:
@@ -1387,7 +1413,8 @@ def _import_one_pr(
     origin_url: str | None = None,
 ) -> int:
     """Fetch + materialize one PR, or stage its failure: 0 on success, 1 on failure."""
-    prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, prior_requested_heads = _prior_import_state(root, raw, number)
+    prior_sig, prior_task_sig, prior_curations, import_file, prior_pinned, prior_policy, \
+        prior_requested_heads = _prior_import_state(root, raw, number)
     try:
         doc = fetch_and_normalize(root, repo, number)
         # Head-immutable task input: an existing final_pr_head case pins the
