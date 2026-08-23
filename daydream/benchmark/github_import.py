@@ -1428,16 +1428,23 @@ def _import_one_pr(
                     doc.pull_request.head.sha = prior_pinned[prior_case_id]
                     break
         # Two independent stale signals: the per-case referenced-evidence arm
-        # (database_ids whose projection hash changed or disappeared) and the
-        # PR-wide task-input arm (the title/body/base/head a reviewer was
-        # shown). A metadata-only change updates checksums without staling.
+        # (database_ids whose projection hash changed or disappeared — runs on
+        # refresh AND plain re-import) and the PR-wide task-input arm (the
+        # title/body/base/head a reviewer was shown — refresh only). A
+        # metadata-only change updates checksums without staling.
         task_input_changed = (
             refresh
             and prior_task_sig is not None
             and prior_task_sig != _task_input_signature_from_doc(doc)
         )
         changed_ids: set[int] | None = None
-        if refresh and prior_sig is not None:
+        # The referenced-evidence arm runs for ANY fetched PR, refresh or plain
+        # re-import: a curated case whose own referenced evidence changed or
+        # disappeared must stale even on a non-refresh import (the refresh
+        # semantics cannot be bypassed). Only the PR-wide task-input arm stays
+        # gated on *refresh* (Assumption 3: a plain re-import never stales on
+        # title/body/base/head). A first import (no prior_sig) computes nothing.
+        if prior_sig is not None:
             prior_by_id = dict(prior_sig)
             new_by_id = dict(_evidence_signature_from_doc(doc))
             changed_ids = {
