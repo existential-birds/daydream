@@ -217,6 +217,14 @@ def _editor_fragment_edit(finding: dict[str, Any]) -> str:
     return yaml.safe_dump({"findings": [atom]}, sort_keys=False)
 
 
+def _editor_fragment_authored(source_ids: list[str]) -> str:
+    """One blank atom pre-filled with the selected evidence *source_ids*."""
+    return yaml.safe_dump({"findings": [{
+        "title": "", "body": "", "severity": None,
+        "location": None, "source_ids": source_ids,
+    }]}, sort_keys=False)
+
+
 def _parse_fragment(text: str) -> list[dict[str, Any]] | None:
     """Parse edited YAML into a list of non-blank finding atoms, or ``None``.
 
@@ -264,9 +272,21 @@ def _action_new(root: Path, case_id: str, view: dict[str, Any], read_line: Calla
 
 
 def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str]) -> str:
-    """The ``[e]`` edit action: replace one gold finding with its re-written atoms."""
+    """The ``[e]`` edit-or-author action.
+
+    Prompts for a finding to rewrite (the existing finding-rewrite path) or
+    ``a`` to author edited finding(s) from selected evidence via
+    :func:`add_edited_findings`.
+    """
     findings = (view.get("curation") or {}).get("findings") or []
-    text = _prompt(read_line, "finding (number, 0 to cancel): ").strip()
+    entries = view.get("evidence") or view.get("candidates") or []
+    first = _prompt(
+        read_line,
+        "edit finding (number) or author from evidence [a] (0 to cancel): ",
+    ).strip()
+    if first.lower() == "a":
+        return _edit_author_evidence(root, case_id, entries, read_line)
+    text = first
     if text == "0":
         return "continue"
     try:
@@ -291,6 +311,42 @@ def _action_edit(root: Path, case_id: str, view: dict[str, Any], read_line: Call
     except (cu.CurationError, ValidationError) as exc:
         return _service_error(exc)
     print(f"replaced finding with {len(atoms)} atom(s)")
+    return "rerender"
+
+
+def _edit_author_evidence(
+    root: Path, case_id: str, entries: list[dict[str, Any]], read_line: Callable[[str], str]
+) -> str:
+    """The ``[e]``\u2192[author-from-evidence] sub-flow.
+
+    Parses one 1-based evidence selector (a number or a single ``a-b`` range),
+    pins the selected source_ids into a blank atom, opens the editor, then
+    stages the atoms through :func:`add_edited_findings`. Editor cancellation,
+    an invalid fragment, a curation error or a validation error all mutate
+    nothing.
+    """
+    text = _prompt(read_line, "evidence (number or range, 0 to cancel): ").strip()
+    if text == "0":
+        return "continue"
+    try:
+        indices = parse_indices(text, len(entries))
+    except ValueError as exc:
+        print(str(exc))
+        return "continue"
+    source_ids = [entries[i]["source_id"] for i in indices]
+    frag = _launch_editor(_editor_fragment_authored(source_ids))
+    if frag is None:
+        print("editor cancelled or failed; nothing written")
+        return "continue"
+    atoms = _parse_fragment(frag)
+    if atoms is None:
+        print("invalid fragment; nothing written")
+        return "continue"
+    try:
+        cu.add_edited_findings(root, case_id, atoms=atoms)
+    except (cu.CurationError, ValidationError) as exc:
+        return _service_error(exc)
+    print(f"authored {len(atoms)} edited finding(s)")
     return "rerender"
 
 

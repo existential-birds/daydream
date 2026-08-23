@@ -233,6 +233,62 @@ def test_action_edit_replaces_seeded_finding(tmp_path, fake_gh, monkeypatch):
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
 
 
+def test_action_edit_authors_edited_finding_from_non_candidate_evidence(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "auth.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: From approval\n"
+        "    body: edited wording\n    severity: null\n    location: null\n"
+        "    source_ids: [github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
+    assert f["provenance"]["source_ids"] == ["github:review:100"]
+
+
+def test_action_edit_splits_one_evidence_into_two_findings(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "split.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Part A\n    body: a\n"
+        "    severity: null\n    location: null\n    source_ids: [github:inline_comment:1]\n"
+        "  - title: Part B\n    body: b\n    severity: null\n    location: null\n"
+        "    source_ids: [github:inline_comment:1]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1", "q"))
+    fs = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
+    assert len(fs) == 2 and {f["provenance"]["kind"] for f in fs} == {"edited"}
+
+
+def test_action_edit_merges_range_into_one_finding(tmp_path, fake_gh, monkeypatch):
+    from daydream.benchmark.curate_tui import run_curate_tui
+    from daydream.benchmark.storage import load_yaml_strict
+    ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
+    editor = tmp_path / "merge.sh"
+    editor.write_text(
+        "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Merged\n    body: combined\n"
+        "    severity: null\n    location: null\n"
+        "    source_ids: [github:inline_comment:1, github:review:100]\nEOF\n"
+    )
+    editor.chmod(0o755)
+    monkeypatch.setenv("VISUAL", str(editor))
+    monkeypatch.delenv("EDITOR", raising=False)
+    run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "1,3", "q"))
+    f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
+    assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100"]
+
+
 def test_action_exclude_evidence_other_requires_note(tmp_path, fake_gh):
     from daydream.benchmark import curation as cu
     from daydream.benchmark.curate_tui import run_curate_tui
