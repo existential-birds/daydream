@@ -84,6 +84,35 @@ def _seed_origin(tmp_path: Path) -> Path:
     return bare
 
 
+def _seed_two_pr_origin(tmp_path: Path) -> tuple[Path, str, str]:
+    """Bare origin with two PRs on unrelated ancestries: main(base1->base2->base3)
+    with refs/pull/1/head off base2, plus a diverged `dev` branch (off base1) whose
+    first commit is PR2's base tip and second commit is PR2's head. Returns
+    (bare, dev_base_tip_sha, pr2_head_sha)."""
+    repo = tmp_path / "seed_wt"; repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _write(repo, "readme.txt", "base1\n"); _commit(repo, "base1")
+    _write(repo, "base.py", "BASE = 2\n"); _commit(repo, "base2")
+    _write(repo, "beyond.py", "BEYOND = 3\n"); _commit(repo, "base3")
+    # PR 1 head off base2 (identical seed to _seed_origin => same _SHA_HEAD)
+    _git(repo, "checkout", "--detach", "HEAD~1")            # base2
+    repo.joinpath("base.py").write_text("BASE = 20\n"); _git(repo, "add", "base.py")
+    _write(repo, "feature.py", "FEATURE = 1\n"); _commit(repo, "feature")
+    pr1_head = _git(repo, "rev-parse", "HEAD")
+    # PR 2: unrelated `dev` branch diverged from base1; base tip = dev1, head = dev2
+    _git(repo, "checkout", "-b", "dev", "HEAD~2")           # base1
+    _write(repo, "dev.py", "DEV = 1\n"); dev_tip = _commit(repo, "dev1")
+    repo.joinpath("dev.py").write_text("DEV = 2\n"); _git(repo, "add", "dev.py")
+    pr2_head = _commit(repo, "dev2")
+    bare = tmp_path / "origin.git"; bare.mkdir(parents=True, exist_ok=True)
+    _git(bare, "init", "--bare")
+    _git(repo, "remote", "add", "origin", str(bare))
+    _git(repo, "push", "origin", "main:main", "dev:dev")
+    _git(repo, "push", "origin", f"{pr1_head}:refs/pull/1/head", check=False)
+    _git(repo, "push", "origin", f"{pr2_head}:refs/pull/2/head", check=False)
+    return bare, dev_tip, pr2_head
+
+
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
 _SHA_BASE1 = 'cae67fc3eb4c5d3dd3353ca7fb41f909837bf0a2'
 _SHA_BASE1_TREE = '2cd99bd20f7b3bac54014e20db1831d64b2c4fc9'
@@ -396,6 +425,24 @@ def test_freeze_one_ready_and_reasons(tmp_path):
     assert ur2["status"] == "unreplayable" and ur2["error"]["reason"] == "head_unreachable"
     assert bundle2 is None
     assert ur2["bundle_file"] is None
+
+
+def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path):
+    """The forced +{base_tip} refspec lets two PRs with unrelated, non-fast-forward
+    base tips both freeze ready in one shared mirror (regression for defect 3)."""
+    from daydream.benchmark import snapshot as sn
+
+    origin, dev_tip, pr2_head = _seed_two_pr_origin(tmp_path)
+    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    m = sn.mirror(tmp_path)
+    ready1, b1 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
+                               policy="final_pr_head", requested_head="final", origin_url=origin)
+    ready2, b2 = sn.freeze_one(tmp_path, "o/r", 2, base_tip=dev_tip, head_sha=pr2_head,
+                               policy="final_pr_head", requested_head="final", origin_url=origin)
+    assert ready1["status"] == "ready" and isinstance(b1, bytes)
+    assert ready2["status"] == "ready" and isinstance(b2, bytes)
+    # the shared base_tip ref was force-re-pointed from base2 to the unrelated dev tip
+    assert sn.rev_parse(m, "refs/heads/base_tip") == dev_tip
 
 
 def test_freeze_one_base_advanced_two_sha(tmp_path):
