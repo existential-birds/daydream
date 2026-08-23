@@ -23,6 +23,7 @@ import datetime
 import hashlib
 import importlib.metadata
 import json
+import os
 import subprocess
 import sys
 import urllib.parse
@@ -71,11 +72,6 @@ def _normalize_allowlist(values: Any, what: str) -> list[str]:
     if not isinstance(values, list) or not values:
         raise RunBlocked(f"privacy {what} must be a non-empty host list")
     return [normalize_hostname(str(v)) for v in values]
-
-
-def _judge_host_from_env(env: dict[str, Any]) -> str:
-    """Judge egress host for ``env`` (mirrors calibrate's resolution)."""
-    return calibrate._judge_host_from_env(env)
 
 
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
@@ -139,12 +135,12 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
     gold_candidate_pairs = sum(
         1 for c in cases if isinstance(c, dict)
     )
-    oracle_pairs = sum(
-        int(c.get("oracle_count", 0) or 0) for c in cases if isinstance(c, dict)
-    )
 
     attempts = config.get("n_attempts")
     concurrency = config.get("n_concurrent_trials")
+    # The oracle judges every compiled case once per attempt, so the oracle
+    # spend is the case count times the configured retries.
+    oracle_pairs = len([c for c in cases if isinstance(c, dict)]) * int(attempts or 1)
     first_case = cases[0] if cases else {}
     timeout_sec = None
     if isinstance(first_case, dict):
@@ -155,7 +151,7 @@ def _pre_run_summary(workspace: Path, *, env: dict[str, Any]) -> str:
     def _or(value: Any, default: str = "unset") -> str:
         return default if value is None else str(value)
 
-    judge_host = _judge_host_from_env(env)
+    judge_host = calibrate._judge_host_from_env(env)
     return "\n".join(
         [
             "Pre-run Harbor spend summary",
@@ -344,26 +340,20 @@ def _preflight(
         except RunBlocked as exc:
             failures.append(str(exc))
             reviewer_hosts, judge_hosts = [], []
-        try:
-            judge_host = _judge_host_from_env(env)
-        except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
-            failures.append(f"cannot resolve judge host: {exc}")
-            judge_host = ""
-        try:
-            reviewer_host = _reviewer_host_from_env(env)
-        except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
-            failures.append(f"cannot resolve reviewer host: {exc}")
-            reviewer_host = ""
-        if judge_host and judge_host not in judge_hosts:
-            failures.append(
-                f"judge host {judge_host!r} is not in the workspace judge_allowed_hosts allowlist"
-                f" ({sorted(judge_hosts)})"
-            )
-        if reviewer_host and reviewer_host not in reviewer_hosts:
-            failures.append(
-                f"reviewer host {reviewer_host!r} is not in the workspace "
-                f"reviewer_allowed_hosts allowlist ({sorted(reviewer_hosts)})"
-            )
+        for label, resolve, hosts in (
+            ("judge", calibrate._judge_host_from_env, judge_hosts),
+            ("reviewer", _reviewer_host_from_env, reviewer_hosts),
+        ):
+            try:
+                host = resolve(env)
+            except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
+                failures.append(f"cannot resolve {label} host: {exc}")
+                continue
+            if host and host not in hosts:
+                failures.append(
+                    f"{label} host {host!r} is not in the workspace "
+                    f"{label}_allowed_hosts allowlist ({sorted(hosts)})"
+                )
         for field in ("archive", "uploads"):
             value = privacy.get(field)
             if value != "disabled":
@@ -476,7 +466,8 @@ def _environment_from_trial(trial: Path) -> dict[str, Any]:
 
 
 def _current_state_mapping(
-    *, compiled_lock_sha256: str, env: dict[str, Any], calibration_digest: str,
+    *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
+    calibration_digest: str,
 ) -> dict[str, Any]:
     """The current Oracle/Harbor state an oracle receipt must match.
 
@@ -486,26 +477,30 @@ def _current_state_mapping(
     version = importlib.metadata.version("harbor")
     major_minor = ".".join(str(version).split(".")[:2])
     sr = calibrate._load_judge_template()
+    config = _compiled_job_config(workspace)
     return {
         "compiled_lock_sha256": compiled_lock_sha256,
         "harbor_version": major_minor,
         "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
         "judge_model": env.get("DAYDREAM_JUDGE_MODEL") or "",
-        "judge_host": _judge_host_from_env(env),
+        "judge_host": calibrate._judge_host_from_env(env),
+        "reviewer_backend": env.get("DAYDREAM_REVIEW_BACKEND") or "",
+        "reviewer_model": env.get("DAYDREAM_REVIEW_MODEL") or "",
+        "reviewer_base_url": env.get("DAYDREAM_REVIEW_BASE_URL") or "",
         "verifier_template_sha256": calibrate._render_judge_prompt_digest(sr),
         "threshold": verifier_core.CONFIDENCE_THRESHOLD,
-        "attempts": 3,
+        "attempts": config.get("n_attempts", 1),
         "calibration_receipt_sha256": calibration_digest,
     }
 
 
 def _oracle_receipt_document(
-    *, compiled_lock_sha256: str, env: dict[str, Any], calibration_digest: str,
-    result_dir: Path,
+    *, workspace: Path, compiled_lock_sha256: str, env: dict[str, Any],
+    calibration_digest: str, result_dir: Path,
 ) -> dict[str, Any]:
     """Assemble the private deterministic Oracle receipt (mode-0600)."""
     doc = _current_state_mapping(
-        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
         calibration_digest=calibration_digest,
     )
     doc["result_dir"] = str(Path(result_dir).resolve())
@@ -527,7 +522,7 @@ def _write_oracle_receipt(
         )
         return 1
     doc = _oracle_receipt_document(
-        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
         calibration_digest=calibration_digest, result_dir=Path(job_dir),
     )
     storage.atomic_write_json(
@@ -551,7 +546,7 @@ def _default_run_gate(
     if not isinstance(receipt, dict):
         return f"malformed oracle receipt at {receipt_path}"
     current = _current_state_mapping(
-        compiled_lock_sha256=compiled_lock_sha256, env=env,
+        workspace=workspace, compiled_lock_sha256=compiled_lock_sha256, env=env,
         calibration_digest=calibration_digest,
     )
     for key, value in current.items():
@@ -629,10 +624,11 @@ def run_run(
     Every run is recorded in ``runtime/harbor.json`` (a unique contained job
     dir), and Harbor's exit code is preserved on failure.
     """
-    workspace = Path(workspace)
+    workspace = Path(workspace).resolve()
     env = dict(env) if env is not None else {}
     docker_ok = docker_ok or _default_docker_ok
     confirm = confirm or _default_confirm
+    spawn = spawn or _default_spawn
 
     # 1. Fail-closed preflight (no running entry, no spawn on failure).
     failures = _preflight(workspace, oracle=oracle, env=env, docker_ok=docker_ok)
@@ -669,12 +665,19 @@ def run_run(
     ledger_append_running(workspace, run_id=run_id, compiled_lock_sha256=compiled_lock_sha,
                           job_dir=str(job_dir), mode=mode)
 
-    # 6. Spawn Harbor, threading the reviewer/judge env and telemetry off.
-    config = workspace / "harbor" / ("harbor-oracle.yaml" if oracle else "harbor-job.yaml")
+    # 6. Spawn Harbor with an absolute config path, the parent environment
+    #    (PATH/HOME/etc.) merged in, and telemetry forced off.
+    config = (workspace / "harbor" / ("harbor-oracle.yaml" if oracle else "harbor-job.yaml")).resolve()
     harbor_exe = package.resolve_harbor()
-    spawn_env = dict(env) | {"HARBOR_TELEMETRY": "off"}
-    result = spawn([harbor_exe, "run", "-c", str(config)],
-                   cwd=(workspace / "harbor").resolve(), env=spawn_env)
+    spawn_env = {key: value for key, value in os.environ.items()}
+    for key, value in env.items():
+        if value is not None:
+            spawn_env[key] = value
+    spawn_env["HARBOR_TELEMETRY"] = "off"
+    result = spawn(
+        [harbor_exe, "run", "-c", str(config)],
+        cwd=workspace / "harbor", env=spawn_env,
+    )
     returncode = int(result.get("returncode", 0))
 
     # 7. Post-run: parse results and reconcile the ledger / receipt.
