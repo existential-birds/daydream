@@ -451,6 +451,17 @@ _LEAK_RULES = [
 
 _BLOCK_PATTERN = re.compile(r"<historical_pr_context>.*?</historical_pr_context>", re.DOTALL)
 
+# Task.md is control-plane content too, but its own prose legitimately talks
+# about the gold shape (provenance/curation/exclusions/clean attestation), so
+# it is scanned with an identifiers-only subset (R13): never the prose tokens.
+_TASK_SPEC_IDENTIFIER_RULES = [
+    rule
+    for rule in _LEAK_RULES
+    if rule[0]
+    in ("original-git-sha", "authoring-case-id", "source-comment-id",
+        "credential", "authenticated-url", "pull-number")
+]
+
 
 def _bounded_block_strip(text: str) -> str:
     """Remove the exact emitted bounded block (instruction.md scan exemption)."""
@@ -467,10 +478,11 @@ def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None
     """
     for rel, text in control_plane.items():
         scanned = _bounded_block_strip(text) if rel.endswith("instruction.md") else text
+        rules = _TASK_SPEC_IDENTIFIER_RULES if rel.endswith("Task.md") else _LEAK_RULES
         hits: list[str] = []
         if repository_slug and repository_slug in scanned:
             hits.append(repository_slug)
-        for label, pattern in _LEAK_RULES:
+        for label, pattern in rules:
             m = pattern.search(scanned)
             if m is not None:
                 hits.append(m.group(0))

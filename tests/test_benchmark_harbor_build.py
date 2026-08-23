@@ -1108,7 +1108,10 @@ def test_spec_change_forces_recompile(tmp_path, fake_gh):
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
     head_sha = raw["snapshot"]["original_head_sha"]
-    raw["pull_request"] = dict(raw["pull_request"]); raw["pull_request"]["title"] = "Changed title"
+    raw["pull_request"] = dict(raw["pull_request"])
+    raw["pull_request"]["title"] = "Changed title"
+    # the case doc is model-validated on every read, so ship the truthful digest
+    raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed title").hexdigest()
     storage.atomic_write_yaml(path, raw)
     new_digest = hashlib.sha256(
         build.render_task_spec(storage.load_yaml_strict(path), instruction=build.ASSIGNMENT_TEXT)).hexdigest()
@@ -1119,3 +1122,18 @@ def test_spec_change_forces_recompile(tmp_path, fake_gh):
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=new_digest)
     lock2 = build.compile_workspace(ws)
     assert lock2["authoring_input_digest"] != lock1["authoring_input_digest"]   # R11: spec change forces recompile
+
+
+def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers():
+    from daydream.benchmark.harbor import build
+    from daydream.benchmark.harbor.build import CompileError
+    prose = ("## Purpose\nreview the change\n## Scoring contract\n"
+             "The gold_status and clean_attested markers and the curation flow "
+             "and any evidence exclusions are described here, with provenance notes.\n")
+    build.leakage_scan({"case-x/Task.md": prose}, repository_slug="o/r")   # must NOT raise (R13)
+    leaky = prose + " see https://github.com/o/r/pull/101 and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
+    try:
+        build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
+        assert False, "expected CompileError for leaked identifier"
+    except CompileError as exc:
+        assert "Task.md" in str(exc)
