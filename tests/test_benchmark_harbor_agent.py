@@ -297,3 +297,95 @@ def test_agent_setup_nonzero_exec_fails(tmp_path):
 
     with pytest.raises(AgentError):
         asyncio.run(agent.setup(Env()))
+
+
+# ---------------------------------------------------------------------------
+# Task 7: agent run() — claude guarantee + allowlist child env + isolation
+# ---------------------------------------------------------------------------
+
+
+_BANNED = [
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "DAYDREAM_APP_ID",
+    "DAYDREAM_APP_PRIVATE_KEY",
+    "HF_TOKEN",
+    "DAYDREAM_TRAJECTORY_HUB_REPO",
+    "DAYDREAM_ARCHIVE_DIR",
+    "DAYDREAM_JUDGE_API_KEY",
+    "DAYDREAM_JUDGE_MODEL",
+    "ANTHROPIC_API_KEY",
+]
+
+
+def test_build_child_env_is_exact_allowlist():
+    from daydream.benchmark.harbor.agent import build_child_env
+
+    parent = {
+        **{k: "secret" for k in _BANNED},
+        "DAYDREAM_REVIEW_BACKEND": "claude",
+        "DAYDREAM_REVIEW_API_KEY": "review-key",
+        "DAYDREAM_REVIEW_BASE_URL": "https://api.anthropic.com",
+        "PATH": "/usr/bin",
+        "HOME": "/root",
+        "LANG": "C.UTF-8",
+        "RANDOM_SECRET": "ignore-me",
+    }
+    child = build_child_env(parent)
+    assert child["DAYDREAM_REVIEW_API_KEY"] == "review-key"  # reviewer credential kept
+    for banned in _BANNED:
+        assert banned not in child                              # fail-closed: absent
+    assert child["PATH"] == "/usr/bin" and child["HOME"] == "/root"
+    # required process vars survive; nothing arbitrary leaks through.
+    assert set(child).issubset(
+        {
+            "DAYDREAM_REVIEW_BACKEND",
+            "DAYDREAM_REVIEW_API_KEY",
+            "DAYDREAM_REVIEW_BASE_URL",
+            "PATH",
+            "HOME",
+            "LANG",
+        }
+    )
+
+
+def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path):
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor.agent import AgentError, DaydreamReviewAgent
+    from harbor.environments.base import ExecResult
+    from harbor.models.agent.context import AgentContext
+
+    agent = DaydreamReviewAgent(
+        logs_dir=tmp_path,
+        extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"},
+    )
+    with pytest.raises(AgentError) as refused:                     # before any reviewing
+        import asyncio
+
+        asyncio.run(agent.run("instruction", object(), AgentContext()))
+    assert "claude" in str(refused.value)
+
+    agent_ok = DaydreamReviewAgent(
+        logs_dir=tmp_path,
+        extra_env={
+            "DAYDREAM_REVIEW_BACKEND": "claude",
+            "DAYDREAM_REVIEW_API_KEY": "k",
+        },
+    )
+
+    class Env:
+        async def exec(self, command, cwd=None, env=None, timeout_sec=None, user=None):
+            self.captured = (command, cwd, env)
+            return ExecResult(return_code=0, stdout="", stderr="")
+
+    env = Env()
+    import asyncio
+
+    asyncio.run(agent_ok.run("instruction", env, AgentContext()))
+    cmd, cwd, child = env.captured
+    assert "daydream.benchmark.harbor.entrypoint" in cmd
+    assert cwd == "/workspace/repo"
+    assert "ANTHROPIC_API_KEY" not in child and "DAYDREAM_REVIEW_API_KEY" in child
+    assert "--findings-out" not in cmd                     # no live-PR emission path
