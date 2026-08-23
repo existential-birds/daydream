@@ -454,3 +454,40 @@ def test_populate_context_malformed_trajectory_leaves_metrics_unset(tmp_path):
     ctx = AgentContext()
     agent.populate_context_post_run(ctx)
     assert ctx.is_empty()
+
+
+# ---------------------------------------------------------------------------
+# Task 9: validate --compiled agent-import preflight
+# ---------------------------------------------------------------------------
+
+
+def test_validate_compiled_imports_agent_path_same_interpreter(tmp_path, fake_gh, monkeypatch):
+    import importlib
+
+    import pytest
+
+    pytest.importorskip("harbor")
+    from daydream.benchmark.harbor import package as pkg
+    from tests.test_benchmark_harbor_build import _seed_ready_workspace
+
+    ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    ver = importlib.metadata.version("daydream")
+    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
+    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    pkg.build_harbor(ws, wheel=wheel)
+
+    assert pkg.validate_compiled(ws) == 0  # agent class imports in the same interpreter
+
+    # A separate/missing environment fails before a trial with remediation.
+    real_import = importlib.import_module
+
+    def broken(name, *a, **k):
+        if name == "daydream.benchmark.harbor.agent":
+            raise ModuleNotFoundError("no module named 'daydream.benchmark.harbor.agent'")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", broken)
+    with pytest.raises(pkg.PackageError) as rejected:
+        pkg.validate_compiled(ws)
+    assert "daydream.benchmark.harbor.agent" in str(rejected.value)
+    assert "pip install 'daydream[benchmark]'" in str(rejected.value)

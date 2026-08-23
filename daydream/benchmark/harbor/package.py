@@ -206,7 +206,12 @@ def _validate_compiled_local(root: Path) -> Path:
 
 
 def validate_compiled(root: Path | None) -> int:
-    """Validate local authoring/compiled state and all Harbor models."""
+    """Validate local authoring/compiled state, all Harbor models, and the custom agent.
+
+    Runs the authoring preflight, the compiled-local inventory/leakage scan, the
+    same-interpreter Harbor resolution, the Harbor Task/JobConfig model checks, and
+    the custom-agent import preflight (``daydream.benchmark.harbor.agent`` must
+    import in this interpreter)."""
     if root is None:
         resolve_harbor()
         raise PackageError("compiled workspace path is required")
@@ -242,6 +247,20 @@ def validate_compiled(root: Path | None) -> int:
             JobConfig.model_validate(yaml.safe_load(path.read_text()))
         except Exception as exc:
             raise PackageError(f"Harbor rejected {name}: {exc}") from exc
+
+    # Custom-agent preflight: import the exact runnable agent path in the same
+    # interpreter Harbor/validation share, so a missing or separate-environment
+    # class fails before any trial is consumed.
+    try:
+        agent_mod = importlib.import_module("daydream.benchmark.harbor.agent")
+        getattr(agent_mod, "DaydreamReviewAgent")
+    except (ImportError, AttributeError) as exc:
+        raise PackageError(
+            f"cannot import custom Harbor agent "
+            f"daydream.benchmark.harbor.agent:DaydreamReviewAgent from the "
+            f"Daydream interpreter: {exc}",
+            remediation="pip install 'daydream[benchmark]'",
+        ) from exc
     return 0
 
 
