@@ -685,14 +685,20 @@ def test_gold_mode_truth_table(kinds, expected):
         ("fetch_failed", "fetched"),
         ("fetch_failed", "fetch_failed"),
         ("fetched", "fetched"),
-        ("fetched", "fetch_failed"),
     ],
 )
 def test_valid_pr_transitions(frm, to):
     validate_pr_transition(frm, to)  # must not raise
 
 
-@pytest.mark.parametrize("frm,to", [("fetched", "pending"), ("pending", "draft")])
+@pytest.mark.parametrize(
+    "frm,to",
+    [
+        ("fetched", "pending"),
+        ("fetched", "fetch_failed"),  # a fetched PR preserves linkage via latest_error
+        ("pending", "draft"),
+    ],
+)
 def test_invalid_pr_transition_rejected(frm, to):
     with pytest.raises(TransitionError):
         validate_pr_transition(frm, to)
@@ -749,3 +755,25 @@ def test_classify_validation_codes():
     assert classify_validation(ready=True, incomplete=False, corrupt=False) == 0
     assert classify_validation(ready=False, incomplete=True, corrupt=False) == 2
     assert classify_validation(ready=False, incomplete=False, corrupt=True) == 1
+
+
+def test_pull_request_entry_fetched_allows_latest_error_only():
+    # A fetched entry may carry latest_error (a failed refresh attempt on an
+    # otherwise-intact import) but never `error` itself.
+    base_entry = {
+        "number": 101,
+        "import_state": "pending",
+        "requested_heads": ["final"],
+        "case_ids": [],
+    }
+    valid = dict(
+        base_entry,
+        import_state="fetched",
+        import_file="imports/pr-000101.json",
+        import_sha256="a" * 64,
+        latest_error={"code": "fetch", "message": "x"},
+    )
+    PullRequestEntry.model_validate(valid)                       # OK
+    bad = dict(valid, error={"code": "fetch", "message": "x"})   # error still forbidden on fetched
+    with pytest.raises(ValidationError):
+        PullRequestEntry.model_validate(bad)

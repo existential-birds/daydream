@@ -3,7 +3,7 @@
 This module is the issue-#5 browser/terminal seam: the fixed operation set a
 curator (or the future interactive client) drives every gold-curation action
 through. Every mutating operation (``accept_candidate``, ``add_finding``,
-``add_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
+``add_findings``, ``add_edited_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
 ``attest_clean``, ``exclude_case``, ``reinclude_case``, ``apply_gold_fragment``)
 runs its complete read -> validate -> mutate -> commit sequence under the
 workspace lock:
@@ -51,7 +51,7 @@ from pydantic import ValidationError
 from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.benchmark.schema import _schema_ready
-from daydream.benchmark.storage import load_yaml_strict
+from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
 
 class CurationError(Exception):
@@ -260,7 +260,9 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 
     Each row adds ``evidence_count``, ``changed_files``, and ``changed_lines``
     to the existing case_id/pr_number/state/gold_mode/gold_count/snapshot_status/
-    head_prefix keys.
+    head_prefix keys. ``evidence_count`` counts the case's full import evidence
+    set (all kinds), falling back to the candidate count only when the import
+    file is unreadable/missing so the resumable index never crashes.
     """
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
@@ -279,6 +281,16 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             gold_mode = schema.derive_gold_mode(_curation_model(curation))
         except ValidationError:
             gold_mode = None
+        try:
+            evidence_count = len(_evidence_list(root, doc))
+        except WorkspaceCorrupt:
+            # a missing/unreadable import file must not crash the resumable
+            # index: fall back to the candidate count. Present-but-malformed
+            # content (a non-list ``evidence``/``candidates`` value, a record
+            # without a source_id) propagates as TypeError/KeyError instead of
+            # being masked, matching get_case/validate_case — never fall back
+            # for any other reason.
+            evidence_count = len(doc.get("candidates") or [])
         out.append({
             "case_id": case_id,
             "pr_number": case.get("pr_number"),
@@ -287,11 +299,40 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
             "gold_count": len(findings),
             "snapshot_status": snapshot_status,
             "head_prefix": head_sha[:12] if head_sha else "",
-            "evidence_count": len(doc.get("candidates") or []),
+            "evidence_count": evidence_count,
             "changed_files": changed_files,
             "changed_lines": changed_lines,
         })
     return out
+
+
+def _evidence_list(
+    root: Path, raw: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Load the import evidence once and return the ordered full record list.
+
+    Returns every evidence record in persisted file order (all kinds — review,
+    inline_comment, thread_comment, issue_comment), each augmented with
+    ``candidate_index`` = index into ``raw["candidates"]`` by matching
+    ``source_id``, or ``None`` when the record is not a candidate. A case that
+    references an import file that is missing/unreadable raises the storage
+    error — no list is fabricated.
+    """
+    source = raw.get("source") or {}
+    import_file = source.get("import_file")
+    if not import_file:
+        return []
+    import_data = storage.load_json_strict(Path(root) / import_file)
+    candidate_index = {
+        c.get("source_id"): i
+        for i, c in enumerate(raw.get("candidates") or [])
+    }
+    records: list[dict[str, Any]] = []
+    for ev in import_data.get("evidence") or []:
+        record = dict(ev)
+        record["candidate_index"] = candidate_index.get(record.get("source_id"))
+        records.append(record)
+    return records
 
 
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
@@ -301,7 +342,9 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
     persisted) ``evidence`` sub-dict ``{kind, author, commit_id, resolved,
     outdated}`` joined by ``source_id`` from the import file the case doc
     references; a candidate whose ``source_id`` matches no evidence record has
-    no ``evidence`` key (absent, not ``None``). A missing/unreadable import
+    no ``evidence`` key (absent, not ``None``). Additionally the case gains an
+    in-memory ``evidence`` list of every import evidence record (all kinds),
+    each augmented with a ``candidate_index``. A missing/unreadable import
     file for a case that references it propagates the storage error.
     """
     raw = _load_case(root, case_id)
@@ -311,6 +354,7 @@ def get_case(root: Path, case_id: str) -> dict[str, Any]:
             src = cand.get("source_id")
             if src in projection:
                 cand["evidence"] = projection[src]
+    raw["evidence"] = _evidence_list(root, raw)
     return raw
 
 
@@ -544,14 +588,47 @@ def _derive_provenance_kind(
     return "edited"
 
 
-def _check_candidate_sources(raw: dict[str, Any], source_ids: list[str], case_id: str) -> None:
-    """Reject a caller-supplied source reference that no candidate backs."""
+def _evidence_source_ids(root: Path, raw: dict[str, Any]) -> set[str]:
+    """The source_ids of every import evidence record the case references."""
+    return set(_evidence_projection(root, raw))
+
+
+def _check_evidence_sources(
+    root: Path, raw: dict[str, Any], source_ids: list[str], case_id: str
+) -> None:
+    """Reject a caller-supplied source reference that no import evidence backs."""
     if not source_ids:
         return
-    candidate_ids = {c.get("source_id") for c in (raw.get("candidates") or [])}
+    evidence_ids = _evidence_source_ids(root, raw)
     for src in source_ids:
-        if src not in candidate_ids:
-            raise CurationError(f"source {src} is not a candidate of case {case_id}")
+        if src not in evidence_ids:
+            raise CurationError(f"source {src} is not evidence of case {case_id}")
+
+
+def _append_atoms_to_case(
+    root: Path, raw: dict[str, Any], case_id: str, atoms: list[dict[str, Any]],
+    *, authored: bool, require_sources: bool,
+) -> None:
+    """Shared mutate body of the three atomic-add siblings.
+
+    Validates every atom's sources up front (all-or-nothing), reopens the case
+    for mutation, appends each atom via :func:`_build_replacement` (the single
+    finding builder, never duplicated inline), and re-derives gold status.
+    With *require_sources* an atom carrying no ``source_ids`` is rejected
+    naming its index — it would otherwise silently derive ``authored``.
+    """
+    for i, atom in enumerate(atoms):
+        source_ids = list(atom.get("source_ids") or [])
+        if require_sources and not source_ids:
+            raise CurationError(f"edited-finding atom {i} carries no source_ids")
+        _check_evidence_sources(root, raw, source_ids, case_id)
+    curation = raw.setdefault("curation", {})
+    _reopen_for_mutation(curation)
+    for atom in atoms:
+        curation.setdefault("findings", []).append(
+            _build_replacement(root, raw, case_id, atom, authored=authored)
+        )
+    _derive_content(raw)
 
 
 def add_finding(
@@ -565,25 +642,13 @@ def add_finding(
     source_ids: list[str] | None = None,
 ) -> None:
     """Add an authored (new) finding. provenance is ``authored`` with empty sources."""
-    source_ids = source_ids or []
+    atom = {"title": title, "body": body, "severity": severity,
+            "location": location, "source_ids": source_ids or []}
 
     def mutate(raw: dict[str, Any]) -> None:
-        _check_candidate_sources(raw, source_ids, case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        finding = {
-            "title": title,
-            "body": body,
-            "severity": severity,
-            "location": location,
-            "provenance": {
-                "kind": _derive_provenance_kind(source_ids, authored=True),
-                "source_ids": source_ids,
-            },
-        }
-        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-        raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
-        _derive_content(raw)
+        _append_atoms_to_case(
+            root, raw, case_id, [atom], authored=True, require_sources=False
+        )
 
     _with_case_lock(root, case_id, "add", mutate)
 
@@ -594,49 +659,63 @@ def add_findings(
     """Atomically add a batch of authored findings in one transaction.
 
     Unlike a loop of :func:`add_finding` calls, a mid-batch invariant violation
-    stages **nothing** — the whole batch validates (candidate sources checked
+    stages **nothing** — the whole batch validates (evidence sources checked
     up front), derives, and stages together, so the TUI's multi-atom ``[n]``
     add stays all-or-nothing and never leaves earlier atoms persisted on a
     failure.
     """
 
     def mutate(raw: dict[str, Any]) -> None:
-        for fi in findings:
-            _check_candidate_sources(raw, list(fi.get("source_ids") or []), case_id)
-        curation = raw.setdefault("curation", {})
-        _reopen_for_mutation(curation)
-        for fi in findings:
-            source_ids = list(fi.get("source_ids") or [])
-            finding = {
-                "title": fi["title"],
-                "body": fi["body"],
-                "severity": fi.get("severity"),
-                "location": fi.get("location"),
-                "provenance": {
-                    "kind": _derive_provenance_kind(source_ids, authored=True),
-                    "source_ids": source_ids,
-                },
-            }
-            finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-            curation.setdefault("findings", []).append(finding)
-        _derive_content(raw)
+        _append_atoms_to_case(
+            root, raw, case_id, findings, authored=True, require_sources=False
+        )
 
     _with_case_lock(root, case_id, "add", mutate)
 
 
+def add_edited_findings(
+    root: Path, case_id: str, *, atoms: list[dict[str, Any]]
+) -> None:
+    """Atomically add re-written (edited) findings in one transaction.
+
+    The split/merge/author-from-evidence engine: N atoms sharing one source
+    split it into N findings, one atom carrying M sources merges them into
+    one finding. Every atom must carry a non-empty ``source_ids`` list whose
+    members are import evidence of the case — an empty list is rejected with a
+    :class:`CurationError` naming the atom index (it would otherwise silently
+    derive ``authored``) — so the resulting findings are always ``edited``,
+    never ``historical`` and never ``authored``. Finding IDs are derived, never
+    caller-supplied. Like :func:`add_findings`, the whole batch validates
+    (sources checked up front), derives, and stages together: a mid-batch
+    invariant violation stages nothing.
+    """
+
+    def mutate(raw: dict[str, Any]) -> None:
+        _append_atoms_to_case(
+            root, raw, case_id, atoms, authored=False, require_sources=True
+        )
+
+    _with_case_lock(root, case_id, "add-edited", mutate)
+
+
 def _build_replacement(
-    raw: dict[str, Any], case_id: str, replacement: dict[str, Any]
+    root: Path, raw: dict[str, Any], case_id: str, replacement: dict[str, Any],
+    *, authored: bool = False,
 ) -> dict[str, Any]:
-    """Build one edited finding from a replacement atom (owner supply the content)."""
+    """Build one finding from a replacement atom; provenance kind driven by *authored*.
+
+    The single finding builder shared by the atomic-adds (via
+    :func:`_append_atoms_to_case`) and replacement paths; callers validate
+    sources up front, so this is a pure dict construction.
+    """
     source_ids = list(replacement.get("source_ids") or [])
-    _check_candidate_sources(raw, source_ids, case_id)
     finding = {
         "title": replacement["title"],
         "body": replacement["body"],
         "severity": replacement.get("severity"),
         "location": replacement.get("location"),
         "provenance": {
-            "kind": _derive_provenance_kind(source_ids, authored=False),
+            "kind": _derive_provenance_kind(source_ids, authored=authored),
             "source_ids": source_ids,
         },
     }
@@ -664,7 +743,9 @@ def replace_findings(
         )
         if index is None:
             raise CurationError(f"no finding {finding_id}")
-        built = [_build_replacement(raw, case_id, r) for r in replacements]
+        for r in replacements:
+            _check_evidence_sources(root, raw, list(r.get("source_ids") or []), case_id)
+        built = [_build_replacement(root, raw, case_id, r) for r in replacements]
         new_findings = list(findings[:index]) + built + list(findings[index + 1:])
         curation["findings"] = new_findings
         _derive_content(raw)
@@ -727,11 +808,36 @@ def exclude_evidence(
 
     def mutate(raw: dict[str, Any]) -> None:
         _validate_evidence_exclusion_contract(reason, note)
-        _check_candidate_sources(raw, [source_id], case_id)
+        _check_evidence_sources(root, raw, [source_id], case_id)
 
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
         _append_evidence_exclusion(curation, source_id, reason, note)
+
+    _with_case_lock(root, case_id, "exclude-evidence", mutate)
+
+
+def exclude_evidence_batch(
+    root: Path, case_id: str, source_ids: list[str], *, reason: str, note: str | None = None
+) -> None:
+    """Exclude several evidence sources from gold in one atomic transaction.
+
+    The batch sibling of :func:`exclude_evidence`: validates the reason/note
+    contract and every source up front (all-or-nothing), then appends the whole
+    selection under one lock+transaction, so a mid-selection service failure
+    stages nothing and cannot leave earlier sources committed. Matches the
+    atomic ``add_findings``/``add_edited_findings`` mutation family the TUI
+    uses for its multi-method actions.
+    """
+
+    def mutate(raw: dict[str, Any]) -> None:
+        _validate_evidence_exclusion_contract(reason, note)
+        for source_id in source_ids:
+            _check_evidence_sources(root, raw, [source_id], case_id)
+        curation = raw.setdefault("curation", {})
+        _reopen_for_mutation(curation)
+        for source_id in source_ids:
+            _append_evidence_exclusion(curation, source_id, reason, note)
 
     _with_case_lock(root, case_id, "exclude-evidence", mutate)
 
@@ -937,9 +1043,7 @@ def reinclude_case(root: Path, case_id: str) -> None:
 
 
 def _fragment_provenance(
-    raw: dict[str, Any],
-    finding: dict[str, Any],
-    source_ids: list[str],
+    root: Path, raw: dict[str, Any], finding: dict[str, Any], source_ids: list[str],
     *,
     case_id: str,
 ) -> tuple[str, list[str]]:
@@ -949,7 +1053,7 @@ def _fragment_provenance(
     the finding; else ``edited`` (>=1 source) or ``authored`` (no source). The
     fragment's own kind is never trusted.
     """
-    _check_candidate_sources(raw, source_ids, case_id)
+    _check_evidence_sources(root, raw, source_ids, case_id)
     if len(source_ids) == 1:
         cand = next(
             (c for c in (raw.get("candidates") or []) if c.get("source_id") == source_ids[0]),
@@ -984,7 +1088,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
                 "location": frag.get("location"),
             }
             kind, source_ids = _fragment_provenance(
-                raw, finding, list(frag.get("source_ids") or []), case_id=case_id
+                root, raw, finding, list(frag.get("source_ids") or []), case_id=case_id
             )
             finding["provenance"] = {"kind": kind, "source_ids": source_ids}
             finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
@@ -996,7 +1100,7 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
             reason = exc["reason"]
             note = exc.get("note")
             _validate_evidence_exclusion_contract(reason, note)
-            _check_candidate_sources(raw, [src], case_id)
+            _check_evidence_sources(root, raw, [src], case_id)
             _append_evidence_exclusion(curation, src, reason, note)
         curation["exclusions"] = curation.get("exclusions") or []
 

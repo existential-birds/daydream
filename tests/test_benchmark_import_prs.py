@@ -963,9 +963,16 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path, fake_gh
                 old_evidence.append({**e,
                                      "source_id": f"github:inline_comment:{e['database_id']}",
                                      "kind": "inline_comment"})
-            old_evidence.append({**e,
-                                 "source_id": f"github:thread_comment:{e['database_id']}",
-                                 "kind": "thread_comment"})
+            # The thread feed never carried commit anchors, so the pre-canonical
+            # thread_comment copy has no commit_id/original_commit_id: the two
+            # copies of db 1 must project DIFFERENTLY.  Spreading e verbatim
+            # would make them hash identically and collapse onto one element,
+            # under-modeling the drift (and hiding the spurious stale it used to
+            # trigger on the first post-format refresh).
+            old_evidence.append({
+                **{k: v for k, v in e.items() if k not in ("commit_id", "original_commit_id")},
+                "source_id": f"github:thread_comment:{e['database_id']}",
+                "kind": "thread_comment"})
         else:
             old_evidence.append(e)
     assert len(old_evidence) == 3      # db 1 twice, db 2 once as thread_comment
@@ -1473,8 +1480,17 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path):
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
     raw = load_yaml_strict(ws / "benchmark.yaml")
-    prior_sig, prior_task_sig, curations, _ = gi._prior_import_state(ws, raw, 202)
+    (
+        prior_sig,
+        prior_task_sig,
+        curations,
+        _,
+        prior_pinned,
+        prior_policy,
+        prior_heads,
+    ) = gi._prior_import_state(ws, raw, 202)
     assert prior_sig is None and prior_task_sig is None and curations == {}
+    assert prior_pinned == {} and prior_policy == {} and prior_heads == []
 
 
 def test_refresh_stale_clears_task_spec_approval(tmp_path, fake_gh):
@@ -1496,3 +1512,376 @@ def test_refresh_stale_clears_task_spec_approval(tmp_path, fake_gh):
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "stale" and case["curation"]["snapshot_attested"] is False
     assert "task_spec_sha256" not in case["curation"] and "task_spec_approved_at" not in case["curation"]
+
+
+# ---------------------------------------------------------------------------
+# widened evidence signature (issue #813): projection-relevant provenance keyed
+# per physical database_id; kind/source_id/url/timestamps excluded
+# ---------------------------------------------------------------------------
+
+
+def _one_evidence() -> dict:
+    """One canonical inline-comment evidence record dict (projection fields)."""
+    return {"database_id": 1, "body_sha256": "a" * 64, "body": "please fix",
+            "path": "a.py", "line": 4, "commit_id": "a" * 40, "outdated": False,
+            "resolved": False, "dismissed": False, "state": "COMMENTED",
+            "subject_type": "line", "side": "RIGHT", "start_side": None,
+            "original_path": "a.py", "original_line": 4, "original_commit_id": "a" * 40,
+            "author": {"login": "alice", "type": "User"}}
+
+
+def _sig(ev: dict):
+    """Signature over one raw evidence record: ``{"evidence": [ev]}`` wrapper."""
+    from daydream.benchmark import github_import as gi
+
+    return gi._evidence_signature_from_raw({"evidence": [ev]})
+
+
+def test_signature_changes_on_anchor_move():
+    base = _one_evidence()
+    moved = {**base, "line": 7}                     # same body, moved anchor
+    assert _sig(base) != _sig(moved)
+
+
+def test_signature_changes_on_resolution_state():
+    base = _one_evidence()
+    assert _sig(base) != _sig({**base, "resolved": True})
+    assert _sig(base) != _sig({**base, "outdated": True})
+    assert _sig(base) != _sig({**base, "dismissed": True})
+    assert _sig(base) != _sig({**base, "commit_id": "b" * 40})
+    assert _sig(base) != _sig({**base, "author": {"login": "bob", "type": "User"}})
+
+
+def test_signature_ignores_metadata_only_change():
+    base = _one_evidence()
+    meta = {**base, "updated_at": "2026-01-02T00:00:00Z", "url": "https://e.example/2"}
+    assert _sig(base) == _sig(meta)
+
+
+def test_signature_ignores_format_drift_duplicate_and_kind():
+    from daydream.benchmark import github_import as gi
+
+    base = _one_evidence()
+    dup = [{**base, "kind": "inline_comment"},      # same database_id stored twice
+           {**base, "kind": "thread_comment"}]
+    canon = [base]
+    assert gi._evidence_signature_from_raw({"evidence": dup}) \
+        == gi._evidence_signature_from_raw({"evidence": canon})
+
+
+# ---------------------------------------------------------------------------
+# per-case staleness via reference intersection (issue #813): a case stales
+# only when its own referenced evidence changed (or the PR-wide task input)
+# ---------------------------------------------------------------------------
+
+
+def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict:
+    """One canonical REST inline-comment dict for the fake router."""
+    return {"id": db_id, "node_id": f"DIFF_{db_id}", "user": {"login": "bot[bot]", "type": "Bot"},
+            "body": body, "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+            "path": "a.py", "line": line, "subject_type": "line", "side": "RIGHT",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "html_url": f"https://github.com/o/r/pull/101#discussion_r{db_id}"}
+
+
+def test_refresh_unrelated_new_comment_does_not_stale(tmp_path, fake_gh):
+    # PR 101 imported with one referenced comment (db 1) and curated ready; a NEW
+    # unrelated comment (db 99) must not stale the referenced case on refresh.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101/comments",
+        [_seed_discussion(1), {**_seed_discussion(99), "path": "b.py", "body": "unrelated nit"}],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"       # NOT staled by an unrelated new comment
+    assert case["curation"]["findings"]
+
+
+def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path, fake_gh):
+    # Same body, moved anchor on the REFERENCED comment (db 1) -> the case stales
+    # while its curated findings stay preserved.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1, line=7)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"
+    assert case["curation"]["findings"]               # curated findings preserved
+    assert case["curation"]["snapshot_attested"] is False
+
+
+# ---------------------------------------------------------------------------
+# head-immutability (issue #813): an existing case resolves to its pinned head,
+# so a live head advance reproduces the same case_id with no orphan
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_after_head_advance_keeps_case_id(tmp_path, fake_gh):
+    # Import + curate PR 101 at head a*40, then change the live head to b*40
+    # (the branch advanced) and refresh: the SAME case_id is reproduced, no
+    # new case, no orphan, and the untouched pinned case stays ready.
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    hdr = dict(_PR_HEADER)
+    hdr["head"] = {"ref": "feature/cache", "sha": "b" * 40}   # live head now advanced (valid 40-hex)
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    ids = [c["case_id"] for c in raw["cases"]]
+    assert ids == ["pr-000101-aaaaaaaaaaaa"]          # pinned, not advanced to b*40
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"       # unchanged evidence -> stays ready
+
+
+# ---------------------------------------------------------------------------
+# non-destructive failed refresh (issue #813): a failed refresh on an already-
+# fetched PR preserves last-good linkage and records the attempt in latest_error
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path, fake_gh):
+    # Import + curate PR 101 successfully, then make the refresh fetch fail: the
+    # last-good import_file/import_sha256/case_ids are preserved and the attempt
+    # is recorded separately in latest_error (NOT reset to fetch_failed).
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    fake_gh.set_response(
+        "GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"}
+    )
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0
+    after = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
+    assert after["import_state"] == "fetched"            # NOT reset to fetch_failed
+    assert after["import_file"] == before["import_file"]  # last-good linkage preserved
+    assert after["import_sha256"] == before["import_sha256"]
+    assert after["case_ids"] == before["case_ids"]
+    assert after["latest_error"]["code"] == "rate_limit"  # attempt recorded separately
+    assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
+
+
+def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path, fake_gh):
+    """A refresh whose re-freeze of a curated pinned head goes unreplayable
+    (force-push/rebased branch made the head unreachable) must fail the refresh
+    (rc != 0) and keep the curated ready case + its bundle intact and indexed —
+    never write the unreplayable snapshot over the curated case (issue #813)."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+    from daydream.benchmark.workspace import init_workspace, validate_workspace
+
+    ws = tmp_path / "ws"
+    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
+    _seed_preflight(ws, fake_gh)
+    origin_url, _base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
+    case_id = f"pr-000101-{head_sha[:12]}"
+    _curate_case(ws, f"{case_id}.yaml")
+    case_path = ws / "cases" / f"{case_id}.yaml"
+    before = load_yaml_strict(case_path)
+    assert before["snapshot"]["status"] == "ready"
+    bundle_rel = before["snapshot"]["bundle_file"]
+
+    # force-push: repoint refs/pull/101/head to a commit that does NOT contain
+    # the pinned head (a rebased branch), so the pinned head is unreachable.
+    repo = tmp_path / "local_wt"
+    _seed_git(repo, "checkout", "main")
+    _seed_write(repo, "rebased.py", "REBASED = 1\n")
+    _seed_git(repo, "add", "rebased.py")
+    new_head = _seed_commit(repo, "force-pushed rebased head")
+    _seed_git(repo, "push", "-f", "origin", f"{new_head}:refs/pull/101/head", check=False)
+    hdr = dict(_PR_HEADER)
+    hdr["head"] = {"ref": "feature/cache", "sha": new_head}
+    _seed_preflight(ws, fake_gh, pull_header=hdr)
+
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=[], refresh=True, origin_url=origin_url)
+    assert rc != 0
+    after = load_yaml_strict(case_path)
+    assert after["snapshot"]["status"] == "ready"   # NOT replaced with unreplayable
+    assert after["curation"]["state"] == "ready"     # curated gold preserved
+    assert (ws / bundle_rel).exists()                  # bundle still on disk and referenced
+    raw = load_yaml_strict(ws / "benchmark.yaml")
+    pr = raw["pull_requests"][0]
+    assert pr["import_state"] == "fetched"            # last-good linkage preserved
+    assert pr["latest_error"] is not None              # attempt recorded, not silent
+    code, _label = validate_workspace(ws)
+    assert code == 0                                    # no orphan bundle corruption
+
+
+def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path, fake_gh):
+    """A hand-edited/externally-mutated curation whose referenced source_id is
+    non-canonical must fail the re-import (rc != 0) instead of being silently
+    dropped from the per-case stale gate — never fail open (issue #813)."""
+    import yaml
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    case_path = ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # hand-edit: a non-canonical referenced source_id (malformed reference).
+    raw = load_yaml_strict(case_path)
+    raw["curation"]["findings"][0]["provenance"]["source_ids"] = [
+        "https://github.com/o/r/pull/101#discussion_r1"
+    ]
+    case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
+    assert rc != 0                                      # fail closed, not silently skipped
+    after = load_yaml_strict(ws / "benchmark.yaml")
+    pr = after["pull_requests"][0]
+    assert pr["latest_error"] is not None
+    on_disk = load_yaml_strict(case_path)
+    assert on_disk["curation"]["findings"][0]["provenance"]["source_ids"] == [
+        "https://github.com/o/r/pull/101#discussion_r1"
+    ]   # curation was NOT rewritten by the failed refresh
+
+
+def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path, fake_gh):
+    """reply_to_id gates candidacy (replies are evidence, never candidates), so it
+    must sit in the projection hash: a comment gaining reply status shifts the
+    candidate set and must flip the signature, staling a referencing case."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # the same comment now carries a reply parent (gains reply status): its
+    # projection hash must flip even though body/anchor fields are unchanged.
+    reply = dict(_seed_discussion(1))
+    reply["in_reply_to_id"] = 10
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [reply])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"       # referenced id's projection changed
+    assert case["curation"]["findings"]               # curated gold preserved
+
+
+def test_reimport_changed_referenced_evidence_stales(tmp_path, fake_gh):
+    """A plain re-import (refresh=False) with changed referenced evidence must not
+    silently keep the curated case ready — it routes through the same per-case
+    stale decision as refresh (issue #813)."""
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    # Seed the referenced comment (db 1) at line 4 for the first import.
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    # Re-seed the REFERENCED comment (db 1) with a moved anchor, same body.
+    fake_gh.set_response(
+        "GET",
+        "repos/o/r/pulls/101/comments",
+        [
+            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
+             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
+             "path": "a.py", "line": 7, "subject_type": "line", "side": "RIGHT",
+             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+        ],
+    )
+    rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=False, origin_url=None)
+    assert rc == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "stale"        # cannot bypass refresh semantics
+    assert case["curation"]["findings"]                # curated findings preserved
+
+
+def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path, fake_gh):
+    """A legacy raw import file storing the same database_id twice - a REST
+    inline copy WITH ``commit_id`` and a GraphQL thread copy WITHOUT it (the
+    pre-canonicalization duplicate) - must yield ONE deterministic changed
+    verdict per id. The two copies' projection hashes differ (``commit_id`` is
+    projected), and the thread copy's missing commit anchors are a pure format
+    artifact: the fresh REST-derived canonical projection is still covered by a
+    prior projection, so the first post-format refresh must NOT stale the
+    curated case. The old ``dict(prior_sig)`` collapse left which tuple survives
+    to frozenset iteration order (nondeterministic across processes under hash
+    randomization), making the spurious stale a coin toss.
+    """
+    import json
+
+    from daydream.benchmark import github_import as gi
+    from daydream.benchmark.storage import load_json_strict, load_yaml_strict
+
+    ws = tmp_path / "ws"
+    _seed_preflight(ws, fake_gh)
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+
+    # Rewrite the prior import file to the REAL historical shape: the same
+    # database_id persisted twice — the REST inline copy (commit_id present) and
+    # a GraphQL thread copy (commit_id absent) — whose projection hashes differ.
+    import_path = ws / "imports/pr-000101.json"
+    prior = load_json_strict(import_path)
+    rest = next(e for e in prior["evidence"] if e["database_id"] == 1)
+    thread = {k: v for k, v in rest.items() if k not in ("commit_id", "original_commit_id")}
+    thread.update(kind="thread_comment", source_id="github:thread_comment:1")
+    prior["evidence"] = [thread, rest]
+    import_path.write_text(json.dumps(prior, indent=2))
+
+    # Premise check: the duplicate's two tuples are genuinely distinct (the
+    # thread copy lacks the projected commit_id), so a dict() collapse would
+    # hand the survivor to frozenset iteration order instead of comparing sets.
+    sig = gi._evidence_signature_from_raw(prior)
+    assert len(sig) == 2 and len({h for _, h in sig}) == 2
+
+    # Refresh against the canonical feed (one record per id, unchanged body):
+    # the fresh REST-derived projection matches a prior projection, so the
+    # per-id comparison (order-independent) leaves the curated case ready, and
+    # the refreshed file carries exactly one record per id.
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    assert gi.run_import_prs(
+        ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None
+    ) == 0
+    case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
+    assert case["curation"]["state"] == "ready"      # format drift must NOT stale gold
+    assert case["curation"]["findings"]              # curated findings preserved
+    refreshed = load_json_strict(import_path)
+    assert len([e for e in refreshed["evidence"] if e["database_id"] == 1]) == 1
