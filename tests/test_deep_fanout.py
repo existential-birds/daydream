@@ -156,7 +156,8 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
     assert structural_calls[0]["files"] == ["a.py"]
-    assert structural_calls[0]["skill_invocation"] == ""  # skill-free (M2)
+    assert "skill_invocation" not in structural_calls[0]  # skill-free (M2)
+    assert structural_calls[0]["strategy"]  # profile-owned structural strategy (M4)
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
 

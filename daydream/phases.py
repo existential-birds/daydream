@@ -3786,6 +3786,7 @@ async def phase_per_stack_reviews(
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
     write_coverage_receipts: bool = False,
+    strategies: dict[str, str] | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run one review agent per detected stack concurrently (D-17).
 
@@ -3811,6 +3812,11 @@ async def phase_per_stack_reviews(
             generic-fallback prompts include the ``AUTHORITATIVE_INTENT_RULE``
             precedence rule, because the intent phase was grounded by a fresh,
             head-matched PR description.
+        strategies: Optional mapping of profile strategy contents resolved from
+            the flow context: ``discovery.per_stack``, ``discovery.structural``,
+            and ``discovery.generic_fallback``. When omitted, the packaged
+            default profile strategy is used for each stage (compatibility with
+            non-profile callers / forks).
 
     Returns:
         Tuple of ``(successes, failures)``:
@@ -3829,6 +3835,18 @@ async def phase_per_stack_reviews(
 
     deep_dir_path = _deep_dir(work.repo)
     recorder = get_current_recorder()
+    if strategies is None:
+        strategies = {
+            "discovery.per_stack": _rp.build_default_profile().strategies[
+                "discovery.per_stack"
+            ].content,
+            "discovery.structural": _rp.build_default_profile().strategies[
+                "discovery.structural"
+            ].content,
+            "discovery.generic_fallback": _rp.build_default_profile().strategies[
+                "discovery.generic_fallback"
+            ].content,
+        }
     results: dict[str, Path] = {}
     failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(
@@ -3873,7 +3891,7 @@ async def phase_per_stack_reviews(
                 # the diff, so it keeps its diff_path pointer and repo-wide
                 # Read/Grep/Bash freedom. No skill invocation is emitted.
                 prompt = get_registry().prompt("structural")(
-                    skill_invocation="",
+                    strategy=strategies["discovery.structural"],
                     files=stack.files,
                     diff_path=diff_path,
                     intent_path=intent_path,
@@ -3898,7 +3916,7 @@ async def phase_per_stack_reviews(
 
                 if stack.stack_name == GENERIC_STACK:
                     prompt = get_registry().prompt("generic-fallback")(
-                        strategy=_rp.build_default_profile().strategies["discovery.generic_fallback"].content,
+                        strategy=strategies["discovery.generic_fallback"],
                         files=stack.files,
                         diff_path=diff_path,
                         intent_path=intent_path,
@@ -3914,16 +3932,11 @@ async def phase_per_stack_reviews(
                         frontier_files=stack.frontier_files,
                     )
                 else:
-                    # Per-stack reviewer for language + fork stacks. Built-in
-                    # stacks carry no skill (M2); fork-registered stacks route
-                    # their own StackRule.skill through the backend formatter.
-                    skill_invocation = (
-                        backend.format_skill_invocation(stack.skill_invocation)
-                        if stack.skill_invocation
-                        else ""
-                    )
+                    # Per-stack reviewer for language + fork stacks. The review
+                    # judgment policy is the profile-owned per-stack strategy;
+                    # built-in stacks carry no skill (M2).
                     prompt = get_registry().prompt("per-stack")(
-                        skill_invocation=skill_invocation,
+                        strategy=strategies["discovery.per_stack"],
                         stack_name=stack.stack_name,
                         files=stack.files,
                         diff_path=diff_path,

@@ -58,7 +58,7 @@ def test_per_stack_prompt_has_intent_pointer(tmp_path: Path) -> None:
     """D-19: prompt references the intent path."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -70,7 +70,7 @@ def test_per_stack_prompt_has_alternatives_pointer(tmp_path: Path) -> None:
     """D-19: prompt references the alternatives path."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -78,23 +78,24 @@ def test_per_stack_prompt_has_alternatives_pointer(tmp_path: Path) -> None:
     assert str(p["alternatives_path"]) in out
 
 
-def test_per_stack_prompt_includes_skill_invocation(tmp_path: Path) -> None:
-    """D-19: prompt includes the Beagle skill invocation."""
+def test_per_stack_prompt_includes_no_skill_invocation(tmp_path: Path) -> None:
+    """D-19: the per-stack prompt carries the profile strategy, no skill token."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
     )
-    assert "/beagle-python:review-python" in out
+    assert _default_strategy("discovery.per_stack") in out
+    assert "/beagle-" not in out and "$review-" not in out
 
 
 def test_per_stack_prompt_scope_lists_only_stack_files(tmp_path: Path) -> None:
     """D-10: stack scope instruction lists only this stack's files."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py", "lib/util.py"],
         **p,
@@ -106,14 +107,21 @@ def test_per_stack_prompt_scope_lists_only_stack_files(tmp_path: Path) -> None:
 def test_generic_fallback_prompt_has_no_skill(tmp_path: Path) -> None:
     """Generic fallback omits any /beagle-* invocation."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     assert "/beagle-" not in out
 
 
 def test_generic_fallback_docs_notice(tmp_path: Path) -> None:
     """D-20: is_docs_only=True prepends the doc-review notice."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["README.md"], is_docs_only=True, **p)
+    out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["README.md"],
+        is_docs_only=True,
+        **p)
     assert DOC_REVIEW_NOTICE in out
     # Notice must appear before other content
     assert out.index(DOC_REVIEW_NOTICE) < out.index("Review these files")
@@ -122,7 +130,10 @@ def test_generic_fallback_docs_notice(tmp_path: Path) -> None:
 def test_generic_fallback_no_docs_notice_by_default(tmp_path: Path) -> None:
     """Docs notice suppressed when is_docs_only=False."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     assert DOC_REVIEW_NOTICE not in out
 
 
@@ -138,7 +149,7 @@ def test_prompts_embed_no_full_file_contents(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -164,7 +175,7 @@ def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
     p = _paths(tmp_path)
     # Default (inline_diff=None) → pointer present (fallback contract).
     out_fallback = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -172,7 +183,7 @@ def test_per_stack_prompt_points_at_diff_path(tmp_path: Path) -> None:
     assert str(p["diff_path"]) in out_fallback
     # inline_diff supplied → pointer absent (hunks inlined instead).
     out_inline = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         inline_diff="diff --git a/api.py b/api.py\n+++ b/api.py\n@@ -1 +1 @@\n-x\n+y\n",
@@ -191,7 +202,7 @@ def test_per_stack_prompt_omits_bare_git_diff_command(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -209,7 +220,10 @@ def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> 
     """
     p = _paths(tmp_path)
     # Default (inline_diff=None) → pointer present (fallback contract).
-    out_fallback = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    out_fallback = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     assert "git diff --no-color -- config.yaml" not in out_fallback
     assert "git diff -- config.yaml" not in out_fallback
     assert str(p["diff_path"]) in out_fallback
@@ -241,7 +255,7 @@ def test_per_stack_prompt_includes_prior_commits(tmp_path: Path) -> None:
     p = _paths(tmp_path)
     commits = "abc1234 fix: handle edge case\ndef5678 feat: add retry logic"
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         prior_commits=commits,
@@ -256,7 +270,7 @@ def test_per_stack_prompt_omits_prior_commits_when_none(tmp_path: Path) -> None:
     """prior_commits block absent when prior_commits is None."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         prior_commits=None,
@@ -269,7 +283,7 @@ def test_per_stack_prompt_omits_prior_commits_when_empty(tmp_path: Path) -> None
     """prior_commits block absent when prior_commits is empty string."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         prior_commits="",
@@ -340,7 +354,7 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     from daydream.deep.prompts import build_structural_prompt
 
     prompt = build_structural_prompt(
-        skill_invocation="",
+        strategy=_default_strategy("discovery.structural"),
         files=["api/main.py", "ui/App.tsx"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -361,7 +375,7 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
 
     exploration_dir = tmp_path / "exploration"
     prompt = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["main.py"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -373,7 +387,7 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
     assert str(exploration_dir / "affected_files.md") in prompt
 
     prompt_none = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["main.py"],
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -626,11 +640,11 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
 
     p = _paths(tmp_path)
     out = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
-    assert "read any file in the codebase" in out
+    assert _default_strategy("discovery.structural") in out
     assert str(p["diff_path"]) in out  # keeps its pointer
     assert "Read it directly" in out   # structural prompt unchanged
 
@@ -645,7 +659,7 @@ def test_per_stack_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -660,7 +674,7 @@ def test_structural_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     out = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
@@ -686,7 +700,10 @@ def test_generic_fallback_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
 
 
@@ -708,7 +725,7 @@ def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) 
 
     p = _paths(tmp_path)
     prompt = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
@@ -719,7 +736,10 @@ def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) 
 
 def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: Path) -> None:
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     assert "review-verification-protocol" in out
     assert "anchor" in out
     assert "evidence" in out
@@ -755,11 +775,14 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
     p = _paths(tmp_path)
     prompts = [
         build_structural_prompt(
-            skill_invocation="/beagle-core:review-structure",
+            strategy=_default_strategy("discovery.structural"),
             files=["api.py"],
             **p,
         ),
-        build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p),
+        build_generic_fallback_prompt(
+            strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+            **p),
     ]
 
     for backend_name in ("claude", "codex", "pi"):
@@ -791,7 +814,7 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
     p = _paths(tmp_path)
     if name == "per-stack":
         return build_per_stack_prompt(
-            skill_invocation="/beagle-python:review-python",
+            strategy=_default_strategy("discovery.per_stack"),
             stack_name="python",
             files=["api.py"],
             intent_authoritative=intent_authoritative,
@@ -799,7 +822,7 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
         )
     if name == "structural":
         return build_structural_prompt(
-            skill_invocation="/beagle-core:review-structure",
+            strategy=_default_strategy("discovery.structural"),
             files=["api.py"],
             intent_authoritative=intent_authoritative,
             **p,
@@ -925,18 +948,18 @@ def test_per_stack_prompt_can_omit_alternatives(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     with_alts = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p, include_alternatives=True,
     )
     without = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p, include_alternatives=False,
     )
     assert "alternatives.json" in with_alts
     assert "alternatives.json" not in without
     assert "intent.md" in without  # ONLY the alternatives paragraph is dropped
     assert build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p,
     ) == with_alts  # default is True
 
@@ -946,18 +969,18 @@ def test_structural_prompt_can_omit_alternatives(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     with_alts = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
         include_alternatives=True,
     )
     without = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
         include_alternatives=False,
     )
     assert "alternatives.json" in with_alts
     assert "alternatives.json" not in without
     assert "intent.md" in without
     assert build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure", files=["api.py"], **p,
+        strategy=_default_strategy("discovery.structural"), files=["api.py"], **p,
     ) == with_alts
 
 
@@ -976,7 +999,10 @@ def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
     assert "alternatives.json" in with_alts
     assert "alternatives.json" not in without
     assert "intent.md" in without
-    assert build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p) == with_alts
+    assert build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p) == with_alts
 
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
@@ -986,7 +1012,7 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
 
     p = _paths(tmp_path)
     without = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p, intent_authoritative=True, include_alternatives=False,
     )
     assert "alternatives.json" not in without
@@ -1020,7 +1046,7 @@ def test_per_stack_prompt_includes_test_quality_rubric(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1042,7 +1068,7 @@ def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path)
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1058,12 +1084,12 @@ def test_per_stack_prompt_test_quality_rubric_sits_after_skill_invocation(tmp_pa
     it to each test hunk, not ahead of the per-stack review instructions."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
     )
-    assert out.index("test-quality rubric") > out.index("/beagle-python:review-python")
+    assert out.index("test-quality rubric") > out.index(_default_strategy("discovery.per_stack"))
 
 
 # =============================================================================
@@ -1101,7 +1127,7 @@ def test_per_stack_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1119,7 +1145,7 @@ def test_structural_prompt_includes_anti_slop_rubric(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
@@ -1132,12 +1158,12 @@ def test_per_stack_prompt_anti_slop_rubric_sits_after_skill_invocation(tmp_path:
     it to the diff hunks it reviews, not ahead of the per-stack instructions."""
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
     )
-    assert out.index("anti-slop rubric") > out.index("/beagle-python:review-python")
+    assert out.index("anti-slop rubric") > out.index(_default_strategy("discovery.per_stack"))
 
 
 def test_structural_prompt_anti_slop_rubric_sits_after_verification_protocol(tmp_path: Path) -> None:
@@ -1146,7 +1172,7 @@ def test_structural_prompt_anti_slop_rubric_sits_after_verification_protocol(tmp
     anti-slop rubric to the hunks."""
     p = _paths(tmp_path)
     out = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
@@ -1162,7 +1188,7 @@ def test_anti_slop_rubric_severity_layering(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1182,7 +1208,7 @@ def test_anti_slop_rubric_never_high_prohibition(tmp_path: Path) -> None:
     """
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1237,7 +1263,7 @@ def _assert_anchors(out: str, anchors: tuple[str, ...]) -> None:
 def _build_structural_for_310(tmp_path: Path) -> str:
     p = _paths(tmp_path)
     return build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )
@@ -1246,7 +1272,7 @@ def _build_structural_for_310(tmp_path: Path) -> str:
 def _build_per_stack_for_310(tmp_path: Path) -> str:
     p = _paths(tmp_path)
     return build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
@@ -1301,7 +1327,10 @@ def test_config_trace_instruction_stays_out_of_structural_prompt(tmp_path: Path)
 
 def _build_generic_fallback_for_310(tmp_path: Path) -> str:
     p = _paths(tmp_path)
-    return build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    return build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
 
 
 def test_generic_fallback_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
@@ -1380,7 +1409,7 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     prompt = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python#0",
         files=["a.py"],
         frontier_files=["shared/iface.py"],
@@ -1395,7 +1424,7 @@ def test_per_stack_prompt_includes_verification_gate(tmp_path: Path) -> None:
     from daydream.deep.prompts import VERIFICATION_PROTOCOL_INSTRUCTION, build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p,
     )
     assert VERIFICATION_PROTOCOL_INSTRUCTION in out
@@ -1411,11 +1440,14 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
     )
     p = _paths(tmp_path)
     prompts = [
-        build_per_stack_prompt(skill_invocation="/beagle-python:review-python",
+        build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"),
                                stack_name="python", files=["api.py"], **p),
-        build_structural_prompt(skill_invocation="/beagle-core:review-structure",
+        build_structural_prompt(strategy=_default_strategy("discovery.structural"),
                                 files=["api.py"], **p),
-        build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p),
+        build_generic_fallback_prompt(
+            strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+            **p),
         build_uncovered_sweep_prompt(
             file="api.py", hunks="", intent_path=p["intent_path"],
             cwd=p["cwd"], output_path=p["output_path"],
@@ -1430,7 +1462,7 @@ def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
     from daydream.deep.prompts import build_generic_fallback_prompt, build_per_stack_prompt
     p = _paths(tmp_path)
     per_stack = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
     )
     fallback = build_generic_fallback_prompt(
@@ -1447,7 +1479,7 @@ def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> N
     from daydream.deep.prompts import build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py", "lib/util.py"], **p,
     )
     assert "Focus ONLY on these files" not in out
@@ -1463,7 +1495,7 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
     from daydream.deep.prompts import build_per_stack_prompt
     p = _paths(tmp_path)
     out = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python", stack_name="python",
+        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], exploration_dir=tmp_path / ".daydream" / "exploration", **p,
     )
     assert "do NOT read them all up front" in out
@@ -1475,3 +1507,32 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
     sentence = out[out.index(upfront):]
     sentence = sentence[: sentence.index("\n")]
     assert "assigned source files" not in sentence
+
+
+def test_per_stack_prompt_uses_profile_strategy_and_no_skill():
+    from daydream import review_profile as rp
+    from daydream.deep.prompts import build_per_stack_prompt
+    strategy = rp.build_default_profile().strategies["discovery.per_stack"].content
+    p = build_per_stack_prompt(
+        strategy=strategy, stack_name="python", files=["a.py"],
+        diff_path=Path("/d"), intent_path=Path("/i"), alternatives_path=Path("/a"),
+        output_path=Path("/o"), cwd=Path("/c"),
+    )
+    assert "Review the changed behavior assigned to this stack" in p
+    assert "python" in p and "a.py" in p and "/d" in p and "/c" in p
+    assert "/beagle-" not in p and "$review-" not in p and "/skill:" not in p
+    assert "Apply this specialist skill" not in p
+
+
+def test_structural_prompt_uses_profile_strategy_and_no_skill():
+    from daydream import review_profile as rp
+    from daydream.deep.prompts import build_structural_prompt
+    strategy = rp.build_default_profile().strategies["discovery.structural"].content
+    p = build_structural_prompt(
+        strategy=strategy, files=["a.py", "b.ts"], diff_path=Path("/d"),
+        intent_path=Path("/i"), alternatives_path=Path("/a"),
+        output_path=Path("/o"), cwd=Path("/c"),
+    )
+    assert "Review the repository-wide interactions" in p
+    assert "a.py, b.ts" in p and "/d" in p and "/c" in p
+    assert "/beagle-" not in p and "Apply this specialist skill" not in p

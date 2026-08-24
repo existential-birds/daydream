@@ -36,13 +36,13 @@ async def test_fork_prompt_override_reaches_backend(
 
     The ``review`` prompt slot was deleted with the shallow flow (#330): shallow
     mode now runs the deep flow, whose per-stack reviewer resolves the
-    ``per-stack`` slot. The kwarg assertion (``kw['skill_invocation']`` echoed
+    ``per-stack`` slot. The kwarg assertion (``kw['strategy']`` echoed
     back — the real parameter name per ``build_per_stack_prompt``) pins that
     overrides receive the exact built-in kwargs — the wholesale-override contract.
     """
     ext_dir.write_module(
         "def register(r):\n"
-        "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['skill_invocation']}\")\n"
+        "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['strategy']}\")\n"
     )
     backend = ScriptedBackend(
         events=(
@@ -58,8 +58,9 @@ async def test_fork_prompt_override_reaches_backend(
     assert rc == 0
     review_prompts = [p for p in backend.prompts if p.startswith("RO-STACK")]
     assert review_prompts  # the wholesale override replaced the per-stack builder
-    # The override received the built-in skill_invocation kwarg (empty now that
-    # built-in stacks are skill-free, M2) -- the wholesale-override contract.
+    # The override received the built-in strategy kwarg (the profile-owned
+    # per-stack strategy, now that built-in stacks are skill-free, M2) -- the
+    # wholesale-override contract.
     assert "RO-STACK " in review_prompts[0]
 
 

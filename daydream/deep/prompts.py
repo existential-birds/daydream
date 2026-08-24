@@ -232,12 +232,16 @@ def _context_pointers(
 
 
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
+    """Host-owned scope/verdict envelope for a reviewed stack scope.
+
+    Carries only runtime scope metadata (stack name, assigned files, the
+    parallel-review boundary, and the per-file verdict contract). The judgment
+    policy is the profile-owned ``discovery.per_stack`` strategy, rendered by
+    the caller.
+    """
     joined = ", ".join(files)
     return (
-        f"You are reviewing the {stack_name} stack. Your assigned files are an "
-        f"inclusion obligation: read and review EACH one in full -- a file you "
-        f"did not read is not covered by this review.\n"
-        f"  Assigned files: {joined}\n"
+        f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
         f"Do NOT review files from other stacks -- their reviews are running in "
         f"parallel and will be merged afterwards.\n"
         f"After the review, output ONE verdict line per assigned file, as: "
@@ -563,7 +567,7 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
 
 def build_per_stack_prompt(
     *,
-    skill_invocation: str,
+    strategy: str,
     stack_name: str,
     files: list[str],
     diff_path: Path,
@@ -581,7 +585,7 @@ def build_per_stack_prompt(
     """Assemble the per-stack review prompt.
 
     Args:
-        skill_invocation: Beagle skill invocation, e.g. "/beagle-python:review-python".
+        strategy: The profile-owned ``discovery.per_stack`` strategy content.
         stack_name: Lower-case stack key for scope messaging.
         files: Files this stack owns.
         diff_path: Path to the full diff on disk.
@@ -620,8 +624,7 @@ def build_per_stack_prompt(
     if frontier_files:
         parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
-    if skill_invocation:
-        parts.append(skill_invocation)
+    parts.append(strategy)
     parts.append(TEST_QUALITY_RUBRIC_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
@@ -635,7 +638,7 @@ def build_per_stack_prompt(
 
 def build_structural_prompt(
     *,
-    skill_invocation: str,
+    strategy: str,
     files: list[str],
     diff_path: Path,
     intent_path: Path,
@@ -656,7 +659,7 @@ def build_structural_prompt(
     instead of being scoped to a stack subset.
 
     Args:
-        skill_invocation: Backend-formatted invocation for the structural skill.
+        strategy: The profile-owned ``discovery.structural`` strategy content.
         files: Full union of changed files across every stack. Used to anchor
             the scope statement; the reviewer is still free to read beyond.
         diff_path: Path to the full diff on disk.
@@ -688,15 +691,10 @@ def build_structural_prompt(
         )
     )
     parts.append(
-        f"You are the structural reviewer. The full change spans: {joined}. "
-        f"The structural rubric applies repo-wide -- read any file in the "
-        f"codebase as needed (Read/Grep/Bash) to judge whether canonical "
-        f"helpers exist, file-size budgets are honored, and the change makes "
-        f"the codebase easier or harder to live with."
+        f"You are the structural reviewer. The full change spans: {joined}."
     )
     parts.append(_full_diff_pointer(diff_path))
-    if skill_invocation:
-        parts.append(skill_invocation)
+    parts.append(strategy)
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(ANTI_SLOP_RUBRIC_INSTRUCTION)
     parts.append(CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION)

@@ -58,20 +58,23 @@ def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(
 ) -> None:
     p = _paths(tmp_path)
     rust = build_per_stack_prompt(
-        skill_invocation="/beagle-rust:review-rust",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="rust",
         files=["src/main.rs"],
         **p,
     )
     python = build_per_stack_prompt(
-        skill_invocation="/beagle-python:review-python",
+        strategy=_default_strategy("discovery.per_stack"),
         stack_name="python",
         files=["api.py"],
         **p,
     )
-    generic = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
+    generic = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
+        files=["config.yaml"],
+        **p)
     structural = build_structural_prompt(
-        skill_invocation="/beagle-core:review-structure",
+        strategy=_default_strategy("discovery.structural"),
         files=["api.py"],
         **p,
     )

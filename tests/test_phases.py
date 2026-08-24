@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from daydream import review_profile as _rp
 from daydream.backends import (
     AgentEvent,
     ContinuationToken,
@@ -2365,7 +2366,7 @@ def _per_stack_prompt(**overrides: Any) -> str:
     from daydream.deep.prompts import build_per_stack_prompt
 
     args: dict[str, Any] = {
-        "skill_invocation": "/beagle-python:review-python",
+        "strategy": _rp.build_default_profile().strategies["discovery.per_stack"].content,
         "stack_name": "python",
         "files": ["a.py"],
         "diff_path": Path("/tmp/diff.patch"),

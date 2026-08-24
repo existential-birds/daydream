@@ -1308,6 +1308,11 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 diff_text=ctx.data["diff"],
                 intent_authoritative=ctx.data.get("intent_authoritative", False),
                 include_alternatives=include_alternatives,
+                strategies={
+                    "discovery.per_stack": ctx.strategy("discovery.per_stack"),
+                    "discovery.structural": ctx.strategy("discovery.structural"),
+                    "discovery.generic_fallback": ctx.strategy("discovery.generic_fallback"),
+                },
                 # Issue #731: always write deterministic coverage receipts so
                 # the sweep credits reviewed files on every run (decoupled from
                 # sharding; #740 updates the evidence gate and bounds).
