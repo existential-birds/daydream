@@ -37,7 +37,6 @@ from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_BASE_DELAY,
     _PI_DEFAULT_RETRY_MAX_DELAY,
     _PI_STDOUT_LIMIT_BYTES,
-    _SKILL_TOKEN_RE,
     PiBackend,
     PiError,
     _is_retryable_error_message,
@@ -48,7 +47,6 @@ from daydream.backends.pi import (
     _pi_retry_base_delay,
     _pi_retry_max_delay,
     _render_tool_result,
-    _resolve_skill_dir,
     _schema_instruction,
 )
 from tests.harness.pi_replay import make_mock_process, make_mock_process_from_fixture
@@ -685,144 +683,27 @@ def test_schema_instruction_contains_schema_json():
     assert json.dumps(schema) in instruction
 
 
-def test_resolve_skill_dir_returns_none_when_absent(tmp_path, monkeypatch):
-    # Isolate from the real ~/.claude and ~/.agents by repointing home and cwd
-    # into an empty tmp_path.
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "nope"))
-    assert _resolve_skill_dir("beagle-python:review-python") is None
-
-
-def test_resolve_skill_dir_finds_slug(tmp_path, monkeypatch):
-    skills_root = tmp_path / "skills"
-    skill_dir = skills_root / "review-python"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text("# review-python\n")
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(skills_root))
-    monkeypatch.chdir(tmp_path)
-    resolved = _resolve_skill_dir("beagle-python:review-python")
-    assert resolved == skill_dir
-
-
-def _install_skill(root: Path, slug: str) -> Path:
-    skill_dir = root / slug
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(f"# {slug}\n")
-    return skill_dir
-
-
-def test_resolve_skill_dir_prefers_agents_over_claude(tmp_path, monkeypatch):
-    # When the same slug exists in both ~/.agents/skills and ~/.claude/skills,
-    # the ~/.agents copy wins -- it is the primary default location.
-    agents_dir = _install_skill(tmp_path / ".agents" / "skills", "review-python")
-    _install_skill(tmp_path / ".claude" / "skills", "review-python")
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.delenv("DAYDREAM_SKILLS_DIR", raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert _resolve_skill_dir("beagle-python:review-python") == agents_dir
-
-
-def test_resolve_skill_dir_env_override_wins(tmp_path, monkeypatch):
-    # DAYDREAM_SKILLS_DIR is searched first: the override outranks the same
-    # slug installed in a standard location.
-    _install_skill(tmp_path / ".agents" / "skills", "review-python")
-    override_root = tmp_path / "custom"
-    override_dir = _install_skill(override_root, "review-python")
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(override_root))
-    monkeypatch.chdir(tmp_path)
-    assert _resolve_skill_dir("beagle-python:review-python") == override_dir
-
-
-def test_skill_token_re_grammar_matches_pi_name_rules():
-    # Pi skill names are lowercase letters, digits, and hyphens.
-    admitted = ["review-python", "review-frontend", "review-go", "2-thing", "a"]
-    rejected = ["Review_Python", "PDF-Processing", "foo_bar", "CamelCase"]
-    for slug in admitted:
-        assert _SKILL_TOKEN_RE.findall(f"/skill:{slug}") == [slug], slug
-    for slug in rejected:
-        # No token (or a truncated one ending before the disallowed char) is
-        # captured as a *complete* match of the invalid slug.
-        assert slug not in _SKILL_TOKEN_RE.findall(f"/skill:{slug}"), slug
-
-
 @pytest.mark.asyncio
-async def test_skill_token_is_consumed_by_execute(tmp_path, monkeypatch):
-    # A native token is recognized by execute's scanner and registered.
-    skills_root = tmp_path / "skills"
-    py_dir = skills_root / "review-python"
-    py_dir.mkdir(parents=True)
-    (py_dir / "SKILL.md").write_text("# review-python\n")
+async def test_execute_always_passes_no_skills_never_skill(tmp_path, monkeypatch):
+    """M15/M16: Pi disables skills even when ambient skill mirrors exist (#727)."""
     monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(skills_root))
-    monkeypatch.chdir(tmp_path)
-
-    backend = PiBackend(model="glm-5.2")
-    prompt = "Review this.\n\n/skill:review-python"
-
-    mock_proc = make_mock_process(['{"id": "s1"}'])
-    with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
-    ) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), prompt):
-            pass
-
-    flat_args = list(mock_exec.call_args.args)
-    skill_indices = [i for i, a in enumerate(flat_args) if a == "--skill"]
-    assert len(skill_indices) == 1, (
-        f"prompt token was not scanned by execute; args: {flat_args}"
-    )
-    assert flat_args[skill_indices[0] + 1] == str(py_dir)
-
-
-@pytest.mark.asyncio
-async def test_execute_registers_resolved_skills_with_skill_flag(tmp_path, monkeypatch):
-    skills_root = tmp_path / "skills"
-    py_dir = skills_root / "review-python"
-    py_dir.mkdir(parents=True)
-    (py_dir / "SKILL.md").write_text("# review-python\n")
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(skills_root))
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "env-skills"))
+    (tmp_path / ".agents" / "skills" / "x" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".agents" / "skills" / "x" / "SKILL.md").write_text("# x\n")
+    (tmp_path / ".claude" / "skills" / "y" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".claude" / "skills" / "y" / "SKILL.md").write_text("# y\n")
+    (tmp_path / "env-skills" / "z" / "SKILL.md").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "env-skills" / "z" / "SKILL.md").write_text("# z\n")
 
     backend = PiBackend(model="glm-5.2")
     mock_proc = make_mock_process(['{"id": "s1"}'])
-    # Duplicate references are de-duplicated; unresolved skills are skipped.
-    prompt = "Review this.\n\n/skill:review-python\n/skill:review-python\n/skill:review-go"
-
-    with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
-    ) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), prompt):
+    with patch("daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        async for _ in backend.execute(tmp_path, "Review the change."):
             pass
 
-    flat_args = list(mock_exec.call_args.args)
-    skill_indices = [i for i, a in enumerate(flat_args) if a == "--skill"]
-    assert len(skill_indices) == 1, f"expected one --skill flag, got args: {flat_args}"
-    assert flat_args[skill_indices[0] + 1] == str(py_dir)
-    # The --skill flag precedes the positional prompt (last arg).
-    assert skill_indices[0] < len(flat_args) - 1
-
-
-@pytest.mark.asyncio
-async def test_execute_no_skill_flag_when_unresolvable(tmp_path, monkeypatch):
-    # Unresolvable skills do not add flags or fail the run.
-    monkeypatch.setattr("daydream.backends.pi.Path.home", lambda: tmp_path)
-    monkeypatch.setenv("DAYDREAM_SKILLS_DIR", str(tmp_path / "nope"))
-    monkeypatch.chdir(tmp_path)
-
-    backend = PiBackend(model="glm-5.2")
-    mock_proc = make_mock_process(['{"id": "s1"}'])
-
-    with patch(
-        "daydream.backends.pi.asyncio.create_subprocess_exec", return_value=mock_proc
-    ) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), "Review.\n\n/skill:review-rust"):
-            pass
-
-    assert "--skill" not in list(mock_exec.call_args.args)
+    args = list(mock_exec.call_args.args)
+    assert args.count("--no-skills") == 1
+    assert "--skill" not in args
 
 
 def test_create_backend_pi_returns_pi_backend_with_default_model():
