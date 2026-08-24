@@ -269,6 +269,15 @@ class Manifest:
     # target-repo ``git.*`` / ``code_context.*`` blocks.
     daydream: Any | None = None
 
+    # Review-profile provenance (issue #885, R12): the resolved profile this
+    # run executed under (schema version, name, source kind, canonical digest).
+    # ``None`` on legacy manifests (which predate the fields) and omitted
+    # entirely from ``to_dict()``; required on new runs.
+    profile_schema_version: int | None = None
+    profile_name: str | None = None
+    profile_source_kind: str | None = None
+    profile_digest: str | None = None
+
     # Run config
     run_flow: str = ""
     skill: str | None = None
@@ -336,6 +345,12 @@ class Manifest:
             "status": self.status,
             "archive_status": self.archive_status,
             "pipeline_status": self.pipeline_status,
+            **_omit_falsy(
+                profile_schema_version=self.profile_schema_version,
+                profile_name=self.profile_name,
+                profile_source_kind=self.profile_source_kind,
+                profile_digest=self.profile_digest,
+            ),
             **_omit_falsy(
                 daydream=self.daydream.to_dict() if self.daydream is not None else None,
                 phase_states=self.phase_states,
@@ -569,6 +584,17 @@ def build_manifest(
         total_cached_tokens=totals["cached"] or None,
         archive_path=str(archive_path),
     )
+
+    # Review-profile provenance (issue #885, R12): the resolved profile lives
+    # on ``config.review_profile`` (set once by the runner composition root);
+    # archive it so results attribute to the exact policy tested. A direct
+    # caller that skipped resolution leaves the fields None (omitted).
+    resolved_profile = getattr(config, "review_profile", None)
+    if resolved_profile is not None:
+        m.profile_schema_version = resolved_profile.profile.schema_version
+        m.profile_name = resolved_profile.profile.name
+        m.profile_source_kind = resolved_profile.source_kind
+        m.profile_digest = resolved_profile.digest
 
     # Derivable from step timestamps, so populated for every run; the eval pass's
     # fork-inclusive value (eval.analyzer.analyze_timing) takes precedence below.

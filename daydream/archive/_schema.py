@@ -83,7 +83,11 @@ CREATE TABLE IF NOT EXISTS runs (
     composite_reward REAL,
     has_posterior INTEGER NOT NULL DEFAULT 0,
     archive_path TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    profile_schema_version INTEGER,
+    profile_name TEXT,
+    profile_source_kind TEXT,
+    profile_digest TEXT
 )
 """
 
@@ -143,7 +147,8 @@ INSERT OR REPLACE INTO runs (
     grounding_rate, coverage_ratio, cost_per_finding_usd, wall_clock_seconds,
     erosion, verbosity, fix_quality_gate, recommended_patch_capture,
     total_prompt_tokens, total_completion_tokens, total_cached_tokens,
-    outcome_labels, labeled_at, composite_reward, archive_path, schema_version
+    outcome_labels, labeled_at, composite_reward, archive_path, schema_version,
+    profile_schema_version, profile_name, profile_source_kind, profile_digest
 ) VALUES (
     :session_id, :archived_at, :status, :archive_status, :pipeline_status, :phase_states,
     :daydream_version, :daydream_install_source, :daydream_commit, :daydream_dirty,
@@ -154,7 +159,8 @@ INSERT OR REPLACE INTO runs (
     :grounding_rate, :coverage_ratio, :cost_per_finding_usd, :wall_clock_seconds,
     :erosion, :verbosity, :fix_quality_gate, :recommended_patch_capture,
     :total_prompt_tokens, :total_completion_tokens, :total_cached_tokens,
-    :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version
+    :outcome_labels, :labeled_at, :composite_reward, :archive_path, :schema_version,
+    :profile_schema_version, :profile_name, :profile_source_kind, :profile_digest
 )
 """
 
@@ -210,6 +216,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             ("daydream_commit", "TEXT"),
             ("daydream_dirty", "INTEGER"),
             ("daydream_container_digest", "TEXT"),
+            ("profile_schema_version", "INTEGER"),
+            ("profile_name", "TEXT"),
+            ("profile_source_kind", "TEXT"),
+            ("profile_digest", "TEXT"),
         ],
     )
 
