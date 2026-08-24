@@ -326,6 +326,12 @@ class ClaudeBackend:
         # bypassPermissions leaves the tool list unrestricted. The dangerous-command
         # guard is always-on (all phases); the read-only guard composes on top when
         # read_only=True.
+        #
+        # NOTE (#887): the skill tool is intentionally left unguarded. daydream no
+        # longer invokes any skill (the skill-resolution seam and skill guard were
+        # deliberately removed), so we consciously accept that a model could call an
+        # operator-installed Claude Code skill. Documented rather than re-adding the
+        # skill-guard machinery.
         pre_tool_use_hooks: list[HookCallback] = [_dangerous_command_guard]
         if read_only:
             pre_tool_use_hooks.append(_read_only_guard)

@@ -4,8 +4,7 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project overview
 
-Automated code review and fix loop: reviews diffs with stack-specific
-[Beagle](https://github.com/existential-birds/beagle) skills, applies fixes, validates via test suite, and
+Automated code review and fix loop: reviews diffs, applies fixes, validates via test suite, and
 records every agent interaction as an
 [ATIF v1.7](https://www.harborframework.com/docs/agents/trajectory-format) trajectory. A bitemporal corpus
 pipeline scores, labels, and projects those trajectories into JSONL datasets for SFT/RL fine-tuning.
@@ -69,7 +68,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 ```
 
 - `runner.run()` is the async entry: builds the per-run extension `Registry` onto a `ContextVar`, then
-  dispatches PR-process modes (`deep`, `shallow`, `review`, `comment`, or `feedback`) to the single deep
+  dispatches PR-process modes (`deep`, `shallow`, `review`, or `comment`) to the single deep
   orchestrator. `improve` and custom extension flows run through `run_flow()` over registered `FlowStep` lists.
 - `agent.run_agent()` is the only agent call site. **Never call a backend/SDK directly from phases.**
 - Subagent fan-out (exploration, per-stack review, parallel fix) is N parallel `run_agent()` calls under
@@ -83,7 +82,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `cli.py` | Args, signals, process lifecycle, subcommand dispatch |
 | `runner.py` | Flow preambles (workspace, diff, recorder), backend resolution, registry, dispatch |
 | `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
-| `extensions/` | `Registry` (phases+flows, skill slots, prompts, stack rules), `daydream_ext` loader |
+| `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Deep-flow steps: exploration, intent, wonder, per-stack, arbiter, merge, verify, fix |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
@@ -93,7 +92,7 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
-| `config.py`, `config_file.py` | Skill mappings, per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
+| `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
 | `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree |
 | `git_ops.py` | **Single point of contact for every `git`/`gh` shell-out** |
 | `exploration*.py`, `tree_sitter_index.py` | Pre-scan: tree-sitter import resolution, convention detection |
@@ -137,7 +136,7 @@ recorder are backend-agnostic.
 ### Config and per-phase model overrides
 
 `config.py` holds `DEFAULT_{CLAUDE,CODEX,PI,EXPLORATION}_MODEL`, `PHASE_DEFAULT_MODELS[backend][phase]`,
-`PHASE_DEFAULT_EFFORT` (deep/review half Codex-only; improve half all three backends), budget constants, improve `EFFORT_TIERS`, and skill mappings. Pi
+`PHASE_DEFAULT_EFFORT` (deep/review half Codex-only; improve half all three backends), budget constants, and improve `EFFORT_TIERS`. Pi
 resolves its own configured default before falling back to `DEFAULT_PI_MODEL`.
 
 **Per-phase overrides are config-file-only — there are no per-phase CLI flags.** Set
@@ -187,9 +186,9 @@ exploration pre-scan (cached across runs)
 
 ### Extension seam
 
-A fork customizes phases, flows, skills, and prompts from a top-level `daydream_ext` package (found via
+A fork customizes phases, flows, and prompts from a top-level `daydream_ext` package (found via
 `$DAYDREAM_EXT_DIR` → `import daydream_ext`) without editing `daydream/`. It must export
-`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 5), may
+`DAYDREAM_EXT_API` within `MIN_SUPPORTED_EXTENSION_API_VERSION..EXTENSION_API_VERSION` (both 6), may
 register one `ToolDecision`-returning tool supervisor, and is resolve-checked by `daydream ext validate`.
 Full contract: `docs/extensions.md`.
 
@@ -229,5 +228,4 @@ Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING
 
 ## Platform requirements
 
-Python ≥3.12.13 + uv; `git` and `gh` on `$PATH`; Beagle plugin installed in Claude Code (for
-`beagle-*:review-*` skills); `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.
+Python ≥3.12.13 + uv; `git` and `gh` on `$PATH`; `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.
