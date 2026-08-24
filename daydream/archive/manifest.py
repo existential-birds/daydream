@@ -503,7 +503,7 @@ def build_manifest(
     # gate robust to lighter config fakes that omit the field.
     _start_at = getattr(config, "start_at", "review")
     per_stack_reviews_ran = (
-        config.bot is None
+        getattr(config, "bot", None) is None
         and (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
         and _start_at not in ("merge", "fix")
     )

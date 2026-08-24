@@ -1,8 +1,8 @@
 """End-to-end integration tests for the workspace + branch-resolution layer.
 
 Stage 4.2: every test below stands up a real git repository (often with a
-real bare-origin remote) and exercises ``daydream.runner.run`` /
-``run_feedback`` end-to-end. The Backend is the ONLY thing mocked — git
+real bare-origin remote) and exercises ``daydream.runner.run`` end-to-end.
+The Backend is the ONLY thing mocked — git
 operations all run for real so the tests reflect actual user-facing
 behavior. The ``MockBackend`` mirrors the canned-event pattern used in
 ``tests/test_runner.py`` and ``tests/test_integration.py``.
@@ -14,8 +14,7 @@ Test inventory (keyed to the Stage 4.2 spec):
 3. ``test_branch_also_checked_out_locally_warns_uses_origin``
 4. ``test_comment_mode_without_open_pr_runs_deep_flow``
 5. ``test_comment_mode_with_open_pr_uses_pr_base``
-6. ``test_feedback_subcommand_works_like_legacy_pr``
-7. ``test_review_mode_on_base_branch_does_not_error``
+6. ``test_review_mode_on_base_branch_does_not_error``
 """
 
 from __future__ import annotations
@@ -96,9 +95,6 @@ class MockBackend:
 
     async def cancel(self) -> None:
         return None
-
-    def format_skill_invocation(self, skill_key: str, args: str = "") -> str:
-        return f"/{skill_key}" + (f" {args}" if args else "")
 
 
 @pytest.fixture

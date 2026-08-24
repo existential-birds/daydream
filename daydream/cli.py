@@ -986,7 +986,6 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         start_at=args.start_at,
         pr_number=pr_number,
         approved_head_sha=args.approved_head_sha,
-        bot=None,
         backend=args.backend,
         review_backend=None,
         fix_backend=None,

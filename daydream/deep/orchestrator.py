@@ -3957,7 +3957,7 @@ def _resolve_mode(config: RunConfig) -> str:
     ``shallow`` replaces the shallow flow (single-stack deep). ``loop`` is the
     unchanged default.
     """
-    if config.bot is not None:
+    if getattr(config, "bot", None) is not None:
         return "feedback"
     if config.flow_name in ("review", "shallow"):
         return config.flow_name
@@ -4159,7 +4159,8 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
     """
     from daydream.runner import _open_recorder, _resolve_review_profile
 
-    if config.pr_number is None or config.bot is None:
+    bot = getattr(config, "bot", None)
+    if config.pr_number is None or bot is None:
         print_error(
             console,
             "Invalid PR config",
@@ -4168,7 +4169,6 @@ async def _run_feedback_flow(config: RunConfig, work: WorkContext) -> int:
         return 1
 
     pr_number = config.pr_number
-    bot = config.bot
     target_dir = work.repo
 
     async with _open_recorder(
