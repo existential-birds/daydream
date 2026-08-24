@@ -102,21 +102,21 @@ VET_BATCH_MAX_FINDINGS: int = 20
 # flag is supplied. Phase names are lowercase and match the strings passed by
 # every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
 # ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
-# ``"pr_feedback"``, ``"recon"``, ``"audit"``, ``"vet"``,
+# ``"recon"``, ``"audit"``, ``"vet"``,
 # ``"plan_write"``).
 #
 # Claude tiering:
 #   - cheap (haiku):   PARSE
 #   - mid   (sonnet):  FIX, TEST, EXPLORATION, PER_STACK_REVIEW, INTENT,
 #                      SUPPRESSION, RECON, AUDIT
-#   - heavy (opus):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#   - heavy (opus):    REVIEW, WONDER, MERGE, ARBITER, VET,
 #                      PLAN_WRITE
 #
 # Codex tiering mirrors it across the GPT-5.6 lineup:
 #   - cheap (gpt-5.6-luna):   PARSE
 #   - mid   (gpt-5.6-terra):  FIX, TEST, VERIFY, EXPLORATION, PER_STACK_REVIEW,
 #                             INTENT, SUPPRESSION, SUPERVISE, RECON, AUDIT
-#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, PR_FEEDBACK, ARBITER, VET,
+#   - heavy (gpt-5.6-sol):    REVIEW, WONDER, MERGE, ARBITER, VET,
 #                             PLAN_WRITE
 #
 # ``suppression`` (issue #232) is the precision-mode skeptical second opinion over
@@ -152,7 +152,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "wonder": "claude-opus-5",
         "merge": "claude-opus-5",
         "intent": "claude-sonnet-5",
-        "pr_feedback": "claude-opus-5",
         "recon": "claude-sonnet-5",
         "audit": "claude-sonnet-5",
         "vet": "claude-opus-5",
@@ -172,7 +171,6 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "wonder": "gpt-5.6-sol",
         "merge": "gpt-5.6-sol",
         "intent": "gpt-5.6-terra",
-        "pr_feedback": "gpt-5.6-sol",
         "recon": "gpt-5.6-terra",
         "audit": "gpt-5.6-terra",
         "vet": "gpt-5.6-sol",
@@ -197,7 +195,7 @@ PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
 # is what the resolver reads.
 REASONING_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
-# Half one: the review/fix pipeline (deep, shallow, review, pr-feedback).
+# Half one: the review/fix pipeline (deep, shallow, review).
 #
 # Codex-only, and deliberately so — this is the historical table and its values
 # are tuned against Codex's own ambient default. Claude and Pi have no entry
@@ -226,7 +224,6 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
         "wonder": "high",
         "merge": "medium",
         "intent": "medium",
-        "pr_feedback": "high",
     },
 }
 
