@@ -67,6 +67,29 @@ class Objective:
     tokens: float | None = None
     cost: float | None = None
 
+    def _as_metric_dict(self) -> dict[str, float | int]:
+        """Project this objective in the exact shape ``aggregate_metrics`` returns.
+
+        The count-derived fields were bound by feeding the run's flattened rows
+        through ``verifier_core.aggregate_metrics`` exactly once, so this maps
+        them back into the authoritative scorer's key/shaper set for byte-for-
+        value comparison against the generated ``metric.py`` aggregation.
+        """
+        return {
+            "micro_precision": self.precision,
+            "micro_recall": self.recall,
+            "micro_f1": self.f1,
+            "mean_task_score": self.mean_task_score,
+            "clean_accuracy": self.clean_accuracy,
+            "task_count": self.task_count,
+            "scored_task_count": self.scored_task_count,
+            "infra_error_task_count": self.infra_error_task_count,
+            "clean_task_count": self.clean_task_count,
+            "total_tp": self.tp,
+            "total_fp": self.fp,
+            "total_fn": self.fn,
+        }
+
 
 @dataclass(frozen=True)
 class CompatibilityIdentity:
@@ -156,7 +179,7 @@ def read_completed_run(
     job_dir = run_mod._validate_job_dir(workspace, str(entry.get("job_dir") or ""))
     identity = _bind_identity(workspace, entry, run_id, env)
     rows, infra_errors = _parse_task_rows(Path(job_dir), run_id)
-    objective = _build_objective(rows, infra_errors)
+    objective = _build_objective(rows, infra_errors, Path(job_dir), run_id)
 
     return CompletedRun(
         run_id=entry["run_id"],
@@ -378,7 +401,8 @@ def _is_finite(value: float) -> bool:
 
 
 def _build_objective(
-    rows: list[dict[str, object] | None], infra_errors: int
+    rows: list[dict[str, object] | None], infra_errors: int,
+    job_dir: Path, run_id: str,
 ) -> Objective:
     """Populate the count-derived ``Objective`` from the parsed rows.
 
@@ -389,7 +413,12 @@ def _build_objective(
     rows' ``verifier_error`` flags. ``comparison_eligible`` is ``False``
     whenever any trial failed to produce a legitimate scored row.
     """
-    agg = verifier_core.aggregate_metrics(rows)
+    try:
+        agg = verifier_core.aggregate_metrics(rows)
+    except verifier_core.VerifierError as exc:
+        raise ObjectiveError(
+            f"malformed reward row(s) in run {run_id!r} under {job_dir}: {exc}"
+        ) from exc
     verifier_errors = sum(
         1 for row in rows if row is not None and int(row.get("verifier_error") or 0) == 1
     )
