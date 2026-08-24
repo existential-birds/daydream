@@ -730,7 +730,7 @@ def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) 
         files=["api.py"],
         **p,
     )
-    assert "review-verification-protocol" in prompt
+    assert "verification gates" in prompt
     assert "anchor" in prompt
     assert "evidence" in prompt
 
@@ -741,7 +741,7 @@ def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: 
         strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"],
         **p)
-    assert "review-verification-protocol" in out
+    assert "verification gates" in out
     assert "anchor" in out
     assert "evidence" in out
 
@@ -792,10 +792,10 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
         backend = create_backend(backend_name)
         token = backend.format_skill_invocation("review-verification-protocol")
         for prompt in prompts:
-            # Gates are embedded as methodology prose (the constant names the
-            # protocol and states gates 0-3 inline), never as an invocation and
-            # never as an unresolvable skill-file read.
-            assert "review-verification-protocol" in prompt
+            # Gates are embedded as methodology prose (the constant states
+            # gates 0-3 inline), never as an invocation and never as an
+            # unresolvable skill-file read.
+            assert "verification gates" in prompt
             assert "SKILL.md" not in prompt
             assert token not in prompt, (
                 f"{backend_name} protocol invocation token {token!r} leaked into prompt"
@@ -1187,7 +1187,7 @@ def test_structural_prompt_anti_slop_rubric_sits_after_verification_protocol(tmp
         files=["api.py"],
         **p,
     )
-    assert out.index("anti-slop rubric") > out.index("verification-protocol gates")
+    assert out.index("anti-slop rubric") > out.index("verification gates")
 
 
 def test_anti_slop_rubric_severity_layering(tmp_path: Path) -> None:

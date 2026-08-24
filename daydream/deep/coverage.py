@@ -562,9 +562,8 @@ def build_uncovered_sweep_prompt(
     ``VERIFICATION_PROTOCOL_INSTRUCTION``. The gates are embedded inline -- not
     routed through ``Backend.format_skill_invocation`` and NOT loaded from a
     skill file -- because the reviewer runs with cwd set to the reviewed repo,
-    where a bare ``read review-verification-protocol/SKILL.md`` resolves against
-    that repo and silently drops the gates (same rationale as the canonical
-    constant).
+    where a bare ``read`` of the protocol skill file resolves against that repo
+    and silently drops the gates (same rationale as the canonical constant).
 
     Args:
         strategy: The profile-owned ``uncovered_review`` strategy content,

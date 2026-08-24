@@ -37,7 +37,7 @@ from daydream.prompts.wire_contract import (
 )
 
 DOC_REVIEW_NOTICE = (
-    "[Notice] Dedicated documentation review (beagle-docs) is planned but not yet "
+    "[Notice] Dedicated documentation review is planned but not yet "
     "implemented.\nThese documentation files are currently being reviewed by the "
     "generic-fallback agent (D-20)."
 )
@@ -107,14 +107,14 @@ TRUST_MODEL_INSTRUCTION = (
 # builders (issue #229). The gates are embedded inline as instruction text, not
 # routed through ``Backend.format_skill_invocation`` and NOT loaded from a skill
 # file: these two reviewers run with cwd set to the reviewed repo, so a bare
-# ``read review-verification-protocol/SKILL.md`` resolves against that repo and
-# fails ("skill doesn't exist as a file"), silently dropping the gates. Both
+# ``read`` of the protocol skill file resolves against that repo and fails
+# ("skill doesn't exist as a file"), silently dropping the gates. Both
 # reviewers are language-agnostic (repo-wide structural / non-stack fallback), so
 # the protocol's language-specific valid-pattern tables add little here — the
 # gate discipline is what matters, and it is self-contained below. Mirrors the
 # inline gate-0 embedding in ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
-    "Before writing findings, apply the review-verification-protocol gates "
+    "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
     "  Gate-0 anti-confabulation (before ANY finding): echo the exact artifact "
     "you are judging — file:line plus the cited code, read freshly in THIS turn, "
