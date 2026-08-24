@@ -798,6 +798,7 @@ def _handle_benchmark_run(args) -> int:
             "DAYDREAM_REVIEW_MODEL",
             "DAYDREAM_REVIEW_API_KEY",
             "DAYDREAM_REVIEW_BASE_URL",
+            "DAYDREAM_REVIEW_EFFORT",
             "DAYDREAM_JUDGE_PROVIDER",
             "DAYDREAM_JUDGE_MODEL",
             "DAYDREAM_JUDGE_API_KEY",

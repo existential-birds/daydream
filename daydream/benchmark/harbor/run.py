@@ -175,6 +175,32 @@ def _compiled_lock_sha256(workspace: Path) -> str:
     return hashlib.sha256((workspace / "harbor" / "benchmark.lock.json").read_bytes()).hexdigest()
 
 
+def _compiled_daydream_wheel(workspace: Path) -> tuple[str, str]:
+    """The ``daydream`` wheel ``(version, sha256)`` from the compiled lock.
+
+    Authoritative provenance source (issue #888): the compiled
+    ``harbor/benchmark.lock.json`` ``daydream`` block describing the exact
+    Daydream wheel the run executed under. Fail-closed: an absent/malformed
+    block (or unreadable lock) raises ``RunError`` naming the lock path — a
+    plausible placeholder is never defaulted.
+    """
+    path = workspace / "harbor" / "benchmark.lock.json"
+    try:
+        lock = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RunError(f"cannot read compiled lock at {path}: {exc}") from exc
+    if not isinstance(lock, dict):
+        raise RunError(f"compiled lock at {path} must be a mapping")
+    day = lock.get("daydream")
+    if not isinstance(day, dict) or not isinstance(day.get("version"), str) \
+            or not isinstance(day.get("sha256"), str):
+        raise RunError(
+            f"compiled lock at {path} is missing its 'daydream' wheel block "
+            "(version/sha256)"
+        )
+    return day["version"], day["sha256"]
+
+
 LEDGER_SUPPORTED_STATES = ("running", "complete", "cleanup_pending", "cleaned")
 LEDGER_SUPPORTED_MODES = ("oracle", "benchmark")
 LEDGER_SUPPORTED_BACKENDS = ("docker",)
@@ -242,6 +268,7 @@ def ledger_append_running(
     workspace: Path, *, run_id: str, compiled_lock_sha256: str, job_dir: str,
     mode: str = "oracle",
     profile_digest: str | None = None,
+    reviewer_effort: str | None = None,
 ) -> None:
     """Append a ``running`` entry (written before Harbor spawns) for this run.
 
@@ -253,8 +280,13 @@ def ledger_append_running(
     plane (the entrypoint computes it from the validated candidate); this
     function never reads ambient env itself. Optional: legacy/late callers
     that omit it leave the field ``None`` on the entry.
+
+    ``reviewer_effort`` (issue #888) is the reviewer reasoning-effort this run
+    executed under, threaded from the control-plane env so the read-only
+    objective can recover it without inference. Optional: callers that omit it
+    leave the field ``None`` on the entry (legacy/late callers stay byte-stable).
     """
-    contained = _validate_job_dir(workspace, job_dir)
+    validated = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
         doc = _load_ledger(workspace)
         entry: dict[str, Any] = {
@@ -262,11 +294,12 @@ def ledger_append_running(
             "mode": mode,
             "state": "running",
             "compiled_lock_sha256": compiled_lock_sha256,
-            "job_dir": contained,
+            "job_dir": validated,
             "harbor_job_id": None,
             "environments": [],
             "error": None,
             "profile_digest": profile_digest,
+            "reviewer_effort": reviewer_effort,
         }
         doc["runs"].append(entry)
         storage.atomic_write_json(_ledger_path(workspace), doc, mode=0o600)
@@ -510,6 +543,13 @@ def _current_state_mapping(
         "attempts": config.get("n_attempts", 1),
         "calibration_receipt_sha256": calibration_digest,
     }
+    # Daydream wheel provenance (issue #888): bind the exact compiled wheel
+    # digest/version the run was built under from the authoritative lock. An
+    # absent/malformed block raises ``RunError`` naming the lock path — never a
+    # default.
+    wheel_version, wheel_sha = _compiled_daydream_wheel(workspace)
+    mapping["daydream_version"] = wheel_version
+    mapping["daydream_wheel_sha256"] = wheel_sha
     # Candidate review-profile digest (issue #885/R12): fold it into the shared
     # oracle state so both the oracle-receipt document and the default-run gate
     # compare the tested candidate. Omitted when no candidate is set so legacy
@@ -517,6 +557,12 @@ def _current_state_mapping(
     digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
     if digest:
         mapping["profile_digest"] = str(digest)
+    # Reviewer reasoning-effort (issue #888): the control plane threads the
+    # reviewer effort under which this run executes into the shared state via
+    # the env, so both the oracle-receipt document and the default-run gate
+    # compare the identical effort. Always present (``""`` when unset) so a
+    # reviewer-less run's receipt and gate agree.
+    mapping["reviewer_effort"] = env.get("DAYDREAM_REVIEW_EFFORT") or ""
     return mapping
 
 
@@ -690,7 +736,8 @@ def run_run(
     mode = "oracle" if oracle else "benchmark"
     ledger_append_running(workspace, run_id=run_id, compiled_lock_sha256=compiled_lock_sha,
                           job_dir=str(job_dir), mode=mode,
-                          profile_digest=env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"))
+                          profile_digest=env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"),
+                          reviewer_effort=env.get("DAYDREAM_REVIEW_EFFORT"))
 
     # 6. Spawn Harbor with an absolute config path, the parent environment
     #    (PATH/HOME/etc.) merged in, and telemetry forced off.

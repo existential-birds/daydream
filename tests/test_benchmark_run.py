@@ -48,7 +48,7 @@ def _ws(tmp_path, **privacy):
     ws = tmp_path / "ws"
     (ws / "runtime").mkdir(parents=True)
     (ws / "harbor").mkdir()
-    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps({"schema_version": 1, "cases": {}}))
+    _seed_compiled_lock(ws)
     (ws / "harbor" / "harbor-job.yaml").write_text("jobs_dir: jobs\n")
     (ws / "harbor" / "harbor-oracle.yaml").write_text("jobs_dir: jobs\n")
     p = {"classification": "confidential", "reviewer_data": "source_snapshot",
@@ -70,6 +70,16 @@ def _env(**over):
             "DAYDREAM_REVIEW_MODEL": "rm", "DAYDREAM_REVIEW_BASE_URL": "http://review.example"}
     base.update(over)
     return base
+
+
+_WHEEL = {"distribution": "daydream", "version": "0.1.0", "sha256": "c" * 64}
+
+
+def _seed_compiled_lock(ws, wheel=_WHEEL):
+    """Write a compiled lock with the ``daydream`` wheel block logged."""
+    lock = {"schema_version": 1, "cases": {"case-a": {"key": "case-a"}}, "files": {},
+            "daydream": wheel}
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +320,7 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock = {"schema_version": 1, "cases": {}}
+    lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
     job_dir = ws / "harbor" / "jobs" / "run-1"
@@ -321,12 +331,13 @@ def test_gate_blocks_on_compiled_lock_mismatch(tmp_path):
         ws, job_dir=job_dir, compiled_lock_sha256=lock_sha, env=_env(),
         calibration_digest="c" * 64,
     ) == 0
-    # now the current compiled lock digest differs from the receipt's
-    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(
-        {"schema_version": 1, "cases": {}, "touched": True}))
+    # now the current compiled lock digest differs from the receipt's (wheel
+    # block kept so the daydream provenance read stays authoritative)
+    changed = {"schema_version": 1, "cases": {}, "touched": True, "daydream": _WHEEL}
+    (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(changed))
     reason = run_mod._default_run_gate(
         ws, env=_env(), compiled_lock_sha256=hashlib.sha256(
-            json.dumps({"schema_version": 1, "cases": {}, "touched": True}).encode()
+            json.dumps(changed).encode()
         ).hexdigest(), calibration_digest="c" * 64,
     )
     assert reason is not None
@@ -350,7 +361,7 @@ def test_gate_passes_when_inputs_match(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock = {"schema_version": 1, "cases": {}}
+    lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
     job_dir = ws / "harbor" / "jobs" / "run-1"
@@ -483,7 +494,7 @@ def test_default_run_propagates_harbor_exit_code(tmp_path):
     import daydream.benchmark.harbor.run as run_mod
 
     ws = _ws(tmp_path)
-    lock = {"schema_version": 1, "cases": {}}
+    lock = {"schema_version": 1, "cases": {}, "daydream": _WHEEL}
     lock_sha = hashlib.sha256(json.dumps(lock).encode()).hexdigest()
     (ws / "harbor" / "benchmark.lock.json").write_text(json.dumps(lock))
     job_dir = ws / "harbor" / "jobs" / "x"
@@ -595,3 +606,33 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path):
     assert ok is False
     assert envs and envs[0]["image_id"].startswith("hb__")   # was [] before the fix
     assert envs[0]["backend"] == "docker"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: provenance — reviewer effort and Daydream wheel digest
+# ---------------------------------------------------------------------------
+
+
+def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    _seed_compiled_lock(ws)   # benchmark.lock.json with daydream block
+    m = run_mod._current_state_mapping(
+        workspace=ws, compiled_lock_sha256="a" * 64, env=_env(), calibration_digest="")
+    assert m["daydream_wheel_sha256"] == "c" * 64
+    assert m["daydream_version"] == "0.1.0"
+    assert "reviewer_effort" in m
+
+
+def test_ledger_records_reviewer_effort_when_present(tmp_path):
+    import daydream.benchmark.harbor.run as run_mod
+
+    ws = _ws(tmp_path)
+    run_id = "run-1"
+    run_mod.ledger_append_running(ws, run_id=run_id, compiled_lock_sha256="a" * 64,
+                                  job_dir=str((ws / "harbor" / "jobs" / run_id).resolve()),
+                                  profile_digest="d" * 64)
+    run_mod.ledger_mark(ws, run_id, state="complete")
+    doc = run_mod._load_ledger(ws)
+    assert doc["runs"][0]["profile_digest"] == "d" * 64
