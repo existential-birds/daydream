@@ -46,11 +46,10 @@ htmlcov/
 *.swo
 *~
 
-# Claude Code (ignore local settings/skills, but distribute the resume-run skill)
+# Agent tooling (ignore local settings and all project-local skills)
 .claude/*
-!.claude/skills/
-.claude/skills/*
-!.claude/skills/resume-run/
+.claude/skills/
+.agents/skills/
 
 # Logs
 logs/
