@@ -4,6 +4,7 @@ Covers an arg-parse unit test for ``_bench_config_from_argv`` and tier-3
 real-path tests through the installed ``daydream`` console script.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -375,6 +376,42 @@ def test_bench_dotenv_autoloads_credential_through_compiled_entrypoint(tmp_path)
         cwd=tmp_path,  # the .env lives here; the real bench entry must auto-load it from cwd
     )
     assert "MARTIAN_API_KEY is not set" not in (r.stdout + r.stderr)
+
+
+def _objective_ws(tmp_path):
+    """A complete, consistent run seeded via the Task-1/2 test helper."""
+    from tests.test_benchmark_objective import _complete_ws
+    return _complete_ws(tmp_path)
+
+
+def test_objective_cli_writes_json_atomically_and_summary(tmp_path, capsys):
+    from daydream.benchmark.cli import _handle_benchmark_command
+
+    ws = _objective_ws(tmp_path)
+    out = tmp_path / "obj.json"
+    code = _handle_benchmark_command([
+        "objective", str(ws), "--run-id", "run-1", "--json", str(out),
+    ])
+    assert code == 0
+    doc = json.loads(out.read_text())
+    assert doc["run_id"] == "run-1" and "f1" in doc["objective"]
+    captured = capsys.readouterr().out
+    assert "run-1" in captured   # concise local summary by default
+
+
+def test_objective_cli_failure_leaves_output_unchanged(tmp_path):
+    from daydream.benchmark.cli import _handle_benchmark_command
+    from daydream.benchmark.harbor import run as run_mod
+
+    ws = _objective_ws(tmp_path)
+    run_mod.ledger_mark(ws, "run-1", state="running")   # non-terminal -> fail closed
+    out = tmp_path / "obj.json"
+    out.write_text("SENTINEL")
+    code = _handle_benchmark_command([
+        "objective", str(ws), "--run-id", "run-1", "--json", str(out),
+    ])
+    assert code == 1
+    assert out.read_text() == "SENTINEL"
 
 
 def test_bench_help_lists_flags():

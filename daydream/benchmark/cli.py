@@ -16,6 +16,7 @@ checkout (``--benchmark-repo``) or a harvested dir (``--harvest-dir``).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -455,13 +456,13 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     """Build the ``daydream benchmark`` subcommand parser.
 
     Sub-verbs: ``init``, ``status``, ``validate``, ``build-harbor``, ``upgrade``, ``import-prs``,
-    ``curate``, ``calibrate-judge``, ``run``, ``clean``.
+    ``curate``, ``calibrate-judge``, ``run``, ``clean``, ``objective``.
     """
     parser = argparse.ArgumentParser(
         prog="daydream benchmark",
         description=(
             "Private PR benchmark workspace: init/status/validate/build-harbor/upgrade/"
-            "import-prs/curate/calibrate-judge/run/clean."
+            "import-prs/curate/calibrate-judge/run/clean/objective."
         ),
     )
     sub = parser.add_subparsers(dest="subcommand")
@@ -576,6 +577,18 @@ def _build_benchmark_parser() -> argparse.ArgumentParser:
     )
     clean_p.add_argument(
         "--yes", action="store_true", help="confirm --all without prompting"
+    )
+
+    objective_p = sub.add_parser(
+        "objective", help="resolve an exact completed run as machine-readable JSON"
+    )
+    objective_p.add_argument("dir", type=Path, help="workspace directory")
+    objective_p.add_argument("--run-id", required=True, help="exact ledgered run id")
+    objective_p.add_argument(
+        "--json",
+        default=None,
+        metavar="PATH|-",
+        help="write the strict objective JSON to this path ('-' writes to stdout)",
     )
 
     return parser
@@ -884,6 +897,45 @@ def _handle_benchmark_curate(args) -> int:
     return 0
 
 
+def _handle_benchmark_objective(args) -> int:
+    """Resolve an exact completed run and emit its machine-readable objective.
+
+    ``--json`` serializes the opaque privacy-safe objective via
+    ``objective.objective_to_json`` and writes it through
+    ``storage.atomic_write_json`` (or prints it directly on ``-``); a parse/
+    compat failure leaves an existing output file byte-identical. Without
+    ``--json``, prints a concise local summary (run_id, comparison_eligible,
+    micro F1, task/infra counts) to stdout. Expected ``ObjectiveError`` prints
+    to stderr and returns exit ``1`` — never a bare traceback.
+    """
+    from daydream.benchmark.harbor import objective
+    from daydream.benchmark.storage import atomic_write_json
+
+    try:
+        run = objective.read_completed_run(args.dir, args.run_id, env=dict(os.environ))
+    except objective.ObjectiveError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if args.json is not None:
+        blob = objective.objective_to_json(run)
+        if args.json == "-":
+            print(json.dumps(blob, indent=2))
+        else:
+            atomic_write_json(Path(args.json), blob)
+
+    obj = run.objective
+    if obj is not None:
+        print(
+            f"objective {run.run_id}: comparison_eligible={obj.comparison_eligible} "
+            f"micro_f1={obj.f1:.4f} tasks={obj.task_count} "
+            f"scored={obj.scored_task_count} infra={obj.infra_error_task_count}"
+        )
+    else:
+        print(f"objective {run.run_id}: no objective (unscored run)")
+    return 0
+
+
 def _handle_benchmark_command(argv: list[str]) -> int:
     """Handle ``daydream benchmark init|status|validate|build-harbor|upgrade|import-prs|curate``.
 
@@ -891,7 +943,9 @@ def _handle_benchmark_command(argv: list[str]) -> int:
     process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
     ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
     stderr and mapped to exit ``1`` — never a bare traceback. ``run`` dispatches
-    to :func:`_handle_benchmark_run` (the supervised Harbor runner).
+    to :func:`_handle_benchmark_run` (the supervised Harbor runner) and
+    ``objective`` to :func:`_handle_benchmark_objective` (the read-only
+    machine-readable run resolution).
     """
 
     parser = _build_benchmark_parser()
@@ -920,5 +974,7 @@ def _handle_benchmark_command(argv: list[str]) -> int:
         return _handle_benchmark_run(args)
     if sub == "clean":
         return _handle_benchmark_clean(args)
+    if sub == "objective":
+        return _handle_benchmark_objective(args)
     parser.print_help(file=sys.stderr)
     return 2
