@@ -773,7 +773,33 @@ def _handle_benchmark_run(args) -> int:
         )
     }
 
+    # Issue #885/R12: thread the control-plane candidate profile digest into
+    # the supervisor env so run.py's ledger/receipt provenance can attribute
+    # the run to exactly the tested candidate. run.py reads
+    # DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from this env dict; the in-container
+    # entrypoint cannot set it (different process, runs after the ledger row).
+    # Fail-closed: an invalid candidate raises ProfileError here, before any
+    # paid run -- matching the entrypoint's own fail-closed validation.
+    env["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] = _candidate_profile_digest()
+
     return run_mod.run_run(args.dir, oracle=args.oracle, yes=args.yes, env=env)
+
+
+def _candidate_profile_digest() -> str | None:
+    """Canonical digest of the control-plane Harbor candidate (R12), or None.
+
+    Reads ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` from the trusted control-plane
+    environment and resolves it exactly as the in-container entrypoint will,
+    so the ledger/receipt ``profile_digest`` matches the tested profile. No
+    candidate -> ``None`` (legacy default-profile runs stay byte-stable).
+    Raises ``ProfileError`` on an invalid candidate (fail-closed).
+    """
+    from daydream import review_profile as rp
+
+    if not os.environ.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE"):
+        return None
+    resolved = rp.resolve_harbor_profile()  # env=None -> os.environ (trusted)
+    return resolved.digest
 
 
 def _handle_benchmark_clean(args) -> int:

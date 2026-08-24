@@ -106,3 +106,53 @@ def test_receipt_invalidation_inputs_include_candidate_digest():
         {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}
     )
     assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
+# Issue #885 R1 items 2/10: the control-plane benchmark handler must thread the
+# candidate profile digest into the env dict it hands to run_run, because run.py
+# reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
+# in-container entrypoint runs in a different process (after the ledger row).
+def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch, tmp_path):
+    from daydream.benchmark import cli as bc
+
+    # No candidate -> digest key is None (legacy default runs stay byte-stable).
+    monkeypatch.delenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", raising=False)
+    assert bc._candidate_profile_digest() is None
+
+    # A candidate -> the control-plane resolver produces its canonical digest.
+    cand = tmp_path / "candidate.toml"
+    cand.write_text(
+        'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
+        'content = "C"\nsource = "copied: a"'
+    )
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(cand))
+    digest = bc._candidate_profile_digest()
+    assert digest and isinstance(digest, str) and len(digest) == 64  # sha256
+
+    # _handle_benchmark_run passes it through into the supervisor env.
+    from daydream.benchmark.harbor import run as run_mod
+
+    captured = {}
+
+    def fake_run_run(workspace, *, oracle=False, yes=False, env=None, **kw):
+        captured["env"] = env
+        return 0
+
+    monkeypatch.setattr(run_mod, "run_run", fake_run_run)
+    rc = bc._handle_benchmark_run(
+        type("Args", (), {"dir": str(tmp_path), "oracle": False, "yes": True})()
+    )
+    assert rc == 0
+    assert captured["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] == digest
+
+
+def test_benchmark_run_invalid_candidate_fails_closed(monkeypatch, tmp_path):
+    from daydream.benchmark import cli as bc
+    from daydream.review_profile import ProfileError
+
+    bad = tmp_path / "bad.toml"
+    bad.write_text('schema_version = 99\nname = "bad"')
+    monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", str(bad))
+    try:
+        bc._candidate_profile_digest()
+        raise AssertionError("expected ProfileError for invalid candidate")
+    except ProfileError:
+        pass
