@@ -18,7 +18,7 @@ import importlib.metadata
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from daydream.benchmark.harbor import calibrate, verifier_core
 from daydream.benchmark.harbor import run as run_mod
@@ -662,7 +662,7 @@ def _parse_reward_strict(reward_path: Path, run_id: str) -> dict[str, object]:
     numeric to zero.
     """
     try:
-        data = json.loads(reward_path.read_text(encoding="utf-8"))
+        data: dict[str, object] = json.loads(reward_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ObjectiveError(
             f"malformed reward artifact at {reward_path} in run {run_id!r}: {exc}"
@@ -679,7 +679,7 @@ def _parse_reward_strict(reward_path: Path, run_id: str) -> dict[str, object]:
                 f"reward artifact at {reward_path} in run {run_id!r} has "
                 f"non-integer {key!r}: {value!r}"
             )
-        if int(value) < 0:
+        if value < 0:
             raise ObjectiveError(
                 f"reward artifact at {reward_path} in run {run_id!r} has "
                 f"negative {key!r}: {value!r}"
@@ -699,8 +699,19 @@ def _parse_reward_strict(reward_path: Path, run_id: str) -> dict[str, object]:
     return data
 
 
-def _is_int(value: object) -> bool:
+def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _row_int(row: dict[str, object], key: str) -> int:
+    """Read an integer-valued row field, defaulting to 0 when absent.
+
+    Only the scored count keys are validated strictly at parse time; auxiliary
+    reporting keys (``candidate_count``/``gold_count``/``verifier_error``) are
+    read here with a non-integer value falling back to 0 rather than crashing.
+    """
+    value = row.get(key)
+    return value if _is_int(value) else 0
 
 
 def _is_finite(value: float) -> bool:
@@ -726,17 +737,20 @@ def _build_objective(
         raise ObjectiveError(
             f"malformed reward row(s) in run {run_id!r} under {job_dir}: {exc}"
         ) from exc
-    verifier_errors = sum(
-        1 for row in rows if row is not None and int(row.get("verifier_error") or 0) == 1
-    )
+    verifier_errors = len([
+        row for row in rows
+        if row is not None and _row_int(row, "verifier_error") == 1
+    ])
     # Malformed rows fail closed in ``_parse_reward_strict`` and so never reach
     # this pool; the count stays zero by construction.
     malformed = 0
     failed = max(verifier_errors, infra_errors)
     candidate_count = sum(
-        int(row["candidate_count"]) for row in rows if row is not None
+        _row_int(row, "candidate_count") for row in rows if row is not None
     )
-    gold_count = sum(int(row["gold_count"]) for row in rows if row is not None)
+    gold_count = sum(
+        _row_int(row, "gold_count") for row in rows if row is not None
+    )
     clean_task_count = int(agg["clean_task_count"])
     return Objective(
         tp=int(agg["total_tp"]),

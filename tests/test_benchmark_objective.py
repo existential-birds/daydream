@@ -298,6 +298,44 @@ def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path):
     assert "profile_digest" in str(e.value)
 
 
+def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path):
+    """Task 11 gate: pooled output equals the authoritative scoring.
+
+    The pooled ``SuiteObjective`` must equal ``verifier_core.aggregate_metrics``
+    over the exact flattened cross-run rows byte-for-value after numeric
+    normalization, and must also equal what the deployed generated
+    ``metric.py`` would compute over the same JSONL (the authoritative corpus
+    scorer — ``build.render_metric`` inlines ``verifier_core.aggregate_metrics``).
+    """
+    import types
+
+    from daydream.benchmark.harbor import build, verifier_core
+
+    def _rendered_metric():
+        # The deployed ``metric.py`` is the template with the authoritative
+        # ``aggregate_metrics`` body spliced in at build time.
+        mod = types.ModuleType("metric")
+        exec(compile(build.render_metric().decode("utf-8"), "metric.py", "exec"), mod.__dict__)
+        return mod
+
+    # Two compatible workspaces with a realistic, comparison-eligible mix: scored
+    # and gold-free clean tasks (an infra-error ``None`` trial would make the entry
+    # comparison-ineligible and ``aggregate_suite`` correctly refuses to pool it).
+    a = _complete_ws_at(tmp_path, "a", "r1",
+                        [_reward(tp=2, fp=1, fn=0, reward=0.8),
+                         _reward(clean_task=1, clean_pass=1)])
+    b = _complete_ws_at(tmp_path, "b", "r2", [_reward(tp=1, fp=0, fn=1, reward=0.5)])
+    manifest = {"schema_version": 1, "entries": [
+        {"workspace": str(a), "run_id": "r1"}, {"workspace": str(b), "run_id": "r2"}]}
+    suite = objective.aggregate_suite(manifest, env={})
+    a_rows = objective.read_completed_run(a, "r1", env={}).task_rows
+    b_rows = objective.read_completed_run(b, "r2", env={}).task_rows
+    flat = a_rows + b_rows   # the exact flattened per-task rows across both runs
+    assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
+    jsonl = _rows_to_jsonl(flat, tmp_path / "gate.jsonl")
+    assert suite.objective._as_metric_dict() == _rendered_metric().aggregate_rewards_file(str(jsonl))
+
+
 def test_suite_manifest_validation(tmp_path):
     good = {"schema_version": 1, "entries": [
         {"workspace": str(tmp_path / "a"), "run_id": "r1"},
