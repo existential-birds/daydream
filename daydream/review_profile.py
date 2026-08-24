@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tomllib
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
@@ -659,6 +661,122 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         arbitration=arbitration,
         suppression=suppression,
     )
+
+
+@dataclass(frozen=True)
+class ResolvedProfile:
+    """A resolved review profile with its source provenance (R9).
+
+    ``source_kind`` is one of ``"explicit"``, ``"env"``, ``"repo"``, or
+    ``"default"``; ``source_path`` is the path the profile came from (``None``
+    for the packaged default); ``digest`` is the canonical digest of the
+    resolved profile value.
+    """
+
+    profile: ReviewProfile
+    source_kind: str
+    source_path: Path | None = None
+
+    @property
+    def digest(self) -> str:
+        return self.profile.digest
+
+
+def _read_and_parse(path: Path, source: str) -> ReviewProfile:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ProfileError(
+            f"cannot read profile file (reason: {exc})", source
+        ) from exc
+    return parse_profile(text, source=source)
+
+
+def _guard_repo_path(path: Path, repo_root: Path | None) -> Path:
+    """Resolve a repo-committed profile path beneath ``repo_root`` (R9).
+
+    The path-escape guard applies to repository-committed RELATIVE paths:
+    resolve beneath the repo root, and reject ``..`` and symlink escapes via
+    ``Path.resolve()`` + a containment check so a benchmarked repository
+    cannot point its own evaluator at an arbitrary filesystem path. An explicit
+    absolute path is the operator's own choice and is resolved as-is.
+    """
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    if repo_root is None:
+        # No repo root supplied — resolve relative to the current dir (cwd is
+        # the repo for normal runs).
+        repo_root = Path.cwd()
+    else:
+        repo_root = Path(repo_root)
+    candidate = (repo_root / expanded).resolve()
+    if not candidate.is_relative_to(repo_root.resolve()):
+        raise ProfileError(
+            f"repo-committed profile path escapes the repository root ({candidate})",
+            str(path),
+        )
+    return candidate
+
+
+def resolve_profile(
+    *,
+    explicit_path: str | None = None,
+    file_config: object | None = None,
+    env: dict | None = None,
+    repo_root: Path | None = None,
+) -> ResolvedProfile:
+    """Resolve the single per-run review profile from the four normal sources (R9).
+
+    Precedence (highest wins; an invalid higher source raises and never falls
+    through to a lower source):
+    1. ``explicit_path`` — an explicit CLI/``RunConfig`` path.
+    2. ``DAYDREAM_REVIEW_PROFILE`` env — a private user path.
+    3. ``file_config.review_profile`` — a repo-committed path.
+    4. Packaged default.
+    """
+    if explicit_path is not None:
+        profile = _read_and_parse(Path(explicit_path), str(explicit_path))
+        return ResolvedProfile(
+            profile=profile,
+            source_kind="explicit",
+            source_path=Path(explicit_path),
+        )
+
+    if env is None:
+        env = os.environ
+    env_value = env.get("DAYDREAM_REVIEW_PROFILE")
+    if env_value:
+        raw = str(env_value)
+        profile = _read_and_parse(Path(raw), raw)
+        return ResolvedProfile(
+            profile=profile, source_kind="env", source_path=Path(raw)
+        )
+
+    if file_config is not None:
+        repo_path = getattr(file_config, "review_profile", None)
+        if repo_path is not None:
+            guarded = _guard_repo_path(Path(repo_path), repo_root)
+            profile = _read_and_parse(guarded, str(guarded))
+            return ResolvedProfile(
+                profile=profile, source_kind="repo", source_path=guarded
+            )
+
+    return ResolvedProfile(
+        profile=build_default_profile(), source_kind="default"
+    )
+
+
+def resolve_from_runconfig(cfg: object) -> ResolvedProfile:
+    """Resolve the profile from a ``RunConfig`` (R1: once at composition root).
+
+    The ``RunConfig`` carries the CLI/env-derived ``review_profile_path`` and the
+    file config; this is the single seam the runner calls exactly once per run.
+    """
+    file_config = getattr(cfg, "file_config", None)
+    explicit = getattr(cfg, "review_profile_path", None)
+    explicit_str = str(explicit) if explicit is not None else None
+    return resolve_profile(explicit_path=explicit_str, file_config=file_config)
 
 
 def clone_with_overrides(
