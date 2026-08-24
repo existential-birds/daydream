@@ -1,11 +1,8 @@
-"""Real-path tests: extension skill slots reach the pr-feedback, shallow, and deep flows.
+"""Real-path tests: native profile strategies reach shallow and deep flows.
 
-Drives the production entrypoints (``runner.run_feedback`` / ``runner.run``)
-against a real temp git repo, mocking ONLY the backend seam
-(``daydream.runner.create_backend``) per the testing standard — the same shape
-as ``tests/test_pr_feedback_integration.py``. A ``daydream_ext`` package
-written by the ``ext_dir`` fixture overrides skill slots; assertions are on
-the prompts the backend actually received and the exit code.
+Drives ``runner.run`` against a real temp git repo, mocking ONLY the backend
+seam (``daydream.runner.create_backend``) per the testing standard. Assertions
+are on the prompts the backend actually received and the exit code.
 """
 
 from __future__ import annotations
@@ -26,31 +23,6 @@ _CLEAN_TURN = (
     TextEvent(text=""),
     ResultEvent(structured_output={"issues": []}, continuation=None),
 )
-
-
-async def test_fork_overrides_pr_feedback_fetch_skill(
-    ext_dir: ExtDir,
-    multi_stack_target: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-) -> None:
-    """A daydream_ext override of the pr-feedback-fetch slot reaches the fetch prompt.
-
-    Observable outcomes: exit 0, the overridden skill string appears in a
-    prompt the backend received, and the built-in literal appears in none.
-    """
-    ext_dir.write_module(
-        "def register(r):\n"
-        "    r.override_skill('pr-feedback-fetch', 'ro-core:fetch-pr-feedback')\n"
-    )
-    backend = ScriptedBackend(events=_CLEAN_TURN)
-    install_backend(backend)
-
-    rc = await runner.run_feedback(make_config(multi_stack_target, bot="x[bot]"), pr=1)
-
-    assert rc == 0
-    assert any("ro-core:fetch-pr-feedback" in p for p in backend.prompts)
-    assert not any("beagle-core:fetch-pr-feedback" in p for p in backend.prompts)
 
 
 async def test_shallow_stack_uses_native_profile_strategy_no_skill(

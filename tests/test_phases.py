@@ -3665,10 +3665,6 @@ def _setup_no_kwargs(tmp_path: Path) -> dict[str, object]:
     return {}
 
 
-def _setup_fetch_pr_feedback(tmp_path: Path) -> dict[str, object]:
-    return {"pr_number": 42, "bot": "botname"}
-
-
 def _setup_understand_intent(tmp_path: Path) -> dict[str, object]:
     diff_file = tmp_path / "diff.patch"
     diff_file.write_text("diff --git ...")
@@ -3720,10 +3716,6 @@ _MERGE_ITEMS = {
             "phase_test_and_heal", "claude-sonnet-4-6",
             (TextEvent(text="All tests passed"), _RESULT),
             "AWAKEN", _setup_no_kwargs, id="test_and_heal",
-        ),
-        pytest.param(
-            "phase_fetch_pr_feedback", "claude-opus-4-6", (_RESULT,), "LISTEN",
-            _setup_fetch_pr_feedback, id="fetch_pr_feedback",
         ),
         pytest.param(
             "phase_understand_intent", "claude-opus-4-6",

@@ -2223,59 +2223,6 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     assert _git(project, "rev-parse", "HEAD") != head_before
 
 
-async def test_feedback_scrub_trust_gate_preserves_user_edits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """Real path: the pr-feedback scrub never rewrites uncommitted tracked user edits.
-
-    Feedback mode runs in-place on the user's checkout with no pre-fix snapshot
-    mechanism, so the scrub used to attribute the user's uncommitted tracked
-    smart-quote lines against bare HEAD as if the fix agent added them, and
-    rewrote them to ASCII. The trust gate captures a pre-fix stash snapshot
-    (mirroring ``_step_fix``) and attributes agent-added lines against it, so
-    the user's smart quotes survive the run byte-identical while the fix
-    agent's own smart-quote line is still normalized before commit.
-
-    Drives ``runner.run`` through feedback mode (``pr_number`` + ``bot``) with a
-    stub backend as the only mocked seam; the commit and push are real.
-    """
-    from daydream.runner import run
-
-    project = tmp_path / "fb_quote_repo"
-    project.mkdir()
-    (project / "main.go").write_text("package main\n\n// doc\n")
-    _init_repo(project)
-    _git(project, "add", "main.go")
-    _commit(project, "test: initialize feedback fixture")
-    bare = _bare_remote(tmp_path / "remote.git")
-    _git(project, "remote", "add", "origin", str(bare))
-
-    # User's uncommitted tracked edit in the in-place checkout carries smart quotes.
-    user_line = "// user \u201Cedit\u201D\n"
-    (project / "main.go").write_text((project / "main.go").read_text() + user_line)
-
-    monkeypatch.setattr("daydream.agent.prompt_user", lambda *a, **kw: "y")
-    mute_side_effects(heal=False, commit=False)
-    stub = _FeedbackQuoteScrubBackend(project)
-    # The fix agent writes U+201D into the changed .go comment; the user's own
-    # smart-quote line is baseline content the scrub must not touch.
-    stub.fix_edit_line = "\n// agent \u201D\n"
-    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
-
-    exit_code = await run(make_config(
-        project, pr_number=7, bot="my-app[bot]", assume="yes",
-        output_mode="loop", non_interactive=False, archive=False,
-    ))
-    assert exit_code == 0
-    go_src = (project / "main.go").read_text()
-    assert user_line in go_src             # user's smart-quote line NOT rewritten
-    assert "// agent \u201D" not in go_src  # fix agent's U+201D never lands in the tree
-    assert '// agent "' in go_src          # ... it is normalized to ASCII straight quote
-
-
 async def test_test_healing_guard_reverts_generated_migration_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6952,56 +6899,6 @@ class _PushingCommittingStubBackend(_StubBackend):
             yield event
 
 
-class _FeedbackQuoteScrubBackend(_PushingCommittingStubBackend):
-    """Feedback-mode stub: parse-feedback yields one ``main.go`` issue; the rest delegate.
-
-    ``_PushingCommittingStubBackend`` already handles the fix turn (appending
-    ``fix_edit_line`` to the fixed file) and the commit/push turn. Feedback mode
-    additionally runs fetch-feedback (skill invocation, default empty branch)
-    and parse-feedback, whose prompt asks the agent to read the review output
-    file — the stub answers with a single actionable issue on ``main.go``.
-    """
-
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-    ) -> Any:
-        if prompt.startswith("Read the review output file"):
-            yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": "doc comment fix",
-                            "file": "main.go",
-                            "line": 1,
-                            "confidence": "HIGH",
-                            "evidence": "main.go:1",
-                        }
-                    ]
-                },
-                continuation=None,
-            )
-            return
-        async for event in super().execute(
-            cwd,
-            prompt,
-            output_schema=output_schema,
-            continuation=continuation,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
-        ):
-            yield event
-
-
 async def test_test_verdict_records_failure_when_operator_ignores_it(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute
 ) -> None:
@@ -7403,6 +7300,24 @@ async def test_skip_tier_writes_empty_alternatives(
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
+
+
+def test_deep_flow_has_no_feedback_prefix() -> None:
+    """M2: the registered deep flow has no feedback-only prefix."""
+    from daydream.deep.orchestrator import STEPS
+
+    names = {step.name for step in STEPS}
+    assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
+
+
+def test_no_feedback_mode_resolver() -> None:
+    """M2: `_resolve_mode` cannot return `feedback`; no feedback runner exists."""
+    from daydream.deep import orchestrator as deep_orchestrator
+    from daydream.runner import RunConfig
+
+    assert not hasattr(deep_orchestrator, "_run_feedback_flow")
+    config = RunConfig(target="/tmp", pr_number=7)
+    assert deep_orchestrator._resolve_mode(config) != "feedback"
 
 
 def test_extension_api_version_is_five_and_alternatives_step_is_gone() -> None:

@@ -3483,30 +3483,6 @@ async def phase_commit_push(
         print_success(console, "Commit and push complete")
 
 
-async def phase_fetch_pr_feedback(
-    backend: Backend, work: WorkContext, pr_number: int, bot: str,
-) -> None:
-    """Fetch PR feedback by invoking the fetch-pr-feedback skill.
-
-    Raises:
-        Exception: If the agent fails to fetch PR feedback.
-    """
-    print_phase_hero(console, "LISTEN", phase_subtitle("LISTEN"))
-    print_dim(console, f"Model: {backend.model}")
-
-    skill_invocation = backend.format_skill_invocation(
-        get_registry().skill("pr-feedback-fetch"), f"--pr {pr_number} --bot {bot}"
-    )
-
-    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
-
-    output_path = work.repo / REVIEW_OUTPUT_FILE
-    if output_path.exists():
-        print_success(console, f"PR feedback written to: {output_path}")
-    else:
-        print_warning(console, "PR feedback file was not created")
-
-
 async def phase_commit_push_auto(
     backend: Backend,
     work: WorkContext,
@@ -3535,37 +3511,6 @@ async def phase_commit_push_auto(
     # either would mislead the operator into believing the fixes were committed.
     if committed:
         print_success(console, "Commit and push complete")
-
-
-async def phase_respond_pr_feedback(
-    backend: Backend, work: WorkContext, pr_number: int, bot: str, results: list[FixResult]
-) -> None:
-    """Respond to PR feedback with results of applied fixes.
-
-    Filters to successful results only and invokes the respond-pr-feedback
-    skill to post replies on the pull request.
-
-    Args:
-        backend: The Backend to execute against.
-        work: Workspace context; ``work.repo`` is the agent cwd.
-        pr_number: Pull request number to respond to
-        bot: Bot username to respond as
-        results: List of (item, success, error) tuples, one per applied fix
-    """
-    successful = [(item, ok, err) for item, ok, err in results if ok]
-
-    if not successful:
-        print_warning(console, "No successful fixes to report")
-        return
-
-    print_info(console, f"Responding to PR #{pr_number} with {len(successful)} fix result(s)...")
-
-    skill_invocation = backend.format_skill_invocation(
-        get_registry().skill("pr-feedback-respond"), f"--pr {pr_number} --bot {bot}"
-    )
-
-    await run_agent(backend, work.repo, skill_invocation, phase=DaydreamPhase.PR_FEEDBACK)
-    print_success(console, f"Responded to PR #{pr_number} feedback")
 
 
 async def phase_understand_intent(
