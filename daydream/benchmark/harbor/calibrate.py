@@ -299,7 +299,7 @@ def _invalidation_inputs(
     env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
 ) -> dict[str, Any]:
     """The receipt's invalidation contract: a deterministic byte-stable dict."""
-    return {
+    inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
         "model": env.get("DAYDREAM_JUDGE_MODEL") or "",
         "host": _judge_host_from_env(env),
@@ -309,6 +309,15 @@ def _invalidation_inputs(
         "attempts": 3,
         "request_timeout": sr._REQUEST_TIMEOUT,
     }
+    # Candidate review-profile digest (issue #885/R12): a change of candidate
+    # invalidates the calibration receipt (per-candidate attribution). Omitted
+    # when absent so the legacy receipt contract stays byte-stable for default
+    # runs. Mirrors run._calibration_invalidation_inputs so the receipt built
+    # here and the preflight check in run.py produce identical inputs.
+    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
+    if digest:
+        inputs["profile_digest"] = str(digest)
+    return inputs
 
 
 def _build_receipt(

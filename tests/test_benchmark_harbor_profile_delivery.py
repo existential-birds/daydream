@@ -106,6 +106,42 @@ def test_receipt_invalidation_inputs_include_candidate_digest():
         {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "xyz"}
     )
     assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
+
+
+# Issue #885 R2 finding 4 (HIGH): the calibration RECEIPT WRITE side
+# (calibrate._invalidation_inputs) must fold the candidate digest too, so a
+# candidate-scoped receipt is producible and byte-matches run.py's preflight
+# _calibration_invalidation_inputs. Legacy default runs (no digest) stay
+# byte-stable. Without this the oracle preflight always fails under a candidate.
+def test_calibrate_invalidation_inputs_folds_candidate_digest():
+    from daydream.benchmark.harbor import calibrate
+
+    sr = calibrate._load_judge_template()
+    # With a candidate digest -> receipt contract includes profile_digest.
+    inputs = calibrate._invalidation_inputs(
+        {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc"}, pairs=[], sr=sr
+    )
+    assert inputs["profile_digest"] == "abc"
+    # Without a candidate digest -> legacy contract stays byte-stable.
+    legacy = calibrate._invalidation_inputs({}, pairs=[], sr=sr)
+    assert "profile_digest" not in legacy
+
+
+def test_candidate_scoped_receipt_matches_preflight_inputs():
+    """A receipt written by the calibrate path under a candidate is byte-identical
+    to the preflight inputs run.py checks, so is_receipt_current passes."""
+    from daydream.benchmark.harbor import calibrate, run
+
+    env = {"DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST": "abc123"}
+    # Use the same real fixture + judge template both paths load internally.
+    sr = calibrate._load_judge_template()
+    pairs = calibrate._load_fixture()
+    # Receipt write path folds the digest (via calibrate._invalidation_inputs).
+    write_inputs = calibrate._invalidation_inputs(env, pairs, sr)
+    # run.py's preflight check folds the same digest (via its own producer).
+    check_inputs = run._calibration_invalidation_inputs(env)
+    # Both must serialize identically (byte-exact is_receipt_current contract).
+    assert calibrate._serialize_inputs(write_inputs) == calibrate._serialize_inputs(check_inputs)
 # Issue #885 R1 items 2/10: the control-plane benchmark handler must thread the
 # candidate profile digest into the env dict it hands to run_run, because run.py
 # reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
