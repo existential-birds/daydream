@@ -26,3 +26,25 @@ def test_classification_is_strategy_plus_host_envelope():
     for key in rp.STAGE_KEYS:
         cls = rp.ENVELOPE_CLASSIFICATION[key]
         assert cls["strategy"] and cls["envelope"]  # both nonempty, one per stage
+
+
+def test_audit_stages_track_production_playbook():
+    # The guard must not be purely self-referential: every audit category in the
+    # production playbook (daydream.improve.prompts) is itself a model-bearing
+    # stage, so it must already be registered as a profile strategy + envelope
+    # classification. A category added to production without a corresponding
+    # STAGE_KEYS edit trips the guard instead of passing silently.
+    from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
+
+    default = rp.build_default_profile()
+    for category in AUDIT_PLAYBOOK_SECTIONS:
+        stage = f"improve.audit.{category}"
+        assert stage in rp.STAGE_KEYS, (
+            f"audit category `{category}` is not a registered review stage"
+        )
+        assert stage in default.strategies, (
+            f"model-bearing audit stage {stage} has no profile strategy"
+        )
+        assert stage in rp.ENVELOPE_CLASSIFICATION, (
+            f"stage {stage} has no host-envelope classification"
+        )

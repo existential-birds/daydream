@@ -496,7 +496,7 @@ def _current_state_mapping(
     major_minor = ".".join(str(version).split(".")[:2])
     sr = calibrate._load_judge_template()
     config = _compiled_job_config(workspace)
-    return {
+    mapping = {
         "compiled_lock_sha256": compiled_lock_sha256,
         "harbor_version": major_minor,
         "judge_provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "anthropic",
@@ -510,6 +510,14 @@ def _current_state_mapping(
         "attempts": config.get("n_attempts", 1),
         "calibration_receipt_sha256": calibration_digest,
     }
+    # Candidate review-profile digest (issue #885/R12): fold it into the shared
+    # oracle state so both the oracle-receipt document and the default-run gate
+    # compare the tested candidate. Omitted when no candidate is set so legacy
+    # oracle receipts stay byte-stable.
+    digest = env.get("DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST")
+    if digest:
+        mapping["profile_digest"] = str(digest)
+    return mapping
 
 
 def _oracle_receipt_document(

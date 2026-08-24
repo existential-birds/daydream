@@ -45,12 +45,6 @@ _TRAJECTORY_PATH_ENV = "DAYDREAM_REVIEW_TRAJECTORY_PATH"
 # configure its own evaluator. Carried into the container through the
 # ``DAYDREAM_REVIEW_*`` child-env allowlist (agent.build_child_env).
 _CANDIDATE_ENV = "DAYDREAM_REVIEW_PROFILE_CANDIDATE"
-# Canonical candidate digest (issue #885/R12): the entrypoint computes it from
-# the validated candidate below and exports it so the Harbor ledger/receipt
-# provenance (run.py) can attribute the run to exactly the tested profile. The
-# ``DAYDREAM_REVIEW_*`` child-env allowlist (agent.build_child_env) carries it
-# into the container alongside the candidate.
-_DIGEST_ENV = "DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"
 
 
 class EntrypointError(Exception):
@@ -111,11 +105,6 @@ def build_run_config(
         file_config=DaydreamFileConfig(),
     )
     config.review_profile = resolved
-    # Export the canonical candidate digest so the Harbor ledger/receipt
-    # provenance reads it from the container env (issue #885/R12). The caller's
-    # run environment is trusted control plane; overwriting any stale value is
-    # correct because the candidate was just re-resolved and re-validated.
-    os.environ[_DIGEST_ENV] = resolved.digest
     return config
 
 

@@ -131,7 +131,7 @@ HOST_OWNED_KEYS: frozenset[str] = frozenset(
 # floors, not tunable budget knobs.
 HOST_CAPS: dict[str, tuple[int | None, int | None]] = {
     # (floor, ceiling) — ceiling None = no ceiling.
-    "uncovered_sweep_max_files": (10, 10),
+    "uncovered_sweep_max_files": (1, 10),
     "uncovered_sweep_min_hunk_lines": (5, None),
 }
 
@@ -767,21 +767,20 @@ def _read_and_parse(path: Path, source: str) -> ReviewProfile:
 def _guard_repo_path(path: Path, repo_root: Path | None) -> Path:
     """Resolve a repo-committed profile path beneath ``repo_root`` (R9).
 
-    The path-escape guard applies to repository-committed RELATIVE paths:
-    resolve beneath the repo root, and reject ``..`` and symlink escapes via
-    ``Path.resolve()`` + a containment check so a benchmarked repository
-    cannot point its own evaluator at an arbitrary filesystem path. An explicit
-    absolute path is the operator's own choice and is resolved as-is.
+    The path-escape guard applies to REPOSITORY-committed paths: the value
+    comes from the (untrusted) benchmarked repository's own config, so relative,
+    absolute, and ``~``-expanded paths must ALL resolve beneath the repo root.
+    ``Path.resolve()`` + a containment check reject ``..``, absolute,
+    ``expanduser``, and symlink escapes to stop a benchmarked repository from
+    pointing its own evaluator at an arbitrary filesystem path.
     """
-    expanded = path.expanduser()
-    if expanded.is_absolute():
-        return expanded.resolve()
     if repo_root is None:
         # No repo root supplied — resolve relative to the current dir (cwd is
         # the repo for normal runs).
         repo_root = Path.cwd()
     else:
         repo_root = Path(repo_root)
+    expanded = path.expanduser()
     candidate = (repo_root / expanded).resolve()
     if not candidate.is_relative_to(repo_root.resolve()):
         raise ProfileError(

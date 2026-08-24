@@ -741,6 +741,12 @@ def _handle_benchmark_calibrate(args) -> int:
         )
     }
 
+    # Issue #885/R12: thread the control-plane candidate profile digest so a
+    # candidate-scoped calibration can be produced (run.py's oracle preflight
+    # compares the receipt against inputs that fold the digest). Fail-closed on
+    # an invalid candidate, matching run.py's handling. None for default runs.
+    env["DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST"] = _candidate_profile_digest()
+
     return calibrate.run_calibration(
         args.dir,
         yes=args.yes,

@@ -45,9 +45,22 @@ def test_env_beats_repo_and_default(tmp_path, monkeypatch):
 def test_repo_beats_default(tmp_path):
     from daydream.config_file import DaydreamFileConfig
     repo = _write_profile(tmp_path, "repo", "R")
+    # A repo-committed path is confined beneath the repo root, so the repo root
+    # must be supplied (as the resolver does for a real target): an absolute path
+    # inside the repo resolves cleanly instead of being mistaken for an escape.
     fc = DaydreamFileConfig(review_profile=str(repo))
-    resolved = rp.resolve_profile(file_config=fc)          # no explicit, no env
+    resolved = rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert resolved.profile.name == "repo" and resolved.source_kind == "repo"
+
+
+def test_absolute_repo_path_cannot_escape(tmp_path):
+    from daydream.config_file import DaydreamFileConfig
+    # The untrusted repo's committed value points outside its own root (the
+    # host file is read into the profile's strategy text if allowed to resolve).
+    fc = DaydreamFileConfig(review_profile="/etc/host-marker.toml")
+    with pytest.raises(rp.ProfileError) as e:
+        rp.resolve_profile(file_config=fc, repo_root=tmp_path)
+    assert "escape" in str(e.value).lower()
 
 
 def test_default_when_nothing_specified():
