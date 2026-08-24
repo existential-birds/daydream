@@ -47,6 +47,13 @@ def _paths(tmp_path: Path) -> _PromptPaths:
     }
 
 
+def _default_strategy(stage: str) -> str:
+    """Return the packaged default profile strategy content for a stage."""
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
+
+
 def test_per_stack_prompt_has_intent_pointer(tmp_path: Path) -> None:
     """D-19: prompt references the intent path."""
     p = _paths(tmp_path)
@@ -99,14 +106,14 @@ def test_per_stack_prompt_scope_lists_only_stack_files(tmp_path: Path) -> None:
 def test_generic_fallback_prompt_has_no_skill(tmp_path: Path) -> None:
     """Generic fallback omits any /beagle-* invocation."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     assert "/beagle-" not in out
 
 
 def test_generic_fallback_docs_notice(tmp_path: Path) -> None:
     """D-20: is_docs_only=True prepends the doc-review notice."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["README.md"], is_docs_only=True, **p)
+    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["README.md"], is_docs_only=True, **p)
     assert DOC_REVIEW_NOTICE in out
     # Notice must appear before other content
     assert out.index(DOC_REVIEW_NOTICE) < out.index("Review these files")
@@ -115,7 +122,7 @@ def test_generic_fallback_docs_notice(tmp_path: Path) -> None:
 def test_generic_fallback_no_docs_notice_by_default(tmp_path: Path) -> None:
     """Docs notice suppressed when is_docs_only=False."""
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     assert DOC_REVIEW_NOTICE not in out
 
 
@@ -202,12 +209,13 @@ def test_generic_fallback_prompt_omits_bare_git_diff_command(tmp_path: Path) -> 
     """
     p = _paths(tmp_path)
     # Default (inline_diff=None) → pointer present (fallback contract).
-    out_fallback = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    out_fallback = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     assert "git diff --no-color -- config.yaml" not in out_fallback
     assert "git diff -- config.yaml" not in out_fallback
     assert str(p["diff_path"]) in out_fallback
     # inline_diff supplied → pointer absent (hunks inlined instead).
     out_inline = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"],
         inline_diff="diff --git a/config.yaml b/config.yaml\n+++ b/config.yaml\n@@ -1 +1 @@\n-x\n+y\n",
         **p,
@@ -275,6 +283,7 @@ def test_generic_fallback_prompt_includes_prior_commits(tmp_path: Path) -> None:
     p = _paths(tmp_path)
     commits = "abc1234 fix: handle edge case"
     out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"],
         prior_commits=commits,
         **p,
@@ -287,6 +296,7 @@ def test_generic_fallback_prompt_omits_prior_commits_when_none(tmp_path: Path) -
     """prior_commits block absent from generic-fallback when prior_commits is None."""
     p = _paths(tmp_path)
     out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"],
         prior_commits=None,
         **p,
@@ -298,6 +308,7 @@ def test_generic_fallback_prompt_omits_prior_commits_when_empty(tmp_path: Path) 
     """prior_commits block absent from generic-fallback when prior_commits is empty."""
     p = _paths(tmp_path)
     out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"],
         prior_commits="",
         **p,
@@ -309,7 +320,7 @@ def test_merge_prompt_requires_structured_item_fields(tmp_path: Path) -> None:
     """The merge agent emits a structured item list; markdown formatting rules
     (bold-wrapping, head-line layout) no longer apply — Python renders the report.
     """
-    out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
+    out = build_merge_prompt(strategy=_default_strategy("merge"), **_merge_paths(tmp_path))  # type: ignore[arg-type]
     assert '{"items": [' in out
     assert "Item fields (MANDATORY):" in out
     # No markdown write-to-file or bold-wrapping directive survives.
@@ -319,7 +330,7 @@ def test_merge_prompt_requires_structured_item_fields(tmp_path: Path) -> None:
 
 def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
     """Multi-file concerns must become multiple items, not a comma list in one file field."""
-    out = build_merge_prompt(**_merge_paths(tmp_path))  # type: ignore[arg-type]
+    out = build_merge_prompt(strategy=_default_strategy("merge"), **_merge_paths(tmp_path))  # type: ignore[arg-type]
     assert "EXACTLY ONE path" in out
     assert "separate item per file" in out
 
@@ -382,6 +393,7 @@ def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> No
 
     structural_path = tmp_path / "stack-structure-records.json"
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md",
         alternatives_path=tmp_path / "alts.json",
@@ -399,6 +411,7 @@ def test_merge_prompt_omits_structural_section_when_path_is_none(tmp_path: Path)
     from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md",
         alternatives_path=tmp_path / "alts.json",
@@ -594,6 +607,7 @@ def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(
     inline = _diff_blocks_for_files(_DIFF_TWO_FILES, ["App.tsx"])
     assert inline is not None
     out = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["App.tsx"],
         inline_diff=inline,
         **p,
@@ -658,6 +672,7 @@ def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
     out = build_arbiter_prompt(
+        strategy=_default_strategy("arbitration"),
         arbiter_input_path=tmp_path / "arbiter-input.json",
         diff_path=tmp_path / "diff.patch",
         intent_path=tmp_path / "intent.md",
@@ -671,7 +686,7 @@ def test_generic_fallback_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in out
 
 
@@ -704,7 +719,7 @@ def test_build_structural_prompt_includes_verification_protocol(tmp_path: Path) 
 
 def test_build_generic_fallback_prompt_includes_verification_protocol(tmp_path: Path) -> None:
     p = _paths(tmp_path)
-    out = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    out = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     assert "review-verification-protocol" in out
     assert "anchor" in out
     assert "evidence" in out
@@ -744,7 +759,7 @@ def test_no_format_skill_invocation_for_verification_protocol(tmp_path: Path) ->
             files=["api.py"],
             **p,
         ),
-        build_generic_fallback_prompt(files=["config.yaml"], **p),
+        build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p),
     ]
 
     for backend_name in ("claude", "codex", "pi"):
@@ -791,12 +806,14 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
         )
     if name == "generic-fallback":
         return build_generic_fallback_prompt(
+            strategy=_default_strategy("discovery.generic_fallback"),
             files=["config.yaml"],
             intent_authoritative=intent_authoritative,
             **p,
         )
     if name == "arbiter":
         return build_arbiter_prompt(
+            strategy=_default_strategy("arbitration"),
             arbiter_input_path=tmp_path / "arbiter-input.json",
             diff_path=p["diff_path"],
             intent_path=p["intent_path"],
@@ -806,6 +823,7 @@ def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> st
         )
     if name == "merge":
         return build_merge_prompt(
+            strategy=_default_strategy("merge"),
             per_stack_records_paths=[tmp_path / "python.json", tmp_path / "react.json"],
             intent_path=tmp_path / "intent.md",
             alternatives_path=tmp_path / "alternatives.json",
@@ -948,15 +966,17 @@ def test_generic_fallback_prompt_can_omit_alternatives(tmp_path: Path) -> None:
 
     p = _paths(tmp_path)
     with_alts = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"], **p, include_alternatives=True
     )
     without = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"], **p, include_alternatives=False
     )
     assert "alternatives.json" in with_alts
     assert "alternatives.json" not in without
     assert "intent.md" in without
-    assert build_generic_fallback_prompt(files=["config.yaml"], **p) == with_alts
+    assert build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p) == with_alts
 
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
@@ -1281,7 +1301,7 @@ def test_config_trace_instruction_stays_out_of_structural_prompt(tmp_path: Path)
 
 def _build_generic_fallback_for_310(tmp_path: Path) -> str:
     p = _paths(tmp_path)
-    return build_generic_fallback_prompt(files=["config.yaml"], **p)
+    return build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
 
 
 def test_generic_fallback_prompt_includes_config_flow_trace(tmp_path: Path) -> None:
@@ -1395,7 +1415,7 @@ def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Pa
                                stack_name="python", files=["api.py"], **p),
         build_structural_prompt(skill_invocation="/beagle-core:review-structure",
                                 files=["api.py"], **p),
-        build_generic_fallback_prompt(files=["config.yaml"], **p),
+        build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p),
         build_uncovered_sweep_prompt(
             file="api.py", hunks="", intent_path=p["intent_path"],
             cwd=p["cwd"], output_path=p["output_path"],
@@ -1414,6 +1434,7 @@ def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
         files=["api.py"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
     )
     fallback = build_generic_fallback_prompt(
+        strategy=_default_strategy("discovery.generic_fallback"),
         files=["config.yaml"], inline_diff="@@ -1 +1 @@\n-'x'\n+'y'\n", **p,
     )
     for prompt in (per_stack, fallback):

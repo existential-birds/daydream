@@ -14,7 +14,7 @@ import anyio
 from rich.text import Text
 
 import daydream
-from daydream import git_ops
+from daydream import git_ops, review_profile as _rp
 from daydream.agent import (
     console,
     detect_test_success,
@@ -3899,6 +3899,7 @@ async def phase_per_stack_reviews(
                 )
                 if stack.skill_invocation is None:
                     prompt = get_registry().prompt("generic-fallback")(
+                        strategy=_rp.build_default_profile().strategies["discovery.generic_fallback"].content,
                         files=stack.files,
                         diff_path=diff_path,
                         intent_path=intent_path,
@@ -4208,6 +4209,7 @@ async def phase_arbiter_review(
     input_path.write_text(json.dumps(arbiter_input, indent=2))
 
     prompt = get_registry().prompt("arbiter")(
+        strategy=_rp.build_default_profile().strategies["arbitration"].content,
         arbiter_input_path=input_path,
         diff_path=diff_path,
         intent_path=intent_path,
@@ -4601,6 +4603,7 @@ async def phase_cross_stack_merge(
     (items_path.parent / "dropped-speculative.json").unlink(missing_ok=True)
 
     prompt = get_registry().prompt("merge")(
+        strategy=_rp.build_default_profile().strategies["merge"].content,
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,

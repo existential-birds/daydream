@@ -705,6 +705,7 @@ def build_structural_prompt(
 
 def build_arbiter_prompt(
     *,
+    strategy: str,
     arbiter_input_path: Path,
     diff_path: Path,
     intent_path: Path,
@@ -747,13 +748,7 @@ def build_arbiter_prompt(
         )
     )
     parts.append(_full_diff_pointer(diff_path))
-    parts.append(
-        "You are the arbiter. The cheaper per-stack reviewers flagged the "
-        f"high-severity and contested findings listed in {arbiter_input_path}. "
-        "Re-review each one against the actual code (Read/Grep/Bash) and the "
-        "diff. You are adjudicating their work, NOT starting a fresh review: do "
-        "not introduce findings that are not in the input list."
-    )
+    parts.append(strategy.format(arbiter_input_path=arbiter_input_path))
     parts.append(
         "Return a single JSON object matching the structured-output schema: "
         '{"findings": [ ... ]}. Emit exactly one entry per input finding, echoing '
@@ -875,6 +870,7 @@ def build_suppression_prompt(
 
 def build_merge_prompt(
     *,
+    strategy: str,
     per_stack_records_paths: list[Path],
     intent_path: Path,
     alternatives_path: Path,
@@ -958,12 +954,8 @@ def build_merge_prompt(
             "them -- downstream readers must be able to tell 'no findings' apart "
             "from 'this stack never ran'."
         )
-    parts.append(
-        "You are the cross-stack merge agent. Read every artifact above by path -- "
-        "do NOT re-run any reviews. Return a single JSON object matching the "
-        "structured-output schema: {\"items\": [ ... ]}. Each item is one "
-        "actionable finding. Emit nothing else."
-    )
+    parts.append(strategy)
+
     parts.append(
         "Dedup adjudication:\n"
         "  dedup-candidates.json has two sections:\n\n"
@@ -1221,6 +1213,7 @@ def build_fix_verify_prompt(
 
 def build_generic_fallback_prompt(
     *,
+    strategy: str,
     files: list[str],
     diff_path: Path,
     intent_path: Path,
@@ -1280,10 +1273,8 @@ def build_generic_fallback_prompt(
     if frontier_files:
         parts.append(_frontier_read_instruction(frontier_files))
     parts.append(_diff_instruction(diff_path, files, inline_diff=inline_diff))
-    parts.append(
-        "Review these files for correctness, clarity, and consistency with the "
-        "author's intent. Apply language-agnostic review practices."
-    )
+    parts.append(strategy)
+
     parts.append(VERIFICATION_PROTOCOL_INSTRUCTION)
     parts.append(CONFIG_FLOW_TRACE_INSTRUCTION)
     parts.append(TRUST_MODEL_INSTRUCTION)

@@ -32,6 +32,12 @@ def _paths(tmp_path: Path) -> _PromptPaths:
     }
 
 
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
+
+
 def test_rust_wire_contract_requires_an_input_deserialization_contract() -> None:
     assert "#[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
     assert "struct-level #[serde(default)]" in WIRE_CONTRACT_RUST_INSTRUCTION
@@ -63,7 +69,7 @@ def test_wire_contract_checklists_are_delivered_only_to_their_intended_prompts(
         files=["api.py"],
         **p,
     )
-    generic = build_generic_fallback_prompt(files=["config.yaml"], **p)
+    generic = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"), files=["config.yaml"], **p)
     structural = build_structural_prompt(
         skill_invocation="/beagle-core:review-structure",
         files=["api.py"],

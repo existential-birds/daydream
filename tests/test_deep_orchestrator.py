@@ -29,6 +29,12 @@ import pytest
 from daydream.backends import ResultEvent, TextEvent
 from daydream.config import SKILL_MAP
 from daydream.eval.analyzer import _records_issues
+
+
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE
 from tests.harness.git_helpers import bare_remote as _bare_remote
 from tests.harness.git_helpers import commit as _commit
@@ -3767,6 +3773,7 @@ def test_merge_prompt_emits_related_files_instruction():
     from daydream.deep.prompts import build_merge_prompt
 
     prompt = build_merge_prompt(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[Path("a-records.json")],
         intent_path=Path("intent.md"), alternatives_path=Path("alt.md"),
         dedup_candidates_path=Path("dedup.json"), output_path=Path("o.json"),

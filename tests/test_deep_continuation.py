@@ -11,6 +11,12 @@ import pytest
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
+def _default_strategy(stage: str) -> str:
+    from daydream import review_profile as _rp
+
+    return _rp.build_default_profile().strategies[stage].content
+
+
 def _merge_call(stub: StubBackend) -> dict[str, Any]:
     return next(c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower())
 
@@ -85,6 +91,7 @@ def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
     from daydream.deep.prompts import build_merge_prompt
 
     kwargs: dict[str, Any] = dict(
+        strategy=_default_strategy("merge"),
         per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",
         dedup_candidates_path=tmp_path / "dedup.json", output_path=tmp_path / "out.md",
