@@ -77,6 +77,14 @@ STAGE_KEYS: frozenset[str] = frozenset(
 )
 
 
+# Host-owned severity/confidence vocabularies (R5; mirror the repo's allowed
+# sets: severity is the lowercase low|medium|high scale -- benchmark/mapping.py,
+# benchmark/cli.py:284-287; confidence is the uppercase HIGH|MEDIUM|LOW schema
+# enum -- phases.py:4048,4250, deep/prompts.py arbiter/suppression/merge).
+_SEVERITY_LEVELS: frozenset[str] = frozenset(("low", "medium", "high"))
+_CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
+
+
 @dataclass(frozen=True)
 class Strategy:
     """One stage's profile-owned strategy component.
@@ -109,7 +117,7 @@ class Suppression:
 
     enabled: bool = False
     severity_classes: tuple[str, ...] = ("low", "medium")
-    confidence_classes: tuple[str, ...] = ("low",)
+    confidence_classes: tuple[str, ...] = ("LOW",)
 
 
 @dataclass(frozen=True)
@@ -398,40 +406,60 @@ def build_default_profile() -> ReviewProfile:
 
 
 def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
-    """Strictly parse TOML into a fully-defaulted ``ReviewProfile``.
+    """Strictly parse TOML into a fully-defaulted ``ReviewProfile`` (R3/R4).
 
-    Task 2 (R4): every omitted pipeline field is filled from ``Pipeline()``
-    defaults so omitted-vs-explicit defaults hash identically; ``content`` /
-    ``source`` key order is irrelevant (dict semantics). Task 3 adds the
-    fail-closed unknown-key / bad-value rejections.
+    Fail-closed: an unknown key, an unsupported ``schema_version``, an
+    invalid enum, a negative limit, or an inconsistent combination raises
+    ``ProfileError`` naming the offending field and the source. A failed
+    parse NEVER falls through to a default or lower-precedence profile.
+    Omitted pipeline fields are filled from ``Pipeline()`` defaults so
+    omitted-vs-explicit defaults hash identically (R4).
 
     Args:
         toml_text: Profile TOML source text.
         source: Human-readable source description for error messages.
 
     Raises:
-        ProfileError: On a structurally invalid profile (never silently
-            degrades to a default).
+        ProfileError: On any invalid profile, naming the offending field
+            and the profile source.
     """
     try:
         data = tomllib.loads(toml_text)
     except tomllib.TOMLDecodeError as exc:
         raise ProfileError(f"TOML parse failure: {exc}", source) from exc
 
+    if not isinstance(data, dict):
+        raise ProfileError("top level must be a table", source)
+
+    _TOP_LEVEL_KEYS = frozenset({"schema_version", "name", "strategies", "pipeline"})
+    unknown = set(data) - _TOP_LEVEL_KEYS
+    if unknown:
+        raise ProfileError(f"unknown top-level key `{sorted(unknown)[0]}`", source)
+
     schema_version = data.get("schema_version", 1)
-    if not isinstance(schema_version, int):
-        raise ProfileError("schema_version", source)
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        raise ProfileError("schema_version must be an integer", source)
+    if schema_version != 1:
+        raise ProfileError(
+            f"unsupported schema_version {schema_version} (only 1 is supported)",
+            source,
+        )
     name = data.get("name", "")
     if not isinstance(name, str):
-        raise ProfileError("name", source)
+        raise ProfileError("name must be a string", source)
 
     strategies: dict[str, Strategy] = {}
     raw_strategies = data.get("strategies", {})
     if not isinstance(raw_strategies, dict):
-        raise ProfileError("strategies", source)
+        raise ProfileError("strategies must be a table", source)
     for key, raw in raw_strategies.items():
         if not isinstance(raw, dict):
-            raise ProfileError(f"strategies.{key}", source)
+            raise ProfileError(f"strategies.{key} must be a table", source)
+        unknown = set(raw) - {"content", "source"}
+        if unknown:
+            raise ProfileError(
+                f"strategies.{key}: unknown key `{sorted(unknown)[0]}`", source
+            )
         content = raw.get("content", "")
         strat_source = raw.get("source", "")
         if not isinstance(content, str) or not isinstance(strat_source, str):
@@ -449,29 +477,55 @@ def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
 
 
 def _parse_pipeline(data: object, *, source: str) -> Pipeline:
-    """Parse the bounded pipeline section, filling defaults for omitted fields."""
+    """Parse the bounded pipeline section (R3 fail-closed, defaults for omitted fields)."""
     if not isinstance(data, dict):
-        raise ProfileError("pipeline", source)
+        raise ProfileError("pipeline must be a table", source)
+    _PIPELINE_KEYS = frozenset(
+        {
+            "structural_enabled",
+            "uncovered_sweep_enabled",
+            "uncovered_sweep_max_files",
+            "uncovered_sweep_min_hunk_lines",
+            "arbitration_enabled",
+            "arbitration_min_severity",
+            "arbitration_contested_location",
+            "suppression_enabled",
+            "suppression_severity_classes",
+            "suppression_confidence_classes",
+        }
+    )
+    unknown = set(data) - _PIPELINE_KEYS
+    if unknown:
+        raise ProfileError(f"pipeline: unknown key `{sorted(unknown)[0]}`", source)
     defaults = Pipeline()
 
     def _bool(key: str, fallback: bool) -> bool:
         value = data.get(key, fallback)
         if not isinstance(value, bool):
-            raise ProfileError(f"pipeline.{key}", source)
+            raise ProfileError(f"pipeline.{key} must be a boolean", source)
         return value
 
     def _int(key: str, fallback: int) -> int:
         value = data.get(key, fallback)
         if not isinstance(value, int) or isinstance(value, bool):
-            raise ProfileError(f"pipeline.{key}", source)
+            raise ProfileError(f"pipeline.{key} must be an integer", source)
+        if value < 0:
+            raise ProfileError(f"pipeline.{key} must not be negative", source)
         return value
 
-    def _severity_classes(key: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    def _severity_classes(
+        key: str, fallback: tuple[str, ...], allowed: frozenset[str]
+    ) -> tuple[str, ...]:
         value = data.get(key, fallback)
         if not isinstance(value, (list, tuple)):
-            raise ProfileError(f"pipeline.{key}", source)
+            raise ProfileError(f"pipeline.{key} must be an array of strings", source)
         if not all(isinstance(item, str) for item in value):
-            raise ProfileError(f"pipeline.{key}", source)
+            raise ProfileError(f"pipeline.{key} must be an array of strings", source)
+        bad = [item for item in value if item not in allowed]
+        if bad:
+            raise ProfileError(
+                f"pipeline.{key}: invalid class `{sorted(set(bad))[0]}`", source
+            )
         return tuple(value)
 
     arbitration = Arbitration(
@@ -481,15 +535,37 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             "arbitration_contested_location", defaults.arbitration.contested_location
         ),
     )
+    severity = data.get("arbitration_min_severity")
+    if severity is not None:
+        if not isinstance(severity, str) or severity not in _SEVERITY_LEVELS:
+            raise ProfileError(
+                f"pipeline.arbitration_min_severity must be one of "
+                f"{sorted(_SEVERITY_LEVELS)}",
+                source,
+            )
+        arbitration = Arbitration(
+            enabled=arbitration.enabled,
+            min_severity=severity,
+            contested_location=arbitration.contested_location,
+        )
     suppression = Suppression(
         enabled=_bool("suppression_enabled", defaults.suppression.enabled),
         severity_classes=_severity_classes(
-            "suppression_severity_classes", defaults.suppression.severity_classes
+            "suppression_severity_classes",
+            defaults.suppression.severity_classes,
+            _SEVERITY_LEVELS,
         ),
         confidence_classes=_severity_classes(
-            "suppression_confidence_classes", defaults.suppression.confidence_classes
+            "suppression_confidence_classes",
+            defaults.suppression.confidence_classes,
+            _CONFIDENCE_LEVELS,
         ),
     )
+    if suppression.enabled and not suppression.confidence_classes:
+        raise ProfileError(
+            "pipeline.suppression: enabled but empty confidence class selection",
+            source,
+        )
 
     return Pipeline(
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),

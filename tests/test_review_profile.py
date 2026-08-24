@@ -108,3 +108,45 @@ source = "copied: a"
 [pipeline]
 structural_enabled = true''')   # default value spelled out
     assert implicit.digest == explicit.digest
+
+# Task 3 (R3): fail-closed validation.
+import pytest
+
+from daydream import review_profile as rp
+
+
+def test_unknown_key_fails_closed_naming_source():
+    with pytest.raises(rp.ProfileError) as e:
+        rp.parse_profile(
+            'schema_version = 1\nname = "p"\nbogus = 1',
+            source="/tmp/profile.toml",
+        )
+    assert "/tmp/profile.toml" in str(e.value) and "bogus" in str(e.value)
+
+
+def test_unsupported_schema_version_fails_closed():
+    with pytest.raises(rp.ProfileError) as e:
+        rp.parse_profile('schema_version = 99\nname = "p"', source="x")
+    assert "schema_version" in str(e.value)
+
+
+def test_negative_limit_fails_closed():
+    with pytest.raises(rp.ProfileError):
+        rp.parse_profile('''schema_version = 1
+name = "p"
+[pipeline]
+uncovered_sweep_max_files = -5''')
+
+
+def test_invalid_enum_fails_closed():
+    with pytest.raises(rp.ProfileError):
+        rp.parse_profile('''schema_version = 1
+name = "p"
+[pipeline]
+arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
+
+
+def test_invalid_profile_never_falls_through_to_default():
+    # A failed parse raises; it does not silently return build_default_profile().
+    with pytest.raises(rp.ProfileError):
+        rp.parse_profile('schema_version = 1\nname = "p"\nunknown = true')
